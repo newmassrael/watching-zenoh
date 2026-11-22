@@ -22,8 +22,9 @@
 //! one writer, so a JOIN advertises what either wrote.
 //!
 //! A batch window ([`GroupTxStage::batch_start`]) holds each conduit's messages in one open frame
-//! until the frame fills, an express message takes it, or the window is flushed, as the tokio
-//! engine's group producer batches: until then nothing of it is on a lane for either writer.
+//! until the frame fills, an express message takes it, the window is flushed, or the pump sends
+//! the group's JOIN or its Close, as the tokio engine's group producer batches: until then nothing
+//! of it is on a lane for either writer.
 //!
 //! The waiting is the host's: a producer whose lane is full runs the host's tasks, in which the
 //! group's pump writes what its socket takes, and waits on the socket ([`GroupTxPace`]).
@@ -1424,5 +1425,163 @@ mod tests {
         let alone = stage.take().expect("a closed window holds nothing back");
         assert!(alone.bytes.ends_with(b"first"));
         assert_eq!([both.sn, third.sn, alone.sn], [0, 1, 2]);
+    }
+
+    /// Puts of one size inside a batch window fill each frame as zenoh-pico fills its batch: a
+    /// frame goes on its lane as one datagram in the put it has no room for, holding as many puts
+    /// as the group's batch takes, with no pass of the host and no wait while it has room; the
+    /// stop puts the rest on its lane. N puts are N over what a frame holds, rounded up, datagrams.
+    #[test]
+    fn a_batch_window_puts_a_frame_on_its_lane_each_time_it_fills() {
+        let params = params();
+        let budget = params.frame_budget();
+        let payload = |at: usize| alloc::format!("{at:08}");
+        // The bytes one put adds to a frame, and the frame's head: a frame of one and one of two.
+        let frame_of = |count: usize| {
+            let stage = GroupTxStage::new(&params);
+            stage.batch_start();
+            for at in 0..count {
+                push_at_once(&stage, put(&payload(at)));
+            }
+            stage.batch_stop();
+            stage.take().expect("the window's frame").bytes.len()
+        };
+        let (one, two) = (frame_of(1), frame_of(2));
+        let each = two - one;
+        let head = one - each;
+        let fits = (budget - head) / each;
+        assert!(
+            fits > 1,
+            "a frame of the group's batch holds several such puts"
+        );
+
+        let stage = GroupTxStage::new(&params);
+        stage.batch_start();
+        let puts = 2 * fits + 3;
+        let mut frames = Vec::new();
+        for at in 0..puts {
+            push_at_once(&stage, put(&payload(at)));
+            frames.extend(core::iter::from_fn(|| stage.take()));
+            assert_eq!(frames.len(), at / fits, "after put {at}");
+        }
+        stage.batch_stop();
+        frames.extend(core::iter::from_fn(|| stage.take()));
+        assert_eq!(frames.len(), puts.div_ceil(fits));
+        for (at, frame) in frames.iter().enumerate() {
+            let first = at * fits;
+            let last = (first + fits).min(puts) - 1;
+            assert_eq!(frame.bytes.len(), head + (last + 1 - first) * each);
+            let opens = payload(first);
+            assert!(frame.bytes.windows(8).any(|w| w == opens.as_bytes()));
+            assert!(frame.bytes.ends_with(payload(last).as_bytes()));
+            assert_eq!(frame.sn, at as u64, "one sequence number a frame");
+        }
+        assert!(head + fits * each <= budget && head + (fits + 1) * each > budget);
+    }
+
+    /// A batch window the program leaves open leaves at the session's next beacon, as zenoh-pico
+    /// sends its batch before a transport message: the step that sends the JOIN puts the window's
+    /// frame on its lane and writes it behind the JOIN, which advertises it as the next to come,
+    /// and the window stays open for the puts after it.
+    #[test]
+    fn a_window_left_open_leaves_at_the_next_beacon_and_stays_open() {
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 8,
+            ..Wire::default()
+        }));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let stage = GroupTxStage::new(&params);
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut nothing = || None;
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        pump.attach_tx_stage(stage.clone());
+
+        stage.batch_start();
+        push_at_once(&stage, put("first"));
+        push_at_once(&stage, put("second"));
+        assert!(stage.is_empty(), "the window holds both");
+
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(
+            taken(&wire),
+            ["join", "second"],
+            "the window's frame left with the beacon"
+        );
+        assert!(wire.borrow().seen[1]
+            .windows(b"first".len())
+            .any(|window| window == b"first"));
+        assert_eq!(advertised(&wire), [0], "the frame's number, as the next");
+
+        push_at_once(&stage, put("third"));
+        assert!(stage.is_empty(), "the window is still open");
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "second", "join", "third"]);
+        assert_eq!(advertised(&wire), [0, 1]);
+        assert_eq!(pump.tx_lost(), 0);
+    }
+
+    /// What a batch window holds when the session stops is written ahead of its Close, as
+    /// zenoh-pico sends its batch before a transport message: it is not lost with the link.
+    #[test]
+    fn a_window_open_at_the_stop_is_written_ahead_of_the_close() {
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 8,
+            ..Wire::default()
+        }));
+        let mut socket = Socket(Rc::clone(&wire));
+        let mut params = params();
+        // A beacon at the first step only, so that the stop is what writes the window.
+        params.join_interval_ms = 60_000;
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let stage = GroupTxStage::new(&params);
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut nothing = || None;
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        pump.attach_tx_stage(stage.clone());
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join"]);
+
+        stage.batch_start();
+        push_at_once(&stage, put("first"));
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(
+            taken(&wire),
+            ["join"],
+            "CONTROL: no beacon due, the window holds"
+        );
+
+        let mut stop = || true;
+        assert!(pump
+            .step(&mut quiet, &mut nothing, Some(&mut stop))
+            .is_some());
+        assert_eq!(
+            taken(&wire),
+            ["join", "first", "other"],
+            "the window's frame, then the Close"
+        );
     }
 }
