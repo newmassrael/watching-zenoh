@@ -1195,7 +1195,10 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +30,148 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,420 on
     # one machine.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_447_588,
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_450_916,
+         # 2026-11-22, alias -- an aliased Put fanned out to clients is encoded once and its key re-
+         # written per face in place (`LeafPush`, `docs/router-fanout-cost.md` row 6): 6,449,020 on
+         # the fleet (+1,432 over the budget, router builds only; the pico and MCU cases held at main's).
          # 2026-11-22, latest -- the router stops writing a face's frames on the routing thread
          # and routes a frame's Puts under one table read, lending the key and the literal Put, with
          # a route kept per face alias (`docs/router-fanout-cost.md` rows 1 and 4): 6,437,908 at
