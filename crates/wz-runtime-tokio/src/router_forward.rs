@@ -21366,6 +21366,12 @@ mod tests {
     /// the whole fan-out, and every subscriber is sent the same message, which carries the Put's
     /// payload. Turned red by a fan-out that encodes the carrier again for each face, or that sends
     /// one face other bytes than the rest.
+    ///
+    /// A build without `pubsub-ts-stack` only: with it a router records its routing on the message
+    /// once for each destination, so no two faces are sent the same bytes and no fan-out is shared
+    /// (`sends_shared`); [`a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own`]
+    /// holds that build to it.
+    #[cfg(not(feature = "pubsub-ts-stack"))]
     #[test]
     fn a_fan_out_to_many_clients_encodes_its_carrier_once() {
         const SUBSCRIBERS: usize = 8;
@@ -21404,6 +21410,37 @@ mod tests {
             2,
             "the next Put is a fan-out of its own, encoded once"
         );
+    }
+
+    /// With `pubsub-ts-stack` a fan-out is not shared: the router records its routing on the message
+    /// for each destination, so it encodes no shared carrier, and every subscriber is still sent the
+    /// Put once with its payload. Turned red by a timestamp-stack build that shares one encoding
+    /// among faces whose messages must differ, or that loses a subscriber's copy.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own() {
+        const SUBSCRIBERS: usize = 8;
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", SUBSCRIBERS);
+        let encodes = fwd.client_carrier_encodes();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes(),
+            encodes,
+            "no shared carrier is encoded"
+        );
+        for sink in &sinks {
+            assert_eq!(
+                sink.frame_count(),
+                1,
+                "every subscriber is sent the Put once"
+            );
+            assert!(
+                frame_messages(&sink.frame_bytes(0))
+                    .windows(FAN_PAYLOAD.len())
+                    .any(|window| window == FAN_PAYLOAD),
+                "each message carries the Put's payload"
+            );
+        }
     }
 
     /// A session sends a Push as its shared encoding in the same message it sends the Push itself
