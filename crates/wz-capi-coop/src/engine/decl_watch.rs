@@ -21,8 +21,9 @@ use crate::prelude::*;
 
 use wz_capi_port::os::Mutex;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
-use wz_session_core::slot_observer::SlotObserver;
+use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
@@ -171,9 +172,13 @@ impl DeclWatches {
     /// Have the observers of `plane` installed in `app`, unless a watch of that kind installed
     /// them already. [`DeclWatchRefused::Full`] when the application layer's list of observers
     /// is at its bound; nothing is installed then.
-    pub(super) fn observe(
+    ///
+    /// Whatever storage `P` the application's tables have: the session's registry holds them in
+    /// rows its arena lent, while the lists of observers are the build's profile's in every
+    /// observer.
+    pub(super) fn observe<P: Storage>(
         &self,
-        app: &mut SlotObserver,
+        app: &mut SlotObserverOf<HeapSinks, P>,
         plane: DeclPlane,
     ) -> Result<(), DeclWatchRefused> {
         let mut table = lock(&self.table);
@@ -240,9 +245,9 @@ impl DeclWatches {
     /// Stop watch `id`: nothing more is owed to it, and the observers of its kind leave `app`
     /// with the last watch of that kind. Its sink, for the caller to let go of with no lock held;
     /// `None` when no watch is declared under `id`.
-    pub(super) fn undeclare(
+    pub(super) fn undeclare<P: Storage>(
         &self,
-        app: &mut SlotObserver,
+        app: &mut SlotObserverOf<HeapSinks, P>,
         id: DeclWatchId,
     ) -> Option<DeclWatchSink> {
         let mut table = lock(&self.table);
@@ -344,8 +349,8 @@ fn undeclared_sink(plane: DeclPlane, staged: &Arc<Mutex<Vec<Staged>>>) -> BoxedU
 }
 
 /// Install in `app` the two observers of `plane`, both or neither.
-fn install(
-    app: &mut SlotObserver,
+fn install<P: Storage>(
+    app: &mut SlotObserverOf<HeapSinks, P>,
     plane: DeclPlane,
     staged: &Arc<Mutex<Vec<Staged>>>,
 ) -> Result<Observers, DeclWatchRefused> {
@@ -403,7 +408,7 @@ fn install(
 }
 
 /// Take the two observers `observers` names out of `app`.
-fn uninstall(app: &mut SlotObserver, observers: Observers) {
+fn uninstall<P: Storage>(app: &mut SlotObserverOf<HeapSinks, P>, observers: Observers) {
     match observers.plane {
         DeclPlane::Subscribers => {
             app.remote_subscribers
@@ -432,6 +437,11 @@ fn uninstall(app: &mut SlotObserver, observers: Observers) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena::{AllocatorMemory, SessionArena};
+    use wz_session_core::limits::SessionLimits;
+    use wz_session_core::slot_observer::{ObserverRows, SlotObserver};
+
+    use super::super::registry::App;
 
     const PEER: [u8; 4] = [0xc3; 4];
 
@@ -536,6 +546,32 @@ mod tests {
         assert_eq!(app.remote_subscribers.on_decl_len(), 0);
         assert_eq!(app.remote_subscribers.on_undecl_len(), 0);
         assert!(watches.undeclare(&mut app, id).is_none());
+    }
+
+    /// The observers go into and out of the application tables a session's arena lent, which the
+    /// session's registry holds, as they do into the heap profile's.
+    #[test]
+    fn the_observers_come_and_go_in_the_application_tables_an_arena_lent() {
+        let mut arena =
+            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+        let mut app = App::lent(
+            arena.arena_mut(),
+            ObserverRows::default(),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let watches = DeclWatches::default();
+        watches
+            .observe(&mut app, DeclPlane::Queryables)
+            .expect("an observer list with room");
+        assert_eq!(app.remote_queryables.on_decl_len(), 1);
+        assert_eq!(app.remote_queryables.on_undecl_len(), 1);
+        let (sink, _log) = recording();
+        let id = watches.add(DeclPlane::Queryables, sink);
+
+        assert!(watches.undeclare(&mut app, id).is_some());
+        assert_eq!(app.remote_queryables.on_decl_len(), 0);
+        assert_eq!(app.remote_queryables.on_undecl_len(), 0);
     }
 
     /// A close hands back every sink and leaves nothing owed.
