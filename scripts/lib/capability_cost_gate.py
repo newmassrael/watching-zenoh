@@ -174,12 +174,16 @@ RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
 # The library without `std` on Linux with the prebuilt standard crates' unwind tables discarded
 # at the link (`crates/.cargo/capi-discard-unwind-tables.toml`, docs/c-abi-size-diet.md T7): a
 # case whose configuration gives the script is held to a library with no `.eh_frame`
-# (`link_findings`). Its zenoh-pico reference is NOT linked with it: the reference keeps the
-# tables zenoh-pico's own build gives it, which is the owner's question that section states.
+# (`link_findings`), and so is its zenoh-pico reference, compiled without unwind tables and
+# linked with the same script (`reference_build`). The script's path in the file is from
+# `crates/`, where cargo runs the linker; the reference's link runs in its CMake tree, so it is
+# given the script's absolute path.
 DISCARD_UNWIND_CONFIG = ".cargo/capi-discard-unwind-tables.toml"
-DISCARD_UNWIND_LINK = "-Wl,-T,wz-capi-pico/link/discard-unwind-tables.ld"
-# The linker arguments of a case its reference is linked with as well (`reference_args`).
-REFERENCE_LINK_ARGS = (PACKED_RELOCS_LINK,)
+DISCARD_UNWIND_SCRIPT = "wz-capi-pico/link/discard-unwind-tables.ld"
+DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
+# The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
+# asynchronous ones GCC writes by default on x86_64 included.
+NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -792,8 +796,9 @@ CASES: tuple[Case, ...] = (
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
               "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. Linked "
               "with the prebuilt standard crates' unwind tables discarded (32,788 bytes of "
-              "`.eh_frame` and `.eh_frame_hdr` in that form); its reference keeps the 72,096 "
-              "zenoh-pico's build gives it. "
+              "`.eh_frame` and `.eh_frame_hdr` in that form), and so is its reference, its C "
+              "compiled with -fno-asynchronous-unwind-tables -fno-unwind-tables (72,096 bytes of "
+              "tables in zenoh-pico's own build). "
               "pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
@@ -1888,11 +1893,17 @@ def has_unwind_tables(data: bytes) -> bool:
     return bool({s.name for s in elf_facts.sections(data)} & {".eh_frame", ".eh_frame_hdr"})
 
 
+def discards_unwind_tables(link: tuple[str, ...]) -> bool:
+    """Whether linker arguments name the script that discards the unwind tables, by its path from
+    `crates/` (a wz library) or by its absolute path (a reference)."""
+    return any(a.startswith("-Wl,-T,") and a.endswith(DISCARD_UNWIND_SCRIPT) for a in link)
+
+
 def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
     with; empty when it was linked as asked."""
     findings: list[str] = []
-    if DISCARD_UNWIND_LINK in lib.link_args and lib.eh_frame:
+    if discards_unwind_tables(lib.link_args) and lib.eh_frame:
         findings.append(f"{subject}: linked with the script that discards the unwind tables and "
                         f"still has an `.eh_frame`: the linker ({lib.linker}) kept them, so its "
                         f"text is that of the form with tables. GNU ld and lld take the script's "
@@ -1994,6 +2005,8 @@ class Reference:
     relr: bool = False
     relr_need: bool = False
     eh_frame: bool = False
+    # The C compiler flags it was built with beyond the rule's (`reference_build`).
+    cflags: tuple[str, ...] = ()
 
 
 def case_features(case: Case) -> set[str]:
@@ -2035,10 +2048,26 @@ def reference_key(pin: str, toolchain: str, flags: list[str], env: Mapping[str, 
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
+def reference_build(link_args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The linker arguments and the C flags of the zenoh-pico reference of a case whose library
+    was linked with `link_args`, so a choice of the build moves both sides of the ratio alike:
+    packed relocations as they are, and for a library whose unwind tables are discarded, C
+    compiled without unwind tables (`NO_UNWIND_CFLAGS`) and linked with the same script, for
+    what the C runtime's own objects still bring."""
+    link: list[str] = []
+    cflags: list[str] = []
+    for arg in link_args:
+        if arg == PACKED_RELOCS_LINK:
+            link.append(arg)
+        elif discards_unwind_tables((arg,)):
+            link.append(f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}")
+            cflags += NO_UNWIND_CFLAGS
+    return tuple(link), tuple(cflags)
+
+
 def reference_args(asked: dict[str, int], link: tuple[str, ...] = ()) -> list[str]:
     """The CMake arguments of zenoh-pico built with `asked` set: each switch, and `link`, the
-    linker arguments of its wz case that the reference shares (`REFERENCE_LINK_ARGS`), so a choice
-    of the link (packed relocations) moves both sides of the ratio alike."""
+    linker arguments `reference_build` gives it."""
     args = [f"-D{s}={v}" for s, v in sorted(asked.items())]
     if link:
         args.append(f"-DCMAKE_SHARED_LINKER_FLAGS={' '.join(link)}")
@@ -2046,13 +2075,18 @@ def reference_args(asked: dict[str, int], link: tuple[str, ...] = ()) -> list[st
 
 
 def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
-                        link: tuple[str, ...] = ()) -> tuple[pathlib.Path, str, str]:
+                        link: tuple[str, ...] = (),
+                        cflags: tuple[str, ...] = ()) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
     writes a header into its source tree, which must not dirty the submodule), in `env` (the
     gate's, `build_env`), unless that build is there already. Returns its directory (`src` the
     export, `build` the CMake tree), the full pin and the toolchain. The host performance matrix
     (`scripts/host-bench/perf_matrix.py`) links this same build, asked for in the environment of
-    `build_env` too, so the library it times is the one whose size this gate prints."""
+    `build_env` too, so the library it times is the one whose size this gate prints. `link` and
+    `cflags` are what `reference_build` adds; the C flags join the rule's in `CFLAGS`, which
+    CMake reads when it first configures the tree and the key holds."""
+    if cflags:
+        env = {**env, "CFLAGS": " ".join(f for f in (env.get("CFLAGS", ""), *cflags) if f)}
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
@@ -2074,10 +2108,12 @@ def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
 
 def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                          prefixes: build_normalization.Prefixes,
-                         link: tuple[str, ...] = ()) -> Reference:
-    """zenoh-pico built with `asked` set and linked with `link` under `env`
-    ([`pico_reference_tree`]), measured, and searched for the build path prefixes `env` maps."""
-    work, pin, toolchain = pico_reference_tree(asked, env, link)
+                         link: tuple[str, ...] = (),
+                         cflags: tuple[str, ...] = ()) -> Reference:
+    """zenoh-pico built with `asked` set, compiled with `cflags` and linked with `link` under
+    `env` ([`pico_reference_tree`]), measured, and searched for the build path prefixes `env`
+    maps."""
+    work, pin, toolchain = pico_reference_tree(asked, env, link, cflags)
     lib = work / "build" / "lib" / "libzenohpico.so"
     dynamic_section = subprocess.run(
         ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
@@ -2091,7 +2127,7 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                      linker=linker_of(lib), link_args=link,
                      relr=any("(RELR)" in line for line in dynamic_section),
                      relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                     eh_frame=has_unwind_tables(data))
+                     eh_frame=has_unwind_tables(data), cflags=cflags)
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -2105,12 +2141,13 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
               f"provisioned only where the oracle is installed)")
         return None, []
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
-    shared = tuple(a for a in got.link_args if a in REFERENCE_LINK_ARGS)
-    ref = pico_reference_build(asked, env, prefixes, shared)
+    link, cflags = reference_build(got.link_args)
+    ref = pico_reference_build(asked, env, prefixes, link, cflags)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
     print(f"  capability-cost: {case.id}: wz linked by {got.linker} with the linker arguments "
-          f"{list(got.link_args)}, zenoh-pico by {ref.linker} with {list(ref.link_args)}")
+          f"{list(got.link_args)}, zenoh-pico by {ref.linker} with {list(ref.link_args)} and "
+          f"the C flags {list(ref.cflags)} beyond the rule's")
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
@@ -2560,7 +2597,8 @@ def cmd_selftest() -> int:
            == ["-C", f"link-arg={DISCARD_UNWIND_LINK}"]
            and config_rustflags(discard, "x86_64-pc-windows-msvc", windows_msvc) == [])
     expect("the script the discard names is in the tree, as the linker reads it from crates/",
-           (CRATES / DISCARD_UNWIND_LINK.split(",")[-1]).is_file())
+           (CRATES / DISCARD_UNWIND_SCRIPT).is_file()
+           and DISCARD_UNWIND_LINK.split(",")[-1] == DISCARD_UNWIND_SCRIPT)
     expect("only the library without std, which never unwinds, discards the unwind tables",
            all(c.profile == "capi-nostd" and NOSTD_CONFIG in c.cargo_configs
                for c in CASES if DISCARD_UNWIND_CONFIG in c.cargo_configs)
@@ -2571,9 +2609,20 @@ def cmd_selftest() -> int:
            and "mold 2.30.0" in found[0]
            and link_findings("t", Measured(900, [], 3, link_args=(DISCARD_UNWIND_LINK,))) == []
            and link_findings("t", Measured(900, [], 3, eh_frame=True)) == [])
-    expect("a reference shares its case's packed relocations and not the discard",
-           tuple(a for a in (PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK) if a in REFERENCE_LINK_ARGS)
-           == (PACKED_RELOCS_LINK,))
+    absolute = f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}"
+    expect("a reference is built as its case: packed as it is, without tables where it has none",
+           reference_build(()) == ((), ())
+           and reference_build((PACKED_RELOCS_LINK, "-Wl,-x")) == ((PACKED_RELOCS_LINK,), ())
+           and reference_build((PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK))
+           == ((PACKED_RELOCS_LINK, absolute), NO_UNWIND_CFLAGS))
+    expect("the discard is read by its path from crates/ and by its absolute path alike",
+           discards_unwind_tables((DISCARD_UNWIND_LINK,)) and discards_unwind_tables((absolute,))
+           and not discards_unwind_tables(("-Wl,-T,other.ld", PACKED_RELOCS_LINK)))
+    expect("a reference linked with the discard and still holding tables is a finding",
+           len(link_findings("t", Reference(text=1, pin="p", toolchain="cc", refused=(),
+                                            link_args=(absolute,), eh_frame=True))) == 1
+           and link_findings("t", Reference(text=1, pin="p", toolchain="cc", refused=(),
+                                            link_args=(absolute,))) == [])
     expect("a reference is linked with its case's linker arguments, and keyed by them",
            reference_args({"Z_A": 1}) == ["-DZ_A=1"]
            and reference_args({"Z_A": 1}, (PACKED_RELOCS_LINK, "-Wl,-x"))

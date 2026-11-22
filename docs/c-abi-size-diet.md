@@ -151,7 +151,7 @@ reference, to a dynamic section with DT_RELR and a version need on `GLIBC_ABI_DT
 taken from the pair.
 
 **Fairness.** The reference is zenoh-pico "as the same build", so it is linked with the same
-packed-relocations argument as its case (`reference_args` with `REFERENCE_LINK_ARGS`:
+packed-relocations argument as its case (`reference_build`, given to CMake as
 `-DCMAKE_SHARED_LINKER_FLAGS`, part of the reference's cache key). Both sides move; the cut is
 nonetheless wz's, because the read reference
 has 58 relative relocations (its calls go through 888 PLT slots, which DT_RELR does not touch).
@@ -252,21 +252,25 @@ form reaches, about 10.6K, and the 24-byte panic locations of T5 with their relo
 build host that builds it; `core` and `alloc` compiled in every build of the form (tens of
 seconds, then fat LTO over them); and `-Z` flags that change between nightlies, as this one did.
 
-**Fairness (owner question).** The reference is not linked with the script
-(`REFERENCE_LINK_ARGS` holds only the packed relocations). zenoh-pico's Release build carries
-72,096 bytes of tables (`.eh_frame` 59,252, `.eh_frame_hdr` 12,844, read), GCC's default
-asynchronous unwind tables on x86_64. wz dropped its own crates' tables while the reference kept
-pico's before this change; T7 widens that on wz's side. Building the reference without tables
-(`-fno-asynchronous-unwind-tables -fno-unwind-tables`) would be the like-for-like of T6's rule
-and would take about 72K off pico: after T6 and T7 the no_std ratio would read about
-494,800 / 329,700 = 1.50 instead of about 494,800 / 401,760 = 1.23. Which build is "zenoh-pico as
-the same build" for D9 is the owner's to rule; the gate keeps pico's own and prints the linker
-arguments of each side.
+**Fairness (decided 2026-11-23, as T6: both arms the same build).** zenoh-pico's Release build
+carries 72,096 bytes of tables (`.eh_frame` 59,252, `.eh_frame_hdr` 12,844, read), GCC's
+default asynchronous unwind tables on x86_64. So the no_std case's reference is built the way
+the case is (`reference_build`, `fix(gate): Build the no_std case's pico reference without
+unwind tables`): its C is compiled with `-fno-asynchronous-unwind-tables -fno-unwind-tables`
+(added to the rule's `CFLAGS`, which the reference's cache key holds), the C counterpart of
+`-C force-unwind-tables=no`, and it is linked with the same discard script, by its absolute path
+since CMake links in its own tree, for what the C runtime's objects still bring (`crtendS.o`'s
+terminator). The gate holds the reference to having no `.eh_frame` either, and prints the C
+flags beside the linker arguments of each side. The std cases' references are unchanged: their
+wz arm keeps its tables. After T6 and T7 the no_std ratio reads about 494,800 / 329,700 = 1.50,
+not the 1.23 a reference with tables would give.
 
 **What the gate's number moves by.** Both sections are allocated and read-only, so Berkeley text
 counts them: about -32,788 in `pico-client-coop-nostd`, and up to 72 more if the linker also
-drops the now unreferenced `.gcc_except_table`. With T6: about 527,600 to 494,800, a ratio of
-about 1.23 against the packed reference. The std case is not touched.
+drops the now unreferenced `.gcc_except_table`. With T6: about 527,600 to 494,800. The reference,
+built without tables too, moves by about -72,000 (401,760 to about 329,700, the C compiled
+without tables may also change a little code), so the ratio reads about 1.50. The std case is
+not touched.
 
 **Compatibility.** Linux only (the file's table is `cfg(target_os = "linux")`); Windows keeps
 its tables, which its exception handling reads (`capi-nostd.toml`). GNU ld and lld take the
