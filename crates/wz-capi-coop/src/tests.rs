@@ -1652,7 +1652,7 @@ fn a_key_wire_form_but_declared_is_refused_in_a_build_without_shared_key_ids() {
 #[cfg(not(feature = "group"))]
 #[test]
 fn a_build_without_groups_refuses_a_session_that_joins_one() {
-    use crate::OpenError;
+    use crate::{EndpointRefusal, OpenError, Refusal};
     use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 
     let refused = Engine::open(
@@ -1682,10 +1682,57 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
     .err();
     assert_eq!(
         refused,
-        Some(OpenError::Group(
-            "udp/239.7.7.7:7447#iface=lan7: joining a group is not built".to_owned()
-        ))
+        Some(OpenError::Group(EndpointRefusal {
+            endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+            why: Refusal::GroupsNotBuilt,
+        }))
     );
+}
+
+/// A refusal is a value, and reads as the endpoint and the reason only when a program prints it:
+/// one that names no endpoint reads as the reason alone, and the reasons that carry another's
+/// refusal read as it.
+#[test]
+fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
+    use crate::{EndpointRefusal, Refusal};
+    use wz_runtime_coop::session_drive::LinkOpenError;
+    use wz_session_mcu::connect_manager::DialRefused;
+
+    let refusal = |endpoint: &str, why| {
+        EndpointRefusal {
+            endpoint: endpoint.to_owned(),
+            why,
+        }
+        .to_string()
+    };
+    assert_eq!(
+        refusal("udp/239.7.7.7:7447", Refusal::GroupsNotBuilt),
+        "udp/239.7.7.7:7447: joining a group is not built"
+    );
+    assert_eq!(
+        refusal("tcp/127.0.0.1:7447", Refusal::ListeningNotBuilt),
+        "tcp/127.0.0.1:7447: listening is not built"
+    );
+    assert_eq!(
+        refusal("tcp/127.0.0.1:7447", Refusal::NoAnswerInTime),
+        "tcp/127.0.0.1:7447: no answer in time"
+    );
+    assert_eq!(
+        refusal("tcp/127.0.0.1:7447", Refusal::Link(LinkOpenError::Refused)),
+        "tcp/127.0.0.1:7447: Refused"
+    );
+    assert_eq!(
+        refusal("foo/bar", Refusal::Locator(DialRefused::Unsupported)),
+        "foo/bar: Unsupported"
+    );
+    assert_eq!(
+        refusal(
+            "tcp/127.0.0.1:7447",
+            Refusal::HandshakeClosed(CloseReason::Generic)
+        ),
+        "tcp/127.0.0.1:7447: the handshake ended: Generic"
+    );
+    assert_eq!(refusal("", Refusal::LinkLost), "the link was lost");
 }
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]

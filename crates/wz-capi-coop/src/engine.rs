@@ -64,12 +64,13 @@ use wz_capi_port::{
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::reassembly_rx::{lent_reassembly_in, LentChains, LENT_CHAINS};
+#[cfg(feature = "listen")]
+use wz_runtime_coop::session_drive::LinkListener;
+use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::{
     spawn_session_with_router, wait_any, LinkReadiness, LinkWritability, OpenedLink, PendingDial,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-#[cfg(feature = "listen")]
-use wz_runtime_coop::session_drive::{LinkListener, LinkOpenError};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
@@ -346,6 +347,78 @@ fn resolve_limits(config: &CoopConfig) -> SessionLimits {
     >(config.limits)
 }
 
+/// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
+/// given, and why.
+// Typed and not a text: the C ABIs answer a refusal with a code and never read its words, so the
+// formatter is linked only into a program that prints one (`Display`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRefusal {
+    /// The endpoint, as the config or the caller states it; empty when the refusal is the
+    /// session's and names no endpoint ([`Refusal::LinkLost`]).
+    pub endpoint: String,
+    /// Why it could not be used.
+    pub why: Refusal,
+}
+
+impl EndpointRefusal {
+    fn new(endpoint: &str, why: Refusal) -> Self {
+        Self {
+            endpoint: endpoint.to_owned(),
+            why,
+        }
+    }
+}
+
+/// Why an endpoint could not be used ([`EndpointRefusal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The endpoint does not parse as a locator this build can dial or listen on.
+    Locator(wz_session_mcu::connect_manager::DialRefused),
+    /// The network opened no link, listener or group for it.
+    Link(LinkOpenError),
+    /// The handshake ended with a close reason.
+    HandshakeClosed(CloseReason),
+    /// The handshake ended with no close reason.
+    HandshakeEnded,
+    /// Nothing answered by the deadline.
+    NoAnswerInTime,
+    /// The link was lost and the session dials no endpoint again.
+    LinkLost,
+    /// The endpoint is one to listen on, and listening is not built.
+    ListeningNotBuilt,
+    /// The endpoint is a group to join, and joining a group is not built.
+    GroupsNotBuilt,
+    /// The group was joined and its link did not open.
+    GroupLinkDidNotOpen,
+    /// The session is closed.
+    SessionClosed,
+    /// The session holds as many faces as `max_faces` admits.
+    FacesFull,
+}
+
+impl core::fmt::Display for EndpointRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if !self.endpoint.is_empty() {
+            write!(f, "{}: ", self.endpoint)?;
+        }
+        match self.why {
+            Refusal::Locator(why) => write!(f, "{why:?}"),
+            Refusal::Link(why) => write!(f, "{why:?}"),
+            Refusal::HandshakeClosed(reason) => write!(f, "the handshake ended: {reason:?}"),
+            Refusal::HandshakeEnded => f.write_str("the handshake ended"),
+            Refusal::NoAnswerInTime => f.write_str("no answer in time"),
+            Refusal::LinkLost => f.write_str("the link was lost"),
+            Refusal::ListeningNotBuilt => f.write_str("listening is not built"),
+            Refusal::GroupsNotBuilt => f.write_str("joining a group is not built"),
+            Refusal::GroupLinkDidNotOpen => f.write_str("the group's link did not open"),
+            Refusal::SessionClosed => f.write_str("the session is closed"),
+            Refusal::FacesFull => {
+                f.write_str("the session holds as many faces as max_faces admits")
+            }
+        }
+    }
+}
+
 /// Why no session was opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
@@ -354,14 +427,14 @@ pub enum OpenError {
     /// An endpoint to listen on could not be listened on: it does not parse, the network opens no
     /// listener for its protocol, or the port is taken. The endpoint and the reason; a build
     /// without `listen` answers every listen endpoint this way.
-    Listen(String),
+    Listen(EndpointRefusal),
     /// A group to join could not be: the network joins no group for its endpoint, or the group's
     /// link did not open. The endpoint and the reason; a build without `group` answers every
     /// group this way.
-    Group(String),
+    Group(EndpointRefusal),
     /// No endpoint could be dialled: each was refused, unreachable or did not complete the
     /// handshake in time. The last endpoint's reason.
-    Unreachable(String),
+    Unreachable(EndpointRefusal),
     /// The platform gave no entropy for the session's zid or its cookie key.
     EntropyUnavailable,
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
@@ -1700,15 +1773,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         face: FaceId,
         endpoint: &str,
     ) -> Result<Box<dyn PendingDial<L::Pump>>, OpenError> {
-        let to = parse_locator(endpoint)
-            .map_err(|refused| OpenError::Unreachable(format!("{endpoint}: {refused:?}")))?;
+        let to = parse_locator(endpoint).map_err(|refused| {
+            OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
+        })?;
         // The face's last link holds its buffers in the session's arena until the last thing that
         // holds the link lets it go, and that is the id space the face's tables keep until a link
         // replaces it: let go of here, so the dial begun next finds the buffers the last one held.
         self.registry.borrow_mut().forget_own_mapping_space(face);
-        self.links
-            .begin_initiator(to)
-            .map_err(|refused| OpenError::Unreachable(format!("{endpoint}: {refused:?}")))
+        self.links.begin_initiator(to).map_err(|refused| {
+            OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
+        })
     }
 
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
@@ -1932,10 +2006,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         endpoint: &str,
         next: usize,
         deadline_us: u64,
-        answer: Result<OpenedLink<L::Pump>, wz_runtime_coop::session_drive::LinkOpenError>,
+        answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
     ) -> Result<Link<C>, OpenError> {
-        let opened =
-            answer.map_err(|refused| OpenError::Unreachable(format!("{endpoint}: {refused:?}")))?;
+        let opened = answer.map_err(|refused| {
+            OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
+        })?;
         let wire = self.open_wire(face, opened, SessionRole::Initiator, Some(endpoint))?;
         Ok(Link::Opening {
             wire,
@@ -2038,7 +2113,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     return Ok(());
                 }
                 if redial_ms.is_none() {
-                    return Err(OpenError::Unreachable(String::from("the link was lost")));
+                    return Err(OpenError::Unreachable(EndpointRefusal::new(
+                        "",
+                        Refusal::LinkLost,
+                    )));
                 }
                 self.dial_or_wait(0, OpenError::NoEndpoint, redial_ms)?
             }
@@ -2054,9 +2132,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     return Ok(());
                 } else if wire.task.is_finished() || now_us >= deadline_us {
                     let why = match (wire.actions.close_reason(), wire.task.is_finished()) {
-                        (Some(reason), _) => format!("the handshake ended: {reason:?}"),
-                        (None, true) => String::from("the handshake ended"),
-                        (None, false) => String::from("no answer in time"),
+                        (Some(reason), _) => Refusal::HandshakeClosed(reason),
+                        (None, true) => Refusal::HandshakeEnded,
+                        (None, false) => Refusal::NoAnswerInTime,
                     };
                     #[cfg(feature = "listen")]
                     let node = Self::node_of(&wire.actions);
@@ -2076,9 +2154,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         self.faces[at].link = Link::Held { zid };
                         return Ok(());
                     }
-                    let last = OpenError::Unreachable(format!(
-                        "{}: {why}",
-                        self.config.endpoints[next - 1]
+                    let last = OpenError::Unreachable(EndpointRefusal::new(
+                        &self.config.endpoints[next - 1],
+                        why,
                     ));
                     self.dial_or_wait(next, last, redial_ms)?
                 } else {
@@ -2105,8 +2183,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                             Some(answer) => {
                                 self.dial_answered(id, &endpoint, next, deadline_us, answer)
                             }
-                            None => Err(OpenError::Unreachable(format!(
-                                "{endpoint}: no answer in time"
+                            None => Err(OpenError::Unreachable(EndpointRefusal::new(
+                                &endpoint,
+                                Refusal::NoAnswerInTime,
                             ))),
                         };
                         match answered {
@@ -2242,10 +2321,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn listen_on_config(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "listen")]
         for endpoint in self.config.listen.clone() {
-            let refused =
-                |why: &dyn core::fmt::Debug| OpenError::Listen(format!("{endpoint}: {why:?}"));
-            let at = parse_listen_locator(&endpoint).map_err(|why| refused(&why))?;
-            let listener = self.links.open_listener(at).map_err(|why| refused(&why))?;
+            let refused = |why| OpenError::Listen(EndpointRefusal::new(&endpoint, why));
+            let at =
+                parse_listen_locator(&endpoint).map_err(|why| refused(Refusal::Locator(why)))?;
+            let listener = self
+                .links
+                .open_listener(at)
+                .map_err(|why| refused(Refusal::Link(why)))?;
             let readiness = listener.readiness().map(Arc::from);
             self.listeners.push(Listening {
                 listener,
@@ -2256,8 +2338,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(not(feature = "listen"))]
         if let Some(endpoint) = self.config.listen.first() {
-            return Err(OpenError::Listen(format!(
-                "{endpoint}: listening is not built"
+            return Err(OpenError::Listen(EndpointRefusal::new(
+                endpoint,
+                Refusal::ListeningNotBuilt,
             )));
         }
         Ok(())
@@ -2294,9 +2377,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(not(feature = "group"))]
         if let Some(join) = self.config.groups.first() {
-            return Err(OpenError::Group(format!(
-                "{}: joining a group is not built",
-                join.endpoint
+            return Err(OpenError::Group(EndpointRefusal::new(
+                &join.endpoint,
+                Refusal::GroupsNotBuilt,
             )));
         }
         Ok(())
@@ -2308,10 +2391,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// ended at its first step (its link did not open).
     #[cfg(feature = "group")]
     fn join_group(&mut self, id: FaceId, join: GroupJoin) -> Result<GroupFace, OpenError> {
-        let transport = self
-            .links
-            .open_group(&join.endpoint)
-            .map_err(|why| OpenError::Group(format!("{}: {why:?}", join.endpoint)))?;
+        let transport = self.links.open_group(&join.endpoint).map_err(|why| {
+            OpenError::Group(EndpointRefusal::new(&join.endpoint, Refusal::Link(why)))
+        })?;
         let endpoint = join.endpoint.clone();
         let params = join.profile.params(
             self.config.whatami,
@@ -2374,8 +2456,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         self.local.run_until_idle();
         if face.has_ended() {
-            return Err(OpenError::Group(format!(
-                "{endpoint}: the group's link did not open"
+            return Err(OpenError::Group(EndpointRefusal::new(
+                &endpoint,
+                Refusal::GroupLinkDidNotOpen,
             )));
         }
         // A droppable publish that finds the session held asks the group's socket for room as it
@@ -3202,16 +3285,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// holds as many faces as `max_faces` admits, or the endpoint is not reached.
     pub fn attach_face(&self, endpoint: &str) -> Result<u64, OpenError> {
         let Some(mut guard) = self.live() else {
-            return Err(OpenError::Unreachable(String::from(
-                "the session is closed",
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::SessionClosed,
             )));
         };
         let core = &mut guard.0;
         // A face past `max_faces` would have no buffers: the arena holds the links of as many
         // faces as the config admits, and an accepted link past them is closed unread.
         if core.faces.len() > core.config.max_faces {
-            return Err(OpenError::Unreachable(String::from(
-                "the session holds as many faces as max_faces admits",
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::FacesFull,
             )));
         }
         let id = core.next_face;

@@ -313,7 +313,7 @@ fn a_group_the_stack_does_not_join_fails_the_open_by_name() {
     // stack refuses to join is refused when it answers.
     for endpoint in ["udp/192.0.2.9:7447", "udp/239.9.9.9:7447#iface=lan9"] {
         match open_member(&network, 1, member_config(1, endpoint)) {
-            Err(OpenError::Group(why)) => assert!(why.starts_with(endpoint), "{why}"),
+            Err(OpenError::Group(why)) => assert!(why.endpoint.starts_with(endpoint), "{why}"),
             Err(other) => panic!("{endpoint}: refused as {other:?}"),
             Ok(_) => panic!("{endpoint}: opened"),
         }
