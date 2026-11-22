@@ -109,6 +109,7 @@ use alloc::vec::Vec;
 // pending table.
 use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::key_gate::KeyGate;
 use crate::registry_error::RegisterError;
 use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
@@ -1079,6 +1080,10 @@ pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     /// Where the build fixes the bound to the rows' capacity it is held in no byte and the rows
     /// refuse alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the pending queries keep the keyexpr they were asked under ([`Storage::Keys`]): the
+    /// session's key arena on the lent policy ([`Self::lent`]). A keyexpr with no room there is
+    /// refused as a full table refuses the query ([`RegisterError::TableFull`]).
+    keys: P::Keys,
     /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
     /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
     key_gate: KeyGate<'static>,
@@ -1101,6 +1106,7 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
             pending: BoundedVec::default(),
             quota: Default::default(),
             key_quota: Default::default(),
+            keys: Default::default(),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -1132,11 +1138,13 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
 
 impl<C: ReplySink> ReplyRegistry<C, Lent> {
     /// An empty registry whose pending queries are `rows` rows lent from `arena`, at most
-    /// `MAX_PENDING_QUERIES`: the gets a session holds pending on one face, at its open. Refused,
-    /// taking nothing, past that ceiling or past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+    /// `MAX_PENDING_QUERIES`, the keyexpr each was asked under kept in `keys`, the session's key
+    /// arena: the gets a session holds pending on one face, at its open. Refused, taking nothing,
+    /// past that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
             pending: arena.lend(rows)?,
+            keys: LentKeys::from(keys),
             ..Self::default()
         })
     }
@@ -1276,7 +1284,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         accept: ReplyAcceptance<'_>,
         sink: C,
     ) -> Result<ReplyHandle, RegisterError> {
-        let accept = accept.store(self.key_quota)?;
+        let accept = accept.store(&self.keys, self.key_quota)?;
         if !self.has_room() {
             return Err(RegisterError::TableFull);
         }

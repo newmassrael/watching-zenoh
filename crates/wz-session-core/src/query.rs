@@ -101,8 +101,11 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
-use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedString, BoundedVec, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
+};
 use crate::caps;
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::query_mode::QueryTarget;
 use crate::registry_error::RegisterError;
 // R311y834 — the only consumers are `QueryResponder` and the dispatcher, both
@@ -573,15 +576,14 @@ impl QueryableId {
 // whose control plane is likewise always-compiled.
 struct Queryable<C, P: Storage = Profile> {
     id: QueryableId,
-    /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU). Matching reads it
-    /// as text at dispatch time rather than keeping a pre-split owned
-    /// `Vec<String>`. A pattern with an empty chunk (`a//b`) is stored
-    /// as written and matches nothing; `*` (single-chunk wildcard),
-    /// `**` (zero-or-more-chunk wildcard), and `$*` intra-chunk
-    /// substring wildcards (R220) match via the shared
+    /// R311gb (Track 2) — the canonical keyexpr pattern, kept as the policy keeps a row's key
+    /// ([`Storage::Key`]): inline in the row on the static policy, a block of the session's key
+    /// arena on the lent one. Matching reads it as text at dispatch time rather than keeping a
+    /// pre-split owned `Vec<String>`. A pattern with an empty chunk (`a//b`) is stored as
+    /// written and matches nothing; `*` (single-chunk wildcard), `**` (zero-or-more-chunk
+    /// wildcard), and `$*` intra-chunk substring wildcards (R220) match via the shared
     /// [`crate::keyexpr_match`] matchers.
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    pattern: P::Key,
     /// What is true of [`Self::pattern`] (a wildcard, a key the matchers accept), read once when
     /// the queryable is declared: the pattern does not change, so a match does not scan it.
     pattern_facts: crate::keyexpr_match::KeyFacts,
@@ -2171,6 +2173,10 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// build fixes the bound to the rows' capacity it is held in no byte and the rows refuse
     /// alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the queryables keep their patterns ([`Storage::Keys`]): the session's key arena on
+    /// the lent policy ([`Self::lent`]). A pattern with no room there is refused as a full table
+    /// refuses the queryable ([`RegisterError::TableFull`]).
+    keys: P::Keys,
     /// The declaration id the next queryable takes, from 1. A `u64` only so
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
@@ -2211,6 +2217,7 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
             queryables: BoundedVec::default(),
             quota: Default::default(),
             key_quota: Default::default(),
+            keys: Default::default(),
             next_id: 1,
             requester: None,
             max_parameters: Default::default(),
@@ -2334,11 +2341,12 @@ impl<C> QueryableRegistry<C, Profile> {
 
 impl<C> QueryableRegistry<C, Lent> {
     /// An empty registry whose queryables are `rows` rows lent from `arena`, at most
-    /// `MAX_QUERYABLES`: a session's, at its open. Refused, taking nothing, past that ceiling or
-    /// past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+    /// `MAX_QUERYABLES`, their patterns kept in `keys`, the session's key arena: a session's, at
+    /// its open. Refused, taking nothing, past that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
             queryables: arena.lend(rows)?,
+            keys: LentKeys::from(keys),
             ..Self::default()
         })
     }
@@ -2479,6 +2487,12 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         if !self.quota.admits(self.queryables.len() + 1) {
             return Err(RegisterError::TableFull);
         }
+        // The row's key before an id is taken too: a pattern with no room where the registry keeps
+        // its keys is refused as a full table refuses it.
+        let key = self.keys.key(&pattern).map_err(|unkept| match unkept {
+            KeyUnkept::TooLong => RegisterError::KeyexprTooLong,
+            KeyUnkept::NoRoom => RegisterError::TableFull,
+        })?;
         let id = QueryableId(u32::try_from(self.next_id).map_err(|_| RegisterError::IdsExhausted)?);
         let pattern_facts = crate::keyexpr_match::KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
@@ -2486,7 +2500,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         self.queryables
             .push(Queryable {
                 id,
-                pattern,
+                pattern: key,
                 pattern_facts,
                 allowed_origin,
                 complete,
@@ -2567,10 +2581,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
             if require_complete {
                 #[cfg(feature = "keyexpr-includes")]
                 {
-                    crate::keyexpr_match::keyexpr_includes(
-                        queryable.pattern.as_str(),
-                        query_keyexpr,
-                    )
+                    crate::keyexpr_match::keyexpr_includes(&queryable.pattern, query_keyexpr)
                 }
                 // Unreachable in any build that can ask: `session-matching`
                 // forwards `keyexpr-includes`, and only a matching poll
@@ -2581,7 +2592,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
                     false
                 }
             } else {
-                crate::keyexpr_match::keyexpr_intersects(queryable.pattern.as_str(), query_keyexpr)
+                crate::keyexpr_match::keyexpr_intersects(&queryable.pattern, query_keyexpr)
             }
         })
     }
@@ -2629,7 +2640,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         let mut declared = 0usize;
         let mut merged: Option<(u64, bool)> = None;
         for queryable in self.queryables.iter() {
-            if !queryable.allowed_origin.allows_remote() || !reaches(queryable.pattern.as_str()) {
+            if !queryable.allowed_origin.allows_remote() || !reaches(&*queryable.pattern) {
                 continue;
             }
             if aggregate {
@@ -2641,7 +2652,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
                 staged.push(QueryableInterestReply::Declared {
                     interest_id,
                     queryable_id: queryable.id.as_u64(),
-                    keyexpr: String::from(queryable.pattern.as_str()),
+                    keyexpr: String::from(&*queryable.pattern),
                     complete: queryable.complete,
                 });
                 declared += 1;

@@ -32,7 +32,9 @@
 pub enum RegisterError {
     /// The registry holds as many entries as it admits: its fixed backing is
     /// at its declared [`crate::caps`] capacity, or it holds the quota its
-    /// creator stated in the session's limits ([`crate::limits`]).
+    /// creator stated in the session's limits ([`crate::limits`]), or the
+    /// session's key arena has no room for the entry's key
+    /// ([`crate::key_arena`], on the lent storage policy).
     TableFull,
     /// A stored keyexpr exceeds [`crate::caps::MAX_KEYEXPR_BYTES`].
     /// Produced by registries that store a keyexpr pattern

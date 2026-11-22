@@ -163,7 +163,7 @@ impl FaceTables {
         peer: PeerRows,
         limits: &SessionLimits,
     ) -> Result<(), LendRefused> {
-        self.gets = Gets::lent(arena, gets, limits)?;
+        self.gets = Gets::lent(arena, keys, gets, limits)?;
         self.peer.lend_rows(arena, keys, peer, limits)
     }
 
@@ -290,14 +290,14 @@ impl Registry {
         gets: GetTables,
         peers: FacePeers,
     ) -> Result<Self, LendRefused> {
-        let app = App::lent(arena, rows, limits)?;
+        let app = App::lent(arena, keys, rows, limits)?;
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));
         lend_set(&mut sets, arena, keys, gets.rows, peers.rows, limits)?;
         sets[0].id = DIAL_FACE;
         #[cfg(feature = "local-queryable")]
-        let local = Gets::lent(arena, gets.rows, limits)?;
+        let local = Gets::lent(arena, keys, gets.rows, limits)?;
         for _ in 1..peers.tables {
             lend_set(&mut sets, arena, keys, gets.rows, peers.rows, limits)?;
         }
@@ -1059,7 +1059,8 @@ mod tests {
             .arena_mut()
             .lend_keys(256)
             .expect("the arena holds the key arena");
-        let by_value_gets = Gets::lent(by_value_arena.arena_mut(), gets, &limits).expect("rows");
+        let by_value_gets =
+            Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
         let mut by_value_peer =
             Peer::lent(by_value_arena.arena_mut(), by_value_keys, peer, &limits).expect("rows");
         let mut arena =

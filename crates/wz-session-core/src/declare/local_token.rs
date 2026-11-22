@@ -71,9 +71,10 @@
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
 use crate::bounded::{
-    Arena, BoundedString, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage,
+    Arena, BoundedVec, CapacityFull, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
 };
 use crate::caps;
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::keyexpr_intersects;
 use crate::registry_error::RegisterError;
 
@@ -150,9 +151,10 @@ struct LocalToken<P: Storage = Profile> {
     /// The token's unique id (was the `HashMap` key; carried in-row now
     /// the table is a linear `BoundedVec`).
     token_id: u64,
-    /// The token's resolved literal keyexpr, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU).
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// The token's resolved literal keyexpr, kept as the policy keeps a row's key
+    /// ([`Storage::Key`]): inline in the row on the static policy, a block of the session's key
+    /// arena on the lent one.
+    keyexpr: P::Key,
 }
 
 /// DECLARER-side registry of wz's own held `LivelinessToken`s.
@@ -187,6 +189,10 @@ pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// build fixes the bound to the rows' capacity it is held in no byte and the rows refuse
     /// alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the tokens keep their keys ([`Storage::Keys`]): the session's key arena on the lent
+    /// policy ([`Self::lent`]). A key with no room there is refused as a full table refuses the
+    /// token ([`RegisterError::TableFull`]).
+    keys: P::Keys,
 }
 
 impl<P: Storage> Default for LocalTokenRegistry<P> {
@@ -196,6 +202,7 @@ impl<P: Storage> Default for LocalTokenRegistry<P> {
             quota: Default::default(),
             reply_quota: Default::default(),
             key_quota: Default::default(),
+            keys: Default::default(),
         }
     }
 }
@@ -212,11 +219,12 @@ impl LocalTokenRegistry<Profile> {
 
 impl LocalTokenRegistry<Lent> {
     /// An empty registry whose tokens are `rows` rows lent from `arena`, at most
-    /// `MAX_LOCAL_TOKENS`: a session's, at its open. Refused, taking nothing, past that ceiling
-    /// or past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+    /// `MAX_LOCAL_TOKENS`, their keys kept in `keys`, the session's key arena: a session's, at
+    /// its open. Refused, taking nothing, past that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
             tokens: arena.lend(rows)?,
+            keys: LentKeys::from(keys),
             ..Self::default()
         })
     }
@@ -290,9 +298,10 @@ impl<P: Storage> LocalTokenRegistry<P> {
         if !self.key_quota.admits(keyexpr.len()) {
             return Err(RegisterError::KeyexprTooLong);
         }
-        let mut ke: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
-        ke.push_str(keyexpr)
-            .map_err(|_| RegisterError::KeyexprTooLong)?;
+        let ke = self.keys.key(keyexpr).map_err(|unkept| match unkept {
+            KeyUnkept::TooLong => RegisterError::KeyexprTooLong,
+            KeyUnkept::NoRoom => RegisterError::TableFull,
+        })?;
         self.tokens
             .push(LocalToken {
                 token_id,
@@ -360,14 +369,14 @@ impl<P: Storage> LocalTokenRegistry<P> {
         let matching = self
             .tokens
             .iter()
-            .filter(|token| token_matches(token.keyexpr.as_str(), pattern))
+            .filter(|token| token_matches(&token.keyexpr, pattern))
             .count();
         if !self.has_room(pending, matching.saturating_add(1)) {
             return Err(CapacityFull(()));
         }
         const RESERVED: &str = "room for the whole chain was checked above";
         for token in self.tokens.iter() {
-            if token_matches(token.keyexpr.as_str(), pattern) {
+            if token_matches(&token.keyexpr, pattern) {
                 // Stage the token by id only — the keyexpr stays in the table
                 // (SSOT) and is resolved at drain via `keyexpr_for`.
                 pending
@@ -394,7 +403,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
         self.tokens
             .iter()
             .find(|t| t.token_id == token_id)
-            .map(|t| t.keyexpr.as_str())
+            .map(|t| &*t.keyexpr)
     }
 
     /// R311hn (Track 2) — `alloc`-gated inbound-parse path: consume an
@@ -1027,6 +1036,7 @@ mod tests {
     #[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
     #[test]
     fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
+        use crate::bounded::BoundedString;
         use wz_codecs::interest_body::InterestBodyOwned;
 
         let mut reg = LocalTokenRegistry::new();
