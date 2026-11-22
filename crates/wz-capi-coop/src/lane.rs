@@ -774,6 +774,16 @@ impl SampleLane {
     /// [`Self::offer`], reading the sample where it lies when every part of it but its key lies in
     /// `datagram`, the first byte's address and the length of the datagram a link lends the step
     /// ([`Lying`]): only the key, when it lies elsewhere, and the subscribers' ids are written.
+    fn offer_lying(
+        &mut self,
+        subscriber: SubId,
+        sample: &dyn SampleView,
+        datagram: (usize, usize),
+    ) {
+        self.offer_from(subscriber, sample, Some(datagram));
+    }
+
+    /// [`Self::offer`], or [`Self::offer_lying`] in `datagram`.
     fn offer_from(
         &mut self,
         subscriber: SubId,
@@ -1585,12 +1595,16 @@ impl LaneHeld<'_> {
         let shared = self.shared;
         // SAFETY: written under the session's lock, under which this hold is.
         let lending = unsafe { *shared.lending.get() };
-        // A delivery running now may be the one this sample's own step runs inside of (a callback
-        // that steps its session), which hands the sample on only once that callback returns: a
-        // sample lying in the datagram would hold the link back until then, and the callback may
-        // be waiting for what the link brings next. It is written into the lane instead.
-        let datagram = lending.filter(|_| !shared.delivering.load(Ordering::SeqCst));
-        self.offer_from(subscriber, sample, datagram);
+        match lending {
+            // A delivery running now may be the one this sample's own step runs inside of (a
+            // callback that steps its session), which hands the sample on only once that callback
+            // returns: a sample lying in the datagram would hold the link back until then, and the
+            // callback may be waiting for what the link brings next. It is written whole instead.
+            Some(datagram) if !shared.delivering.load(Ordering::SeqCst) => {
+                self.offer_lying(subscriber, sample, datagram)
+            }
+            _ => self.offer(subscriber, sample),
+        }
     }
 
     /// Publish what this hold leaves open: the sample the lane holds open for more subscribers.
