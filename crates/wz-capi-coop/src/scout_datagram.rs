@@ -25,7 +25,7 @@ use core::net::SocketAddr;
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
-    deliver_in_upstream_order, ScoutParams, ScoutWindow, ScoutedHello,
+    deliver_in_upstream_order, ScoutParams, ScoutWindowPlace, ScoutedHello,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -113,7 +113,10 @@ where
     U: DatagramSocket,
     C: ClockSource + Clone + 'static,
 {
-    let mut window = ScoutWindow::<CoopRuntime<C>>::new(params);
+    // Built in this frame's place and pumped from it: the machine is made in a frame that has
+    // returned before the first datagram is read.
+    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let window = place.build(params);
     let actions = window.actions().clone();
     let Ok(socket) = U::bind(scout_bind(group)) else {
         return actions.scouted_hellos();
@@ -150,6 +153,49 @@ where
 mod tests {
     use super::*;
     use core::net::{Ipv4Addr, Ipv6Addr};
+
+    /// A window built in its place is the window built by value: it opens to the same Scout, stays
+    /// open until its budget passes and then ends alike, and its actions go when the place goes.
+    /// Turned red by a place that writes another window, or drops its window otherwise than once.
+    #[test]
+    fn a_window_built_in_its_place_is_the_window_built_by_value() {
+        use alloc::sync::Arc;
+        use wz_runtime_posix::PosixClock;
+        use wz_session_core::scouting_host::{ScoutOutcome, ScoutWindow};
+
+        let params = ScoutParams {
+            what: 0x03,
+            zid: None,
+            timeout_ms: 100,
+            exit_on_first: false,
+        };
+        let mut by_value = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
+        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        let in_place = place.build(params);
+        let scout = in_place.open();
+        assert!(scout.is_some(), "a window opens with a Scout");
+        assert_eq!(scout, by_value.open(), "the same Scout either way");
+        in_place.sent(0, true);
+        by_value.sent(0, true);
+        in_place.tick(99);
+        by_value.tick(99);
+        assert!(
+            !in_place.resolved() && !by_value.resolved(),
+            "CONTROL: open inside its budget"
+        );
+        in_place.tick(100);
+        by_value.tick(100);
+        assert!(in_place.resolved() && by_value.resolved());
+        assert_eq!(in_place.outcome(), ScoutOutcome::TimedOut);
+        assert_eq!(by_value.outcome(), ScoutOutcome::TimedOut);
+        let actions = Arc::clone(in_place.actions());
+        let held = Arc::strong_count(&actions);
+        drop(place);
+        assert!(
+            Arc::strong_count(&actions) < held,
+            "the window, and the actions its machine held, went with its place"
+        );
+    }
 
     /// The window's socket is of the group's family, unbound to any one address of it, and on a
     /// port the stack picks.

@@ -41,8 +41,11 @@ use core::ffi::{c_char, CStr};
 use wz_session_core::json5::{self, Json5Value};
 #[cfg(feature = "config-document")]
 use wz_session_core::limits::RuntimeLimits;
+use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::policy_document::{self, Overrides, Resolved, Statement};
+#[cfg(test)]
+use wz_session_core::policy_document::Resolved;
+use wz_session_core::policy_document::{self, Overrides, Statement};
 
 use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
@@ -72,10 +75,51 @@ pub(crate) struct PolicyStatements {
 }
 
 impl PolicyStatements {
+    /// The layers written over `policy` and the limits the document states over `limits`, the
+    /// snapshot of a session's ([`policy_document::resolve_under_into`]), or
+    /// `Z_ERR_CONFIG_INVALID_VALUE` when `Self::compose` refuses them: what an open hands its
+    /// engine, without the record of where each value came from, which this ABI reports nowhere.
+    /// On a refusal what was written is no resolution, and the caller drops it.
+    pub(crate) fn compose_into(
+        &self,
+        policy: &mut SessionPolicy,
+        limits: &mut SessionLimits,
+    ) -> Result<(), ZResult> {
+        let api: Vec<Statement<'_>> = self
+            .api
+            .iter()
+            .map(|(id, value)| Statement::new(id.as_str(), value.as_str()))
+            .collect();
+        let overrides = Overrides {
+            profile: self.profile.as_deref(),
+            statements: &api,
+            limits: &[],
+        };
+        // The reader of a document resolves into a record of where each value came from; the
+        // two snapshots are taken from it.
+        #[cfg(feature = "config-document")]
+        if let Some(document) = &self.document {
+            let base = policy_document::Base {
+                policy: *policy,
+                session_limits: *limits,
+                runtime_limits: None,
+            };
+            let resolved = policy_document::resolve_document_under(base, document, overrides)
+                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+            *policy = resolved.policy;
+            *limits = resolved.limits.session;
+            return Ok(());
+        }
+        policy_document::resolve_under_into(overrides, policy, limits)
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+    }
+
     /// `base` with the layers over it, and the limits the document states over the build defaults
     /// of a session's limits ([`policy_document::Base::session`]), or `Z_ERR_CONFIG_INVALID_VALUE`
     /// when any statement of any layer is refused, a document whose shape is refused, a profile
-    /// the build does not have and a limit of a runtime among them.
+    /// the build does not have and a limit of a runtime among them. Where each value came from is
+    /// read by the tests alone: the open and the doors resolve through [`Self::compose_into`].
+    #[cfg(test)]
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
         let base = policy_document::Base::session(base);
         let api: Vec<Statement<'_>> = self
@@ -152,7 +196,7 @@ fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
 }
 
 /// `change` made to the policies `config` states, kept only when the open would compose the
-/// result ([`crate::session::resolve_policy`]); a refused change leaves the config as it was.
+/// result ([`crate::session::resolve_snapshots`]); a refused change leaves the config as it was.
 ///
 /// # Safety
 /// `config` must be null or a live loaned config.
@@ -168,7 +212,7 @@ unsafe fn amend(
     if let Err(code) = change(&mut candidate) {
         return code;
     }
-    match crate::session::resolve_policy(&candidate) {
+    match crate::session::resolve_snapshots(&candidate) {
         Ok(_) => {
             state.policies = candidate;
             Z_OK
@@ -343,7 +387,7 @@ mod tests {
     use super::*;
     use crate::abi::z_owned_config_t;
     use crate::config::{z_config_default, z_config_drop, z_config_loan_mut, z_config_move};
-    use crate::session::resolve_policy;
+    use crate::session::{resolve_policy, resolve_snapshots};
     use alloc::ffi::CString;
     use wz_session_core::policy::POLICIES;
     use wz_session_core::policy_binding::{Binding, PolicyEntry};
@@ -462,6 +506,33 @@ mod tests {
             resolve_policy(&PolicyStatements::default()),
             Ok(Resolved::unchanged(SessionPolicy::defaults()))
         );
+    }
+
+    /// What the open and the doors resolve for a config is what the record of where each value
+    /// came from resolves: the two snapshots of a config that states nothing and of one whose
+    /// door kept a statement, and the same code for a statement no door would keep. Turned red by
+    /// an open that resolves its snapshots by another path than the record.
+    #[test]
+    fn the_open_resolves_the_snapshots_the_record_of_origins_resolves() {
+        assert_eq!(
+            resolve_snapshots(&PolicyStatements::default()),
+            Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
+        );
+        let (entry, value) = one_allowed();
+        let mut config = Config::new();
+        assert_eq!(config.policy(entry.id(), value), Z_OK);
+        let recorded = config.resolved();
+        assert_eq!(
+            resolve_snapshots(&config.state().policies),
+            Ok((recorded.policy, recorded.limits.session))
+        );
+        let refused = PolicyStatements::unchecked("no-such-policy", value);
+        assert_eq!(
+            resolve_policy(&refused).map(|_| ()),
+            Err(Z_ERR_CONFIG_INVALID_VALUE),
+            "CONTROL: the record refuses it"
+        );
+        assert_eq!(resolve_snapshots(&refused), Err(Z_ERR_CONFIG_INVALID_VALUE));
     }
 
     /// The policy door refuses what the build refuses, by the same code, and a refused statement

@@ -1797,6 +1797,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         role: SessionRole,
         endpoint: Option<&str>,
     ) -> Result<Wire<C>, OpenError> {
+        let wire = self.start_wire(face, opened, role, endpoint)?;
+        self.local.run_until_idle();
+        Ok(wire)
+    }
+
+    /// [`Self::open_wire`] up to the first step of the task: the link's session, its gates and its
+    /// task made, and the task spawned. Never inlined, for the stack: what is built here (the
+    /// session's parameters moved into its actions, the gates over the link, the task's closure)
+    /// lies in this frame alone, which has returned before the task first runs, so the frame of
+    /// the caller the session's first steps run under (a dial, a face's poll) holds only the wire
+    /// handed back.
+    #[inline(never)]
+    fn start_wire(
+        &mut self,
+        face: FaceId,
+        opened: OpenedLink<L::Pump>,
+        role: SessionRole,
+        endpoint: Option<&str>,
+    ) -> Result<Wire<C>, OpenError> {
         let OpenedLink { sink, pump } = opened;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
@@ -1931,7 +1950,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             move |place| lent_reassembly_in(place, &policy, chains),
             dispatch,
         );
-        self.local.run_until_idle();
         Ok(Wire {
             actions,
             task,
@@ -3020,7 +3038,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// lent from it to `links` before anything is bound or dialled
     /// (`SessionLinks::lend_buffers`), so a link the session opens reads and encodes in the arena.
     pub fn open_in(
-        mut links: L,
+        links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         config: CoopConfig,
@@ -3028,6 +3046,50 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Arc<Self>, OpenError> {
+        Self::open_made_in(links, clock, entropy, || config, policy, key_ids, memory)
+    }
+
+    /// [`Self::open_in`], its config made by `make_config` inside the open, once, before anything
+    /// else: an ABI that builds the config from its own values hands the maker, so the config is
+    /// never a value of its frame, which the open's handshake runs under.
+    ///
+    /// The open is two frames that never lie on the stack together. The first builds the engine
+    /// where it is kept (the session's state and its arena's tables, in the engine's own
+    /// allocation), and returns; the second binds the ports, joins the groups and dials over the
+    /// engine it built, holding only a handle to it. So no part of the engine, and no copy of the
+    /// config, is under the session's first steps. An open that fails once the engine is built
+    /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
+    /// go of and a group it joined is told it leaves.
+    pub fn open_made_in(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        make_config: impl FnOnce() -> CoopConfig,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<Arc<Self>, OpenError> {
+        let engine = Self::assemble(links, clock, entropy, make_config, policy, key_ids, memory)?;
+        engine.open_links()?;
+        Ok(engine)
+    }
+
+    /// The engine [`Self::open_made_in`] opens, built where it is kept and not yet bound, joined
+    /// or dialled: the config made, the key-wire form judged, the arena reserved and its tables
+    /// lent, the zid decided. Never inlined, for the stack: the session's state is put together in
+    /// this frame and moved into the engine's allocation, and the frame has returned before the
+    /// first link is opened.
+    #[inline(never)]
+    fn assemble(
+        mut links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        make_config: impl FnOnce() -> CoopConfig,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<Arc<Self>, OpenError> {
+        let config = make_config();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
@@ -3113,7 +3175,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .saturating_add(config.listen.len())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
-        let mut core = Core {
+        let core = Core {
             local,
             runtime,
             clock,
@@ -3196,25 +3258,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "queryable")]
         let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
         let arena_bytes = core.arena.bytes();
-        // The ports are bound and the groups joined before anything is dialled: a session that
-        // cannot listen, or join a group, where it was told to does not open.
-        core.listen_on_config()?;
-        core.join_groups()?;
-        // A session that only listens, or only joins groups, is open once it is bound and joined;
-        // one that dials is open once a link completes its handshake.
-        if !(core.config.endpoints.is_empty() && (core.listens() || !core.config.groups.is_empty()))
-        {
-            core.faces[0].link = core.dial_from(0, OpenError::NoEndpoint)?;
-            // Open once the dial's link is up, or once the node it reached is held by a face that
-            // came first (a peer that listens and dials its own listener's peer).
-            while !core.dial_settled() {
-                let spare = core.idle_wait().wait();
-                core.give_back_waits(spare);
-                core.local.run_until_idle();
-                let now_us = core.now_us();
-                core.poll_links(None, now_us)?;
-            }
-        }
         Ok(Arc::new_cyclic(|this| Self {
             core: Mutex::new(Confined(core)),
             rooms,
@@ -3262,6 +3305,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             takes: Takes::default(),
             this: this.clone(),
         }))
+    }
+
+    /// Open the links of the engine [`Self::assemble`] built: the ports bound and the groups
+    /// joined before anything is dialled, so a session that cannot listen, or join a group, where
+    /// it was told to does not open; then the first endpoint dialled and the session stepped on
+    /// this thread until the dial settles. A session that only listens, or only joins groups, is
+    /// open once it is bound and joined; one that dials is open once a link completes its
+    /// handshake. Never inlined: what it holds under the session's first steps is the guard of the
+    /// engine's state, which nothing else can take before the open returns the engine.
+    #[inline(never)]
+    fn open_links(&self) -> Result<(), OpenError> {
+        let mut held = lock(&self.core);
+        let core = &mut held.0;
+        core.listen_on_config()?;
+        core.join_groups()?;
+        if !(core.config.endpoints.is_empty() && (core.listens() || !core.config.groups.is_empty()))
+        {
+            core.faces[0].link = core.dial_from(0, OpenError::NoEndpoint)?;
+            // Open once the dial's link is up, or once the node it reached is held by a face that
+            // came first (a peer that listens and dials its own listener's peer).
+            while !core.dial_settled() {
+                let spare = core.idle_wait().wait();
+                core.give_back_waits(spare);
+                core.local.run_until_idle();
+                let now_us = core.now_us();
+                core.poll_links(None, now_us)?;
+            }
+        }
+        Ok(())
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans

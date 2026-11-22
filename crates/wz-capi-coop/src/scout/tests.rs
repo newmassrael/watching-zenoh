@@ -13,7 +13,7 @@ use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::scouting::ScoutMember;
 use wz_runtime_posix::PosixClock;
 use wz_session_core::scout_initiator::ScoutRxIgnored;
-use wz_session_core::scouting_host::decode_scouted_hello;
+use wz_session_core::scouting_host::{decode_scouted_hello, ScoutWindow};
 
 use super::*;
 
