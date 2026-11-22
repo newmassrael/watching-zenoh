@@ -634,18 +634,10 @@ pub struct Limited<L: LimitSpec, const HELD: usize> {
 impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
     /// `value`, when the build's domain allows it.
     pub fn select(value: L::Value) -> Result<Self, OutsideLimitDomain> {
-        let stated = value.to_value();
-        match L::DOMAIN.check(stated) {
-            Ok(()) => Ok(Self {
-                value: [value; HELD],
-            }),
-            Err(why) => Err(OutsideLimitDomain {
-                limit: L::LIMIT,
-                value: stated,
-                domain: L::DOMAIN,
-                why,
-            }),
-        }
+        admit(L::LIMIT, L::DOMAIN, value.to_value())?;
+        Ok(Self {
+            value: [value; HELD],
+        })
     }
 
     /// The selected value. Where the build's domain is one value, that value is the build's and
@@ -838,6 +830,25 @@ fn select_at<S, L: LimitField<S>>(
             why: Outside::UnboundedParameter,
         }),
     }
+}
+
+/// Whether `domain` holds `stated`, the value a statement names for `limit`, and the refusal
+/// when it does not.
+// Out of line: written in `Limited::select`, the domain's check and the refusal it builds were
+// compiled into the selector of every limit a build declares, though only the limit's id and
+// domain differ between them.
+#[inline(never)]
+fn admit(
+    limit: &'static str,
+    domain: LimitDomain,
+    stated: LimitValue,
+) -> Result<(), OutsideLimitDomain> {
+    domain.check(stated).map_err(|why| OutsideLimitDomain {
+        limit,
+        value: stated,
+        domain,
+        why,
+    })
 }
 
 /// The value `snapshot` holds of `L`, as a statement names it.
