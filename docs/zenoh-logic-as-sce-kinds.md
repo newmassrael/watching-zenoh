@@ -494,14 +494,18 @@ The list above is the census as taken. This list records what changed since.
   is `sources/algorithms/take_generation.scxml`, an algorithm that takes the
   table `inout` (SCE ADR 0108, a `map<record, uint64>` keyed by the zid as its
   two halves) and answers taken, duplicate or no room.
-  `wz-session-core::reset_generations` holds it in a `ResetGenerations<N>`, and
-  the heap profile's `lifecycle_query` answers through it (row 30), its bound one
-  no node reaches and its seed the host's entropy. The fixed-memory profile's
-  connect manager (row M5) still holds its `FixedVec`: its table lives in a
-  `static` built by a `const fn` whose bytes are all zero, so the linker puts it in
-  `.bss`, and SCE's map at the pin is neither built by a `const fn` nor zero when
-  empty (its "no slot" marks are `u32::MAX`). That is a request to the SCE side,
-  not a wz edit.
+  `wz-session-core::reset_generations` holds it in a `ResetGenerations<N, S>`,
+  whose map storage `S` is a type (SCE ADR 0108, D4), not a feature of the
+  build (Round 4594, SCE `7f52c3d78ee`). The heap profile's `lifecycle_query`
+  answers through it in `Heap` storage (row 30), its bound one no node reaches
+  and its seed the host's entropy. The fixed-memory profile's connect manager
+  (row M5) still holds its `FixedVec`. Moved onto the map in `Inline` storage it
+  is all zero bytes in `.bss`, and it costs the `zephyr-admin-fixed-tls` image
+  2,288 bytes of text and 96 of data, 1,480 of them the map's hashing (SipHash
+  and its probe), for a table of two peers that a linear search reads for less;
+  the kit's text and stack gates refuse it. The move waits for a map of a small
+  bound without a hash, asked of the SCE side; the three client images are
+  unchanged by it.
 
 ### 7.2 What S7 to S10 found (2026-11-20)
 
