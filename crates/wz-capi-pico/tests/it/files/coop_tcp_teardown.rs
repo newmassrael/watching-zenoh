@@ -21,7 +21,7 @@
 
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use wz_capi_pico::{
@@ -201,34 +201,42 @@ unsafe fn pair() -> Pair {
     }
 }
 
-/// Tear `handles` down on a thread of its own as a pico program does: three puts on its last
-/// publisher, 20 ms apart, the close, the drop of each publisher, the drop of the session. The
-/// steps as they end, by name.
-fn tear_down(mut handles: Handles, puts: bool) -> Receiver<&'static str> {
-    let (done, steps) = channel();
-    std::thread::spawn(move || {
-        // SAFETY: the handles are this thread's alone (`Handles`), and each is let go of once.
-        unsafe {
-            if puts {
-                let last = handles.publishers.last().expect("a publisher to put on");
-                for _ in 0..3 {
-                    // Whether the put reached anyone is not this test's question: whether it
-                    // returned is.
-                    let _ = put(last);
-                    let _ = done.send("put");
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+impl Handles {
+    /// The teardown a pico program makes: three puts on the last publisher, 20 ms apart, when
+    /// `puts`; the close; the drop of each publisher; the drop of the session. Each step is told
+    /// to `done` as it ends.
+    ///
+    /// # Safety
+    /// The handles are live and used by no other thread.
+    unsafe fn tear(mut self, puts: bool, done: &Sender<&'static str>) {
+        if puts {
+            let last = self.publishers.last().expect("a publisher to put on");
+            for _ in 0..3 {
+                // Whether the put reached anyone is not this test's question: whether it
+                // returned is.
+                let _ = put(last);
+                let _ = done.send("put");
+                std::thread::sleep(Duration::from_millis(20));
             }
-            z_close(z_session_loan_mut(&mut handles.session), std::ptr::null());
-            let _ = done.send("z_close");
-            for publisher in &mut handles.publishers {
-                z_publisher_drop(z_publisher_move(publisher));
-                let _ = done.send("z_publisher_drop");
-            }
-            z_session_drop(z_session_move(&mut handles.session));
-            let _ = done.send("z_session_drop");
         }
-    });
+        z_close(z_session_loan_mut(&mut self.session), std::ptr::null());
+        let _ = done.send("z_close");
+        for publisher in &mut self.publishers {
+            z_publisher_drop(z_publisher_move(publisher));
+            let _ = done.send("z_publisher_drop");
+        }
+        z_session_drop(z_session_move(&mut self.session));
+        let _ = done.send("z_session_drop");
+    }
+}
+
+/// Tear `handles` down on a thread of its own ([`Handles::tear`]); the steps as they end, by
+/// name. The thread is handed the whole value through a method that takes it, since a closure that
+/// named its fields would capture each field apart, and a field is not `Send`.
+fn tear_down(handles: Handles, puts: bool) -> Receiver<&'static str> {
+    let (done, steps) = channel();
+    // SAFETY: the handles are moved to this thread alone (`Handles`), and each is let go of once.
+    std::thread::spawn(move || unsafe { handles.tear(puts, &done) });
     steps
 }
 
