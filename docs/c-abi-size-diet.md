@@ -51,7 +51,7 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 | T5 | `expect` / panic locations on reachable paths | both | -1K to -2K | candidate |
 | T6 | 1,590 relative relocations (`.rela.dyn`) | both | about -36K no_std | owner decision |
 | T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | about -30K | owner decision |
-| T8 | owned records in a build that lends every one | both | -0.3K to -3K | record buffer landed in round 2; outcome list candidate |
+| T8 | owned records in a build that lends every one | both | -0.3K to -3K | record buffer landed in round 2; outcome list R3-d (section 6) |
 | T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | domain check landed here |
 | T10 | observer planes kept out of line for the stack | both | at most -0.5K | not worth a change alone |
 | T11 | the owned encoders compiled twice (count, then write) | both | -2.5K to -5K no_std | landed in round 2 |
@@ -236,6 +236,11 @@ For round 2's three changes, the same with `--scope 'CountSink|CountTxBuf|encode
 `CountSink` instances of `PushWire`, `DeclareWire` and `InterestWire` gone),
 `--scope 'RemoteQueryable|watch_queriers'` (T12) and `--scope 'drop_in_place<.*NetworkMessage'` (T8).
 
+For round 3 (section 6): `--scope 'write_publication|build_push_.*_with_meta|PushOwned'` (R3-a: the
+owned builders gone from both forms), `--scope 'source_info'` (R3-c),
+`--scope 'policy_document|limit_binding|policy_binding|config_policy'` (R3-e), and the export count
+the gate prints (441 and 442).
+
 ## 5. Round 2: where the no_std form's code goes, and what pico's build does not carry
 
 **Attribution (read and estimated).** The read of section 1, by crate: `wz_session_core` 167K,
@@ -257,23 +262,151 @@ the pico ABI must have reaches it, what was done, and the estimate (from the cod
 
 | # | feature (where) | reached from a required export | verdict | estimate |
 |---|-----------------|--------------------------------|---------|---------:|
-| 1 | policy and limit resolution (`policy_document`, `policy`, `limits`, `policy_binding`, `limit_binding`) | only through `wz_ext_config_policy` / `wz_ext_config_profile`, which `z_open` composes (`config_policy::PolicyStatements::compose_into`); with neither door called it is the build defaults | lighter form: a capability for the two doors, off in the pico client profiles, and an open that takes the build defaults with no resolver. Owner decision: the doors are documented as in every build and the gate pins 445 exports | -6K to -12K |
+| 1 | policy and limit resolution (`policy_document`, `policy`, `limits`, `policy_binding`, `limit_binding`) | only through `wz_ext_config_policy` / `wz_ext_config_profile`, which `z_open` composes (`config_policy::PolicyStatements::compose_into`); with neither door called it is the build defaults | cut in round 3 (section 6, R3-e): the `config-policy` capability, off in the zenoh-pico preset | -6K to -12K |
 | 2 | the session's arena and its lent rows (`wz-capi-coop/arena.rs`, `bounded::Lent`, `Quota::lent_under`) | `z_open` | kept: it is the no-heap form decision D9 asks for (pico mallocs per object); the MCU heap work owns it | (6K to 10K, kept) |
 | 3 | the generated session machine (`sce_rust_runtime`, `session_fsm_unicast` and its binding) | every open | kept: the machine is the SCXML source's; pico's handshake is hand-written | (10K to 15K, kept) |
-| 4 | the owned Put and Delete with options (`push_build::build_push_*_with_meta`, `PushOwned` and its drop) | `z_put` / `z_publisher_put` with an encoding, attachment or timestamp, every delete | lighter form: a borrowed writer for a Put or Del with its body extensions (`lent_push::write_plain_put` extended), each field held to the owned builder's bytes as `the_direct_writer_is_the_codecs_bytes` holds the plain one. Not done: a writer and its equality tests per field | -4K to -8K |
+| 4 | the owned Put and Delete with options (`push_build::build_push_*_with_meta`, `PushOwned` and its drop) | `z_put` / `z_publisher_put` with an encoding, attachment or timestamp, every delete | cut in round 3 (section 6, R3-a): `lent_push::write_publication` | -4K to -8K |
 | 5 | owned declarations and interests in the heap lend-only build (`declare_build`, `interest_build`, `DeclareOwned`, `InterestOwned`) | `z_declare_subscriber`, `z_declare_keyexpr`, matching, interests | lighter form: the borrowed writers the no-allocator build already sends with (`lent_control`, `LentDeclaration`) used in `tx-lend-only` too; T11 already compiles the owned encoder once | -3K to -6K |
 | 6 | the delivery lane (`wz-capi-coop/lane.rs`) | every delivery | kept: callbacks run after the session's lock (decision D8) | (3K to 5K, kept) |
 | 7 | the droppable publish handed off (`HandedLeg`, `hand_off`, `send_handed`) | a put that finds the session held | kept: what D8 owes a droppable put; pico waits on its own lock | (1.5K to 3K, kept) |
 | 8 | the faces table for more than one link (`FaceRows`, `Others`, `max_faces`) | the dial face; others come from `listen`, `group` and `attach_face` | lighter form: a one-face registry where no second face can come. Not touched: the registry is another worker's in this round | -2K to -4K |
 | 9 | the remote queryable plane | none without `query` / `queryable` | cut (T12) | -3K to -5K |
-| 10 | source info on put and delete (`pubsub-source-info` in `wz-capi-coop`'s base list) | none without `unstable-api`: the option field reads as null and `z_sample_source_info` is not exported | cut candidate: move the feature to `wz-capi-pico`'s `unstable-api`, gate the four `with_source_info` calls of `pubsub.rs` and the lane test that names it. Not done: three crates and the lane record's field | -1K to -2K |
+| 10 | source info on put and delete (`pubsub-source-info` in `wz-capi-coop`'s base list) | none without `unstable-api`: the option field reads as null and `z_sample_source_info` is not exported | cut in round 3 (section 6, R3-c) | -1K to -2K |
 | 11 | owned records reported where every one is lent (`FramePayload.messages`) | none in the lend-only build (`owned_records` answers `None`) | record buffer cut (T8); the outcome list is a candidate (T8) | -1K to -3K |
 | 12 | the owned encoders counted by a second instance | owned sends | cut (T11) | -2.5K to -5K |
 | 13 | the outbound key mappings in a `hashbrown` map with `foldhash` | `z_declare_keyexpr` | lighter form: a table of the build's `MAX_DECLARED_KEYEXPRS` rows; the no-heap work replaces it anyway | -1.5K to -3K |
 | 14 | typed refusals and their counters (`OpenError`, `EndpointRefusal`, `SendWireError`, `tx_refusals`, `InPlaceFallbacks`) | the doors map each to a code | kept: the codes a program reads; the words are formatted only by a program that prints them (T3) | (1K to 2K, kept) |
-| 15 | wz doors in every build (`wz_ext_conformance_digest`, the key-wire-form doors of `key_ids`) | none of pico's | owner decision with item 1: the same pin of the export count | -0.3K to -1K |
+| 15 | wz doors in every build (`wz_ext_conformance_digest`, the key-wire-form doors of `key_ids`) | none of pico's | the digest cut in round 3 (section 6, R3-e): the `conformance-digest` capability; the key-wire-form judgement of `key_ids` stays (no export, a comparison) | -0.1K to -0.3K |
 
 Items 1, 4, 5, 8, 10 and 13 together are the bulk of what a reading can name: -17K to -35K. Against
 the measured 542,460 and pico's 403,086 (the 1.0x goal needs -139K), code volume of this kind is
 not the whole answer: T6 and T7 (-66K, owner decisions) and the session-core send side are the
 other two places to look.
+
+## 6. Round 3: the candidates of round 2 carried out, and what is left
+
+**Measured at the start of round 3** (the main session's reading; the same linker, GNU ld, both
+arms with packed relative relocations; the no_std arm and the pico reference both without unwind
+tables): `pico-client-coop-nostd` 478,564 against zenoh-pico's 329,664 (1.45x);
+`pico-client-coop` (std) 956,521 against 401,760 (2.38x). The 1.0x goal of D9 needs -148,900 in
+the no_std form. The estimates below are from the code; nothing of round 3 was built when this was
+written, and section 4's commands turn them into readings.
+
+| id | change | form | estimate | status |
+|----|--------|------|---------:|--------|
+| R3-a | a Put or Del with options written from its parts | both | -4K to -8K | landed |
+| R3-b | owned declarations and interests in the lend-only build | both | -3K to -6K | not done (plan below) |
+| R3-c | `pubsub-source-info` only with `unstable-api` | both | -1K to -2K | landed |
+| R3-d | `FramePayload.messages` in the lend-only build | both | -1K to -3K | not done (plan below) |
+| R3-e1 | the policy doors and the open's resolver as `config-policy` | both | -6K to -12K | landed |
+| R3-e2 | the digest door as `conformance-digest` | both | -0.1K to -0.3K | landed |
+
+### R3-a: a publication with options written from its parts (landed)
+
+`refactor(session-core): Write a publication's metadata from its parts`. A put with an encoding,
+an attachment, a timestamp or a source info, and every delete, built the owned `PushOwned` (the
+key, the payload and each field copied, the extension chains as `Vec`s) and sent it as an owned
+`NetworkMessage` in a `Box`. `lent_push::write_publication` writes the same bytes straight into
+the slot the link lends, from the caller's key, bytes and `PushMetadata`: the Push header and key
+as `write_plain_put` writes them, the QoS byte on the outer chain, the body header with its `T`,
+`E` and `Z` bits, the timestamp, a Put's encoding, the source info and the attachment as `ZBuf`
+entries, the payload. `SessionLinkActions::send_publication_qos` sends it the way
+`send_plain_put_qos` sends a plain Put (the slot's length is the writer's own count,
+`tx_buf::encoded_len`, so the writer is compiled once), and the cooperative engine's fan-out uses
+it for every publication that is not plain. It declines (`None`) only where the owned message is
+what must go out: a session that rewrites the keys it originates (`routing-namespace`), the
+network counters that classify by the owned message (`transport-stats`), and a timestamp stack
+(`pubsub-ts-stack`). `lent_push::LENT_PUBLICATION_MAY_DECLINE` is that set as a constant, and the
+fan-out's owned branch sits behind it, so a build with none of the three (the C ABI's) does not
+reference `build_push_*_with_meta`, `PushOwned`'s encoder and drop, or the owned dispatch for a
+publication. Held by `a_publication_written_from_its_parts_is_the_owned_builders_bytes` (64 field
+sets, a literal key and an id with and without a suffix, Put and Del, two payloads) and by the
+refusal test (a key past `u16`, a timestamp id past 16 bytes, a schema past 255).
+
+### R3-c: source info only with the unstable API (landed)
+
+`refactor(capi-pico): Link a Push's source info only with unstable-api`. `wz-capi-coop`'s base list
+no longer names `wz-session-core/pubsub-source-info`; `wz-capi-pico`'s `unstable-api` does, since
+pico's API sets a put's source info and reads a sample's only with `Z_FEATURE_UNSTABLE_API`. The
+four `with_source_info` calls of `pubsub.rs` are gated by the same feature. Without it the
+session neither writes the extension nor decodes it from what it receives. The lane's record keeps
+its `source_info` field (the lane is another worker's), which is `None` in such a build.
+
+### R3-e: the wz doors of the pico preset as capabilities (landed)
+
+`feat(capi-pico): Make the policy doors and the digest pico capabilities`. Upstream presets are
+presets of wz, so the doors stay available, as two capabilities in `deploy/wz-config.toml`:
+
+- `config-policy` (`WZ_CAP_CONFIG_POLICY`): `wz_ext_config_policy`, `wz_ext_config_profile` and
+  the open's resolution of what they state. Off, `PolicyStatements` is a type of no size, a config
+  states nothing of its policies, and `z_open` runs the session under the build's policies and
+  limits with no resolver linked: no `policy_document::resolve_under_into`, no statement parsing,
+  no per-limit and per-policy setters a statement reaches, no `String`s of statements. Estimate
+  -6K to -12K. `config-document` implies it (the document's statements go through the same open).
+  The runtime's limit document (`wz_ext_runtime_limits_document`) was already `config-document`'s,
+  off in the preset, so a preset build's limits are the build's.
+- `conformance-digest` (`WZ_CAP_CONFORMANCE_DIGEST`): `wz_ext_conformance_digest`. Estimate about
+  -0.15K (the door, the 72-byte string, one `.dynsym` and `.dynstr` entry).
+
+Both are on in a build that names nothing (the crate's `default`, and the Kconfig default), off in
+`configs/zenoh-pico_defconfig` (`upstream_off = ["zenoh-pico"]`), and on in
+`configs/profiles/host-peer-ext.conf`, the package that ships a build statement. The export pins
+of the two cooperative cases move to 441 (`pico-client-coop`) and 442 (`pico-client-coop-nostd`):
+their feature lists name neither capability, as the preset does.
+`crates/wz-conformance-build/statement_vectors.json` is generated from the declaration with sha256
+digests and must be regenerated (`python3 scripts/lib/wz_config.py --write`); the Kconfig file, the defconfig and
+`items_generated.rs` were written as the generator writes them, and `--check` holds all four.
+
+### R3-b and R3-d: not done, and how
+
+R3-b. The cooperative engine declares through `send_declare_subscriber`, `send_declare_keyexpr`,
+`send_interest_kinds` and the undeclare and final sends of `session_actions`, whose `alloc` arm
+builds `DeclareOwned` / `InterestOwned` (`prepare_declare_*`, `interest_build`), records it for a
+reconnect (`declare_*_recorded`) and dispatches the owned message; the no-allocator arm already
+writes `lent_control::LentDeclaration` through `dispatch_declare_lent`. The lighter form under
+`tx-lend-only`: keep the record of the parts (id, mapping id, suffix) and the pico-safety gate, dispatch
+`LentDeclaration`, and make `replay_declarations` write each recorded entry the same way. Only
+when the replay path also stops building owned declarations does the owned encoder leave the link,
+so the change is the send and the replay together, one commit per declaration kind, each with an
+owned-bytes equality test as R3-a's. Not done in this round: the replay path and the pico-safety
+gate of `prepare_declare_*` have to be shown equivalent to `check_outbound_declared_keyexpr` first.
+
+R3-d. `DriverLoopOutcome::FramePayload.messages` is read in about 25 places in `wz-session-core`
+(namespace strip, the four dispatch adapters, `declaration_sync`, `multicast_rx`,
+`multicast_reply_sink`, `observer`, `slot_observer`, `switchboard`, `drive`) and in
+`wz-session-mcu` (`app_layer`, `admin_host`). The lighter form is `RecordBuf`'s: a list type that
+is `Vec<NetworkMessage>` in the heap profile and a type of no size answering `len() == 0`, an empty
+iterator and an empty slice under `rx-lent-only`, with the constructors (`Vec::new()`,
+`vec![message]`) moved behind it. The tokio runtime never builds `rx-lent-only` (it refuses to), so
+its readers keep the `Vec`. Not done: each reader needs reading for what it does with the list
+(`retain` in the namespace strip, slicing in the adapters), which is the change, not a cfg per site.
+
+## 7. What is left, by module, and the next ten
+
+**Where the no_std form's code is** (from the round 2 reading by crate, less what rounds 2 and 3
+took out; estimates): `wz_session_core` about 150K (send side about 40K to 50K, receive walk and
+lent readers 25K to 35K, application tables and planes 25K to 35K, the generated machine and its
+binding 10K to 15K, key expressions, reassembly and the lease the rest; the policy and limit
+resolution is gone from the preset with R3-e), `wz_capi_coop` about 55K, the `z_*` exports and
+`wz_capi_pico` about 55K, `wz_codecs` about 33K, `core` 34K (of which `core::fmt` about 10K),
+`alloc` 25K, `wz_runtime_coop` 20K, `sce_rust_runtime` 13K. Beside code, `.dynsym` and
+`.dynstr` are smaller than pico's (27K against 89K) and `.rodata` larger (25K against 5K).
+
+The next ten, by estimated bytes, each with its lighter form:
+
+| # | what | where | lighter form | estimate |
+|---|------|-------|--------------|---------:|
+| 1 | the owned network-message dispatch a client still reaches | `session_actions::send_network_message*`, the owned `NetworkMessage` encode match | after R3-a and R3-b no client send is owned; gate the owned dispatch behind the same kind of build constant as `LENT_PUBLICATION_MAY_DECLINE` and read `nm` for what still calls it | -5K to -10K |
+| 2 | the per-type ABI object families (`_move`, `_drop`, `_check`, `_loan`, `_null` of about 30 types) | `wz-capi-pico` `abi.rs`, `object_slot.rs` | one non-generic body per operation over the slot's size and drop function, each export a thin call into it | -5K to -10K |
+| 3 | `core::fmt` kept by formatted panic and assert messages on reachable paths | every crate | messages without arguments on paths a client reaches (`expect("...")`, `assert!(c, "...")`), or no message where the condition is an invariant; T5's sites first | -5K to -10K |
+| 4 | `alloc`'s growth paths, one per element type of each `Vec` the registry and the tables grow | `wz-session-core` tables, `wz-capi-coop` engine | rows of the session's lent arena (the no-heap work, another worker's) | -5K to -10K |
+| 5 | owned declarations and interests (R3-b) | `session_actions`, `declare_build`, `interest_build` | `LentDeclaration` in `tx-lend-only`, with the reconnect record of parts | -3K to -6K |
+| 6 | owned-profile codec instances left after 1 and 5 | `wz_codecs` (`*Owned<WireStorage>` encode, decode and drop) | nothing to do once nothing names them; read `nm` for `Owned` after 1 and 5 | -2K to -5K |
+| 7 | the faces table for more than one link | `wz-capi-coop` `FaceRows`, `Others`, `LinkRegistry` | a one-face registry where neither `listen` nor `group` is built | -2K to -4K |
+| 8 | the outbound key mappings in a `hashbrown` map with `foldhash` | `wz-session-core` outbound mapping | a table of `MAX_DECLARED_KEYEXPRS` rows (overlaps the MCU key storage work) | -1.5K to -3K |
+| 9 | `FramePayload.messages` (R3-d) | `driver_loop` and its readers | a list of no size under `rx-lent-only` | -1K to -3K |
+| 10 | per-limit setters a build that resolves no statement still links | `limit_binding::select_at`, `policy_binding::select_at` | with R3-e no statement reaches them in the preset; what remains is the snapshot's construction, readable with `--scope 'limit_binding|policy_binding'` | -1K to -2K |
+
+Together about -31K to -63K. With round 3's -12K to -25K that is not the -148,900 the 1.0x goal
+needs: the code volume of the session core's send side and tables is the other half, and the
+estimates above say where to read first, not that reading them closes the gap.
