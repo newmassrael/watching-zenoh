@@ -18,7 +18,7 @@ use super::put_outcome;
 
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
-pub fn take_generation<const N0: usize>(resets: &mut ::sce_portable_bytes::BoundedMap<reset_peer_schema::ResetPeerSchemaPayload, u64, N0>, peer: reset_peer_schema::ResetPeerSchemaPayload, generation: u64) -> take_generation_result::TakeGenerationResult {
+pub fn take_generation<const N0: usize, S0: ::sce_portable_bytes::MapStorage>(resets: &mut ::sce_portable_bytes::BoundedMap<reset_peer_schema::ResetPeerSchemaPayload, u64, N0, S0>, peer: reset_peer_schema::ResetPeerSchemaPayload, generation: u64) -> take_generation_result::TakeGenerationResult {
     if ::sce_portable_bytes::map::holds(&(*resets), &(peer)) && ::sce_portable_bytes::map::held_cloned(&(*resets), &(peer)) >= generation {
         let duplicate = take_generation_result::TakeGenerationResult::Duplicate(take_generation_duplicate::TakeGenerationDuplicatePayload { last: ::sce_portable_bytes::map::held_cloned(&(*resets), &(peer)) });
         return duplicate;
