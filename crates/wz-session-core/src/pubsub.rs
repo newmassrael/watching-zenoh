@@ -98,9 +98,10 @@ use alloc::string::String;
 // a subset no lane built until Layer C1bj. Fully qualifying removes the
 // coupling rather than restating it in a longer cfg.
 
-use crate::bounded::{
-    Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Static, Storage,
-};
+use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
+// The fixed own-zid row of a peer's naming is its one reader.
+#[cfg(feature = "storage-profile")]
+use crate::bounded::Static;
 // Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
 #[cfg(feature = "storage-profile")]
