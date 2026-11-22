@@ -3214,7 +3214,12 @@ where
     F: FnMut(&AcceptEvent),
 {
     let shutdown = std::pin::pin!(shutdown);
-    face_drive_loop_core(
+    // The core's state machine is the node's whole face loop, and a future is held by value by
+    // whatever awaits it: unboxed, every caller's future and every frame that moves it carried
+    // the loop's full size (a test that held a peer loop beside its peers measured 458,752 bytes
+    // of debug poll frame). The loop runs for the node's lifetime, so it is made once, on the
+    // heap, and every caller holds a pointer to it: one allocation per node, at its start.
+    Box::pin(face_drive_loop_core(
         sources,
         params,
         clock,
@@ -3222,7 +3227,7 @@ where
         shutdown,
         &mut on_event,
         driving,
-    )
+    ))
     .await
 }
 
