@@ -434,14 +434,13 @@ impl wz_runtime_coop::session_drive::SessionDatagramLink for Quiet {
 /// the lane cannot take a batch, and lets it go once the lane has room again.
 #[test]
 fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
-    use crate::lane::LaneGate;
-    use wz_capi_port::os::Mutex;
+    use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
     let Some(lane) = lane(64, 4) else {
         return;
     };
-    let lane = alloc::sync::Arc::new(Mutex::new(lane));
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     let gate = LaneGate::new(Quiet, lane.clone(), room(32));
     assert!(gate.takes_input(), "an empty lane takes a batch");
     lane.lock().offer(1, &best_effort(40));
@@ -449,6 +448,44 @@ fn the_gate_holds_back_what_was_read_while_the_lane_is_full() {
     assert!(front(&mut lane.lock()).is_some());
     lane.lock().complete();
     assert!(gate.takes_input(), "emptied, the lane takes a batch again");
+}
+
+/// The gate is asked before every datagram and every further record, and reads the lane's room
+/// from the word the lane's last holder left: asked any number of times it takes the lane's lock
+/// not once, and the word follows each change made under the lock, a delivery's on another thread
+/// among them.
+#[test]
+fn the_gate_reads_the_lanes_room_without_its_lock() {
+    use crate::lane::{LaneGate, SharedLane};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let Some(lane) = lane(64, 4) else {
+        return;
+    };
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane));
+    let gate = LaneGate::new(Quiet, lane.clone(), room(32));
+    let takes = lane.takes();
+    for _ in 0..10 {
+        assert!(gate.takes_input(), "an empty lane takes a batch");
+        assert!(gate.try_recv().is_none(), "the link has nothing");
+    }
+    assert_eq!(lane.takes(), takes, "the gate took the lane's lock");
+    lane.lock().offer(1, &best_effort(40));
+    assert_eq!(lane.takes(), takes + 1, "CONTROL: an offer takes it once");
+    assert!(!gate.takes_input(), "no room left for a batch of 32");
+    let delivery = {
+        let lane = lane.clone();
+        std::thread::spawn(move || {
+            assert!(front(&mut lane.lock()).is_some());
+            lane.lock().complete();
+        })
+    };
+    delivery.join().expect("the delivery");
+    assert!(
+        gate.takes_input(),
+        "the delivery's thread gave the room back"
+    );
+    assert_eq!(lane.takes(), takes + 3, "and took the lock for it alone");
 }
 
 /// A sample offered for several subscribers is written once and handed to each of them, in the

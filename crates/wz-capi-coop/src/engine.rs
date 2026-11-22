@@ -45,7 +45,7 @@ use crate::prelude::*;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
 };
-use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SampleLane};
+use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SampleLane, SharedLane};
 use wz_session_core::bounded::{BoundedString, BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::slot_observer::ObserverRows;
@@ -589,7 +589,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// subscribers, in the order they arrived, in the session's delivery lane (`crate::lane`),
     /// and the changes of its matching statuses. Apart, so a matching flip does not take a
     /// sample's room.
-    samples: Arc<Mutex<SampleLane>>,
+    samples: Arc<SharedLane>,
     matching: Arc<Mutex<MatchFlips>>,
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
@@ -934,11 +934,11 @@ impl Drop for Running<'_> {
 
 /// A sample a delivery took from the head of the session's lane, given back when the delivery is
 /// done with it: when its callback returns, or unwinds.
-struct Handed<'a>(&'a Mutex<SampleLane>);
+struct Handed<'a>(&'a SharedLane);
 
 impl Drop for Handed<'_> {
     fn drop(&mut self) {
-        lock(self.0).complete();
+        self.0.lock().complete();
     }
 }
 
@@ -1185,7 +1185,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     tickers: Tickers,
     /// The session's delivery lane, which every link's gate asks before it reads a batch
     /// (`crate::lane::LaneGate`).
-    lane: Arc<Mutex<SampleLane>>,
+    lane: Arc<SharedLane>,
     /// The buffers the session's links stage the chains of their fragmented messages in, lent
     /// from the arena (`ArenaPlan::reassembly`).
     reassembly: LentByteCells,
@@ -1515,16 +1515,16 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
 }
 
 /// The lane told, while a link's record is dispatched, that what is offered waited for room
-/// ([`SampleLane::offering_gated`]), and told otherwise again when the dispatch is done, or
-/// unwinds. Only a debug build checks the gate's bound by it, so a release build's dispatch does
-/// not take the lane's lock twice a record to tell it.
+/// ([`SharedLane::offering_gated`]), and told otherwise again when the dispatch is done, or
+/// unwinds. Only a debug build checks the gate's bound by it; it is told without the lane's lock,
+/// so a debug build's dispatch takes the lock as often as a release build's.
 #[cfg(debug_assertions)]
-struct Gated<'a>(&'a Mutex<SampleLane>);
+struct Gated<'a>(&'a SharedLane);
 
 #[cfg(debug_assertions)]
 impl<'a> Gated<'a> {
-    fn over(lane: &'a Mutex<SampleLane>) -> Self {
-        lock(lane).offering_gated(true);
+    fn over(lane: &'a SharedLane) -> Self {
+        lane.offering_gated(true);
         Self(lane)
     }
 }
@@ -1532,7 +1532,7 @@ impl<'a> Gated<'a> {
 #[cfg(debug_assertions)]
 impl Drop for Gated<'_> {
     fn drop(&mut self) {
-        lock(self.0).offering_gated(false);
+        self.0.offering_gated(false);
     }
 }
 
@@ -1547,7 +1547,7 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
     actions: Rc<McuActions<C>>,
     plane: Arc<QueryPlane>,
     generation: u64,
-    lane: Arc<Mutex<SampleLane>>,
+    lane: Arc<SharedLane>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     #[cfg(not(debug_assertions))]
     let _ = lane;
@@ -1606,7 +1606,7 @@ fn dispatch_all<C: ClockSource + 'static>(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
     actions: Rc<McuActions<C>>,
-    lane: Arc<Mutex<SampleLane>>,
+    lane: Arc<SharedLane>,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_, '_>) + 'static {
     #[cfg(not(debug_assertions))]
     let _ = lane;
@@ -2956,7 +2956,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
         // and given back only when the session is let go, after its last delivery.
-        let samples = Arc::new(Mutex::new(unsafe {
+        let samples = Arc::new(SharedLane::new(unsafe {
             SampleLane::over(lane_area, lane_bytes, &resolve_limits(&config))
         }));
         let mut entropy = SharedEntropy::new(entropy);
@@ -3190,7 +3190,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The samples the session's delivery lane did not hand a subscriber, by why
     /// (`crate::lane`).
     pub fn lane_counts(&self) -> LaneCounts {
-        lock(&self.samples).counts()
+        self.samples.lock().counts()
     }
 
     /// Dial `endpoint` as a face of its own, beside the dial role's, and return the id it is
@@ -3349,6 +3349,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(test)]
     pub(crate) fn clock_reads(&self) -> usize {
         lock(&self.core).0.clock_reads.get()
+    }
+
+    /// How often the session's delivery lane was taken since the open: what a test of the cost of
+    /// one received sample counts.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn lane_takes(&self) -> usize {
+        self.samples.takes()
     }
 
     /// Whether the peer of every established link has been told every declaration the session
@@ -3532,7 +3539,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // closure's `drop(context)`). A lane another delivery still hands out may hold a reply
         // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        while lock(&self.samples).is_idle() {
+        while self.samples.lock().is_idle() {
             let next = lock(&self.gets.ended).take();
             let Some(leg) = next else {
                 break;
@@ -3561,7 +3568,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
         loop {
-            let next = lock(&self.samples).take_front();
+            let next = self.samples.lock().take_front();
             let Some(item) = next else {
                 break;
             };
@@ -4011,14 +4018,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Ok(0);
         };
         let sample = opts.loopback_sample(keyexpr, payload);
-        lock(&self.samples).capture();
+        self.samples.lock().capture();
         core.0
             .registry
             .borrow_mut()
             .app
             .subscribers
             .local_publish(&sample);
-        let reached = lock(&self.samples).captured();
+        let reached = self.samples.lock().captured();
         drop(core);
         let inside = |id: &SubId| Running::here(&self.running, TargetKey::Subscriber(*id));
         let mut later: BoundedVec<
@@ -4031,7 +4038,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             debug_assert!(kept.is_ok(), "no more subscribers than were reached");
         }
         if !later.is_empty() {
-            let mut lane = lock(&self.samples);
+            let mut lane = self.samples.lock();
             if !lane.takes_sample(&sample, later.len()) {
                 return Err(FanoutError::LocalNoRoom);
             }
@@ -4765,7 +4772,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
             &keyexpr,
             allowed_origin,
-            BoxedSink::new(move |sample: &dyn SampleView| lock(&lane).offer(id, sample)),
+            BoxedSink::new(move |sample: &dyn SampleView| lane.lock().offer(id, sample)),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.
@@ -5894,14 +5901,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // They are rehearsed first: the declaration is refused when the lane cannot hold every one
         // of them until they are handed, at the end of this call or, declared from inside a
         // callback, once that callback returns.
-        lock(&self.samples).rehearse();
+        self.samples.lock().rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             &keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );
-        let held = lock(&self.samples).rehearsed();
+        let held = self.samples.lock().rehearsed();
         if registered.is_ok() && !held {
             core.registry
                 .borrow_mut()

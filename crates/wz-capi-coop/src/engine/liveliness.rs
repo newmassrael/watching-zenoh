@@ -27,8 +27,7 @@ use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, Liv
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_mcu::dial::McuActions;
 
-use super::lock;
-use crate::lane::SampleLane;
+use crate::lane::SharedLane;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
@@ -100,9 +99,9 @@ impl LiveSubEntry {
 
 /// The sink subscriber `id` is registered with: each sample is queued in the session's delivery
 /// lane, its key copied into the lane's bytes.
-pub(super) fn sample_sink(id: SubId, lane: &Arc<Mutex<SampleLane>>) -> BoxedLivelinessSampleSink {
+pub(super) fn sample_sink(id: SubId, lane: &Arc<SharedLane>) -> BoxedLivelinessSampleSink {
     let lane = Arc::clone(lane);
     BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
-        lock(&lane).offer_liveliness(id, &sample);
+        lane.lock().offer_liveliness(id, &sample);
     })
 }

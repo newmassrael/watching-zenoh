@@ -30,7 +30,7 @@ use wz_session_core::bounded::{BoundedVec, Lent};
 
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
-use crate::lane::SampleLane;
+use crate::lane::SharedLane;
 
 use super::lock;
 use super::registry::{FaceId, Registry};
@@ -144,7 +144,7 @@ impl Drop for LegEnd {
 pub(super) fn reply_sink(
     leg: u64,
     plane: &Arc<GetPlane>,
-    lane: &Arc<Mutex<SampleLane>>,
+    lane: &Arc<SharedLane>,
 ) -> BoxedReplySink {
     let lane = Arc::clone(lane);
     let end = LegEnd {
@@ -153,7 +153,7 @@ pub(super) fn reply_sink(
     };
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
-            lock(&lane).offer_reply(leg, view);
+            lane.lock().offer_reply(leg, view);
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.

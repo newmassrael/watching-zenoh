@@ -43,9 +43,11 @@
 //! a count.
 
 use alloc::sync::Arc;
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use wz_capi_port::os::Mutex;
+use wz_capi_port::os::{Mutex, MutexGuard};
 use wz_capi_port::{MatchId, SubId};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
 use wz_session_core::bounded::{BoundedVec, Static};
@@ -465,9 +467,12 @@ pub(crate) struct SampleLane {
     open: Option<Reservation>,
     /// A delivery holds the head: another thread that delivers finds nothing until it completes.
     handing: bool,
+    /// The room the session's links ask for before each record ([`LaneGate`]), once a link was
+    /// opened: what the lane's holder publishes for the gates as it lets go ([`SharedLane`]).
+    link_room: Option<ReadRoom>,
     /// What is offered now is a record a link's gate let through ([`Self::offering_gated`]).
     /// Read only by a debug build's check of the gate's bound, so a release build neither keeps
-    /// nor sets it, and a link's dispatch does not take the lane's lock twice a record for it.
+    /// nor sets it; [`SharedLane`] tells it each time the lane is taken.
     #[cfg(debug_assertions)]
     gated: bool,
     /// The tokens offered now are rehearsed on a copy of the bookkeeping and not queued
@@ -504,6 +509,7 @@ impl SampleLane {
             area,
             open: None,
             handing: false,
+            link_room: None,
             #[cfg(debug_assertions)]
             gated: false,
             #[cfg(feature = "liveliness")]
@@ -871,6 +877,24 @@ impl SampleLane {
         bytes && (empty || owed <= stats.callback_budget)
     }
 
+    /// The session's links ask for `room` before each record ([`LaneGate`]). Every link of a
+    /// session asks for the same room; were two to differ, the larger is asked for all, which holds
+    /// a link back sooner and never lets a record through that its own room would not.
+    pub(crate) fn gate_links(&mut self, room: ReadRoom) {
+        self.link_room = Some(match self.link_room {
+            Some(held) => ReadRoom {
+                bytes: held.bytes.max(room.bytes),
+                callbacks: held.callbacks.max(room.callbacks),
+            },
+            None => room,
+        });
+    }
+
+    /// Whether the lane has the room the links ask for now: `true` before a link asked.
+    fn takes_a_link_read(&self) -> bool {
+        self.link_room.map_or(true, |room| self.takes_a_read(room))
+    }
+
     /// Whether what is offered from here on is a record a link's gate let through (`true`), which
     /// waited for the room one record can take ([`LaneGate`]), or anything else (`false`, the
     /// lane's state when made): the session's own puts, the tokens a liveliness subscriber is
@@ -940,6 +964,105 @@ impl SampleLane {
     /// What the lane did not hand a subscriber.
     pub(crate) fn counts(&self) -> LaneCounts {
         self.counts
+    }
+}
+
+/// The session's lane behind its lock, with what is read of it without the lock: whether it has
+/// the room the links ask for before each record ([`LaneGate`]). The word is written by whoever
+/// held the lock, as it lets go ([`LaneGuard`]), so it says what the lane was when it was last let
+/// go, as a read under the lock said what it was when that lock was let go: a gate that reads it
+/// just before a delivery gives room back holds its link back for one more step, as one that took
+/// the lock just before it did.
+pub(crate) struct SharedLane {
+    lane: Mutex<SampleLane>,
+    /// Whether the lane has the room the links ask for (`SampleLane::takes_a_link_read`), as the
+    /// lane's last holder left it.
+    reads: AtomicBool,
+    /// What a link's dispatch tells the lane while it runs, which a debug build's check of the
+    /// gate's bound reads ([`SampleLane::offering_gated`]): told to the lane each time it is
+    /// taken, so the dispatch tells it without taking the lock twice a record.
+    #[cfg(debug_assertions)]
+    gated: AtomicBool,
+    /// How often the lock was taken, which the tests of the cost of one sample count.
+    #[cfg(test)]
+    takes: core::sync::atomic::AtomicUsize,
+}
+
+impl SharedLane {
+    pub(crate) fn new(lane: SampleLane) -> Self {
+        let reads = lane.takes_a_link_read();
+        Self {
+            lane: Mutex::new(lane),
+            reads: AtomicBool::new(reads),
+            #[cfg(debug_assertions)]
+            gated: AtomicBool::new(false),
+            #[cfg(test)]
+            takes: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The lane, held until the guard drops.
+    pub(crate) fn lock(&self) -> LaneGuard<'_> {
+        #[cfg(test)]
+        self.takes.fetch_add(1, Ordering::Relaxed);
+        let lane = self.lane.lock();
+        #[cfg(debug_assertions)]
+        let lane = {
+            let mut lane = lane;
+            lane.offering_gated(self.gated.load(Ordering::Acquire));
+            lane
+        };
+        LaneGuard { lane, shared: self }
+    }
+
+    /// Whether the lane has the room the links ask for before each record, read without its lock.
+    pub(crate) fn takes_a_link_read(&self) -> bool {
+        self.reads.load(Ordering::Acquire)
+    }
+
+    /// Whether what is offered from here on is a record a link's gate let through
+    /// ([`SampleLane::offering_gated`]), told without the lock.
+    #[cfg(debug_assertions)]
+    pub(crate) fn offering_gated(&self, gated: bool) {
+        self.gated.store(gated, Ordering::Release);
+    }
+
+    /// How often the lock was taken since the lane was made. The tests that read it are a
+    /// host's.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn takes(&self) -> usize {
+        self.takes.load(Ordering::Relaxed)
+    }
+}
+
+/// The lane held ([`SharedLane::lock`]). As it lets go it leaves what the lane is now in the words
+/// read without the lock, so every change made under the lock is published before the next holder
+/// can make another.
+pub(crate) struct LaneGuard<'a> {
+    lane: MutexGuard<'a, SampleLane>,
+    shared: &'a SharedLane,
+}
+
+impl Deref for LaneGuard<'_> {
+    type Target = SampleLane;
+
+    fn deref(&self) -> &SampleLane {
+        &self.lane
+    }
+}
+
+impl DerefMut for LaneGuard<'_> {
+    fn deref_mut(&mut self) -> &mut SampleLane {
+        &mut self.lane
+    }
+}
+
+impl Drop for LaneGuard<'_> {
+    fn drop(&mut self) {
+        // The lock is let go after this body, when the fields are dropped.
+        self.shared
+            .reads
+            .store(self.lane.takes_a_link_read(), Ordering::Release);
     }
 }
 
@@ -1244,7 +1367,7 @@ impl MatchFlips {
 /// to hold.
 #[cfg(feature = "group")]
 pub(crate) fn takes_a_group_read(
-    lane: Arc<Mutex<SampleLane>>,
+    lane: Arc<SharedLane>,
     room: ReadRoom,
 ) -> impl Fn() -> bool + 'static {
     move || lane.lock().takes_a_read(room)
@@ -1253,21 +1376,25 @@ pub(crate) fn takes_a_group_read(
 /// `pump`, which gives the session nothing while the lane has not the room one record can take
 /// (`room`, decision Q4): not the next datagram, and not the next record of one the link keeps.
 /// What the peer sends meanwhile waits in the link, and the transport's flow control carries the
-/// wait back to it.
+/// wait back to it. The gate is asked before every datagram and every further record, so it reads
+/// the room from the word the lane's holder leaves ([`SharedLane::takes_a_link_read`]) and takes
+/// no lock.
 pub(crate) struct LaneGate<P> {
     pump: P,
-    lane: Arc<Mutex<SampleLane>>,
-    room: ReadRoom,
+    lane: Arc<SharedLane>,
 }
 
 impl<P> LaneGate<P> {
-    pub(crate) fn new(pump: P, lane: Arc<Mutex<SampleLane>>, room: ReadRoom) -> Self {
-        Self { pump, lane, room }
+    /// `pump`, gated by `lane` for the room `room` of one of its records, which the lane is told
+    /// once here.
+    pub(crate) fn new(pump: P, lane: Arc<SharedLane>, room: ReadRoom) -> Self {
+        lane.lock().gate_links(room);
+        Self { pump, lane }
     }
 
     /// Whether the link's input is held back: the lane has not the room of a record.
     fn shut(&self) -> bool {
-        !self.lane.lock().takes_a_read(self.room)
+        !self.lane.takes_a_link_read()
     }
 }
 
