@@ -7,7 +7,8 @@ the end without `std` and without a heap. This note lists what the no_std form
 function, with an estimate for each target and the change made for it. It is a companion to
 `docs/host-size-debt.md`, which covers the tokio cases and the decisions on planes.
 
-Every figure is labelled. **Read** figures come from `nm -S`, `readelf -S` and `objdump -d` of
+Every figure is labelled. One figure is the main session's own measurement: `pico-client-coop`
+(std) read 1,017,671 after T1 to T3, against 1,037,983 before (-20,312). **Read** figures come from `nm -S`, `readelf -S` and `objdump -d` of
 two artifacts already built: the std form of the integration base (`release`,
 `engine-coop,link-udp`, Berkeley text 1,037,983) and a no_std form built on 2026-11-22 from
 a tree 177 commits behind that base (Berkeley text 565,157, 1.40x pico's 403,086). The no_std
@@ -43,7 +44,7 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 
 | id | target | form | estimate | status |
 |----|--------|------|---------:|--------|
-| T1 | lent record walk generic over its consumer | both | std -8K to -14K, no_std -5K to -6K | landed here |
+| T1 | lent record walk generic over its consumer | both | std -8K to -14K, no_std -5K to -6K | landed here; with T2 and T3, std read -20,312 |
 | T2 | `z_keyexpr_concat` / `z_keyexpr_join` through `format!` | both | -0.3K direct | landed here |
 | T3 | open and dial refusals formatted into a `String` | both | -1.5K to -3K | landed here |
 | T4 | `Locator` text through `core::fmt` and `SocketAddr`'s `Display` | both | -3K to -5K | candidate |
@@ -51,7 +52,7 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 | T6 | 1,590 relative relocations (`.rela.dyn`) | both | about -36K no_std | owner decision |
 | T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | about -30K | owner decision |
 | T8 | generic copies thin LTO keeps in two crates | std | -10K to -20K | candidate |
-| T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | candidate |
+| T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | domain check landed here |
 | T10 | observer planes kept out of line for the stack | both | at most -0.5K | not worth a change alone |
 | T11 | the Put encoder compiled twice (count, then write) | both | about -1.4K | candidate |
 | T12 | the remote queryable plane in a build without `query` | both | -3K to -5K | candidate |
@@ -136,14 +137,17 @@ and an `ExtEntryWire` writer. Two cures: fat LTO for the C ABI profiles (the no_
 has it, and it read 4,830 of such copies), or making the owned-form users non-generic as T1
 did.
 
-### T9: per-limit selectors (candidate)
+### T9: per-limit selectors (domain check landed, `refactor(session-core): Check a limit's domain in one function`)
 
 `limit_binding::select_at::<S, L>` (57 instances, 5,758 in std) and `held_at` (63, 891), with
 `policy_binding::select_at` (32, 895), are one function per limit, each converting a
 `LimitValue` into the limit's own type and storing it at the field `L` names. An outlined form
 would hold the conversion once per value type and the field as data in the limit's table
-entry. That is a change of the table's construction; the estimate is the selectors less one
-copy per value type.
+entry. That is a change of the table's construction. The part that needs no such change is
+landed: `Limited::select` inlined the domain's check and the refusal it builds into every
+selector (the 27 instances of 125 to 199 bytes; the pinned ones fold to about 30), and now
+calls one out-of-line `admit` with the limit's id and domain. Estimate: -2.5K to -3.5K in
+either form, the selector entries' own setters left.
 
 ### T10: observer planes out of line (measured by the main session)
 
