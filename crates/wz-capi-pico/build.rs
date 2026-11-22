@@ -16,4 +16,27 @@ fn main() {
     // carries (`wz-capi-pico-ext`): set by the build of that form on this crate's own compile
     // (`cargo rustc -- --cfg wz_additional_apart`), never by a feature, since it takes doors out.
     println!("cargo:rustc-check-cfg=cfg(wz_additional_apart)");
+    refuse_discarded_unwind_tables_with_std();
+}
+
+/// The linker script that discards the unwind tables (`link/discard-unwind-tables.ld`, given by
+/// `.cargo/capi-discard-unwind-tables.toml`).
+const DISCARD_SCRIPT: &str = "discard-unwind-tables.ld";
+
+/// A library with `std` unwinds a panic to the door that catches it, through the tables the
+/// script discards; with them gone that panic would end the process instead. Only the library
+/// without `std` (`os-posix`), which never unwinds, may be linked with the script.
+fn refuse_discarded_unwind_tables_with_std() {
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    let discards = std::env::var("CARGO_ENCODED_RUSTFLAGS")
+        .unwrap_or_default()
+        .split('\x1f')
+        .any(|flag| flag.contains(DISCARD_SCRIPT));
+    if discards && std::env::var_os("CARGO_FEATURE_OS_POSIX").is_none() {
+        panic!(
+            "this build links with {DISCARD_SCRIPT} (.cargo/capi-discard-unwind-tables.toml), which \
+             discards the unwind tables, and is not the library without std (os-posix): a build \
+             with std unwinds a panic to the door that catches it, so it keeps its tables"
+        );
+    }
 }

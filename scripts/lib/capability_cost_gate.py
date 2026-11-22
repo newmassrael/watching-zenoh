@@ -171,6 +171,15 @@ PACKED_RELOCS_LINK = "-Wl,-z,pack-relative-relocs"
 # version: a C library older than 2.36 has no such version and refuses to load the library, where
 # without it the old loader would ignore DT_RELR and run the library with its pointers unrelocated.
 RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
+# The library without `std` on Linux with the prebuilt standard crates' unwind tables discarded
+# at the link (`crates/.cargo/capi-discard-unwind-tables.toml`, docs/c-abi-size-diet.md T7): a
+# case whose configuration gives the script is held to a library with no `.eh_frame`
+# (`link_findings`). Its zenoh-pico reference is NOT linked with it: the reference keeps the
+# tables zenoh-pico's own build gives it, which is the owner's question that section states.
+DISCARD_UNWIND_CONFIG = ".cargo/capi-discard-unwind-tables.toml"
+DISCARD_UNWIND_LINK = "-Wl,-T,wz-capi-pico/link/discard-unwind-tables.ld"
+# The linker arguments of a case its reference is linked with as well (`reference_args`).
+REFERENCE_LINK_ARGS = (PACKED_RELOCS_LINK,)
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -777,10 +786,14 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         exports=445, profile="capi-nostd", cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG),
+         exports=445, profile="capi-nostd",
+         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
-              "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. "
+              "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. Linked "
+              "with the prebuilt standard crates' unwind tables discarded (32,788 bytes of "
+              "`.eh_frame` and `.eh_frame_hdr` in that form); its reference keeps the 72,096 "
+              "zenoh-pico's build gives it. "
               "pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
@@ -1535,6 +1548,8 @@ class Measured:
     # `RELR_VERSION_NEED`.
     relr: bool = False
     relr_need: bool = False
+    # Whether the library holds unwind tables (an `.eh_frame` or `.eh_frame_hdr` section).
+    eh_frame: bool = False
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1868,22 +1883,33 @@ def link_args(flags: list[str]) -> list[str]:
     return out
 
 
+def has_unwind_tables(data: bytes) -> bool:
+    """Whether an ELF file has an `.eh_frame` or `.eh_frame_hdr` section."""
+    return bool({s.name for s in elf_facts.sections(data)} & {".eh_frame", ".eh_frame_hdr"})
+
+
 def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
     with; empty when it was linked as asked."""
+    findings: list[str] = []
+    if DISCARD_UNWIND_LINK in lib.link_args and lib.eh_frame:
+        findings.append(f"{subject}: linked with the script that discards the unwind tables and "
+                        f"still has an `.eh_frame`: the linker ({lib.linker}) kept them, so its "
+                        f"text is that of the form with tables. GNU ld and lld take the script's "
+                        f"INSERT; mold refuses it.")
     if PACKED_RELOCS_LINK not in lib.link_args:
-        return []
+        return findings
     if not lib.relr:
-        return [f"{subject}: linked with `{PACKED_RELOCS_LINK}` and has no DT_RELR: the "
-                f"linker ({lib.linker}) did not pack its relative relocations, so its text is the "
-                f"unpacked form's. GNU ld from 2.38 and lld from 15 pack them; an older GNU ld "
-                f"ignores the option with a warning."]
-    if not lib.relr_need:
-        return [f"{subject}: has DT_RELR and does not ask for `{RELR_VERSION_NEED}`, so a C "
-                f"library older than 2.36 loads it, ignores the packed table and runs it with its "
-                f"pointers unrelocated. The linker ({lib.linker}) writes that need when the "
-                f"library asks libc.so.6 for a GLIBC_2 version."]
-    return []
+        findings.append(f"{subject}: linked with `{PACKED_RELOCS_LINK}` and has no DT_RELR: "
+                        f"the linker ({lib.linker}) did not pack its relative relocations, so its "
+                        f"text is the unpacked form's. GNU ld from 2.38 and lld from 15 pack them; "
+                        f"an older GNU ld ignores the option with a warning.")
+    elif not lib.relr_need:
+        findings.append(f"{subject}: has DT_RELR and does not ask for `{RELR_VERSION_NEED}`, so "
+                        f"a C library older than 2.36 loads it, ignores the packed table and runs "
+                        f"it with its pointers unrelocated. The linker ({lib.linker}) writes that "
+                        f"need when the library asks libc.so.6 for a GLIBC_2 version.")
+    return findings
 
 
 def linker_of(lib: pathlib.Path) -> str:
@@ -1946,7 +1972,8 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
                     undefined=tuple(line.split()[-1] for line in undefined if line.split()),
                     needed=needed, linker=linker_of(lib), link_args=tuple(linked),
                     relr=any("(RELR)" in line for line in dynamic_section),
-                    relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data))
+                    relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
+                    eh_frame=has_unwind_tables(data))
 
 
 @dataclass(frozen=True)
@@ -1966,6 +1993,7 @@ class Reference:
     link_args: tuple[str, ...] = ()
     relr: bool = False
     relr_need: bool = False
+    eh_frame: bool = False
 
 
 def case_features(case: Case) -> set[str]:
@@ -2008,9 +2036,9 @@ def reference_key(pin: str, toolchain: str, flags: list[str], env: Mapping[str, 
 
 
 def reference_args(asked: dict[str, int], link: tuple[str, ...] = ()) -> list[str]:
-    """The CMake arguments of zenoh-pico built with `asked` set: each switch, and the linker
-    arguments its wz case was linked with (`Measured.link_args`), which the reference's link takes
-    too, so a choice of the link (packed relocations) moves both sides of the ratio alike."""
+    """The CMake arguments of zenoh-pico built with `asked` set: each switch, and `link`, the
+    linker arguments of its wz case that the reference shares (`REFERENCE_LINK_ARGS`), so a choice
+    of the link (packed relocations) moves both sides of the ratio alike."""
     args = [f"-D{s}={v}" for s, v in sorted(asked.items())]
     if link:
         args.append(f"-DCMAKE_SHARED_LINKER_FLAGS={' '.join(link)}")
@@ -2062,7 +2090,8 @@ def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                      leaked=tuple(build_normalization.leaked(data, prefixes)),
                      linker=linker_of(lib), link_args=link,
                      relr=any("(RELR)" in line for line in dynamic_section),
-                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data))
+                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
+                     eh_frame=has_unwind_tables(data))
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -2076,11 +2105,12 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
               f"provisioned only where the oracle is installed)")
         return None, []
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
-    ref = pico_reference_build(asked, env, prefixes, got.link_args)
+    shared = tuple(a for a in got.link_args if a in REFERENCE_LINK_ARGS)
+    ref = pico_reference_build(asked, env, prefixes, shared)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
-    print(f"  capability-cost: {case.id}: wz linked by {got.linker}, zenoh-pico by {ref.linker}, "
-          f"both with the linker arguments {list(got.link_args)}")
+    print(f"  capability-cost: {case.id}: wz linked by {got.linker} with the linker arguments "
+          f"{list(got.link_args)}, zenoh-pico by {ref.linker} with {list(ref.link_args)}")
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
@@ -2524,6 +2554,26 @@ def cmd_selftest() -> int:
            and RELR_VERSION_NEED in found[0])
     expect("a library not asked to pack is not held to DT_RELR",
            link_findings("t", Measured(900, [], 3)) == [])
+    discard = (CRATES / DISCARD_UNWIND_CONFIG).read_text(encoding="utf-8")
+    expect("the discard file links a Linux library with the script, and nothing else",
+           config_rustflags(discard, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", f"link-arg={DISCARD_UNWIND_LINK}"]
+           and config_rustflags(discard, "x86_64-pc-windows-msvc", windows_msvc) == [])
+    expect("the script the discard names is in the tree, as the linker reads it from crates/",
+           (CRATES / DISCARD_UNWIND_LINK.split(",")[-1]).is_file())
+    expect("only the library without std, which never unwinds, discards the unwind tables",
+           all(c.profile == "capi-nostd" and NOSTD_CONFIG in c.cargo_configs
+               for c in CASES if DISCARD_UNWIND_CONFIG in c.cargo_configs)
+           and DISCARD_UNWIND_CONFIG in by_case["pico-client-coop-nostd"].cargo_configs)
+    expect("a library linked with the discard and still holding tables is a finding",
+           len(found := link_findings("t", Measured(900, [], 3, link_args=(DISCARD_UNWIND_LINK,),
+                                                    eh_frame=True, linker="mold 2.30.0"))) == 1
+           and "mold 2.30.0" in found[0]
+           and link_findings("t", Measured(900, [], 3, link_args=(DISCARD_UNWIND_LINK,))) == []
+           and link_findings("t", Measured(900, [], 3, eh_frame=True)) == [])
+    expect("a reference shares its case's packed relocations and not the discard",
+           tuple(a for a in (PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK) if a in REFERENCE_LINK_ARGS)
+           == (PACKED_RELOCS_LINK,))
     expect("a reference is linked with its case's linker arguments, and keyed by them",
            reference_args({"Z_A": 1}) == ["-DZ_A=1"]
            and reference_args({"Z_A": 1}, (PACKED_RELOCS_LINK, "-Wl,-x"))

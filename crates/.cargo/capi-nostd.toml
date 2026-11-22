@@ -17,6 +17,10 @@
 # `panic=unwind` without unwind tables, so the mistake is loud. A `RUSTFLAGS` in the environment
 # replaces this table, as it replaces every configured one.
 #
+# On Linux the prebuilt `core` and `alloc` keep their tables, which this flag does not reach; the
+# configuration named after this one, `.cargo/capi-discard-unwind-tables.toml`, discards them at
+# the link (docs/c-abi-size-diet.md T7).
+#
 # The flag is given to POSIX hosts only: a Windows build keeps its tables, which the system's own
 # exception handling reads, and needs no other flag: `panic = "abort"` is the profile's, and the
 # library names the C runtime it links itself (`src/os/no_std_host.rs` of `wz-capi-pico`).
