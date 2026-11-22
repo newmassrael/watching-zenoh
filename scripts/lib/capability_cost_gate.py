@@ -1336,7 +1336,11 @@ CASES: tuple[Case, ...] = (
     # 2026-11-22, latest -- the router changes `capic-router-node`'s note of this day names:
     # 11,495,937 at main `85330b9e0` -> 11,503,677 on hkl002 (+7,740). Main itself already read
     # 297 over the earlier budget on that host; the budget keeps 4,127 over the new reading.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_507_804,
+    # 2026-11-22, after it -- the face loop made once on the heap for its node (one `Box::pin` of
+    # the loop's state machine and its drop): 11,495,965 at main `85330b9e0` -> 11,496,805 on one
+    # machine (+840), both trees built there; the budget moves by that growth and keeps the
+    # headroom the note above states.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_508_644,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
