@@ -2968,6 +2968,15 @@ jobs:
   # and a fourth shard gives back the margin the table's growth took. The partition is still
   # position modulo the count, so the heavy leg shares its shard with a quarter of the rest.
   #
+  # BY COST (hosted run 45051019628). Shard 1 read 99 percent of 1800 s with every leg green,
+  # its legs 1,647 s against 869, 810 and 995 for the other three: it held the 543 s
+  # `wz-capture` leg and the 227 s `wz-runtime-tokio` one. The legs are now dealt by measured
+  # cost, heaviest first to the least loaded shard (`census_shard_plan.py` over
+  # `c1bnl_leg_weights.tsv`, keyed by each leg's package, filter and feature CRC), which puts
+  # about 1,110 s of that run's legs in each shard. PREDICTION, for the next run to judge: each
+  # shard near 1,260 s with its own setup, 70 percent of the budget. The weights decide the
+  # balance only; a leg added later is planned at the median and named in the log.
+  #
   # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
   # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;
   # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
