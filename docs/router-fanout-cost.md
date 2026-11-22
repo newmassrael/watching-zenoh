@@ -3,8 +3,8 @@
 What one Put that arrives on one face and leaves on N subscriber faces costs the wz router preset,
 read from the code, set beside what upstream's router does with the same Put at the pinned version,
 and ordered by what removing each cost is expected to give. The first reading of the AP superiority
-matrix (decision D13, `docs/ap-superiority-matrix.md`) is the reason; section 5 names what was
-changed in the round that wrote this page.
+matrix (decision D13, `docs/ap-superiority-matrix.md`) is the reason; section 5 names what has
+been changed for each row since.
 
 ## 1. What was measured
 
@@ -71,7 +71,8 @@ Once per subscriber, before this round's change (`deliver_to_client_subscribers`
   write the frame itself (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`): `flush_inline`
   (`crates/wz-runtime-tokio/src/writer_queue.rs:2075`) writes on the sender's thread when at most
   `LONE_STAGED_MAX` (2) messages were staged since the last flush and none ran for
-  `INLINE_MIN_QUIET_NS` (8 us, `crates/wz-runtime-tokio/src/writer_queue.rs:730`).
+  `INLINE_MIN_QUIET_NS` (8 us, `crates/wz-runtime-tokio/src/writer_queue.rs:730`). A router's face
+  no longer does (section 5, row 1).
 - The copy, its box and its containers were freed once the frame was built.
 
 ## 3. The path upstream
@@ -111,7 +112,7 @@ taken in this round. Each row says how to confirm it.
 
 | # | Cost, per subscriber unless said | Evidence | Upstream | Estimated share of the fan-out gap | Textbook fix |
 |---|---|---|---|---|---|
-| 1 | The routing thread writes each subscriber's frame to its socket itself. Once one Put takes the routing thread longer than 8 us, every subscriber's link has been quiet that long by the next Put, so each Put to each subscriber is a write system call on the one thread, with no batch | `flush_inline` and its thresholds (section 2); the TCP link installs the inline write (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`) | the producer only notifies; the face's task writes, in batches | largest, if confirmed: a write call costs microseconds where upstream's per-face cost is an encode into memory; the feedback (slower Put, more inline writes) fits a gap that grows with N | the routing thread never does a destination's I/O: a send made on behalf of a fan-out stages and wakes, and the inline write is kept for a sender's own lone message. Confirm first: count write calls per thread on the router (`perf trace -s`) against Puts routed |
+| 1 | The routing thread writes each subscriber's frame to its socket itself. Once one Put takes the routing thread longer than 8 us, every subscriber's link has been quiet that long by the next Put, so each Put to each subscriber is a write system call on the one thread, with no batch | `flush_inline` and its thresholds (section 2); the TCP link installs the inline write (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`) | the producer only notifies; the face's task writes, in batches | largest, if confirmed: a write call costs microseconds where upstream's per-face cost is an encode into memory; the feedback (slower Put, more inline writes) fits a gap that grows with N | the routing thread never does a destination's I/O: a send made on behalf of a fan-out stages and wakes, and the inline write is kept for a sender's own lone message. **Done** (section 5): a router marks the link of every face it holds as its writer's alone, by the node's role and not by a timing threshold. The gain is to be read off the D13 cells and a count of write calls per thread on the router (`perf trace -s`) against Puts routed |
 | 2 | The carrier was copied, boxed, measured and encoded for every subscriber: 4 of the 5 allocations and 400 of the 444 bytes a subscriber added (measured after the change, section 5), two walks of the message | `crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`; the steps of section 2 | a stack `Push` and a reference count | second; all of the per-subscriber allocation a forward made but one | encode once, share the bytes: **done in this round** for a Put the credit stage sends (section 5) |
 | 3 | Locks and atomics per subscriber: the egress chain's read lock, the held queue's mutex, the chain mark (`SeqCst`), the conduit's mutex, the staged counter and the flush flag | section 2 | the stage's one mutex and one notify | small to moderate; each is uncontended, and cache lines move between the routing thread and the writers | read the egress chain once per fan-out; read the held queue's emptiness from an atomic beside it; `Acquire` where no total order is read |
 | 4 | Per Put, not per subscriber: the tables taken per message rather than per frame, the key resolved to an owned `String`, the carrier deep-copied, the memo read by hashing key text | section 2; 5 of the 10 allocations of a forward to one subscriber | one read lock, a mapping-id lookup, a cached `Arc` route | most of the 1-subscriber and 8 B gap (3.3 and 3.2 times), little of the 16-subscriber one | take the tables once per frame; key the client memo by the inbound face's mapping id; forward a literal Put's received bytes when nothing in it changes |
@@ -121,9 +122,39 @@ taken in this round. Each row says how to confirm it.
 Not found: no per-Put copy of the tables (the version is shared, `docs/router-table-snapshots.md`),
 no per-Put route computation (the memo is hit), and no per-face task spawned per Put.
 
-## 5. What this round changed
+## 5. What was changed
 
-Row 2. A fan-out to the client faces makes one carrier (`SharedCarrier`,
+### Row 1: the routing thread does no destination's I/O
+
+The rule is now structural. A link's outbound queue can be marked as its writer's alone
+(`OutboundTx::set_writer_only`, `crates/wz-runtime-tokio/src/writer_queue.rs`); on a marked queue a
+sender never writes its own lone message (`flush_inline`) nor a datagram as it lands
+(`write_landed_datagram`), whatever the timing: it stages, and wakes the writer, which takes what
+was staged for the face in a few writes. The session asks its link for the mark through
+`BoxedLinkDriver::tx_writer_only` (`crates/wz-session-core/src/link.rs`), which the stream driver
+(TCP and the links built on it), the UDP driver and the QUIC stream driver forward to their queue,
+and the two swap seams of a reconnecting session forward to the live link and to every link swapped
+in after.
+
+The router asks for it once per face, when it holds the face (`hold_face_link` in
+`crates/wz-runtime-tokio/src/router_forward.rs`, called from the forwarder's registration of a face
+and of a joined link), and only on a node whose role is router. A peer node and a client node keep
+the sender's own write, which is what the round trip of their own lone puts was measured with. A
+keepalive is still written from the thread that sends it on every node: it carries liveness and no
+data. Not covered: the router's multicast group egress, which writes once per group and not once
+per subscriber.
+
+The tests: `a_router_fan_out_is_written_by_the_faces_writers_and_not_by_the_routing_thread` and
+`only_a_router_takes_the_senders_own_write_from_the_faces_it_holds` in
+`crates/wz-runtime-tokio/src/router_forward/fanout_io_tests.rs`. The first routes a burst of 64
+blocking Puts to 16 client faces over the production stream driver and queue, and asserts that the
+routing thread was asked for no write, that every face was written on its writer's thread, and that
+each face took at most one write for eight Puts. No throughput figure of the D13 cells was taken
+after the change.
+
+### Row 2: the carrier encoded once
+
+A fan-out to the client faces makes one carrier (`SharedCarrier`,
 `crates/wz-runtime-tokio/src/router_forward/held_route.rs:104`) and encodes it at most once, on the
 first face that is sent its bytes (`EncodedPush`, `crates/wz-session-core/src/session_actions.rs:3230`).
 Each such face's session frames those bytes under its own sequence number
