@@ -656,6 +656,10 @@ transport-link-unixpipe,transport-link-ws|"
     # And with `transport-stats` (`tests::group::congested::`): what a group's queue drops for
     # congestion is the transport's `tx.n_dropped`, as the tokio engine's group counts it.
     "wz-capi-coop|hook|app-transport,group,transport-stats|tests::group::congested::"
+    # And with the lent-only receive the C library's final build selects (`rx-lent-only`): a
+    # member's datagram is read where it lies and its records lent, its declarations scoped by the
+    # member and its departure's retractions lent, and no table is handed an owned record.
+    "wz-capi-coop|hook|app-transport,group,rx-lent-only|tests::group::"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
