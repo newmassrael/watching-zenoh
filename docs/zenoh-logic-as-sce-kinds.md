@@ -478,6 +478,18 @@ The list above is the census as taken. This list records what changed since.
   (`TxFrame<&[u8]>`), where wz's links lend the transmit slot in place. Both are
   candidates for the catalogue of section 4, for the SCE session to judge.
 - **W3, open.** Not yet scoped beyond the census row.
+- **W11, fixed (2026-11-22).** A start of the cooperative engine's read task
+  that the system gives no thread is answered: the port's start says
+  `ReadTaskStartRefused::NoThread`, `zp_start_read_task` returns
+  `_Z_ERR_SYSTEM_GENERIC` and `z_open` fails with it and drops the session, as
+  zenoh-pico's task creation and `z_open` do where `pthread_create` refuses. It
+  had panicked, and `zp_start_read_task` caught no panic, so the process
+  aborted; `z_open` ignored the start's answer.
+- **W9, compared.** Upstream installs a listener and then reports the history
+  (`zenoh/src/api/session.rs` @ `for transport in self.runtime().get_transports() {`), so a face that
+  comes up between the two can be reported twice and none is lost. wz reports
+  the history first and then installs its watch, so such a face is lost, and
+  one that goes down there is reported up and never down. Not yet changed.
 - **The reset-generation pilot (S2 row 30 and S5 row M5), half done.** The rule
   is `sources/algorithms/take_generation.scxml`, an algorithm that takes the
   table `inout` (SCE ADR 0108, a `map<record, uint64>` keyed by the zid as its

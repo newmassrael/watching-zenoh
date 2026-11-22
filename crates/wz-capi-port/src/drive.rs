@@ -23,6 +23,24 @@ use crate::SessionEngine;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CalledFromReadTask;
 
+/// Why a start of the read task did not start it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTaskStartRefused {
+    /// The start was made from inside one of the session's own callbacks ([`CalledFromReadTask`]).
+    CalledFromReadTask,
+    /// The system gave no thread for the task. zenoh-pico answers the error its task creation
+    /// reported, `_Z_ERR_SYSTEM_GENERIC` where `pthread_create` refuses
+    /// (`vendor/zenoh-pico/src/system/unix/system.c` @ `_Z_CHECK_SYS_ERR(pthread_create(task, attr, fun, arg));`),
+    /// and a session opened to start it is not opened.
+    NoThread,
+}
+
+impl From<CalledFromReadTask> for ReadTaskStartRefused {
+    fn from(_: CalledFromReadTask) -> Self {
+        Self::CalledFromReadTask
+    }
+}
+
 /// The session is closed: nothing was read, kept alive or sent. zenoh-pico answers
 /// `_Z_ERR_SESSION_CLOSED`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +71,10 @@ pub trait SessionDrive: Send + Sync + 'static {
     /// Whether [`Self::close`] has run.
     fn is_closed(&self) -> bool;
 
-    /// Start the read task (zenoh-pico `zp_start_read_task`); idempotent.
-    fn start_read_task(&self) -> Result<(), CalledFromReadTask>;
+    /// Start the read task (zenoh-pico `zp_start_read_task`); idempotent. A system that gives
+    /// no thread is an answer, never a panic: the task is not running and a later start tries
+    /// again.
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused>;
 
     /// Stop the read task (zenoh-pico `zp_stop_read_task`); idempotent. It returns once no
     /// callback is running.

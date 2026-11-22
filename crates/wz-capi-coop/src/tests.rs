@@ -1120,6 +1120,30 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     SessionDrive::close(&*engine);
 }
 
+/// A system that gives no thread for the read task is answered, not panicked on: the start answers
+/// `NoThread`, the task is not running, the session is still open, and a start once the system
+/// gives a thread starts it. zenoh-pico answers its task creation's error the same way.
+#[test]
+fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
+    use wz_capi_port::ReadTaskStartRefused;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.start_reader(|_| None),
+        Err(ReadTaskStartRefused::NoThread)
+    );
+    assert!(!SessionDrive::read_task_is_running(&*engine));
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "a refused start leaves the session open"
+    );
+
+    SessionDrive::start_read_task(&*engine).expect("a read task once a thread is given");
+    assert!(SessionDrive::read_task_is_running(&*engine));
+    SessionDrive::close(&*engine);
+}
+
 /// A peer that was told an id names it. A zenoh router sends a subscriber the samples it routes
 /// to it by the key expression the subscriber declared to it (the receiver's id space, `M=0`),
 /// not by the literal, and a session that cannot resolve the id drops the sample: the engine

@@ -50,8 +50,8 @@ use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    SessionClosed, SessionDrive, SessionEngine, StatementNotHonoured, SubId, SubscriberSink,
-    WireKey,
+    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, StatementNotHonoured, SubId,
+    SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -844,6 +844,9 @@ struct ReadTask {
     thread: JoinHandle,
     id: ThreadId,
 }
+
+/// What the read task's thread runs, handed to whatever makes the thread.
+pub(crate) type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
 
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     local: CoopLocalSet<C>,
@@ -3514,6 +3517,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.registry.borrow_mut().reevaluate_publisher_watches();
     }
 
+    /// Start the read task on the thread `spawn` makes; idempotent. A system that gives no thread
+    /// is answered (`NoThread`), and the task is left not running, so a later start tries again:
+    /// zenoh-pico's start answers its task creation's error the same way, and a panic here would
+    /// leave the C caller nothing to read on a build that aborts on one.
+    pub(crate) fn start_reader(
+        &self,
+        spawn: impl FnOnce(ReaderBody) -> Option<(JoinHandle, ThreadId)>,
+    ) -> Result<(), ReadTaskStartRefused> {
+        let mut reader = lock(&self.reader);
+        if let Some(task) = reader.as_ref() {
+            if task.id == os::current() {
+                return Err(ReadTaskStartRefused::CalledFromReadTask);
+            }
+            return Ok(());
+        }
+        let Some(engine) = self.this.upgrade() else {
+            return Ok(());
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let body: ReaderBody =
+            Box::new(
+                move || {
+                    while !stopped.load(Ordering::Acquire) && engine.read(false).is_ok() {}
+                },
+            );
+        let (thread, id) = spawn(body).ok_or(ReadTaskStartRefused::NoThread)?;
+        *reader = Some(ReadTask { stop, thread, id });
+        Ok(())
+    }
+
     /// Stop the read task, from a thread that is not it.
     fn stop_reader(&self) -> Result<(), CalledFromReadTask> {
         let task = {
@@ -4896,34 +4930,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.closed.load(Ordering::Acquire)
     }
 
-    fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
-        let mut reader = lock(&self.reader);
-        if let Some(task) = reader.as_ref() {
-            if task.id == os::current() {
-                return Err(CalledFromReadTask);
-            }
-            return Ok(());
-        }
-        let Some(engine) = self.this.upgrade() else {
-            return Ok(());
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let Some((thread, id)) =
-            os::spawn(
-                move || {
-                    while !stopped.load(Ordering::Acquire) && engine.read(false).is_ok() {}
-                },
-            )
-        else {
-            // What `std::thread::spawn` did when the system gave no thread, kept as it was: the
-            // ABI's guard answers the C call with an error. The port's start has no answer for
-            // "no thread" yet (zenoh-pico's `_Z_ERR_SYSTEM_TASK_FAILED`), which is where this
-            // belongs.
-            panic!("the system gave no thread for the read task");
-        };
-        *reader = Some(ReadTask { stop, thread, id });
-        Ok(())
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        self.start_reader(os::spawn)
     }
 
     fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
@@ -5015,7 +5023,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive f
         SessionDrive::is_closed(&*self.0)
     }
 
-    fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
+    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
         self.0.start_read_task()
     }
 
