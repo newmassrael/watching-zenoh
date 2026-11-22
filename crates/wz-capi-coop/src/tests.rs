@@ -1541,6 +1541,7 @@ mod local;
 mod local_query;
 #[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
 mod one_face;
+mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
