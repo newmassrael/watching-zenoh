@@ -459,7 +459,9 @@ pub mod app_transport;
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
 pub mod c_enum;
-// The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`.
+// The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`:
+// a wz door (`wz_ext.h`) in a build with `conformance-digest`, which the zenoh-pico preset leaves out.
+#[cfg(feature = "conformance-digest")]
 pub mod conformance;
 // What the cooperative engine is given by the system the build runs on (the tokio engine brings
 // its own runtime's).
@@ -474,7 +476,8 @@ pub mod cancellation;
 pub mod codec;
 pub mod config;
 // The policies a config states for its session, from code and from a zenoh document: wz doors
-// (`wz_ext.h`) in every build.
+// (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
+// them the open runs a session under the build's policies and limits.
 pub mod config_policy;
 // What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
 // unstable surface (docs/target-build-contract.md T9).

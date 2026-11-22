@@ -78,6 +78,10 @@ default = [
     "transport_multilink",
     "auth_pubkey",
     "e2e-sender",
+    # The pico ABI's policy doors and its conformance digest, which a build that names nothing has
+    # (deploy/wz-config.toml, `config-policy`, `conformance-digest`).
+    "config-policy",
+    "conformance-digest",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -288,6 +292,12 @@ switch-doors = []
 # The JSON5 document a pico config is handed for its policies (`wz-capi-pico/config-document`): the
 # reader of the document is session-core's, so this feature only carries the capability's name.
 config-document = []
+# The doors of a pico config that state its sessions' policies and profile
+# (`wz-capi-pico/config-policy`), and the door that hands out a pico build's conformance digest
+# (`wz-capi-pico/conformance-digest`): this engine's sessions take the policies the ABI resolves,
+# so each feature only carries the capability's name.
+config-policy = []
+conformance-digest = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

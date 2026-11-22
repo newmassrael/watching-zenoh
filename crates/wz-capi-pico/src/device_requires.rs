@@ -176,7 +176,9 @@ mod tests {
         );
     }
 
-    /// A config whose policies the build refuses is refused with the open's code and reason.
+    /// A config whose policies the build refuses is refused with the open's code and reason. Only
+    /// a build with the policy doors holds a statement to refuse.
+    #[cfg(feature = "config-policy")]
     #[test]
     fn a_config_whose_policies_the_open_refuses_is_refused() {
         let mut cfg = config(&[(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447")]);

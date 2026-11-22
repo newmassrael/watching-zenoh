@@ -1109,7 +1109,9 @@ mod tests {
     }
 
     /// `z_scout` with a config whose policies the build refuses answers the open's
-    /// `Z_ERR_CONFIG_INVALID_VALUE` before it scouts, and runs the closure's drop once.
+    /// `Z_ERR_CONFIG_INVALID_VALUE` before it scouts, and runs the closure's drop once. Only a
+    /// build with the policy doors holds a statement to refuse.
+    #[cfg(feature = "config-policy")]
     #[test]
     fn a_scout_refuses_a_config_whose_policies_the_open_refuses() {
         use core::sync::atomic::{AtomicUsize, Ordering};

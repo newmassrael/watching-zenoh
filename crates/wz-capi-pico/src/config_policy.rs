@@ -6,10 +6,14 @@
 //! it.
 //!
 //! pico's config is a set of numbered keys and has none for wz's policies, so these are doors wz
-//! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. The first two are in every
-//! build; `wz_ext_config_document` is in a build with the `config-document` capability, since it
-//! links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses every other
-//! value of it by name.
+//! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. The first two are in a build
+//! with the `config-policy` capability, which a build that names nothing has and the zenoh-pico
+//! preset leaves out; `wz_ext_config_document` is in a build with the `config-document` capability,
+//! since it links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses
+//! every other value of it by name.
+//!
+//! A build without `config-policy` has no statement to resolve: its config states nothing of its
+//! policies, and a session opens under the build's policies and limits, with no resolver linked.
 //!
 //! What the doors state is kept in the config (`PolicyStatements`) and composed by the open,
 //! lowest first, through [`policy_document::resolve_document_under`], the reader the other ABIs
@@ -35,6 +39,7 @@
 //! it was. The document is the zenoh JSON5 document the zenoh-c ABI reads, of which only the `wz`
 //! member is read here, so one document gives both ABIs the same policies.
 
+#[cfg(feature = "config-policy")]
 use core::ffi::{c_char, CStr};
 
 #[cfg(feature = "config-document")]
@@ -45,22 +50,64 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 #[cfg(test)]
 use wz_session_core::policy_document::Resolved;
+#[cfg(feature = "config-policy")]
 use wz_session_core::policy_document::{self, Overrides, Statement};
 
+#[cfg(feature = "config-policy")]
 use crate::abi::z_loaned_config_t;
+#[cfg(feature = "config-policy")]
 use crate::config::ConfigState;
+#[cfg(feature = "config-policy")]
 use crate::ffi::guarded;
+#[cfg(feature = "config-policy")]
 use crate::prelude::*;
+use crate::result::ZResult;
 #[cfg(feature = "config-document")]
 use crate::result::Z_EINVAL;
-use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
+#[cfg(feature = "config-policy")]
+use crate::result::{Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_OK};
 
 /// The top-level member of a zenoh document that holds wz's own statements.
 #[cfg(feature = "config-document")]
 const WZ_MEMBER: &str = "wz";
 
+/// What a build without the doors states about a config's policies: nothing, so the open runs a
+/// session under the build's policies and limits and links no resolver of a statement.
+#[cfg(not(feature = "config-policy"))]
+#[derive(Clone, Default)]
+pub(crate) struct PolicyStatements;
+
+#[cfg(not(feature = "config-policy"))]
+impl PolicyStatements {
+    /// `policy` and `limits` as they are: the build's, which no statement can move here.
+    #[inline(always)]
+    pub(crate) fn compose_into(
+        &self,
+        _policy: &mut SessionPolicy,
+        _limits: &mut SessionLimits,
+    ) -> Result<(), ZResult> {
+        Ok(())
+    }
+
+    /// `base` with no layer over it, every value from the build defaults.
+    #[cfg(test)]
+    pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
+        Ok(Resolved::unchanged(base))
+    }
+
+    /// No key ids: a config handed no document states none, and only `config-document`, which
+    /// brings the doors, hands one.
+    #[cfg(feature = "shared-key-ids")]
+    pub(crate) fn document_key_ids(
+        &self,
+    ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ZResult> {
+        Ok(Default::default())
+    }
+}
+
 /// What a config's doors stated about its policies, as they stated it: the open judges and
 /// composes it ([`Self::compose`]).
+#[cfg(feature = "config-policy")]
 #[derive(Clone, Default)]
 pub(crate) struct PolicyStatements {
     /// The id `wz_ext_config_profile` named; it replaces the profile the document names.
@@ -74,6 +121,7 @@ pub(crate) struct PolicyStatements {
     api: Vec<(String, String)>,
 }
 
+#[cfg(feature = "config-policy")]
 impl PolicyStatements {
     /// The layers written over `policy` and the limits the document states over `limits`, the
     /// snapshot of a session's ([`policy_document::resolve_under_into`]), or
@@ -200,6 +248,7 @@ fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
 ///
 /// # Safety
 /// `config` must be null or a live loaned config.
+#[cfg(feature = "config-policy")]
 unsafe fn amend(
     config: *mut z_loaned_config_t,
     change: impl FnOnce(&mut PolicyStatements) -> Result<(), ZResult>,
@@ -226,6 +275,7 @@ unsafe fn amend(
 ///
 /// # Safety
 /// `text` must be null or a NUL-terminated string that outlives `'a`.
+#[cfg(feature = "config-policy")]
 unsafe fn text_of<'a>(text: *const c_char) -> Result<&'a str, ZResult> {
     if text.is_null() {
         return Err(Z_ERR_NULL);
@@ -244,6 +294,7 @@ unsafe fn text_of<'a>(text: *const c_char) -> Result<&'a str, ZResult> {
 /// # Safety
 /// `config` must be null or a live loaned config; `policy` and `value` must be null or
 /// NUL-terminated strings.
+#[cfg(feature = "config-policy")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_config_policy(
     config: *mut z_loaned_config_t,
@@ -267,6 +318,7 @@ pub unsafe extern "C" fn wz_ext_config_policy(
 /// # Safety
 /// `config` must be null or a live loaned config; `profile` must be null or a NUL-terminated
 /// string.
+#[cfg(feature = "config-policy")]
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_config_profile(
     config: *mut z_loaned_config_t,
@@ -382,7 +434,7 @@ pub unsafe extern "C" fn wz_ext_runtime_limits_document(json5: *const c_char) ->
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "config-policy"))]
 mod tests {
     use super::*;
     use crate::abi::z_owned_config_t;
@@ -1032,5 +1084,30 @@ mod tests {
         assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
         assert!(session._val.is_null(), "no session was opened");
         assert!(config.0.handle.is_null(), "the open consumed the config");
+    }
+}
+
+#[cfg(test)]
+mod build_default_tests {
+    use super::PolicyStatements;
+    use wz_session_core::limits::SessionLimits;
+    use wz_session_core::policy::SessionPolicy;
+
+    /// A config that states nothing opens under the build's policies and limits: through the
+    /// resolver in a build with the doors, and with no resolver in one without them, so the two
+    /// builds open such a config alike.
+    #[test]
+    fn a_config_that_states_nothing_opens_under_the_builds_policies_and_limits() {
+        assert_eq!(
+            crate::session::resolve_snapshots(&PolicyStatements::default()),
+            Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
+        );
+    }
+
+    /// Without the doors a config holds nothing of its policies.
+    #[cfg(not(feature = "config-policy"))]
+    #[test]
+    fn without_the_doors_a_config_holds_no_statement() {
+        assert_eq!(core::mem::size_of::<PolicyStatements>(), 0);
     }
 }

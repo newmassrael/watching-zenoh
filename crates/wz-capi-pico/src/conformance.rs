@@ -15,7 +15,8 @@
 include!(concat!(env!("OUT_DIR"), "/conformance_digest.rs"));
 
 /// The conformance digest of this build: `sha256:` and 64 lowercase hex digits, NUL-terminated,
-/// static for the life of the program. Present in every build.
+/// static for the life of the program. In a build with the `conformance-digest` capability, which a
+/// build that names nothing has and the zenoh-pico preset leaves out.
 #[no_mangle]
 pub extern "C" fn wz_ext_conformance_digest() -> *const core::ffi::c_char {
     CONFORMANCE_DIGEST.as_ptr()
