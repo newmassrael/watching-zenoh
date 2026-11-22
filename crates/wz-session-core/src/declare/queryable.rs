@@ -32,7 +32,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use wz_codecs::lent::DeclareVariant;
 
@@ -57,7 +57,7 @@ use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
@@ -1113,7 +1113,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     pub fn dispatch_declare_view_with_local<'a, 'f, Q: Storage>(
         &mut self,
@@ -1335,8 +1335,8 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
                     local_matching,
                 );
             }
-            // A Declare the slot profile's receive path lends where its frame lies.
-            #[cfg(feature = "session-slot")]
+            // A Declare the in-place receive path lends where its frame lies.
+            #[cfg(feature = "rx-lent-control")]
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
                     self.dispatch_declare_view_with_local(

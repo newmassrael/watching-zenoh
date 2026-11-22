@@ -174,7 +174,7 @@ mod cross_tests;
 // carry, so it compiles only where they all do.
 #[cfg(all(
     test,
-    feature = "session-slot",
+    feature = "rx-lent-control",
     feature = "codec-declare",
     feature = "codec-response-final",
     feature = "declare-subscriber",

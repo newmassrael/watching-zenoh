@@ -83,7 +83,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use wz_codecs::lent::DeclareVariant;
 
@@ -111,7 +111,7 @@ use crate::wireexpr_resolve::resolve_wireexpr_into;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
@@ -928,7 +928,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     pub fn dispatch_declare_view_historical<'a, 'f, Q: Storage>(
         &mut self,
@@ -1506,7 +1506,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // build with neither (no owned frame, no lent Declare) reads none of them.
         #[cfg(not(any(
             feature = "alloc",
-            all(feature = "session-slot", feature = "codec-declare")
+            all(feature = "rx-lent-control", feature = "codec-declare")
         )))]
         let _ = (&peer, &peer_keyexpr_table, claimed);
         match event {
@@ -1514,11 +1514,11 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
             }
-            // A Declare the slot profile's receive path lends where its frame lies,
+            // A Declare the in-place receive path lends where its frame lies,
             // judged by the same three rules as the owned one: a GET's claim, the
             // historical flag the envelope's `interest_id` gives, and the
             // history-complete marker a CURRENT replay's `DeclFinal` is.
-            #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+            #[cfg(all(feature = "rx-lent-control", feature = "codec-declare"))]
             IterationEvent::InPlace(record) => {
                 if let Some(decl) = record.declare() {
                     if decl.interest_id.is_some_and(claimed) {

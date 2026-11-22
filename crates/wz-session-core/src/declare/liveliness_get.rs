@@ -569,7 +569,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     #[cfg(all(
         feature = "storage-profile",
         feature = "codec-declare",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     pub fn dispatch_declare_view<'a, 'f>(
         &mut self,
@@ -643,8 +643,8 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table);
             }
-            // A Declare the slot profile's receive path lends where its frame lies.
-            #[cfg(all(feature = "codec-declare", feature = "session-slot"))]
+            // A Declare the in-place receive path lends where its frame lies.
+            #[cfg(all(feature = "codec-declare", feature = "rx-lent-control"))]
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
                     self.dispatch_declare_view(declare, peer_keyexpr_table);

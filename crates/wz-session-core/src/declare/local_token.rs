@@ -458,7 +458,7 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// held token (a registered token's keyexpr fits the same bound), so it is
     /// answered with the terminating `Final` alone, as the subscriber side
     /// answers it.
-    #[cfg(all(feature = "storage-profile", feature = "session-slot"))]
+    #[cfg(all(feature = "storage-profile", feature = "rx-lent-control"))]
     pub fn respond_to_interest_view<'a, 'f, Q: Storage>(
         &self,
         interest: &wz_codecs::lent::Interest<'f>,
@@ -550,9 +550,9 @@ impl<P: Storage> LocalTokenRegistry<P> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table, pending)
             }
-            // An Interest the slot profile's receive path lends where its frame
+            // An Interest the in-place receive path lends where its frame
             // lies; a refused chain is counted as for the owned one.
-            #[cfg(feature = "session-slot")]
+            #[cfg(feature = "rx-lent-control")]
             IterationEvent::InPlace(record) => match record.interest() {
                 Some(interest) => usize::from(
                     self.respond_to_interest_view(interest, peer_keyexpr_table, pending)

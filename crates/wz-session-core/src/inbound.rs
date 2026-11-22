@@ -647,8 +647,17 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 ))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InPlaceExtChain {
-    /// Whether the message carried a chain at all.
-    #[cfg(feature = "alloc")]
+    /// Whether the message carried a chain at all: read only to own the chain, which a build
+    /// whose every record is lent never does.
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     chained: bool,
     /// The admission verdict, which only the unicast receive path asks for.
     #[cfg(feature = "session-unicast")]
@@ -674,7 +683,15 @@ impl InPlaceExtChain {
     /// What a receive path hands a consumer that is given the owned chain (the
     /// `extensions` of a `FramePayload`), made only when one is: a frame whose
     /// every record is lent never pays for it.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     pub(crate) fn owned(&self, unit: &[u8]) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
         if !self.chained {
             return Ok(Vec::new());
@@ -902,13 +919,29 @@ impl KeptChain for InPlaceExtChain {
         // is all of the chain its verdict needs.
         #[cfg(feature = "session-unicast")]
         let mut refused: Option<u8> = None;
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         let mut chained = false;
         #[cfg(feature = "reassembly")]
         let mut markers = crate::extfragment::FragmentMarkers::NONE;
         let mut priority = None;
         for entry in walked {
-            #[cfg(feature = "alloc")]
+            #[cfg(all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ))]
             {
                 chained = true;
             }
@@ -927,7 +960,15 @@ impl KeptChain for InPlaceExtChain {
             }
         }
         Ok(Self {
-            #[cfg(feature = "alloc")]
+            #[cfg(all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ))]
             chained,
             #[cfg(feature = "session-unicast")]
             admission: crate::ext_admit::judge_ext_chain(carrier, refused),

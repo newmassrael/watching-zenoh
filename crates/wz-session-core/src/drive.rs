@@ -1747,29 +1747,29 @@ pub enum CopyReason {
 /// silently skipped the records of an in-place frame would be a wrong number,
 /// so the build that has the counters does not lend.
 ///
-/// On the per-session slot profile (`session-slot`) EVERY record is lent, the
-/// control kinds (a Declare, an Interest, a ResponseFinal) too
+/// A build that lends its control records (`rx-lent-control`, which the slot profile
+/// selects) lends EVERY record, the control kinds (a Declare, an Interest, a
+/// ResponseFinal) too
 /// ([`RecordForm::LentControl`](crate::network_message::RecordForm::LentControl)):
 /// the owned message a control record would otherwise become is a boxed
-/// `DeclareOwned` with heap lists, which is what that profile does not have.
-#[cfg(all(feature = "codec-frame", feature = "session-slot", feature = "alloc"))]
-const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "transport-stats") {
-    crate::network_message::RecordForm::Owned
-} else {
-    crate::network_message::RecordForm::LentControl
-};
-// A build with no allocator has the one form: `transport-stats` implies `alloc`, and
-// the owned messages are the heap profile's.
+/// `DeclareOwned` with heap lists, which a slot has no room for and a heap engine
+/// whose every record is read in place has no use for.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "session-slot",
-    not(feature = "alloc")
+    feature = "rx-lent-control",
+    feature = "transport-stats"
+))]
+const RECORD_FORM: crate::network_message::RecordForm = crate::network_message::RecordForm::Owned;
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats")
 ))]
 const RECORD_FORM: crate::network_message::RecordForm =
     crate::network_message::RecordForm::LentControl;
 #[cfg(all(
     feature = "codec-frame",
-    not(feature = "session-slot"),
+    not(feature = "rx-lent-control"),
     any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1784,7 +1784,7 @@ const RECORD_FORM: crate::network_message::RecordForm = if cfg!(feature = "trans
 /// Without a lendable codec there is no record to lend.
 #[cfg(all(
     feature = "codec-frame",
-    not(feature = "session-slot"),
+    not(feature = "rx-lent-control"),
     not(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -1798,14 +1798,10 @@ const RECORD_FORM: crate::network_message::RecordForm = crate::network_message::
 /// whose copying path strips the namespace off the reassembled message's owned
 /// outcome before the fan-out. A lent record has no owned outcome to strip, so
 /// that build keeps the owned form here and the strip is not skipped.
-#[cfg(all(feature = "reassembly", feature = "alloc"))]
+#[cfg(all(feature = "reassembly", feature = "routing-namespace"))]
 const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm =
-    if cfg!(feature = "routing-namespace") {
-        crate::network_message::RecordForm::Owned
-    } else {
-        RECORD_FORM
-    };
-#[cfg(all(feature = "reassembly", not(feature = "alloc")))]
+    crate::network_message::RecordForm::Owned;
+#[cfg(all(feature = "reassembly", not(feature = "routing-namespace")))]
 const REASSEMBLED_RECORD_FORM: crate::network_message::RecordForm = RECORD_FORM;
 
 /// Dispatch one inbound datagram that the link LENDS, where it lies, and hand
@@ -2378,7 +2374,15 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
     let walked = walk_records_in_place(
         unit,
         carrier,
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         &mut || Ok(alloc::vec::Vec::new()),
         RECORD_FORM,
         RecordSource::Frame,
@@ -2472,8 +2476,17 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
         chain,
         ..
     } = head;
-    // The frame's own chain is owned only for an owned record (the heap profile's).
-    #[cfg(not(feature = "alloc"))]
+    // The frame's own chain is owned only for an owned record, which a build that lends every
+    // record has none of.
+    #[cfg(not(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    )))]
     let _ = chain;
     let refused = match resume {
         Some(_) => None,
@@ -2507,7 +2520,15 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     let walked = walk_records_in_place(
         &unit[records_at..],
         carrier,
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         &mut || chain.owned(unit),
         RECORD_FORM,
         RecordSource::Frame,
@@ -2563,7 +2584,15 @@ enum RecordSource {
 /// has no slot to hand over, so the message is moved into the list (which keeps
 /// its room for the rest of the walk's records).
 #[cfg(all(
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "codec-frame",
     not(feature = "bounded-heapless")
 ))]
@@ -2577,7 +2606,15 @@ fn hand_record_to(
 /// See the growable form. The record buffer holds one message, so the move is one
 /// `pop`.
 #[cfg(all(
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "codec-frame",
     feature = "bounded-heapless"
 ))]
@@ -2593,7 +2630,15 @@ fn hand_record_to(
 /// Undo [`hand_record_to`] once the outcome has been reported, so the walk's next
 /// decode finds its record buffer as it left it: empty, and with its slot.
 #[cfg(all(
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "codec-frame",
     not(feature = "bounded-heapless")
 ))]
@@ -2607,7 +2652,15 @@ fn take_record_back(
 /// See the growable form: the fixed buffer was emptied by the hand-over, so what
 /// is left to do is to drop the reported message and keep the list's room.
 #[cfg(all(
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "codec-frame",
     feature = "bounded-heapless"
 ))]
@@ -2633,7 +2686,16 @@ fn take_record_back(
 fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     payload: &[u8],
     carrier: RecordCarrier,
-    #[cfg(feature = "alloc")] extensions: &mut dyn FnMut() -> Result<
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
+    extensions: &mut dyn FnMut() -> Result<
         alloc::vec::Vec<wz_codecs::ext_entry::ExtEntryOwned>,
         crate::parse_error::InboundParseError,
     >,
@@ -2645,7 +2707,15 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
     use crate::driver_loop::IterationEvent;
-    #[cfg(feature = "alloc")]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     use crate::network_message::WalkedRecord;
     #[cfg(feature = "alloc")]
     let RecordCarrier {
@@ -2655,15 +2725,24 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
         has_ext,
     } = carrier;
     // A build with no allocator delivers no owned outcome, so it has no use for the
-    // frame's own extension flag, for where the walk came from, or for the session
-    // (each of the lent arms below is handed what it needs by the record).
+    // frame's own extension flag.
     #[cfg(not(feature = "alloc"))]
     let RecordCarrier {
         reliable,
         sn,
         priority,
     } = carrier;
-    #[cfg(not(feature = "alloc"))]
+    // A build with no owned record has no use for where the walk came from or for the
+    // session: each lent arm below is handed what it needs by the record.
+    #[cfg(not(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    )))]
     let _ = (source, actions);
     #[cfg(feature = "alloc")]
     let empty = |extensions| DriverLoopOutcome::FramePayload {
@@ -2674,7 +2753,15 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
         extensions,
         priority,
     };
-    #[cfg(feature = "alloc")]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     let mut outcome: Option<DriverLoopOutcome> = None;
     let mut dispatched = false;
     // Set once the host has no room for another record; the walk then ends before the next.
@@ -2682,29 +2769,53 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     let go_on = || !stopping.get();
     let (read, stopped) =
         crate::network_message::try_for_each_record_while(payload, record, form, &go_on, |one| {
-            // A build with no allocator walks no owned record: every one is lent.
+            // A build with no owned record walks none: every one is lent.
             #[cfg(all(
-                not(feature = "alloc"),
+                not(all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                )),
                 any(
                     feature = "codec-push",
                     feature = "codec-request",
                     feature = "codec-response",
-                    feature = "session-slot"
+                    feature = "rx-lent-control"
                 )
             ))]
             crate::driver_loop::report_lent_record(one, reliable, sn, priority, on_event);
-            // ... and one with no allocator and no lent kind walks no record at all.
+            // ... and one with no owned record and no lent kind walks no record at all.
             #[cfg(all(
-                not(feature = "alloc"),
+                not(all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                )),
                 not(any(
                     feature = "codec-push",
                     feature = "codec-request",
                     feature = "codec-response",
-                    feature = "session-slot"
+                    feature = "rx-lent-control"
                 ))
             ))]
             let _ = one;
-            #[cfg(feature = "alloc")]
+            #[cfg(all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ))]
             match one {
                 WalkedRecord::Owned(one) => {
                     let outcome = match &mut outcome {
@@ -2735,7 +2846,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                     feature = "codec-push",
                     feature = "codec-request",
                     feature = "codec-response",
-                    feature = "session-slot"
+                    feature = "rx-lent-control"
                 ))]
                 lent => {
                     crate::driver_loop::report_lent_record(lent, reliable, sn, priority, on_event)
@@ -2748,8 +2859,31 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
             Ok(())
         })?;
     if !dispatched {
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         on_event.event(IterationEvent::Poll(&empty(extensions()?)));
+        // The frame's own chain is not owned where no record is: the empty batch
+        // carries none.
+        #[cfg(all(
+            feature = "alloc",
+            not(all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ))
+        ))]
+        on_event.event(IterationEvent::Poll(&empty(alloc::vec::Vec::new())));
         // A frame with no record to deliver is a frame the session read and has
         // nothing to hand on; the heap profile's empty batch, without the batch.
         #[cfg(not(feature = "alloc"))]
@@ -2848,7 +2982,15 @@ where
             dropped_by_decode = walk_records_in_place(
                 message,
                 carrier,
-                #[cfg(feature = "alloc")]
+                #[cfg(all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ))]
                 &mut || Ok(alloc::vec::Vec::new()),
                 REASSEMBLED_RECORD_FORM,
                 RecordSource::Reassembled,

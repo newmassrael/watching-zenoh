@@ -187,7 +187,7 @@ macro_rules! own_wire {
     any(
         feature = "alloc",
         all(
-            feature = "session-slot",
+            feature = "rx-lent-control",
             // Named by the arms of `lend_any_record`, each of which is a kind the build reads.
             any(
                 feature = "codec-request",
@@ -351,7 +351,7 @@ impl NetworkMessage {
     ),
     all(
         feature = "codec-frame",
-        feature = "session-slot",
+        feature = "rx-lent-control",
         any(feature = "rx-control", feature = "rx-response"),
         any(
             test,
@@ -389,7 +389,7 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
     ),
     all(
         feature = "codec-frame",
-        feature = "session-slot",
+        feature = "rx-lent-control",
         any(
             test,
             feature = "session-unicast",
@@ -562,7 +562,7 @@ fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
     feature = "codec-frame",
     feature = "codec-declare",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -594,7 +594,7 @@ fn declare_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -614,7 +614,7 @@ fn interest_view_admission(
     feature = "codec-frame",
     feature = "codec-response-final",
     feature = "rx-response",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -635,7 +635,7 @@ fn response_final_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -696,7 +696,18 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
-    any(feature = "alloc", feature = "rx-push"),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "rx-push"
+    ),
     any(
         test,
         feature = "session-unicast",
@@ -857,7 +868,18 @@ fn request_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
-    any(feature = "alloc", feature = "rx-response"),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "rx-response"
+    ),
     any(
         test,
         feature = "session-unicast",
@@ -1197,13 +1219,33 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 ))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordForm {
-    /// Every record is decoded into its owned message.
-    #[cfg(feature = "alloc")]
+    /// Every record is decoded into its owned message. Absent from a build that
+    /// lends its control records (`rx-lent-control`) unless it keeps an owned
+    /// reader for its counters (`transport-stats`), its namespace strip
+    /// (`routing-namespace`) or its tests: there no record of a frame read in
+    /// place is ever an owned message, and the owned walk is not linked.
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     Owned,
     /// A Push, a Request and a Response are decoded where the payload lies and
     /// lent.
     #[cfg(all(
-        feature = "alloc",
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -1211,14 +1253,15 @@ pub(crate) enum RecordForm {
         )
     ))]
     Lent,
-    /// The slot profile's form: EVERY record is decoded where the payload lies
-    /// and lent, the control kinds (a Declare, an Interest, a ResponseFinal) beside
-    /// the data kinds, and nothing is projected into an owned message at all. A
+    /// The form of a build that lends its control records (`rx-lent-control`,
+    /// which the slot profile selects): EVERY record is decoded where the payload
+    /// lies and lent, the control kinds (a Declare, an Interest, a ResponseFinal)
+    /// beside the data kinds, and nothing is projected into an owned message at all. A
     /// record this build reads no further (an Oam, which has no consumer, or a
     /// MID it has no decoder for, whose length is unknowable) is judged where
     /// that is possible and skipped, so the walk allocates nothing whatever the
     /// peer put in the frame ([`WalkedRecord::Skipped`]).
-    #[cfg(feature = "session-slot")]
+    #[cfg(feature = "rx-lent-control")]
     LentControl,
 }
 
@@ -1257,10 +1300,32 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         core::marker::PhantomData<(&'r (), &'f ())>,
     ),
     /// The record's owned message, the one entry of the buffer.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ))]
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
-    #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
+    #[cfg(all(
+        feature = "codec-push",
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-push"
+        )
+    ))]
     Push(&'r wz_codecs::lent::Push<'f>),
     /// A Request read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries (the eager record is 1.8 KB).
@@ -1269,13 +1334,24 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// A Response decoded where the payload lies, valid for the call.
     #[cfg(all(
         feature = "codec-response",
-        any(feature = "alloc", feature = "rx-response")
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-response"
+        )
     ))]
     Response(&'r wz_codecs::response::ResponseView<'f>),
     /// A Declare decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-declare",
         feature = "rx-control"
     ))]
@@ -1283,14 +1359,14 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// A ResponseFinal decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-response-final",
         feature = "rx-response"
     ))]
     ResponseFinal(&'r wz_codecs::lent::ResponseFinal<'f>),
     /// An Interest decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
-    #[cfg(all(feature = "session-slot", feature = "rx-control"))]
+    #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
     Interest(&'r wz_codecs::lent::Interest<'f>),
     /// A record the walk read and judged and no consumer reads further: an Oam, or
     /// the tail of a payload that opens with a MID this build has no decoder for
@@ -1298,7 +1374,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     /// ([`RecordForm::LentControl`]). It carries nothing: the point of handing it
     /// over is that the walk counts it as a record, as it counts the owned
     /// `Oam` and `Unknown` it replaces.
-    #[cfg(feature = "session-slot")]
+    #[cfg(feature = "rx-lent-control")]
     Skipped,
 }
 
@@ -1318,7 +1394,7 @@ pub(crate) enum WalkedRecord<'r, 'f> {
         feature = "codec-push",
         all(feature = "codec-request", feature = "codec-response"),
         all(
-            feature = "session-slot",
+            feature = "rx-lent-control",
             feature = "codec-declare",
             feature = "declare-final",
             feature = "codec-response-final"
@@ -1394,14 +1470,22 @@ pub(crate) fn try_for_each_record_while<'f>(
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
         all(
-            feature = "alloc",
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
             any(
                 feature = "codec-push",
                 feature = "codec-request",
                 feature = "codec-response"
             )
         ),
-        feature = "session-slot"
+        feature = "rx-lent-control"
     )))]
     let _ = form;
     let mut cursor = SceCursor::new(payload);
@@ -1421,18 +1505,37 @@ pub(crate) fn try_for_each_record_while<'f>(
             stopped = true;
             break;
         }
-        // The slot profile's form lends every kind, so there is no owned decode
-        // left for the rest of the loop to do on its behalf.
-        #[cfg(all(feature = "session-slot", feature = "alloc"))]
+        // The form that lends every kind leaves no owned decode for the rest of the
+        // loop to do on its behalf.
+        #[cfg(all(
+            feature = "rx-lent-control",
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            )
+        ))]
         if form == RecordForm::LentControl {
             match lend_any_record(&mut cursor, &mut each)? {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
         }
-        // A build with no allocator has the one form and no owned message to decode a
-        // record into: this is the whole walk.
-        #[cfg(not(feature = "alloc"))]
+        // A build with no owned record (no allocator, or control records lent and no
+        // owned reader kept) has the one form: this is the whole walk.
+        #[cfg(not(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        )))]
         {
             let RecordForm::LentControl = form;
             match lend_any_record(&mut cursor, &mut each)? {
@@ -1440,7 +1543,15 @@ pub(crate) fn try_for_each_record_while<'f>(
                 Walk::End => break,
             }
         }
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         {
             use crate::parse_error::InboundParseError;
             #[cfg(any(
@@ -1495,7 +1606,15 @@ pub(crate) fn try_for_each_record_while<'f>(
 /// line it occupies the stack only while that one record is handed over, not
 /// for the whole walk.
 #[cfg(all(
-    feature = "alloc",
+    all(
+        feature = "alloc",
+        any(
+            test,
+            not(feature = "rx-lent-control"),
+            feature = "transport-stats",
+            feature = "routing-namespace"
+        )
+    ),
     feature = "codec-frame",
     any(
         test,
@@ -1514,7 +1633,21 @@ fn lend_record<'f>(
     each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<bool, crate::parse_error::InboundParseError> {
     match mid {
-        #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
+        #[cfg(all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-push"
+            )
+        ))]
         wire_const::N_MID_PUSH => {
             let start = *cursor;
             match lend_push(cursor, each)? {
@@ -1529,7 +1662,18 @@ fn lend_record<'f>(
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| true),
         #[cfg(all(
             feature = "codec-response",
-            any(feature = "alloc", feature = "rx-response")
+            any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-response"
+            )
         ))]
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| true),
         _ => Ok(false),
@@ -1541,7 +1685,18 @@ fn lend_record<'f>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
-    any(feature = "alloc", feature = "rx-push"),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "rx-push"
+    ),
     any(
         test,
         feature = "session-unicast",
@@ -1572,7 +1727,7 @@ enum Lend {
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     )
 ))]
 // Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
@@ -1589,7 +1744,18 @@ fn admit_lent(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
-    any(feature = "alloc", feature = "rx-push"),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "rx-push"
+    ),
     any(
         test,
         feature = "session-unicast",
@@ -1645,7 +1811,18 @@ fn lend_request<'f>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
-    any(feature = "alloc", feature = "rx-response"),
+    any(
+        all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ),
+        feature = "rx-response"
+    ),
     any(
         test,
         feature = "session-unicast",
@@ -1673,7 +1850,7 @@ fn lend_response<'f>(
 /// (`Continue`), or it was the tail of the payload and the walk ends (`End`).
 #[cfg(all(
     feature = "codec-frame",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1700,7 +1877,7 @@ enum Walk {
 /// walk.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1721,8 +1898,8 @@ fn lend_any_record<'f>(
         #[cfg(all(feature = "codec-push", feature = "rx-push"))]
         wire_const::N_MID_PUSH => match lend_push(cursor, each)? {
             Lend::Lent => Ok(Walk::Continue),
-            // The slot profile holds no other form of a record, so a Push past what it
-            // lends inline is refused, as its fixed capacity says.
+            // This form holds no other form of a record, so a Push past what it lends
+            // inline is refused, as its fixed capacity says.
             Lend::PastCapacity => Err(crate::parse_error::InboundParseError::Codec(
                 sce_forge_runtime::codec::CodecError::CapacityExceeded,
             )),
@@ -1751,7 +1928,7 @@ fn lend_any_record<'f>(
     feature = "codec-frame",
     feature = "codec-declare",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1777,7 +1954,7 @@ fn lend_declare<'f>(
     feature = "codec-frame",
     feature = "codec-response-final",
     feature = "rx-response",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1800,7 +1977,7 @@ fn lend_response_final<'f>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1823,7 +2000,7 @@ fn lend_interest<'f>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "rx-control",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -1848,7 +2025,7 @@ fn lend_oam<'f>(
 /// walk ends.
 #[cfg(all(
     feature = "codec-frame",
-    feature = "session-slot",
+    feature = "rx-lent-control",
     any(
         test,
         feature = "session-unicast",
@@ -2428,7 +2605,7 @@ mod chain_saturation_tests {
 
     /// The slot profile's walk holds no owned form of a record, so there a Push
     /// past what it lends is refused, after the record at the cap before it.
-    #[cfg(all(feature = "session-slot", feature = "rx-push"))]
+    #[cfg(all(feature = "rx-lent-control", feature = "rx-push"))]
     #[test]
     fn the_slot_walk_refuses_a_push_past_what_it_lends() {
         let depth = crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH;
@@ -3054,7 +3231,7 @@ mod record_walk_tests {
                 feature = "codec-push",
                 feature = "codec-request",
                 feature = "codec-response",
-                feature = "session-slot"
+                feature = "rx-lent-control"
             ))]
             let WalkedRecord::Owned(one) = one
             else {
@@ -3064,7 +3241,7 @@ mod record_walk_tests {
                 feature = "codec-push",
                 feature = "codec-request",
                 feature = "codec-response",
-                feature = "session-slot"
+                feature = "rx-lent-control"
             )))]
             let WalkedRecord::Owned(one) = one;
             assert_eq!(one.len(), 1, "one record per call");
@@ -3213,7 +3390,7 @@ mod record_walk_tests {
     /// build decodes is lent where the payload lies, and what no consumer reads is
     /// skipped, so the walk builds no owned message at all.
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-declare",
         feature = "declare-final",
         feature = "codec-response-final"

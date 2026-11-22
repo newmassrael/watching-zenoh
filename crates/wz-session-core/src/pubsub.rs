@@ -1289,32 +1289,32 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             }) => {
                 self.dispatch_plain_puts(peer, *reliable, payload, puts);
             }
-            // A Push lent where its frame lies, and on the slot profile the control
-            // records lent beside it: a Declare's alias is absorbed and a
+            // A Push lent where its frame lies, and the control records lent beside
+            // it where a build lends them: a Declare's alias is absorbed and a
             // subscriber Interest is answered from the same views.
             #[cfg(any(
                 feature = "pubsub-put",
                 feature = "pubsub-delete",
-                feature = "session-slot"
+                feature = "rx-lent-control"
             ))]
             IterationEvent::InPlace(record) => {
                 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
                 self.dispatch_in_place(peer, &record);
-                #[cfg(feature = "session-slot")]
+                #[cfg(feature = "rx-lent-control")]
                 self.dispatch_in_place_control(peer, &record);
             }
             _ => {}
         }
     }
 
-    /// The control records of the slot profile that this registry owns, lent where
+    /// The control records this registry owns, lent where
     /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
     /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
     /// session's own subscriptions. Both are the owned forms' rules over the
     /// borrowed views ([`SubscriberPeer::absorb_declare_view`],
     /// `respond_to_subscriber_interest_view`); a record of any other kind is another
     /// registry's.
-    #[cfg(feature = "session-slot")]
+    #[cfg(feature = "rx-lent-control")]
     fn dispatch_in_place_control<Q: Storage>(
         &mut self,
         peer: &mut SubscriberPeer<Q>,
@@ -1464,7 +1464,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     #[cfg(all(
         feature = "storage-profile",
         feature = "declare-subscriber",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     fn respond_to_subscriber_interest_view<Q: Storage>(
         &mut self,
@@ -3367,7 +3367,7 @@ impl<P: Storage> SubscriberPeer<P> {
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::lent::DeclareVariant<'_>) {
         use wz_codecs::lent::DeclareVariant;

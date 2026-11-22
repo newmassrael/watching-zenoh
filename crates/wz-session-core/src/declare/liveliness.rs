@@ -19,7 +19,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use wz_codecs::lent::DeclareVariant;
 
@@ -42,7 +42,7 @@ use crate::wireexpr_resolve::MappingSpaces;
 #[cfg(all(
     feature = "codec-declare",
     feature = "storage-profile",
-    feature = "session-slot"
+    feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf};
 
@@ -209,7 +209,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     #[cfg(all(
         feature = "codec-declare",
         feature = "storage-profile",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     ))]
     pub fn dispatch_declare_view<'a, 'f>(
         &mut self,
@@ -313,9 +313,9 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
             }
-            // A Declare the slot profile's receive path lends where its frame lies,
+            // A Declare the in-place receive path lends where its frame lies,
             // under the same claim as the owned one.
-            #[cfg(feature = "session-slot")]
+            #[cfg(feature = "rx-lent-control")]
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
                     if !declare.interest_id.is_some_and(claimed) {

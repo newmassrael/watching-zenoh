@@ -767,6 +767,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-consolidation",
                 "query-queryable",
                 "query-timeout",
+                # `rx-lent-control` lends the control records of a frame read in place. What it
+                # gates in public is the lent readers of a record (`InPlaceRecord::declare`,
+                # `interest`, `response_final`) and the registries' readers of a lent declaration
+                # (`dispatch_declare_view*`, `respond_to_interest_view`), each behind an `all(..)`
+                # with the codec or the storage tier, which rustc's note does not name.
+                "rx-lent-control",
                 "session-matching",
                 # `session-unicast-accept` and `session-unicast-open` MOVED HERE from
                 # `NO_PUBLIC_PATH` (see the note there). The handshake-stray-message policy

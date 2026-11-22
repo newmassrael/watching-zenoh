@@ -611,6 +611,48 @@ impl ApplicationLayerObserver {
         );
     }
 
+    /// [`Self::stage_queryable_interest`] for an `Interest` lent where its frame lies: the same
+    /// reading of it (only a CURRENT queryables interest is answered, a key naming an undeclared
+    /// mapping drops), its key resolved by the rule both forms share
+    /// ([`crate::wireexpr_resolve::resolve_wireexpr_view`]).
+    #[cfg(all(
+        feature = "rx-lent-control",
+        feature = "query-queryable",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn stage_queryable_interest_view(
+        queryables: &QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+        staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
+        interest: &wz_codecs::lent::Interest<'_>,
+        peer_table: crate::wireexpr_resolve::MappingSpaces<'_>,
+    ) {
+        if !interest.c() {
+            return;
+        }
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+            return;
+        };
+        if !body.qu() {
+            return;
+        }
+        let mut composed = crate::wireexpr_resolve::KeyexprBuf::new();
+        let pattern = match &body.keyexpr {
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+                &w.body,
+                peer_table,
+                &mut composed,
+            ) {
+                Ok(Some(p)) => Some(p),
+                // Undeclared, or past what the bounded buffer holds: no held queryable's key
+                // is longer, so neither reaches one.
+                Ok(None) | Err(_) => return,
+            },
+            None => None,
+        };
+        queryables.respond_to_queryable_interest(interest.interest_id, pattern, body.ag(), staged);
+    }
+
     /// How many inbound liveliness-token Interests had their reply chain
     /// refused whole by the staging buffer since this observer was built.
     /// Always zero on the growable backing, where staging never refuses.
@@ -717,6 +759,23 @@ impl ApplicationLayerObserver {
                         peer_table,
                     );
                 }
+            }
+        }
+        // The same Interest lent where its frame lies, on a build that lends control records.
+        #[cfg(all(
+            feature = "rx-lent-control",
+            feature = "query-queryable",
+            feature = "declare-queryable",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        if let IterationEvent::InPlace(record) = event {
+            if let Some(interest) = record.interest() {
+                Self::stage_queryable_interest_view(
+                    &self.queryables,
+                    &mut self.pending_queryable_replies,
+                    interest,
+                    peer_table,
+                );
             }
         }
         // R311y788 — the remote-subscriber fan carries the SESSION-LOCAL
@@ -2938,6 +2997,61 @@ mod queryable_interest_reply_tests {
                 alloc::format!("queryable {id} lat complete=false interest=7"),
                 "final 7".to_string()
             ]
+        );
+    }
+
+    /// The same interest lent where its frame lies, on a build that lends control records, is
+    /// answered as the owned one is: the queryable stamped with the interest's id, then the
+    /// `Final`. A FUTURE-only interest asks no dump and is answered with nothing.
+    #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+    #[test]
+    fn a_lent_queryable_interest_is_answered_as_the_owned_one_is() {
+        use crate::driver_loop::InPlaceRecord;
+        use sce_forge_runtime::codec::SceCursor;
+
+        let lent_answer = |observer: &mut ApplicationLayerObserver, current: bool| {
+            let owned = build_interest_kinds_with_aggregate(
+                7,
+                InterestKinds::QUERYABLES,
+                current,
+                /*future=*/ true,
+                false,
+                0,
+                Some("lat"),
+            )
+            .expect("a literal key builds");
+            let wire = owned
+                .try_as_borrowed()
+                .expect("a borrowed view")
+                .encode_to_vec();
+            let view =
+                wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("decodes");
+            observer.dispatch_event(IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
+                &view,
+                true,
+                0,
+                crate::qos::Priority::DEFAULT,
+            )));
+            let sink = RecordingSink::default();
+            observer.flush_declare_replies(&sink);
+            sink.wire.into_inner().unwrap()
+        };
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer
+            .queryables
+            .register("lat", |_q, _out| {})
+            .expect("no quota is stated on this table")
+            .as_u64();
+        assert_eq!(
+            lent_answer(&mut observer, true),
+            [
+                alloc::format!("queryable {id} lat complete=false interest=7"),
+                "final 7".to_string()
+            ]
+        );
+        assert!(
+            lent_answer(&mut observer, false).is_empty(),
+            "a FUTURE-only interest asks for no dump"
         );
     }
 

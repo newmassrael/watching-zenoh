@@ -118,9 +118,9 @@ impl DeclarationSync {
 
 /// Calls `each` with the interest id of every `Declare(DeclFinal)` that `event` delivers.
 ///
-/// A final carries the id of the interest it ends in the envelope of the declaration. The slot
-/// profile reads its records where the frame lies and has its own host, so only the owned batch of a
-/// delivered frame is read here.
+/// A final carries the id of the interest it ends in the envelope of the declaration: read from
+/// the owned batch of a delivered frame, or from the Declare a build that lends its control records
+/// (`rx-lent-control`) hands over where its frame lies.
 #[cfg(feature = "codec-declare")]
 pub fn finals_in_event(
     event: crate::driver_loop::IterationEvent<'_, '_>,
@@ -130,17 +130,31 @@ pub fn finals_in_event(
     use crate::network_message::NetworkMessage;
     use crate::transport_profile::owned::DeclareOwnedVariant;
 
-    let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
-        return;
-    };
-    for message in messages {
-        if let NetworkMessage::Declare(declare) = message {
-            if let (Some(interest_id), DeclareOwnedVariant::CodecZenohDeclFinal(_)) =
-                (declare.interest_id, &declare.body)
-            {
-                each(interest_id);
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+            for message in messages {
+                if let NetworkMessage::Declare(declare) = message {
+                    if let (Some(interest_id), DeclareOwnedVariant::CodecZenohDeclFinal(_)) =
+                        (declare.interest_id, &declare.body)
+                    {
+                        each(interest_id);
+                    }
+                }
             }
         }
+        #[cfg(feature = "rx-lent-control")]
+        IterationEvent::InPlace(record) => {
+            if let Some(declare) = record.declare() {
+                if let (
+                    Some(interest_id),
+                    wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_),
+                ) = (declare.interest_id, &declare.body)
+                {
+                    each(interest_id);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -155,8 +169,8 @@ pub struct DeclarationProgress {
     pub initial_scope: bool,
 }
 
-/// [`DeclarationProgress`] of `event`, read from the owned batch of a delivered frame, as
-/// [`finals_in_event`] reads the finals.
+/// [`DeclarationProgress`] of `event`, read from the owned batch of a delivered frame or from a
+/// lent Declare, as [`finals_in_event`] reads the finals.
 #[cfg(feature = "codec-declare")]
 pub fn declaration_progress_in(
     event: crate::driver_loop::IterationEvent<'_, '_>,
@@ -165,16 +179,27 @@ pub fn declaration_progress_in(
     use crate::network_message::NetworkMessage;
 
     let mut progress = DeclarationProgress::default();
-    let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
-        return progress;
+    let mut note = |interest_id: Option<u64>| {
+        progress.declared = true;
+        if interest_id == Some(crate::extbound::INITIAL_INTEREST_ID) {
+            progress.initial_scope = true;
+        }
     };
-    for message in messages {
-        if let NetworkMessage::Declare(declare) = message {
-            progress.declared = true;
-            if declare.interest_id == Some(crate::extbound::INITIAL_INTEREST_ID) {
-                progress.initial_scope = true;
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+            for message in messages {
+                if let NetworkMessage::Declare(declare) = message {
+                    note(declare.interest_id);
+                }
             }
         }
+        #[cfg(feature = "rx-lent-control")]
+        IterationEvent::InPlace(record) => {
+            if let Some(declare) = record.declare() {
+                note(declare.interest_id);
+            }
+        }
+        _ => {}
     }
     progress
 }
@@ -245,6 +270,63 @@ mod tests {
     use super::*;
 
     const TIMEOUT: u64 = 1_000;
+
+    /// A build that lends its control records reads the peer's sync off the Declare lent where its
+    /// frame lies as off the owned one: the final of an interest is seen with its id, a declaration
+    /// of the initial interest is progress in its scope, and a record of another kind is neither.
+    #[cfg(all(
+        feature = "rx-lent-control",
+        feature = "codec-declare",
+        feature = "rx-control",
+        feature = "codec-frame"
+    ))]
+    #[test]
+    fn a_lent_declaration_is_read_as_the_owned_one_is() {
+        use crate::declare_build::build_declare_final_reply;
+        use crate::driver_loop::{InPlaceRecord, IterationEvent};
+        use sce_forge_runtime::codec::SceCursor;
+
+        let lent = |owned: &crate::transport_profile::owned::DeclareOwned| {
+            owned
+                .try_as_borrowed()
+                .expect("a borrowed view")
+                .encode_to_vec()
+        };
+        let wire = lent(&build_declare_final_reply(7));
+        let view = wz_codecs::lent::Declare::decode(&mut SceCursor::new(&wire)).expect("decodes");
+        let record = || {
+            IterationEvent::InPlace(InPlaceRecord::declare_of_frame(
+                &view,
+                true,
+                0,
+                crate::qos::Priority::DEFAULT,
+            ))
+        };
+        let mut finals = alloc::vec::Vec::new();
+        finals_in_event(record(), |id| finals.push(id));
+        assert_eq!(finals, [7], "the lent final names its interest");
+        let progress = declaration_progress_in(record());
+        assert!(progress.declared, "a lent declaration is progress");
+        assert!(!progress.initial_scope, "interest 7 is not the initial one");
+
+        let initial = lent(&build_declare_final_reply(
+            crate::extbound::INITIAL_INTEREST_ID,
+        ));
+        let view =
+            wz_codecs::lent::Declare::decode(&mut SceCursor::new(&initial)).expect("decodes");
+        let progress = declaration_progress_in(IterationEvent::InPlace(
+            InPlaceRecord::declare_of_frame(&view, true, 0, crate::qos::Priority::DEFAULT),
+        ));
+        assert!(progress.initial_scope, "the initial interest's scope begun");
+
+        // CONTROL: an event that lends no Declare shows neither.
+        let mut none = alloc::vec::Vec::new();
+        finals_in_event(
+            IterationEvent::Lease(crate::lease::LeaseCheckOutcome::WithinLease),
+            |id| none.push(id),
+        );
+        assert!(none.is_empty());
+    }
 
     /// A window that runs out ends the sync as empty only under the when-begun mode, on an
     /// accepted link whose peer began nothing; every other cell loses the link.

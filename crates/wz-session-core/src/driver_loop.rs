@@ -677,9 +677,10 @@ impl<'a> InPlaceFragment<'a> {
 /// gets); a record of any other kind is decoded into its owned message and
 /// reported as `Poll(FramePayload)`.
 ///
-/// On the per-session slot profile (`session-slot`) the control kinds travel this
-/// way too: a Declare (`declare`), an Interest (`interest`) and a ResponseFinal
-/// (`response_final`). Their owned messages are what that profile cannot build:
+/// Where control records are lent (`rx-lent-control`: the per-session slot profile,
+/// and a heap engine whose every record is read in place) the control kinds travel
+/// this way too: a Declare (`declare`), an Interest (`interest`) and a ResponseFinal
+/// (`response_final`). Their owned messages are what the slot profile cannot build:
 /// the boxed `DeclareOwned` and the lists it carries are heap, and the same
 /// mirror at the inline profile would put the spread of the codecs' widest bodies
 /// into the one record buffer of every pump and refuse a keyexpr past the codec's
@@ -698,7 +699,7 @@ pub struct InPlaceRecord<'a, 'f> {
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
-        all(feature = "session-slot", feature = "codec-frame")
+        all(feature = "rx-lent-control", feature = "codec-frame")
     ))]
     record: LentRecord<'a, 'f>,
     _frame: core::marker::PhantomData<(&'a (), &'f [u8])>,
@@ -714,7 +715,7 @@ pub struct InPlaceRecord<'a, 'f> {
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",
-    all(feature = "session-slot", feature = "codec-frame")
+    all(feature = "rx-lent-control", feature = "codec-frame")
 ))]
 #[cfg_attr(
     not(any(
@@ -731,30 +732,55 @@ enum LentRecord<'a, 'f> {
         core::convert::Infallible,
         core::marker::PhantomData<(&'a (), &'f ())>,
     ),
-    #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
+    #[cfg(all(
+        feature = "codec-push",
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-push"
+        )
+    ))]
     Push(&'a wz_codecs::lent::Push<'f>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'f>),
     #[cfg(all(
         feature = "codec-response",
-        any(feature = "alloc", feature = "rx-response")
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-response"
+        )
     ))]
     Response(&'a wz_codecs::response::ResponseView<'f>),
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-declare",
         feature = "rx-control"
     ))]
     Declare(&'a wz_codecs::lent::Declare<'f>),
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-frame",
         feature = "codec-response-final",
         feature = "rx-response"
     ))]
     ResponseFinal(&'a wz_codecs::lent::ResponseFinal<'f>),
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-frame",
         feature = "rx-control"
     ))]
@@ -775,7 +801,7 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
             feature = "codec-push",
             feature = "codec-request",
             feature = "codec-response",
-            all(feature = "session-slot", feature = "codec-frame")
+            all(feature = "rx-lent-control", feature = "codec-frame")
         )
     ))]
     #[cfg_attr(
@@ -805,7 +831,18 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     /// A Push record of a frame (see [`Self::reliable`] and its siblings).
     #[cfg(all(
         feature = "codec-push",
-        any(feature = "alloc", feature = "rx-push"),
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-push"
+        ),
         any(
             test,
             feature = "session-unicast",
@@ -856,7 +893,18 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     /// A Response record of a frame.
     #[cfg(all(
         feature = "codec-response",
-        any(feature = "alloc", feature = "rx-response"),
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    test,
+                    not(feature = "rx-lent-control"),
+                    feature = "transport-stats",
+                    feature = "routing-namespace"
+                )
+            ),
+            feature = "rx-response"
+        ),
         any(
             test,
             feature = "session-unicast",
@@ -879,9 +927,9 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         Self::of_frame(LentRecord::Response(response), reliable, sn, priority)
     }
 
-    /// A Declare record of a frame, on the slot profile.
+    /// A Declare record of a frame, where control records are lent.
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-declare",
         feature = "rx-control",
         any(
@@ -906,9 +954,9 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         Self::of_frame(LentRecord::Declare(declare), reliable, sn, priority)
     }
 
-    /// A ResponseFinal record of a frame, on the slot profile.
+    /// A ResponseFinal record of a frame, where control records are lent.
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-frame",
         feature = "codec-response-final",
         feature = "rx-response",
@@ -939,9 +987,9 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         )
     }
 
-    /// An Interest record of a frame, on the slot profile.
+    /// An Interest record of a frame, where control records are lent.
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-frame",
         feature = "rx-control",
         any(
@@ -988,7 +1036,18 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     #[cfg(feature = "codec-push")]
     pub fn push(&self) -> Option<&'a wz_codecs::lent::Push<'f>> {
         match self.record {
-            #[cfg(any(feature = "alloc", feature = "rx-push"))]
+            #[cfg(any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-push"
+            ))]
             LentRecord::Push(push) => Some(push),
             #[allow(unreachable_patterns)]
             _ => None,
@@ -1014,7 +1073,18 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     #[cfg(feature = "codec-response")]
     pub fn response(&self) -> Option<&'a wz_codecs::response::ResponseView<'f>> {
         match self.record {
-            #[cfg(any(feature = "alloc", feature = "rx-response"))]
+            #[cfg(any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-response"
+            ))]
             LentRecord::Response(response) => Some(response),
             #[allow(unreachable_patterns)]
             _ => None,
@@ -1022,9 +1092,9 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     }
 
     /// The Declare, as it is decoded, its keyexpr, extensions and inner body
-    /// ranges of the frame (slot profile). `None` when the record is of another
+    /// ranges of the frame (`rx-lent-control`). `None` when the record is of another
     /// kind.
-    #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+    #[cfg(all(feature = "rx-lent-control", feature = "codec-declare"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
     pub fn declare(&self) -> Option<&'a wz_codecs::lent::Declare<'f>> {
@@ -1036,10 +1106,10 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         }
     }
 
-    /// The ResponseFinal, as it is decoded (slot profile). `None` when the
+    /// The ResponseFinal, as it is decoded (`rx-lent-control`). `None` when the
     /// record is of another kind.
     #[cfg(all(
-        feature = "session-slot",
+        feature = "rx-lent-control",
         feature = "codec-frame",
         feature = "codec-response-final"
     ))]
@@ -1053,8 +1123,8 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     }
 
     /// The Interest, as it is decoded, its keyexpr and extensions ranges of the
-    /// frame (slot profile). `None` when the record is of another kind.
-    #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
+    /// frame (`rx-lent-control`). `None` when the record is of another kind.
+    #[cfg(all(feature = "rx-lent-control", feature = "codec-frame"))]
     ///
     /// Always `None` in a build that reads no control record off the wire (`rx-control`).
     pub fn interest(&self) -> Option<&'a wz_codecs::lent::Interest<'f>> {
@@ -1158,7 +1228,7 @@ impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {
         feature = "codec-push",
         feature = "codec-request",
         feature = "codec-response",
-        feature = "session-slot"
+        feature = "rx-lent-control"
     )
 ))]
 // Its arguments are read by the arm of a kind the build reads; a slot build that reads none has no arm.
@@ -1173,9 +1243,31 @@ pub(crate) fn report_lent_record(
     use crate::network_message::WalkedRecord;
     match one {
         // Owned: the caller's, see above.
-        #[cfg(feature = "alloc")]
+        #[cfg(all(
+            feature = "alloc",
+            any(
+                test,
+                not(feature = "rx-lent-control"),
+                feature = "transport-stats",
+                feature = "routing-namespace"
+            )
+        ))]
         WalkedRecord::Owned(_) => {}
-        #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
+        #[cfg(all(
+            feature = "codec-push",
+            any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-push"
+            )
+        ))]
         WalkedRecord::Push(push) => {
             sink.record(InPlaceRecord::push_of_frame(push, reliable, sn, priority))
         }
@@ -1185,14 +1277,25 @@ pub(crate) fn report_lent_record(
         )),
         #[cfg(all(
             feature = "codec-response",
-            any(feature = "alloc", feature = "rx-response")
+            any(
+                all(
+                    feature = "alloc",
+                    any(
+                        test,
+                        not(feature = "rx-lent-control"),
+                        feature = "transport-stats",
+                        feature = "routing-namespace"
+                    )
+                ),
+                feature = "rx-response"
+            )
         ))]
         WalkedRecord::Response(response) => sink.record(InPlaceRecord::response_of_frame(
             response, reliable, sn, priority,
         )),
-        // The slot profile's control records, lent as the data records are.
+        // The control records, lent as the data records are (`rx-lent-control`).
         #[cfg(all(
-            feature = "session-slot",
+            feature = "rx-lent-control",
             feature = "codec-declare",
             feature = "rx-control"
         ))]
@@ -1200,20 +1303,20 @@ pub(crate) fn report_lent_record(
             declare, reliable, sn, priority,
         )),
         #[cfg(all(
-            feature = "session-slot",
+            feature = "rx-lent-control",
             feature = "codec-response-final",
             feature = "rx-response"
         ))]
         WalkedRecord::ResponseFinal(response_final) => sink.record(
             InPlaceRecord::response_final_of_frame(response_final, reliable, sn, priority),
         ),
-        #[cfg(all(feature = "session-slot", feature = "rx-control"))]
+        #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
         WalkedRecord::Interest(interest) => sink.record(InPlaceRecord::interest_of_frame(
             interest, reliable, sn, priority,
         )),
         // Read and judged, and nothing reads it further: no event, and the walk
         // counts it as a record dispatched.
-        #[cfg(feature = "session-slot")]
+        #[cfg(feature = "rx-lent-control")]
         WalkedRecord::Skipped => {}
     }
 }

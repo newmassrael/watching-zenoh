@@ -1910,13 +1910,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 self.dispatch_messages(messages, peer_keyexpr_table);
             }
-            // The slot profile lends a `ResponseFinal` too: the same rule as the
-            // owned one (`dispatch_response_final`), which reads the request id
-            // and nothing else of it.
+            // A build that lends control records lends a `ResponseFinal` too: the
+            // same rule as the owned one (`dispatch_response_final`), which reads the
+            // request id and nothing else of it.
             #[cfg(any(
                 feature = "codec-response",
                 all(
-                    feature = "session-slot",
+                    feature = "rx-lent-control",
                     feature = "codec-frame",
                     feature = "codec-response-final"
                 )
@@ -1927,7 +1927,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     self.dispatch_response_in_place(response, peer_keyexpr_table);
                 }
                 #[cfg(all(
-                    feature = "session-slot",
+                    feature = "rx-lent-control",
                     feature = "codec-frame",
                     feature = "codec-response-final"
                 ))]

@@ -361,6 +361,14 @@ rx-response = []
 # holds no token for an interest to find and takes no session a peer opens is therefore sent none of
 # these, so the Zephyr client that only answers does not decode them (docs/text-ownership.md).
 rx-control = []
+# Every record of a frame read in place is lent, the control records too: a Declare, an Interest and a
+# ResponseFinal are handed to the tables that read them where their frame lies, as a Push, a Request
+# and a Response are, and an Oam is judged and skipped (`network_message::RecordForm::LentControl`).
+# No record of such a frame is decoded into an owned message, so a build with it does not link the
+# owned walk, except to keep the counters of `transport-stats` and the namespace strip of
+# `routing-namespace`, which read owned messages. The slot profile has it (`session-slot`); a heap
+# engine whose receive is in place selects it. It changes nothing on the copying receive.
+rx-lent-control = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
@@ -1153,7 +1161,7 @@ tx-lend-only = ["transport-tx-lend"]
 # the multilink aggregation API is not compiled (a build that selects every
 # feature at once must still build; an image that turns this selector on does
 # not turn multilink on).
-session-slot = ["bounded-heapless", "tx-lend-only", "storage-profile"]
+session-slot = ["bounded-heapless", "tx-lend-only", "storage-profile", "rx-lent-control"]
 
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door
