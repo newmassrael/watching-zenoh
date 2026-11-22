@@ -1,0 +1,16 @@
+impact = ["rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection"]
+decision = '''
+With SCE ADR 0108's map and set landed on the Interpreter, Rust and C11 and wz pinned at `7f52c3d78ee`, the census rows whose only gap was U1 were read again against what the pin accepts (`vendor/sce/docs/SCE_ACCEPTED_SUBSET.md`, "Map and set variables" to "An algorithm's map slot"), each at its code's current lines. Of 51 such rows, 24 fit a bounded map or set now, with host objects kept in a host table under the same key; 6 wait for a map value that holds a collection; 10 fit but state no bound on their table, recorded as W16; and 11 need something the map does not give (a minimum by deadline, a walk in key order, a key that is a sum type, access by place, or a table that does not exist yet). U3's 20 rows were placed by probes of the pin: a record with a bounded byte string leaves U3 now as a list element and as a map value once Rust copies it, a record with a list field waits for ADR 0086 section 7.3's lowering, and a collection inside a collection waits for ADR 0108's nested values. Section 5's order is restated with what has landed on SCE (`origin/main` `635dd67664a`): ADR 0110's gate, ADR 0111 accepted with U16 and U18 in it, and the SCE session's items 4a to 4c before its implementation.
+'''
+changes = '''
+- docs/zenoh-logic-as-sce-kinds.md: section 7.4 (U1's 51 rows and U3's 20 rows by verdict, W16); section 5's order and what is unscheduled; the U1 and U3 catalogue cells; section 8's U3 point removed.
+- docs/zenoh-logic-as-sce-kinds/S2.md: row 10's note states the map that now holds it.
+'''
+verification = '''
+- Each of the 51 rows' cited code was read at today's lines (four read-only passes), against the pinned subset; the U3 shapes by `sce-codegen check` probes built from the pin. SCE facts read on `origin/main` `635dd67664a` (ADR 0108 order of work through 7b, ADR 0110 and 0111 status). `MAX_PENDING_FINALS` checked unused in wz-capi-coop, wz-capi-core and wz-capi-pico.
+- The pre-push hook's round-fed gates 170 of 170.
+'''
+carry = '''
+- W16: state a bound for the ten tables (section 7.4), the cooperative engine's held finals first (`MAX_PENDING_FINALS`).
+- The 24 rows that fit the map now are the next moves into SCE documents, after S5 M5's MCU move lands with the `Linear` storage.
+'''
