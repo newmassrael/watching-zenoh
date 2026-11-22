@@ -1824,7 +1824,8 @@ mod put_options_tests {
             let source = carried.source_info.expect("the source info");
             assert_eq!((source.eid, source.sn), (0x5150, 9001));
             assert_eq!(source.zid, [0xa1; 16]);
-            info._source_id.zid.id = [0; crate::zid::Z_ID_SIZE];
+            let mut unset = z_source_info_t::empty();
+            options.source_info = &mut unset;
             assert!(
                 publisher_put_options(&options).is_none(),
                 "pico's null source info is no source info"
