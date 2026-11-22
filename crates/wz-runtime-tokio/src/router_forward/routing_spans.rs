@@ -185,7 +185,19 @@ mod tests {
     fn a_query_routed_and_its_final_are_told_with_their_face_and_id() {
         let recorded = Recorded::default();
         let zid = Zid::from_slice(&[1, 2, 3, 4]);
+        // The two callsites are the router's own, which other tests of this binary reach on
+        // other threads. A callsite caches whether any subscriber wants it, and until the process
+        // has made its first subscriber it registers by reading the registering thread's own
+        // (none, so "never") without the lock that orders it against a subscriber being made: one
+        // that another thread was registering as this recorder was made kept "never", and the
+        // event at it was not told (seen once each in an all-features and a workspace run,
+        // 2026-11-22). So the callsites are registered here first, by this thread, and the cache is
+        // made again once the recorder is in place; what is left is a thread that began to
+        // register one of them before this test did and has still not finished.
+        query_routed(zid, FaceId(0), 0);
+        query_final(zid, FaceId(0), 0);
         tracing::subscriber::with_default(recorded.clone(), || {
+            tracing::callsite::rebuild_interest_cache();
             query_routed(zid, FaceId(7), 41);
             query_final(zid, FaceId(7), 41);
         });

@@ -126,9 +126,8 @@ pub trait TimeSource: Send + Sync + 'static {
     ///   from the same task — without the bound, the success value
     ///   could not flow out of the timeout combinator).
     ///
-    /// Tokio profile delegates to `tokio::time::timeout` (which is
-    /// implemented as a `select!` between the wrapped future and a
-    /// `sleep` future). Embassy profile composes
+    /// Tokio profile races the future against its own `sleep`, the
+    /// future polled first, as `tokio::time::timeout` does. Embassy profile composes
     /// `embassy_futures::select::select` over `Timer::after` + the
     /// inner future, mapping the timer arm to `TimeoutElapsed`.
     /// FreeRTOS / lwIP profiles compose a `vTaskDelay`-driven race

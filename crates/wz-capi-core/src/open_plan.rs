@@ -806,6 +806,15 @@ pub struct StatedTxQueue {
     /// `size/<priority>`, by the priority's wire byte: the batches each priority's queue holds,
     /// which an `init` queue allocates at the open and a `lazy` one allocates up to.
     pub sizes: [Option<usize>; wz_session_core::qos::Priority::NUM],
+    /// `congestion_control/drop/wait_before_drop`, in microseconds: how long a message that may be
+    /// dropped waits for room.
+    pub wait_before_drop_us: Option<u64>,
+    /// `congestion_control/drop/max_wait_before_drop_fragments`, in microseconds: how far the
+    /// fragments of a droppable chain may extend its deadline, all together.
+    pub max_wait_before_drop_fragments_us: Option<u64>,
+    /// `congestion_control/block/wait_before_close`, in microseconds: how long a blocking message
+    /// waits for room before the session is closed as unresponsive.
+    pub wait_before_close_us: Option<u64>,
 }
 
 impl StatedTxQueue {
@@ -822,6 +831,13 @@ impl StatedTxQueue {
             sizes: core::array::from_fn(|lane| {
                 (stated.sizes[lane] != upstream.sizes[lane]).then_some(stated.sizes[lane])
             }),
+            wait_before_drop_us: (stated.wait_before_drop_us != upstream.wait_before_drop_us)
+                .then_some(stated.wait_before_drop_us),
+            max_wait_before_drop_fragments_us: (stated.max_wait_before_drop_fragments_us
+                != upstream.max_wait_before_drop_fragments_us)
+                .then_some(stated.max_wait_before_drop_fragments_us),
+            wait_before_close_us: (stated.wait_before_close_us != upstream.wait_before_close_us)
+                .then_some(stated.wait_before_close_us),
         }
     }
 
@@ -840,6 +856,15 @@ impl StatedTxQueue {
         }
         if let Some(allocation) = self.allocation {
             model.allocation = allocation;
+        }
+        if let Some(wait_us) = self.wait_before_drop_us {
+            model.wait_before_drop_us = wait_us;
+        }
+        if let Some(wait_us) = self.max_wait_before_drop_fragments_us {
+            model.max_wait_before_drop_fragments_us = wait_us;
+        }
+        if let Some(wait_us) = self.wait_before_close_us {
+            model.wait_before_close_us = wait_us;
         }
         model
     }
@@ -2467,6 +2492,44 @@ mod tests {
             },
             "only the stated size moves"
         );
+        // The waits of the congestion control are laid over the model too, each alone: a
+        // document that shortens a blocking message's wait before the session is closed is obeyed
+        // by the open of every ABI, as the reader of the document already says it is
+        // (`HONOURED_CONFIG_KEYS`).
+        let waits = r#"{ transport: { link: { tx: { queue: { congestion_control: {
+                           drop: { wait_before_drop: 2000, max_wait_before_drop_fragments: 70000 },
+                           block: { wait_before_close: 3000000 } } } } } } }"#;
+        for model in [
+            TxQueueConf::of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+            TxQueueConf::pico_of_snapshot(
+                &SessionPolicy::defaults(),
+                &wz_session_core::limits::SessionLimits::BUILD,
+            ),
+        ] {
+            assert_eq!(
+                stance(waits, model),
+                TxQueueConf {
+                    wait_before_drop_us: 2_000,
+                    max_wait_before_drop_fragments_us: 70_000,
+                    wait_before_close_us: 3_000_000,
+                    ..model
+                },
+                "only the stated waits move"
+            );
+        }
+        // Upstream's own waits are no instruction: pico's model keeps its droppable message's
+        // wait, which is pico's and not upstream's millisecond.
+        let upstream_waits = r#"{ transport: { link: { tx: { queue: { congestion_control: {
+                                    drop: { wait_before_drop: 1000 },
+                                    block: { wait_before_close: 5000000 } } } } } } }"#;
+        let pico = TxQueueConf::pico_of_snapshot(
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::SessionLimits::BUILD,
+        );
+        assert_eq!(stance(upstream_waits, pico), pico);
         // Upstream's own value is no instruction, and silence is none either: the model keeps
         // its writer's bound rather than taking upstream's millisecond.
         let on = r#"{ transport: { link: { tx: { queue: { batching: { enabled: true,

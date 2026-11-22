@@ -1351,6 +1351,22 @@ fn admit_parked(
 #[cfg(feature = "transport-multilink")]
 type DriveFuture<'f> = Pin<Box<dyn Future<Output = (Face, DriverOutcome)> + 'f>>;
 
+/// `make`'s future, boxed where it is polled from. The face loop makes its opens and drives, 2
+/// to 30 KB each, as it runs ([`face_drive_loop_core`]); a `Box::pin(dial_face(..))` written in
+/// the loop makes the future in the loop's own frame first, and a build that is not optimised
+/// keeps a slot of its own there for every place one is written, so the loop's frame was their
+/// sum (311,296 bytes in the `--all-features` debug build of the runtime's tests, 2026-11-22).
+/// Made here, the future is in this frame, which is gone once it is boxed.
+fn boxed<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
+    Box::pin(make())
+}
+
+/// `make`'s future, pushed onto `set`: [`boxed`] for a set that holds its futures unboxed.
+#[cfg(not(feature = "transport-multilink"))]
+fn push_made<F: Future>(set: &mut FuturesUnordered<F>, make: impl FnOnce() -> F) {
+    set.push(make());
+}
+
 /// Item 751 — what every face this loop opens is opened from, dialled,
 /// accepted and re-dialled alike: the node's session-init template, and the
 /// south partition its forwarder places faces by
@@ -3537,15 +3553,17 @@ async fn face_drive_loop_core(
         // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
         // single-link seed.
         #[cfg(not(feature = "transport-multilink"))]
-        opening.push(Box::pin(dial_face(
-            id,
-            target,
-            Arc::clone(&dial_config),
-            params.clone(),
-            offer,
-            clock,
-            tick_interval_ms,
-        )));
+        opening.push(boxed(|| {
+            dial_face(
+                id,
+                target,
+                Arc::clone(&dial_config),
+                params.clone(),
+                offer,
+                clock,
+                tick_interval_ms,
+            )
+        }));
         #[cfg(feature = "transport-multilink")]
         opening.push(if max_links > 1 {
             // R311y212 — retain the dial endpoint so a partial-loss re-add can
@@ -3555,26 +3573,30 @@ async fn face_drive_loop_core(
             // parity). R2233 — retained BEFORE the dial consumes the plan, and
             // it is the plan (scheme included) that is retained now.
             ml_dial_endpoints.insert(id, RetainedLink::first(id, target.clone()));
-            Box::pin(dial_face_multilink(
-                id,
-                target,
-                Arc::clone(&dial_config),
-                offer,
-                multilink_priority_range(id),
-                params.clone(),
-                clock,
-                tick_interval_ms,
-            )) as OpenFuture
+            boxed(|| {
+                dial_face_multilink(
+                    id,
+                    target,
+                    Arc::clone(&dial_config),
+                    offer,
+                    multilink_priority_range(id),
+                    params.clone(),
+                    clock,
+                    tick_interval_ms,
+                )
+            }) as OpenFuture
         } else {
-            Box::pin(dial_face(
-                id,
-                target,
-                Arc::clone(&dial_config),
-                params.clone(),
-                offer,
-                clock,
-                tick_interval_ms,
-            )) as OpenFuture
+            boxed(|| {
+                dial_face(
+                    id,
+                    target,
+                    Arc::clone(&dial_config),
+                    params.clone(),
+                    offer,
+                    clock,
+                    tick_interval_ms,
+                )
+            }) as OpenFuture
         });
     }
 
@@ -3737,9 +3759,9 @@ async fn face_drive_loop_core(
                                             // dropping it at the faces.get gate. A
                                             // no-op for observation-only forwarders.
                                             forwarder.register_joined(id, primary_id, &joined);
-                                            driving.push(Box::pin(drive_joined_face(
-                                                face, opened, joined, forwarder,
-                                            ))
+                                            driving.push(boxed(|| {
+                                                drive_joined_face(face, opened, joined, forwarder)
+                                            })
                                                 as DriveFuture<'_>);
                                         }
                                         JoinOutcome::OverLimit => {
@@ -3770,7 +3792,7 @@ async fn face_drive_loop_core(
                                             ml_dial_endpoints.remove(&id);
                                             ml_rejected.insert(id);
                                             driving
-                                                .push(Box::pin(drain_rejected_face(face, opened))
+                                                .push(boxed(|| drain_rejected_face(face, opened))
                                                     as DriveFuture<'_>);
                                         }
                                         JoinOutcome::InvalidPubkey => {
@@ -3796,7 +3818,7 @@ async fn face_drive_loop_core(
                                             ml_dial_endpoints.remove(&id);
                                             ml_rejected.insert(id);
                                             driving
-                                                .push(Box::pin(drain_rejected_face(face, opened))
+                                                .push(boxed(|| drain_rejected_face(face, opened))
                                                     as DriveFuture<'_>);
                                         }
                                     }
@@ -4097,11 +4119,13 @@ async fn face_drive_loop_core(
                         // on the runtime instead, wrapped as its executor wants it
                         // polled: this face is then driven by a task of its own.
                         if let Some(spawn) = &spawned {
-                            let drive = spawn.executor.wrap(Box::pin(drive_face_shared(
-                                face.clone(),
-                                opened,
-                                Arc::clone(&spawn.forwarder),
-                            )));
+                            let drive = spawn.executor.wrap(boxed(|| {
+                                drive_face_shared(
+                                    face.clone(),
+                                    opened,
+                                    Arc::clone(&spawn.forwarder),
+                                )
+                            }));
                             let drive = crate::runtime_pool::in_caller_span(drive);
                             let task = match spawn.on {
                                 SpawnOn::Workers => spawned_drives.spawn(drive),
@@ -4110,10 +4134,10 @@ async fn face_drive_loop_core(
                             spawned_faces.insert(task.id(), face);
                         } else {
                             #[cfg(not(feature = "transport-multilink"))]
-                            driving.push(drive_face(face, opened, forwarder));
+                            push_made(&mut driving, || drive_face(face, opened, forwarder));
                             #[cfg(feature = "transport-multilink")]
                             driving
-                                .push(Box::pin(drive_face(face, opened, forwarder))
+                                .push(boxed(|| drive_face(face, opened, forwarder))
                                     as DriveFuture<'_>);
                         }
                     }
@@ -4167,16 +4191,18 @@ async fn face_drive_loop_core(
                                             attempt,
                                         },
                                     );
-                                    opening.push(Box::pin(dial_face_after(
-                                        again,
-                                        target,
-                                        Arc::clone(&dial_config),
-                                        backoff_ms,
-                                        params.clone(),
-                                        offer,
-                                        clock,
-                                        tick_interval_ms,
-                                    ))
+                                    opening.push(boxed(|| {
+                                        dial_face_after(
+                                            again,
+                                            target,
+                                            Arc::clone(&dial_config),
+                                            backoff_ms,
+                                            params.clone(),
+                                            offer,
+                                            clock,
+                                            tick_interval_ms,
+                                        )
+                                    })
                                         as OpenFuture);
                                 }
                                 None => {
@@ -4465,19 +4491,35 @@ async fn face_drive_loop_core(
                                 let retained = RetainedLink::first(id, target.clone());
                                 let band = retained.band;
                                 ml_dial_endpoints.insert(id, retained);
-                                opening.push(Box::pin(dial_face_multilink(
+                                opening.push(boxed(|| {
+                                    dial_face_multilink(
+                                        id,
+                                        target,
+                                        Arc::clone(&dial_config),
+                                        offer,
+                                        band,
+                                        params.clone(),
+                                        clock,
+                                        tick_interval_ms,
+                                    )
+                                }) as OpenFuture);
+                            }
+                        } else {
+                            opening.push(boxed(|| {
+                                dial_face(
                                     id,
                                     target,
                                     Arc::clone(&dial_config),
-                                    offer,
-                                    band,
                                     params.clone(),
+                                    offer,
                                     clock,
                                     tick_interval_ms,
-                                )) as OpenFuture);
-                            }
-                        } else {
-                            opening.push(Box::pin(dial_face(
+                                )
+                            }) as OpenFuture);
+                        }
+                        #[cfg(not(feature = "transport-multilink"))]
+                        opening.push(boxed(|| {
+                            dial_face(
                                 id,
                                 target,
                                 Arc::clone(&dial_config),
@@ -4485,18 +4527,8 @@ async fn face_drive_loop_core(
                                 offer,
                                 clock,
                                 tick_interval_ms,
-                            )) as OpenFuture);
-                        }
-                        #[cfg(not(feature = "transport-multilink"))]
-                        opening.push(Box::pin(dial_face(
-                            id,
-                            target,
-                            Arc::clone(&dial_config),
-                            params.clone(),
-                            offer,
-                            clock,
-                            tick_interval_ms,
-                        )));
+                            )
+                        }));
                     }
                     DialDecision::AlreadyHeld => {
                         // An aggregating node too: its links to a node are the ones the
@@ -4715,7 +4747,7 @@ async fn face_drive_loop_core(
                 // Taken through the arm every open ends in. The accept stays counted
                 // against `accept_pending` until then, as upstream counts it until
                 // its transport is up.
-                opening.push(Box::pin(async move {
+                opening.push(boxed(|| async move {
                     let opened = (id, peer, result);
                     drop(pending);
                     opened

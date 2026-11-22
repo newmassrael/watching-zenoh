@@ -433,11 +433,32 @@ impl ProgramEpoch {
     }
 }
 
-/// The wait a [`TokioTime`] makes: on the program's time base, or tokio's.
+/// The wait a [`TokioTime`] makes: on the program's time base, or tokio's. A future of its own,
+/// so the clock's sleep is the wait itself, and not an `async` block that would hold it twice: as
+/// the value it captured and as the one it matched out of it to await.
 #[cfg(feature = "program-time")]
+#[must_use = "futures do nothing unless polled"]
 enum Wait {
     Program(wz_node_time::time_base::ProgramSleep),
     Wall(tokio::time::Sleep),
+}
+
+#[cfg(feature = "program-time")]
+impl Future for Wait {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        // SAFETY: the variant's wait is pinned structurally: it is never moved out of a pinned
+        // `Wait`, which has no `Drop` of its own and is never written to once made.
+        match unsafe { self.get_unchecked_mut() } {
+            Wait::Program(program) => std::pin::Pin::new(program).poll(cx),
+            // SAFETY: as above, the wall wait stays where it is for as long as `self` is pinned.
+            Wait::Wall(wall) => unsafe { std::pin::Pin::new_unchecked(wall) }.poll(cx),
+        }
+    }
 }
 
 impl TokioTime {
@@ -564,37 +585,9 @@ impl TimeSource for TokioTime {
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
         // The wait is made here, as tokio's sleep fixes its deadline when it is made, and the
         // future only awaits it.
-        let wait = match self.program {
+        match self.program {
             Some(program) => Wait::Program(program.sleep_ms(ms)),
             None => Wait::Wall(tokio::time::sleep(Duration::from_millis(ms))),
-        };
-        async move {
-            match wait {
-                Wait::Program(program) => program.await,
-                Wait::Wall(wall) => wall.await,
-            }
-        }
-    }
-
-    #[cfg(feature = "program-time")]
-    async fn timeout<F>(&self, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send,
-    {
-        let Some(program) = self.program else {
-            return tokio::time::timeout(Duration::from_millis(ms), fut)
-                .await
-                .map_err(|_elapsed| TimeoutElapsed);
-        };
-        let deadline = program.sleep_ms(ms);
-        tokio::pin!(fut);
-        // The future first, as tokio's timeout polls it first: a future that is ready when the
-        // deadline passes has finished in time.
-        tokio::select! {
-            biased;
-            out = &mut fut => Ok(out),
-            () = deadline => Err(TimeoutElapsed),
         }
     }
 
@@ -609,29 +602,18 @@ impl TimeSource for TokioTime {
         tokio::time::sleep(Duration::from_millis(ms))
     }
 
-    #[cfg(not(feature = "program-time"))]
-    async fn timeout<F>(&self, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
+    /// The race of [`timeout_on`], on this clock's own sleep: a named future and not an `async fn`,
+    /// which would keep `fut` twice, as its argument and as the value it races.
+    fn timeout<F>(
+        &self,
+        ms: u64,
+        fut: F,
+    ) -> impl Future<Output = Result<F::Output, TimeoutElapsed>> + Send + '_
     where
         F: Future + Send + 'static,
         F::Output: Send,
     {
-        // `tokio::time::timeout` is itself a `select!` over the inner
-        // future and a `sleep`. Its `Err` variant is
-        // `tokio::time::error::Elapsed`, an opaque unit-ish marker —
-        // we collapse it to the runtime-neutral [`TimeoutElapsed`]
-        // contract type so embassy / lwIP impls do not have to
-        // pretend they produce a tokio-shaped error.
-        //
-        // The `async fn` shape (instead of `-> impl Future` + an
-        // explicit `async move { … }` body) is preferred per
-        // clippy::manual_async_fn; the desugared return type
-        // matches the trait's `-> impl Future<Output = Result<…>>
-        // + Send + '_` contract because tokio's runtime guarantees
-        // the auto-generated state machine is `Send` whenever the
-        // captured `fut` is `Send`.
-        tokio::time::timeout(Duration::from_millis(ms), fut)
-            .await
-            .map_err(|_elapsed| TimeoutElapsed)
+        TimeoutOn::new(fut, self.sleep(ms))
     }
 }
 
