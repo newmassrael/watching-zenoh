@@ -694,7 +694,9 @@ config WZ_LIMIT_PICO_UNICAST_BATCH_BYTES
 	  PICO_FRAG_MAX_BYTES, with MAX_KEYEXPR_BYTES, 16 bytes of a timestamp's clock id
 	  and 4 bytes for each of the larger of MAX_SUBSCRIPTIONS and
 	  MAX_LIVELINESS_SUBSCRIPTIONS, as the cooperative engine's build asserts; a build
-	  that raises this raises DELIVERY_LANE_BYTES with it.
+	  that raises this raises DELIVERY_LANE_BYTES with it. A build whose engine lends
+	  each link's buffers from the session's memory when it opens holds a stated value
+	  to the build's own: a session may lower it, never raise it.
 
 config WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES
 	int "PICO_MULTICAST_BATCH_BYTES"

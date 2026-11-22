@@ -495,10 +495,10 @@
               "maximum": 4294967295,
               "default": 65536,
               "x-wz-kind": "parameter",
-              "x-wz-storage": "quota",
+              "x-wz-storage": "both",
               "x-wz-scope": "entity",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "DELIVERY_LANE_CALLBACKS": {
@@ -1213,10 +1213,10 @@
               "maximum": 65535,
               "default": 2048,
               "x-wz-kind": "parameter",
-              "x-wz-storage": "quota",
+              "x-wz-storage": "both",
               "x-wz-scope": "link",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "none",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "negotiated"
             },
             "PICO_MULTICAST_BATCH_BYTES": {

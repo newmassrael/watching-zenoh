@@ -36,6 +36,18 @@ const fn fixed_capacity(value: usize) -> Option<usize> {
     }
 }
 
+/// The capacity of a parameter whose bytes a session's arena lends when it opens, under the
+/// build's value: `value` where the build's tables are fixed in size or its engine lends from
+/// an arena (`limits-lent-at-open`), so a stage after the build only lowers it; none where the
+/// heap sizes the bytes from the session's own value.
+const fn lent_capacity(value: usize) -> Option<usize> {
+    if crate::bounded::ENFORCES_CAPACITY || crate::limit_binding::LIMITS_LENT_AT_OPEN {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 /// `MAX_KEYEXPR_BYTES`: The longest key expression, in bytes, a session stores: a
 /// subscription's pattern, or a key a peer declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +144,7 @@ impl LimitSpec for DeliveryLaneBytes {
     const LIMIT: &'static str = "DELIVERY_LANE_BYTES";
     const DRIVEN: Option<Driven> = None;
     const READ_FROM_SNAPSHOT: bool = true;
-    const CAPACITY: Option<usize> = None;
+    const CAPACITY: Option<usize> = lent_capacity(caps::DELIVERY_LANE_BYTES);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: usize = caps::DELIVERY_LANE_BYTES;
@@ -1234,7 +1246,7 @@ impl LimitSpec for PicoUnicastBatchBytes {
     const LIMIT: &'static str = "PICO_UNICAST_BATCH_BYTES";
     const DRIVEN: Option<Driven> = None;
     const READ_FROM_SNAPSHOT: bool = true;
-    const CAPACITY: Option<usize> = None;
+    const CAPACITY: Option<usize> = lent_capacity(caps::PICO_UNICAST_BATCH_BYTES);
     const DOMAIN: LimitDomain =
         LimitDomain::of_parameter(1, 65535, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
     const DEFAULT: usize = caps::PICO_UNICAST_BATCH_BYTES;

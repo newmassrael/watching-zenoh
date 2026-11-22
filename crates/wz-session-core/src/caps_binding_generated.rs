@@ -87,10 +87,10 @@ pub const DELIVERY_LANE_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
     driven: None,
     range: Some((1, 4294967295)),
-    storage: Storage::Quota,
+    storage: Storage::Both,
     scope: &[Scope::Entity],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -855,10 +855,10 @@ pub const PICO_UNICAST_BATCH_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
     driven: None,
     range: Some((1, 65535)),
-    storage: Storage::Quota,
+    storage: Storage::Both,
     scope: &[Scope::Link],
     binding_heap: Some(Binding::Open),
-    binding_fixed: None,
+    binding_fixed: Some(Binding::Open),
     wire: Wire::Negotiated,
 };
 
