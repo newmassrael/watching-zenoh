@@ -1544,7 +1544,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
-    // way the session holds the key ids the config states (`crate::key_ids`).
+    // way the session holds the key ids the config states (`crate::key_ids`). The read task waits
+    // for the program's links as it waits for the host's sockets, with the session free: a link
+    // waiting in its own loop would hold the session through each tick of its wait, and a call
+    // that takes the session (a get takes it more than once) would wait behind the read task
+    // turn after turn.
     #[cfg(feature = "app-transport")]
     let opened = match request.app_transport {
         Some(transport) => wz_capi_coop::CoopEngine::open_made_in(
@@ -1552,7 +1556,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
                 wz_capi_coop::app_link::AppLinks::new(
                     wz_session_core::app_transport::SessionTransport::new(transport, &limits),
                 )
-                .with_rx_capacity(limits.pico_unicast_batch_bytes()),
+                .with_rx_capacity(limits.pico_unicast_batch_bytes())
+                .waited_by_owner(),
                 &clock,
             ),
             clock,
