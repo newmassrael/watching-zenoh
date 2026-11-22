@@ -98,6 +98,34 @@ pub(crate) enum Backing {
 unsafe impl Send for Backing {}
 unsafe impl Sync for Backing {}
 
+/// Where a payload's bytes are held.
+enum Store {
+    /// Storage its holders share.
+    Shared(Arc<Backing>),
+    /// The start of bytes the payload only reads, for as long as their owner keeps them: a
+    /// sample's payload handed to a callback ([`ByteBuf::lent`]). Never shared, so a holder that
+    /// may outlive them is given a copy.
+    Lent(*const u8),
+}
+
+// SAFETY: a lent payload's bytes are its lender's, valid and unchanged for as long as the payload
+// lives (`ByteBuf::lent`); nothing writes through the pointer, so it is shared between threads
+// exactly as the lender's own reference would be.
+unsafe impl Send for Store {}
+unsafe impl Sync for Store {}
+
+/// The `len` bytes a lent payload reads at `start`.
+///
+/// # Safety
+/// `start` is a lent payload's ([`ByteBuf::lent`]) and `len` its length, read while it lives.
+unsafe fn lent_bytes<'a>(start: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(start, len)
+    }
+}
+
 impl Backing {
     fn as_slice(&self) -> &[u8] {
         match self {
@@ -135,10 +163,10 @@ impl Backing {
 ///
 /// `Clone` SHARES the storage, as pico's `z_bytes_clone` does; a copy is asked
 /// for by name ([`ByteBuf::copied`]), and a writer that needs to change shared
-/// or aliased bytes copies them first ([`ByteBuf::owned_mut`]).
-#[derive(Clone)]
+/// or aliased bytes copies them first ([`ByteBuf::owned_mut`]). A LENT payload
+/// ([`ByteBuf::lent`]) has no storage to share, so its clone is a copy.
 pub(crate) struct ByteBuf {
-    backing: Arc<Backing>,
+    backing: Store,
     /// How much of `backing` this payload is. Shorter than the backing only for
     /// a string that was MOVED into a payload: its allocation carries a NUL the
     /// payload does not.
@@ -154,6 +182,21 @@ impl core::fmt::Debug for ByteBuf {
             .field("len", &self.len)
             .field("bounds", &self.bounds)
             .finish()
+    }
+}
+
+impl Clone for ByteBuf {
+    fn clone(&self) -> Self {
+        let backing = match &self.backing {
+            Store::Shared(backing) => Store::Shared(Arc::clone(backing)),
+            // The lender's bytes are gone once its call returns, and a clone may outlive it.
+            Store::Lent(_) => Store::Shared(Arc::new(Backing::Owned(self.as_slice().to_vec()))),
+        };
+        Self {
+            backing,
+            len: self.len,
+            bounds: self.bounds.clone(),
+        }
     }
 }
 
@@ -177,19 +220,49 @@ impl ByteBuf {
     /// that stay valid and unchanged until `release` has run.
     pub(crate) unsafe fn aliased(start: *const u8, len: usize, release: Release) -> Self {
         Self {
-            backing: Arc::new(Backing::Aliased {
+            backing: Store::Shared(Arc::new(Backing::Aliased {
                 start,
                 len,
                 _release: release,
-            }),
+            })),
             len,
+            bounds: Vec::new(),
+        }
+    }
+
+    /// A payload that READS `bytes` where they lie and allocates nothing: a sample's payload
+    /// handed to a callback, read where the session delivered it. What may outlive the bytes is
+    /// given a copy: a clone, and the storage a slice or a string takes over.
+    ///
+    /// # Safety
+    /// `bytes` stay valid and unchanged until this payload is dropped.
+    pub(crate) unsafe fn lent(bytes: &[u8]) -> Self {
+        Self {
+            backing: Store::Lent(bytes.as_ptr()),
+            len: bytes.len(),
             bounds: Vec::new(),
         }
     }
 
     /// The payload's bytes.
     pub(crate) fn as_slice(&self) -> &[u8] {
-        &self.backing.as_slice()[..self.len]
+        match &self.backing {
+            Store::Shared(backing) => &backing.as_slice()[..self.len],
+            // SAFETY: a lent payload's bytes outlive it (`Self::lent`).
+            Store::Lent(start) => unsafe { lent_bytes(*start, self.len) },
+        }
+    }
+
+    /// The storage, for a holder that keeps it: a lent payload's bytes are copied into storage
+    /// of their own first.
+    fn into_shared(self) -> Arc<Backing> {
+        match self.backing {
+            Store::Shared(backing) => backing,
+            // SAFETY: a lent payload's bytes outlive it (`Self::lent`), and it lives here.
+            Store::Lent(start) => Arc::new(Backing::Owned(
+                unsafe { lent_bytes(start, self.len) }.to_vec(),
+            )),
+        }
     }
 
     /// A payload with the same bytes in storage of its own: the copy an
@@ -201,13 +274,21 @@ impl ByteBuf {
     /// The bytes as an owned, unshared `Vec`, copying them first when the
     /// storage is shared or the caller's.
     fn owned_mut(&mut self) -> &mut Vec<u8> {
-        let private = matches!(Arc::get_mut(&mut self.backing), Some(Backing::Owned(v)) if v.len() == self.len);
+        let private = match &mut self.backing {
+            Store::Shared(backing) => {
+                matches!(Arc::get_mut(backing), Some(Backing::Owned(v)) if v.len() == self.len)
+            }
+            Store::Lent(_) => false,
+        };
         if !private {
-            self.backing = Arc::new(Backing::Owned(self.as_slice().to_vec()));
+            self.backing = Store::Shared(Arc::new(Backing::Owned(self.as_slice().to_vec())));
         }
-        match Arc::get_mut(&mut self.backing) {
-            Some(Backing::Owned(bytes)) => bytes,
-            _ => unreachable!("the storage was made private and owned just above"),
+        match &mut self.backing {
+            Store::Shared(backing) => match Arc::get_mut(backing) {
+                Some(Backing::Owned(bytes)) => bytes,
+                _ => unreachable!("the storage was made private and owned just above"),
+            },
+            Store::Lent(_) => unreachable!("the storage was made private and owned just above"),
         }
     }
 
@@ -293,7 +374,7 @@ impl From<Vec<u8>> for ByteBuf {
     fn from(data: Vec<u8>) -> Self {
         let len = data.len();
         Self {
-            backing: Arc::new(Backing::Owned(data)),
+            backing: Store::Shared(Arc::new(Backing::Owned(data))),
             len,
             bounds: Vec::new(),
         }
@@ -322,7 +403,7 @@ unsafe fn payload_over(backing: &Arc<Backing>, start: *const u8, len: usize) -> 
     let whole = backing.as_slice();
     if start == whole.as_ptr() && len <= whole.len() {
         return ByteBuf {
-            backing: Arc::clone(backing),
+            backing: Store::Shared(Arc::clone(backing)),
             len,
             bounds: Vec::new(),
         };
@@ -361,9 +442,10 @@ pub(crate) struct SliceState {
 impl SliceState {
     fn boxed(buf: ByteBuf) -> Box<SliceState> {
         let len = buf.len;
-        let start = buf.as_slice().as_ptr();
+        let backing = buf.into_shared();
+        let start = backing.as_slice().as_ptr();
         Box::new(SliceState {
-            backing: buf.backing,
+            backing,
             self_view: z_loaned_slice_t {
                 _start: start,
                 _len: len,
@@ -408,7 +490,7 @@ impl StringState {
                 _start: alias.as_slice().as_ptr(),
                 _len: len,
             },
-            backing: alias.backing,
+            backing: alias.into_shared(),
         })
     }
 

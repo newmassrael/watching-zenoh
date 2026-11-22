@@ -122,6 +122,8 @@ mod generated {
 /// Whether some key matches both `a` and `b`; either may be a pattern, and the answer is
 /// symmetric. zenoh's `intersects`. See the module docs for what it refuses.
 pub fn keyexpr_intersects(a: &str, b: &str) -> bool {
+    #[cfg(test)]
+    INTERSECT_WALKS.with(|walks| walks.set(walks.get() + 1));
     generated::keyexpr_intersects::keyexpr_intersects(
         a.as_bytes(),
         b.as_bytes(),
@@ -223,6 +225,12 @@ impl KeyFacts {
         }
     }
 
+    /// Whether the text is a key the matchers accept: no empty chunk, and on the fixed backing
+    /// no deeper than [`MAX_KEYEXPR_CHUNKS`].
+    pub const fn is_key(self) -> bool {
+        self.key
+    }
+
     /// Whether the key of these facts intersects ITSELF, which is what a reply keyed exactly as
     /// its query is asked: the answer [`keyexpr_intersects`] gives for the same text on both
     /// sides, with no scan unless a wildcard makes the walk necessary.
@@ -247,6 +255,13 @@ pub fn keyexpr_intersects_text_with(
         return candidate == target && target_facts.key;
     }
     keyexpr_intersects(candidate, target)
+}
+
+// How many times `keyexpr_intersects` walked two keys on this thread: a test reads the difference
+// to tell a match answered from the keys' facts from one that walked them.
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static INTERSECT_WALKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

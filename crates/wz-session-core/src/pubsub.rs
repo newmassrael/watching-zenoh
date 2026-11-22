@@ -114,7 +114,7 @@ use crate::id_map::{IdMap, PeerAliases};
 use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
 #[cfg(feature = "key-set-closed")]
 use crate::keyexpr_match::keyexpr_intersects_text;
-use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+use crate::keyexpr_match::{keyexpr_intersects_text_with, KeyFacts, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -259,6 +259,9 @@ struct Subscriber<C: SampleSink, P: Storage = Profile> {
     /// written and matches nothing; `*` / `**` are single-char chunks;
     /// matching is performed by [`keyexpr_intersects`].
     pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// What [`KeyFacts`] reads of `pattern`, read once at registration so that a message
+    /// matched against it does not scan the pattern again.
+    pattern_facts: KeyFacts,
     /// R223 — locality filter applied before the sink fires.
     /// See [`crate::locality`] for the semantics and the wz
     /// dispatch invariant (every inbound Push is treated as remote
@@ -1168,12 +1171,14 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             .admit_entity(&pattern, EntityKind::Subscriber)
             .map_err(|_| RegisterError::KeyNotInSet)?;
         let id = SubscriptionId(self.next_entity_id().ok_or(RegisterError::IdsExhausted)?);
+        let pattern_facts = KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
         // rejected (table-full) registration leaves no id gap.
         self.subscribers
             .push(Subscriber {
                 id,
                 pattern,
+                pattern_facts,
                 allowed_origin,
                 entity,
                 sink,
@@ -2663,11 +2668,20 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
     // So this widens delivery to the wildcard case and changes nothing about
     // the concrete one.
     //
+    // The arriving key is read once for the whole table, and each pattern was read when it
+    // registered: a pattern and a key that hold no wildcard are compared as text, and only a
+    // wildcard on either side walks them, which zenoh-pico's matcher does too
+    // (`vendor/zenoh-pico/src/session/keyexpr.c` @ `fast path for identical key expressions`).
+    let facts = KeyFacts::of(keyexpr);
     // Over-depth arriving key on the fixed backing: delivered to nobody and
     // answered `None`, so a caller that remembers answers does not remember
     // it. The matcher would refuse it for every subscriber anyway; the depth
-    // is counted here only for that answer.
-    if crate::bounded::ENFORCES_CAPACITY && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS {
+    // is counted here only for that answer, and only for a key the facts do not
+    // already place within the bound.
+    if crate::bounded::ENFORCES_CAPACITY
+        && !facts.is_key()
+        && keyexpr.split('/').count() > MAX_KEYEXPR_CHUNKS
+    {
         return None;
     }
     for (position, subscriber) in subscribers.iter_mut().enumerate() {
@@ -2682,7 +2696,12 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
         // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
         // applies the fixed backing's depth bound to it, the same defensive
         // over-depth skip every scan inherits from the one seam.
-        if keyexpr_intersects(&subscriber.pattern, keyexpr) {
+        if keyexpr_intersects_text_with(
+            &subscriber.pattern,
+            subscriber.pattern_facts,
+            keyexpr,
+            facts,
+        ) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU `C` is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -7907,6 +7926,54 @@ mod tests {
             assert_eq!(reg.dispatch_borrowed(&key(long), true), 1);
         }
         assert_eq!(scans() - start, 5, "a key too long for a slot");
+    }
+
+    /// A pattern and a key with no wildcard are compared as text, from the facts each was read
+    /// for once, and only a wildcard on either side walks the two: a concrete key delivered past
+    /// two concrete subscriptions and a wildcard one walks the wildcard one alone, and a wildcard
+    /// key walks every subscription.
+    #[test]
+    fn a_concrete_key_walks_only_the_wildcard_subscriptions() {
+        use crate::bounded::Static;
+        use crate::keyexpr_match::INTERSECT_WALKS;
+        use crate::sink::BorrowedSample;
+
+        struct Noop;
+        impl SampleSink for Noop {
+            fn deliver(&mut self, _sample: &dyn SampleView) {}
+        }
+
+        if caps::MAX_SUBSCRIPTIONS < 3 {
+            return;
+        }
+        let walks = || INTERSECT_WALKS.with(|count| count.get());
+        let key = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let mut reg: SubscriberRegistry<Noop, Static> = SubscriberRegistry::default();
+        for pattern in ["s/one", "s/two", "s/*"] {
+            reg.register_sink(pattern, crate::locality::Locality::Any, Noop)
+                .expect("three subscriptions fit");
+        }
+
+        let start = walks();
+        assert_eq!(reg.dispatch_borrowed(&key("s/one"), true), 2);
+        assert_eq!(walks() - start, 1, "the wildcard subscription alone");
+
+        let start = walks();
+        assert_eq!(reg.dispatch_borrowed(&key("s/other"), true), 1);
+        assert_eq!(walks() - start, 1, "a key no concrete subscription equals");
+
+        let start = walks();
+        assert_eq!(reg.dispatch_borrowed(&key("s/*"), true), 3);
+        assert_eq!(
+            walks() - start,
+            3,
+            "a wildcard key walks every subscription"
+        );
     }
 }
 
