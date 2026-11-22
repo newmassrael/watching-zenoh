@@ -79,58 +79,35 @@ pub(super) type Gets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplyS
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
 pub(super) type Peer = PeerTables<Lent>;
 
-/// Where the rows of a face's tables lie.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowsOrigin {
-    /// A set the session's arena lent at its open, which a face takes when it comes and leaves,
-    /// emptied, for the next when it goes.
-    Spare,
-    /// Nowhere: every set the arena lent was held, and the tables, of no rows, refuse every get
-    /// and everything the peer would have them hold. The arena lends a set for each face the
-    /// config admits and a face past those is refused before it comes, so no face is expected
-    /// here; the session's memory is the arena alone either way.
-    Unlent,
-}
-
-/// The id a set no face holds carries: the session numbers its faces from 1, and its own and the
-/// dial role's above them, so no face is 0.
-const UNHELD: FaceId = 0;
-
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
 /// A set is built where the registry keeps it ([`Self::rowless_in`], then [`Self::lend`]) and is
 /// never moved from there: a face that comes takes a set where it lies and one that goes empties it
 /// there. The peer's tables keyed by its ids are inline at the build's capacity, so a set is tens of
 /// kilobytes, and a set moved as a value passes through the frame of each function that moves it.
+/// Which face holds a set is the registry's index of held sets, not the set's: a walk over the
+/// faces reads no set to learn whether a face holds it.
 pub(super) struct FaceTables {
-    pub(super) id: FaceId,
     pub(super) peer: Peer,
     pub(super) gets: Gets,
-    origin: RowsOrigin,
 }
 
 impl FaceTables {
-    /// A set for no face yet whose rows lie where `origin` says, written field by field into
-    /// `place`, which is overwritten without dropping what it held: tables of no rows, each
-    /// refusing what is asked of it until [`Self::lend`] lends it rows, the peer's held to
-    /// `limits`. Not inlined: the peer's tables, nearly all of the set, are written where they lie
-    /// by `init_in`, and of the set only its gets are a value in this frame.
+    /// A set for no face yet, written field by field into `place`, which is overwritten without
+    /// dropping what it held: tables of no rows, each refusing what is asked of it until
+    /// [`Self::lend`] lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
+    /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
+    /// gets are a value in this frame.
     #[inline(never)]
-    fn rowless_in<'p>(
-        place: &'p mut MaybeUninit<Self>,
-        origin: RowsOrigin,
-        limits: &SessionLimits,
-    ) -> &'p mut Self {
+    fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
         // pointer to it, the peer's tables by `init_in`, which writes them whole (a
         // `MaybeUninit<T>` has the layout of `T`). `every_field_is_written` names every field, so
         // the set is whole when it is lent.
         let set = unsafe {
-            ptr::write(addr_of_mut!((*at).id), UNHELD);
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
             Peer::init_in(&mut *addr_of_mut!((*at).peer).cast::<MaybeUninit<Peer>>());
-            ptr::write(addr_of_mut!((*at).origin), origin);
             &mut *at
         };
         set.peer.limit_to(limits);
@@ -142,12 +119,7 @@ impl FaceTables {
     /// here (and so without writing it there) does not compile.
     #[allow(dead_code)]
     fn every_field_is_written(set: Self) {
-        let Self {
-            id: _,
-            peer: _,
-            gets: _,
-            origin: _,
-        } = set;
+        let Self { peer: _, gets: _ } = set;
     }
 
     /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its
@@ -164,38 +136,89 @@ impl FaceTables {
         self.peer.lend_rows(arena, peer, limits)
     }
 
-    /// Whether face `id` holds this set.
-    fn held_by(&self, id: FaceId) -> bool {
-        self.id == id && self.held()
-    }
-
-    /// Whether a face holds this set.
-    fn held(&self) -> bool {
-        self.id != UNHELD
-    }
-
     /// Give the set back where it lies, for the next face: what its peer wrote is dropped and its
     /// pending gets end, as the loss of the face they were asked of ends them, each table keeping
     /// the rows it was lent.
     fn give_back(&mut self) {
         self.gets.clear();
         self.peer.forget_peer();
-        self.id = UNHELD;
     }
 }
 
-/// The faces other than the one a call acts on, which the matching verdicts of that call count.
+/// A set a face holds: where it lies among the registry's sets, and the face. An entry is two
+/// words, so a walk over the faces reads one line of the index for every few faces and then the
+/// held sets alone, where a test of each set would read a line of every set the open lent.
+#[derive(Clone, Copy, Debug)]
+struct HeldSet {
+    at: usize,
+    id: FaceId,
+}
+
+/// The sets faces hold, to write, in set order: each is split off what lies past the one before
+/// it, so the walk takes the held sets alone.
+#[cfg(feature = "query")]
+struct HeldMut<'a> {
+    /// The sets past the last one taken.
+    rest: &'a mut [FaceTables],
+    /// Where `rest` starts among the registry's sets.
+    base: usize,
+    held: core::slice::Iter<'a, HeldSet>,
+}
+
+#[cfg(feature = "query")]
+impl<'a> HeldMut<'a> {
+    /// The sets of `sets` that `held`, in set order, names.
+    fn of(sets: &'a mut [FaceTables], held: &'a [HeldSet]) -> Self {
+        Self {
+            rest: sets,
+            base: 0,
+            held: held.iter(),
+        }
+    }
+}
+
+#[cfg(feature = "query")]
+impl<'a> Iterator for HeldMut<'a> {
+    type Item = &'a mut FaceTables;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let held = self.held.next()?;
+        let rest = core::mem::take(&mut self.rest);
+        let (_, from) = rest.split_at_mut(held.at - self.base);
+        let (set, after) = from.split_first_mut()?;
+        self.rest = after;
+        self.base = held.at + 1;
+        Some(set)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.held.size_hint()
+    }
+}
+
+/// The faces other than the one a call acts on, which the matching verdicts of that call count:
+/// the sets before the call's own and after it, and the entries of the index of held sets that
+/// name them.
 struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
+    held_before: &'a [HeldSet],
+    held_after: &'a [HeldSet],
+    /// Where `after` starts among the registry's sets.
+    after_at: usize,
 }
 
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.before
+        let (before, after, after_at) = (self.before, self.after, self.after_at);
+        self.held_before
             .iter()
-            .chain(self.after.iter())
-            .filter(|face| face.held())
+            .map(move |held| &before[held.at])
+            .chain(
+                self.held_after
+                    .iter()
+                    .map(move |held| &after[held.at - after_at]),
+            )
     }
 }
 
@@ -234,9 +257,18 @@ pub(super) struct Registry {
     limits: SessionLimits,
     /// Every set of face tables, each where it was built and never moved from: the sets the arena
     /// lent at the open, the dial role's face's first and always held by it, then any set of no
-    /// rows made for a face that came when every lent set was held. A set no face holds is kept,
-    /// emptied, for the next face; the faces are those of the sets a face holds, in this order.
+    /// rows made for a face that came when every lent set was held, which refuses every get and
+    /// everything the peer would have it hold. The arena lends a set for each face the config
+    /// admits and a face past those is refused before it comes, so no face is expected in a set
+    /// of no rows; the session's memory is the arena alone either way. A set no face holds is
+    /// kept, emptied, for the next face.
     sets: Vec<FaceTables>,
+    /// The sets faces hold, each with its face, in the order of `sets`, which is the order of the
+    /// faces: the dial role's face first. Every walk over the faces and every lookup of one reads
+    /// this and the held sets alone; the open lends a set for each face the config admits, tens of
+    /// kilobytes each and most of them free at any time. Its room is reserved at the open for
+    /// every set the open lent, so a face coming or going moves entries within it.
+    held: Vec<HeldSet>,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
@@ -255,6 +287,9 @@ pub(super) struct Registry {
     /// the cost of a filtered put counts.
     #[cfg(test)]
     peer_looks: core::cell::Cell<usize>,
+    /// How many sets the walks over the faces read: what a test of the cost of a walk counts.
+    #[cfg(test)]
+    set_reads: core::cell::Cell<usize>,
     /// The lent Pushes handed to the subscribers' plane alone ([`Self::dispatch_push`]), the
     /// face lookups their dispatches made with the drains after them, and the lent Pushes that
     /// reached the fan over every plane instead ([`Self::dispatch_event`]): what a test of the
@@ -289,8 +324,12 @@ impl Registry {
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));
+        let mut held = Vec::with_capacity(sets.capacity());
         lend_set(&mut sets, arena, gets.rows, peers.rows, limits)?;
-        sets[0].id = DIAL_FACE;
+        held.push(HeldSet {
+            at: 0,
+            id: DIAL_FACE,
+        });
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, gets.rows, limits)?;
         for _ in 1..peers.tables {
@@ -299,6 +338,7 @@ impl Registry {
         Ok(Self {
             app,
             sets,
+            held,
             limits: *limits,
             #[cfg(feature = "local-queryable")]
             local,
@@ -310,6 +350,8 @@ impl Registry {
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
+            #[cfg(test)]
+            set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
         })
@@ -373,14 +415,39 @@ impl Registry {
         self.pushes.1 += lookups;
     }
 
+    /// The set that lies at `at`, for a walk over the faces.
+    fn set(&self, at: usize) -> &FaceTables {
+        #[cfg(test)]
+        self.set_reads.set(self.set_reads.get() + 1);
+        &self.sets[at]
+    }
+
     /// The tables of every face, the dial role's first.
     pub(super) fn faces(&self) -> impl Iterator<Item = &FaceTables> {
-        self.sets.iter().filter(|set| set.held())
+        self.held.iter().map(move |held| self.set(held.at))
+    }
+
+    /// Where the set face `id` holds lies among the sets, while the session holds the face.
+    fn held_at(&self, id: FaceId) -> Option<usize> {
+        self.held
+            .iter()
+            .find(|held| held.id == id)
+            .map(|held| held.at)
+    }
+
+    /// The tables of face `id`, while the session holds it.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    pub(super) fn tables_of(&self, id: FaceId) -> Option<&FaceTables> {
+        self.held_at(id).map(|at| self.set(at))
     }
 
     /// The tables of face `id`, while the session holds it, to write.
     fn held_mut(&mut self, id: FaceId) -> Option<&mut FaceTables> {
-        self.sets.iter_mut().find(|set| set.held_by(id))
+        let at = self.held_at(id)?;
+        Some(&mut self.sets[at])
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
@@ -395,11 +462,7 @@ impl Registry {
     /// [`Self::all_gets`], to write.
     #[cfg(feature = "query")]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
-        let gets = self
-            .sets
-            .iter_mut()
-            .filter(|set| set.held())
-            .map(|face| &mut face.gets);
+        let gets = HeldMut::of(&mut self.sets, &self.held).map(|face| &mut face.gets);
         #[cfg(feature = "local-queryable")]
         let gets = gets.chain(core::iter::once(&mut self.local));
         gets
@@ -421,19 +484,20 @@ impl Registry {
     /// plan left, or a new one).
     pub(super) fn add_face(&mut self, id: FaceId) {
         self.writing();
-        let lent = self
-            .sets
+        // The index is in set order with one entry for each held set, so the first entry whose set
+        // lies past its own place in the index has a free set at that place, and with none the
+        // first free set is the one past the last entry. The lent sets lie first, so the first
+        // free set is a lent one while any is free.
+        let at = self
+            .held
             .iter()
-            .position(|set| !set.held() && set.origin == RowsOrigin::Spare);
-        let free = lent.or_else(|| self.sets.iter().position(|set| !set.held()));
-        let at = match free {
-            Some(at) => at,
-            None => {
-                push_rowless(&mut self.sets, RowsOrigin::Unlent, &self.limits);
-                self.sets.len() - 1
-            }
-        };
-        self.sets[at].id = id;
+            .enumerate()
+            .position(|(place, held)| held.at != place)
+            .unwrap_or(self.held.len());
+        if at == self.sets.len() {
+            push_rowless(&mut self.sets, &self.limits);
+        }
+        self.held.insert(at, HeldSet { at, id });
     }
 
     /// The tables of face `id`, gone with the face and left, emptied, where they lie for the next
@@ -442,8 +506,9 @@ impl Registry {
         if id == DIAL_FACE {
             return;
         }
-        if let Some(at) = self.sets.iter().position(|set| set.held_by(id)) {
+        if let Some(place) = self.held.iter().position(|held| held.id == id) {
             self.writing();
+            let at = self.held.remove(place).at;
             self.sets[at].give_back();
         }
     }
@@ -452,11 +517,14 @@ impl Registry {
     /// where they lie.
     pub(super) fn remove_accepted_faces(&mut self) {
         self.writing();
-        for set in &mut self.sets {
-            if set.held() && set.id != DIAL_FACE {
-                set.give_back();
+        let Self { sets, held, .. } = self;
+        held.retain(|face| {
+            let accepted = face.id != DIAL_FACE;
+            if accepted {
+                sets[face.at].give_back();
             }
-        }
+            !accepted
+        });
     }
 
     /// The tables of face `id`, while the session holds it.
@@ -509,8 +577,12 @@ impl Registry {
     /// be used as its call needs: what every dispatch and drain takes.
     fn split(&mut self, id: FaceId) -> Option<Split<'_>> {
         self.writing();
-        let Self { app, sets, .. } = self;
-        let at = sets.iter().position(|set| set.held_by(id))?;
+        let Self {
+            app, sets, held, ..
+        } = self;
+        let held = held.as_slice();
+        let place = held.iter().position(|face| face.id == id)?;
+        let at = held[place].at;
         let (before, rest) = sets.split_at_mut(at);
         let (face, after) = rest.split_first_mut()?;
         Some(Split {
@@ -519,6 +591,9 @@ impl Registry {
             others: Others {
                 before: &*before,
                 after: &*after,
+                held_before: &held[..place],
+                held_after: &held[place + 1..],
+                after_at: at + 1,
             },
         })
     }
@@ -551,8 +626,7 @@ impl Registry {
     /// Whether the peer of face `id` has ended its initial declarations since its link came up.
     #[cfg(feature = "declarations-synced-event")]
     fn declarations_final(&self, id: FaceId) -> bool {
-        self.faces()
-            .find(|face| face.id == id)
+        self.tables_of(id)
             .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
     }
 
@@ -776,7 +850,9 @@ impl Registry {
         history: bool,
         sink: wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
     ) -> Result<bool, RegisterError> {
-        let Self { app, sets, .. } = self;
+        let Self {
+            app, sets, held, ..
+        } = self;
         let registered = app.liveliness_subscribers.register(
             &sets[0].peer.tokens,
             id,
@@ -784,10 +860,11 @@ impl Registry {
             history,
             sink,
         )?;
+        // The dial role's face holds the first set and is the first entry, told above.
         if registered && history {
-            for face in sets[1..].iter().filter(|set| set.held()) {
+            for face in &held[1..] {
                 app.liveliness_subscribers
-                    .replay_known_tokens(&face.peer.tokens, id);
+                    .replay_known_tokens(&sets[face.at].peer.tokens, id);
             }
         }
         Ok(registered)
@@ -797,28 +874,26 @@ impl Registry {
     /// registration with `history` does.
     #[cfg(feature = "liveliness")]
     pub(super) fn replay_liveliness_tokens(&mut self, id: u64) {
-        let Self { app, sets, .. } = self;
-        for face in sets.iter().filter(|set| set.held()) {
+        let Self {
+            app, sets, held, ..
+        } = self;
+        for face in held.iter() {
             app.liveliness_subscribers
-                .replay_known_tokens(&face.peer.tokens, id);
+                .replay_known_tokens(&sets[face.at].peer.tokens, id);
         }
     }
 }
 
 /// Write a set of no rows at the end of `sets`, in the storage the vector keeps it in, held to
 /// `limits`, and hand it back: a set is never a value of its own in this frame.
-fn push_rowless<'s>(
-    sets: &'s mut Vec<FaceTables>,
-    origin: RowsOrigin,
-    limits: &SessionLimits,
-) -> &'s mut FaceTables {
+fn push_rowless<'s>(sets: &'s mut Vec<FaceTables>, limits: &SessionLimits) -> &'s mut FaceTables {
     sets.reserve(1);
     let at = sets.len();
     // SAFETY: `reserve` left room for at least one set past the length, which is the first cell of
     // the spare capacity; `rowless_in` writes a whole set there and cannot unwind, so the length may
     // count it.
     unsafe {
-        FaceTables::rowless_in(&mut sets.spare_capacity_mut()[0], origin, limits);
+        FaceTables::rowless_in(&mut sets.spare_capacity_mut()[0], limits);
         sets.set_len(at + 1);
     }
     &mut sets[at]
@@ -833,7 +908,7 @@ fn lend_set(
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, RowsOrigin::Spare, limits).lend(arena, gets, peer, limits)
+    push_rowless(sets, limits).lend(arena, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -847,10 +922,11 @@ mod tests {
     use wz_session_core::sample::QosLevel;
 
     /// A registry and the arena its tables were lent from, the registry first so its tables go
-    /// before the memory they lie in.
+    /// before the memory they lie in, and how many sets the open lent rows to.
     struct Held {
         registry: Registry,
         arena: SessionArena,
+        lent: usize,
     }
 
     /// A registry whose arena lends the tables of `faces` faces, one row of each table.
@@ -882,20 +958,47 @@ mod tests {
             peers,
         )
         .expect("the arena has the rows");
-        Held { registry, arena }
+        Held {
+            registry,
+            arena,
+            lent: faces,
+        }
     }
 
     fn face(registry: &mut Registry, id: FaceId) -> &mut FaceTables {
         registry.held_mut(id).expect("the registry holds the face")
     }
 
-    /// How many sets the open lent that no face holds.
-    fn free_lent(registry: &Registry) -> usize {
-        registry
-            .sets
-            .iter()
-            .filter(|set| !set.held() && set.origin == RowsOrigin::Spare)
+    /// How many sets the open lent that no face holds: the lent sets lie first.
+    fn free_lent(held: &Held) -> usize {
+        (0..held.lent)
+            .filter(|at| held.registry.held.iter().all(|face| face.at != *at))
             .count()
+    }
+
+    /// Whether face `id` holds a set the open lent rows to.
+    fn in_a_lent_set(held: &Held, id: FaceId) -> bool {
+        held.registry.held_at(id).is_some_and(|at| at < held.lent)
+    }
+
+    /// The faces the registry holds, in the order its walks take them.
+    fn face_ids(registry: &Registry) -> Vec<FaceId> {
+        registry.held.iter().map(|held| held.id).collect()
+    }
+
+    /// Where the sets the walk over the faces takes lie.
+    fn walked(registry: &Registry) -> Vec<*const FaceTables> {
+        registry
+            .faces()
+            .map(|face| face as *const FaceTables)
+            .collect()
+    }
+
+    /// Where the sets at `at` lie.
+    fn lying_at(registry: &Registry, at: &[usize]) -> Vec<*const FaceTables> {
+        at.iter()
+            .map(|at| &registry.sets[*at] as *const FaceTables)
+            .collect()
     }
 
     /// The face's peer tables hold one `Final`, have no room for a second, and have room again
@@ -959,23 +1062,24 @@ mod tests {
     #[test]
     fn an_accepted_face_takes_a_lent_set_where_it_lies_and_gives_it_back_there() {
         let mut held = held(2);
-        assert_eq!(free_lent(&held.registry), 1);
+        assert_eq!(free_lent(&held), 1);
         held.registry.add_face(5);
-        assert_eq!(free_lent(&held.registry), 0);
+        assert_eq!(free_lent(&held), 0);
+        assert!(in_a_lent_set(&held, 5));
         let accepted = face(&mut held.registry, 5);
-        assert_eq!(accepted.origin, RowsOrigin::Spare);
         accepted.peer.finals.owe(1, QosLevel::DEFAULT);
         let lies_at: *const FaceTables = accepted;
         held.registry.remove_face(5);
-        assert_eq!(free_lent(&held.registry), 1, "the set went back");
+        assert_eq!(free_lent(&held), 1, "the set went back");
         assert_eq!(held.registry.sets.len(), 2, "and stayed where it lies");
         assert_eq!(
             held.registry.sets[1].peer.finals.owed(),
             0,
             "emptied for the next face"
         );
-        assert!(
-            held.registry.faces().all(|face| face.id == DIAL_FACE),
+        assert_eq!(
+            face_ids(&held.registry),
+            vec![DIAL_FACE],
             "the face that went is not among the faces"
         );
         held.registry.add_face(6);
@@ -991,7 +1095,7 @@ mod tests {
     fn faces_that_go_leave_the_pools_as_full_as_before() {
         let mut held = held(3);
         let lent = held.arena.arena_mut().high_water();
-        assert_eq!(free_lent(&held.registry), 2);
+        assert_eq!(free_lent(&held), 2);
         for id in [5, 6] {
             held.registry.add_face(id);
             let accepted = face(&mut held.registry, id);
@@ -1001,10 +1105,10 @@ mod tests {
                 "CONTROL: its one row is held"
             );
         }
-        assert_eq!(free_lent(&held.registry), 0);
+        assert_eq!(free_lent(&held), 0);
         held.registry.remove_face(5);
         held.registry.remove_accepted_faces();
-        assert_eq!(free_lent(&held.registry), 2, "every lent set is free again");
+        assert_eq!(free_lent(&held), 2, "every lent set is free again");
         assert_eq!(
             held.registry.sets.len(),
             3,
@@ -1019,8 +1123,9 @@ mod tests {
             assert!(set.peer.finals.has_room(), "each row of each set is free");
             assert!(set.gets.replies.has_room());
         }
-        assert!(
-            held.registry.faces().all(|face| face.id == DIAL_FACE),
+        assert_eq!(
+            face_ids(&held.registry),
+            vec![DIAL_FACE],
             "the dial role's face stays"
         );
     }
@@ -1057,7 +1162,6 @@ mod tests {
             "the same tables lent in the same order take the same bytes"
         );
         let set = &mut sets[0];
-        assert_eq!((set.id, set.origin), (UNHELD, RowsOrigin::Spare));
         assert_eq!(
             set.gets.replies.has_room(),
             by_value_gets.replies.has_room()
@@ -1080,8 +1184,8 @@ mod tests {
         let mut held = held(1);
         let lent = held.arena.arena_mut().high_water();
         held.registry.add_face(5);
+        assert!(!in_a_lent_set(&held, 5));
         let accepted = face(&mut held.registry, 5);
-        assert_eq!(accepted.origin, RowsOrigin::Unlent);
         assert!(!accepted.peer.finals.has_room());
         assert!(!accepted.gets.replies.has_room());
         assert_eq!(
@@ -1090,7 +1194,7 @@ mod tests {
             "no rows were lent"
         );
         held.registry.remove_face(5);
-        assert_eq!(free_lent(&held.registry), 0, "no lent set comes of it");
+        assert_eq!(free_lent(&held), 0, "no lent set comes of it");
         held.registry.add_face(6);
         assert_eq!(
             held.registry.sets.len(),
@@ -1098,5 +1202,99 @@ mod tests {
             "the set of no rows was taken again"
         );
         assert!(!face(&mut held.registry, 6).peer.finals.has_room());
+    }
+
+    /// The walk over the faces takes exactly the sets faces hold, in set order, as faces come, go
+    /// and take a set another left: the next face takes the first free set, in its place among
+    /// the others, and a lookup by face finds the set the walk takes for it.
+    #[test]
+    fn the_walk_takes_the_held_sets_in_set_order() {
+        let mut held = held(5);
+        for id in [5, 6, 7] {
+            held.registry.add_face(id);
+        }
+        assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 5, 6, 7]);
+        assert_eq!(
+            walked(&held.registry),
+            lying_at(&held.registry, &[0, 1, 2, 3])
+        );
+        held.registry.remove_face(6);
+        assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 5, 7]);
+        assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1, 3]));
+        held.registry.add_face(8);
+        assert_eq!(
+            face_ids(&held.registry),
+            vec![DIAL_FACE, 5, 8, 7],
+            "the set the face that went left is taken in its place"
+        );
+        assert_eq!(
+            walked(&held.registry),
+            lying_at(&held.registry, &[0, 1, 2, 3])
+        );
+        let taken = lying_at(&held.registry, &[2])[0];
+        assert!(ptr::eq(&*face(&mut held.registry, 8), taken));
+        held.registry.remove_face(DIAL_FACE);
+        held.registry.remove_accepted_faces();
+        assert_eq!(face_ids(&held.registry), vec![DIAL_FACE]);
+        assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0]));
+        held.registry.add_face(9);
+        assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 9]);
+        assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1]));
+        assert_eq!(held.registry.sets.len(), 5, "no set was made or dropped");
+    }
+
+    /// The faces other than the one a call acts on are the other held sets, in set order, and
+    /// none that no face holds.
+    #[test]
+    fn the_other_faces_are_the_other_held_sets() {
+        let mut held = held(6);
+        for id in [5, 6, 7, 8] {
+            held.registry.add_face(id);
+        }
+        held.registry.remove_face(5);
+        held.registry.remove_face(8);
+        let own = lying_at(&held.registry, &[3])[0];
+        let others = lying_at(&held.registry, &[0, 2]);
+        let Split {
+            face, others: seen, ..
+        } = held.registry.split(7).expect("the registry holds the face");
+        assert!(ptr::eq(&*face, own));
+        assert_eq!(seen.faces().size_hint(), (2, Some(2)));
+        let seen: Vec<*const FaceTables> =
+            seen.faces().map(|face| face as *const FaceTables).collect();
+        assert_eq!(seen, others);
+    }
+
+    /// A walk over the faces reads the sets the faces hold and no other: of the sixteen sets the
+    /// open lent, a walk over three faces reads three, and says so before it starts.
+    #[test]
+    fn a_walk_over_the_faces_reads_the_held_sets_alone() {
+        let mut held = held(16);
+        held.registry.add_face(5);
+        held.registry.add_face(6);
+        assert_eq!(
+            held.registry.sets.len(),
+            16,
+            "CONTROL: sixteen sets were lent"
+        );
+        let before = held.registry.set_reads.get();
+        let faces = held.registry.faces();
+        assert_eq!(faces.size_hint(), (3, Some(3)));
+        assert_eq!(faces.count(), 3);
+        assert_eq!(
+            held.registry.set_reads.get() - before,
+            3,
+            "one set read for each face"
+        );
+        #[cfg(feature = "query")]
+        {
+            let walked = 3 + usize::from(cfg!(feature = "local-queryable"));
+            assert_eq!(held.registry.all_gets().size_hint(), (walked, Some(walked)));
+            assert_eq!(
+                held.registry.all_gets_mut().size_hint(),
+                (walked, Some(walked))
+            );
+            assert_eq!(held.registry.all_gets_mut().count(), walked);
+        }
     }
 }
