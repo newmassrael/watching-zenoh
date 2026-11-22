@@ -591,6 +591,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
     targets: Mutex<Vec<(TargetKey, Target)>>,
+    /// How many callbacks were taken out of `targets`, counted under its lock: a delivery that found
+    /// a subscriber's callback while the count was what it reads now hands that callback the next
+    /// sample without looking it up again ([`Resolved`]).
+    removed: AtomicU64,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -640,12 +644,14 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 }
 
 /// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
-/// queue of handed legs were taken: what a test of the cost of one message counts.
+/// queue of handed legs were taken, and a subscriber's callback was looked up in the table of
+/// them: what a test of the cost of one message counts.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Takes {
     pub(crate) core: core::sync::atomic::AtomicUsize,
     pub(crate) handed: core::sync::atomic::AtomicUsize,
+    pub(crate) callbacks: core::sync::atomic::AtomicUsize,
 }
 
 /// The session state no other thread may touch while one does; see the module doc.
@@ -909,6 +915,30 @@ type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 /// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
 /// from the read task and one from the program's own `zp_read` never overlap.
 type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
+
+/// How many subscribers of one sample a delivery keeps the callbacks of ([`Resolved`]): a sample
+/// for more is handed to the ones past these by a look in the table each.
+const RESOLVED_SUBSCRIBERS: usize = 4;
+
+/// The callbacks one delivery found for the subscribers of the sample it handed last, by their
+/// place in the sample's list, and the count of removals from the table of callbacks they were
+/// found at ([`CoopEngine::removed`]). The samples behind it in the lane are almost always for the
+/// same subscribers: they are handed the same callbacks with no lock of the table, no search of
+/// it and no count taken on the callback, while nothing has been taken out of the table since.
+/// The callbacks are let go of with the delivery, or as soon as a removal is seen.
+struct Resolved {
+    removed: u64,
+    callbacks: [Option<(SubId, SubscriberCallback)>; RESOLVED_SUBSCRIBERS],
+}
+
+impl Resolved {
+    fn new() -> Self {
+        Self {
+            removed: 0,
+            callbacks: [const { None }; RESOLVED_SUBSCRIBERS],
+        }
+    }
+}
 
 /// A queryable's callback, locked while it runs as a subscriber's is.
 #[cfg(feature = "queryable")]
@@ -2947,6 +2977,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             samples,
             matching: Arc::new(Mutex::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
+            removed: AtomicU64::new(0),
             #[cfg(feature = "queryable")]
             plane,
             #[cfg(feature = "query")]
@@ -3322,6 +3353,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// [`Self::deliver`] entered. Whether anything was handed out.
     fn hand_out(&self) -> bool {
         let mut handed = false;
+        // The callbacks found for the samples' subscribers, kept from one sample to the next and let
+        // go of once the lane is passed over.
+        let mut resolved = Resolved::new();
         // Each popped under its queue's lock alone, which is released before the callback runs:
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
@@ -3335,13 +3369,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let _handed = Handed(&self.samples);
             match item {
                 LaneItem::Sample(sample) => {
+                    let hand = |id: SubId, callback: &SubscriberCallback| {
+                        #[cfg(feature = "local-subscriber")]
+                        let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
+                        #[cfg(not(feature = "local-subscriber"))]
+                        let _ = id;
+                        (lock(callback))(&sample);
+                    };
                     // A subscriber undeclared since the sample was queued has no callback left,
                     // and is passed over.
-                    for id in sample.subscribers() {
-                        if let Some(callback) = self.subscriber_callback(id) {
-                            #[cfg(feature = "local-subscriber")]
-                            let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
-                            (lock(&callback))(&sample);
+                    for (at, id) in sample.subscribers().enumerate() {
+                        if at < RESOLVED_SUBSCRIBERS {
+                            if let Some(callback) =
+                                self.resolved_subscriber_callback(&mut resolved, at, id)
+                            {
+                                hand(id, callback);
+                            }
+                        } else if let Some(callback) = self.subscriber_callback(id) {
+                            hand(id, &callback);
                         }
                     }
                 }
@@ -3381,6 +3426,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
+        drop(resolved);
         // A face that came up or went down, told to each watcher as it stands now: the list is
         // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
         #[cfg(feature = "connectivity")]
@@ -3709,12 +3755,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// The callback of subscriber `id`, while the subscriber is declared.
     fn subscriber_callback(&self, id: SubId) -> Option<SubscriberCallback> {
+        #[cfg(test)]
+        self.takes.callbacks.fetch_add(1, Ordering::Relaxed);
         lock(&self.targets)
             .iter()
             .find_map(|(t, target)| match target {
                 Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
                 _ => None,
             })
+    }
+
+    /// The callback of subscriber `id`, the `at`th of the sample a delivery hands, `at` under
+    /// [`RESOLVED_SUBSCRIBERS`]: the one `resolved` kept for that place when it is `id`'s and
+    /// nothing was taken out of the table since it was found, else the table's, kept there for the
+    /// samples after. A subscriber undeclared since has none.
+    fn resolved_subscriber_callback<'r>(
+        &self,
+        resolved: &'r mut Resolved,
+        at: usize,
+        id: SubId,
+    ) -> Option<&'r SubscriberCallback> {
+        let removed = self.removed.load(Ordering::Acquire);
+        if resolved.removed != removed {
+            resolved.removed = removed;
+            resolved.callbacks = [const { None }; RESOLVED_SUBSCRIBERS];
+        }
+        let kept = &mut resolved.callbacks[at];
+        if !matches!(kept, Some((held, _)) if *held == id) {
+            *kept = self.subscriber_callback(id).map(|callback| (id, callback));
+        }
+        kept.as_ref().map(|(_, callback)| callback)
     }
 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
@@ -3877,6 +3947,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn take_target(&self, key: TargetKey) -> Option<Target> {
         let mut targets = lock(&self.targets);
         let at = targets.iter().position(|(t, _)| *t == key)?;
+        self.removed.fetch_add(1, Ordering::Release);
         Some(targets.remove(at).1)
     }
 

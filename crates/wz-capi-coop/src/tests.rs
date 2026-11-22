@@ -902,6 +902,104 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     );
 }
 
+/// The samples one delivery hands a subscriber find its callback in the table of callbacks once,
+/// not once a sample: the delivery keeps the callback it found for the samples behind, so they are
+/// handed it with no lock of the table, no search of it and no count taken on the callback. The
+/// CONTROL is the next test: a removal from the table ends what the delivery kept.
+#[test]
+fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let looks = engine.takes.callbacks.load(Ordering::SeqCst);
+    for _ in 0..8 {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    // Every push reaches the session's socket before the session reads one.
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the pushes", || {
+        received.load(Ordering::SeqCst) == 8
+    });
+    let found = engine.takes.callbacks.load(Ordering::SeqCst) - looks;
+    assert!(
+        found < 8,
+        "{found} looks in the table for 8 samples: the callback is kept across them"
+    );
+}
+
+/// A subscriber that undeclares itself from inside its callback is handed nothing more, though the
+/// delivery kept its callback and the lane still holds samples for it: the removal from the table
+/// ends what the delivery kept, as a look in the table for each sample would have found nothing.
+#[test]
+fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::new(Mutex::new(None));
+    let own_id = own.clone();
+    let session = Arc::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/**".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                let own_id = own_id.clone();
+                let session = session.clone();
+                Box::new(move |_sample: &dyn SampleView| {
+                    if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                        let id = own_id.lock().unwrap().take();
+                        if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                            engine.undeclare_subscriber(id);
+                        }
+                    }
+                })
+            }),
+        )
+        .expect("declared");
+    *own.lock().unwrap() = Some(id);
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    for _ in 0..8 {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the third push", || {
+        received.load(Ordering::SeqCst) >= 3
+    });
+    // What is left of the pushes is read and passed over.
+    for _ in 0..10 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        3,
+        "nothing is handed to a subscriber after its undeclaration"
+    );
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that
