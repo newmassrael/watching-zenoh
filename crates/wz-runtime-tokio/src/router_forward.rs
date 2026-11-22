@@ -462,7 +462,7 @@ mod face_runtime;
 mod face_table;
 use face_table::FaceTable;
 mod held_route;
-use held_route::{HeldFace, HeldFaceContext, LiteralPush};
+use held_route::{HeldFace, HeldFaceContext, LiteralPush, SharedCarrier};
 
 /// The client leg's routes of a broker hat, each naming its faces as the router holds them while
 /// they are up.
@@ -3335,6 +3335,9 @@ pub struct RouterForwarder {
     /// Count of messages a route that holds its faces did not send to a face because the face had
     /// left the tables since the route was computed (its runtime closed).
     held_route_closed_skips: Counter,
+    /// Count of the client carriers encoded to shared bytes: one for each fan-out that sent at
+    /// least one face the bytes, however many faces it sent them to.
+    client_carrier_encodes: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
     recomputes: Counter,
@@ -4485,6 +4488,7 @@ router_entry_points! { on_tables:
     fn deferred_client_delivery_seen(&self) -> usize;
     fn fan_out_face_visits(&self) -> usize;
     fn held_route_closed_skips(&self) -> usize;
+    fn client_carrier_encodes(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_federated(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
@@ -5258,6 +5262,7 @@ impl RouterForwarder {
             egress_interceptor_cache_recomputes: Counter::new(),
             interceptor_dropped: Counter::new(),
             held_route_closed_skips: Counter::new(),
+            client_carrier_encodes: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
@@ -5851,6 +5856,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// since the route was computed (see the field).
     pub fn held_route_closed_skips(&self) -> usize {
         self.held_route_closed_skips.get()
+    }
+
+    /// The client carriers encoded to shared bytes so far (see the field): one a fan-out, where a
+    /// carrier encoded for each face would count one a face.
+    pub fn client_carrier_encodes(&self) -> usize {
+        self.client_carrier_encodes.get()
     }
 
     /// I3c — count of mcast-ingress Pushes this router FEDERATED into the mesh as
@@ -6584,7 +6595,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         Ok(sent)
     }
 
-    /// Send to each of `targets` that is a face of `tier` the Put `build` produces for it,
+    /// Send to each of `targets` that is a face of `tier` the carrier `build` names for it,
     /// returning the count of faces that accepted one — the TARGETED twin of
     /// [`fan_out_tier_qos`](Self::fan_out_tier_qos), for a caller that already knows which faces
     /// a message goes to (a cached client route, which holds its faces).
@@ -6592,15 +6603,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Its cost is the number of targets, not the number of faces the router holds, and no target
     /// is looked up: the route holds what a send reads of each face. A target of another tier is
     /// skipped, and one that left the tables since the route was computed is skipped by
-    /// [`egress_held`](Self::egress_held), the send every target goes through.
-    fn fan_out_to_held_faces(
+    /// [`egress_held_shared`](Self::egress_held_shared), the send every target goes through. The
+    /// targets are handed one carrier, encoded once for all of them where they can be sent its
+    /// bytes.
+    fn fan_out_to_held_faces<'c>(
         &self,
         tier: Region,
         targets: &[HeldFace],
         reliable: bool,
         priority: Priority,
         express: bool,
-        mut build: impl FnMut(FaceId) -> Option<LiteralPush>,
+        mut build: impl FnMut(FaceId) -> Option<&'c SharedCarrier>,
     ) -> usize {
         let mut sent = 0;
         for face in targets {
@@ -6609,7 +6622,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 continue;
             }
             if let Some(carrier) = build(face.id) {
-                if self.egress_held(face, carrier, reliable, express, priority) {
+                if self.egress_held_shared(face, carrier, reliable, express, priority) {
                     sent += 1;
                 }
             }
@@ -6707,6 +6720,66 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             express,
             priority,
         )
+    }
+
+    /// [`egress_held`](Self::egress_held) of the carrier of a fan-out, sent as the bytes the carrier
+    /// was encoded to once for every face, so that nothing of the message is copied, measured or
+    /// encoded for this face. Only where this face would be sent exactly those bytes
+    /// ([`sends_shared`](Self::sends_shared)); any other face is sent a copy through
+    /// [`egress_held`](Self::egress_held). What the shared send skips of
+    /// [`egress_through`](Self::egress_through) is what `sends_shared` found empty: no egress
+    /// interceptor to admit or rewrite the message, and no routing to record on it.
+    fn egress_held_shared(
+        &self,
+        face: &HeldFace,
+        carrier: &SharedCarrier,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> bool {
+        let push = carrier.push();
+        if !self.sends_shared(push.as_push(), reliable) {
+            return self.egress_held(face, push.clone(), reliable, express, priority);
+        }
+        if face.is_closed() {
+            self.held_route_closed_skips.bump();
+            return false;
+        }
+        let send = face.send_face();
+        route_event!(
+            "node {} sends to face {:?} (remote {:?}): {}",
+            self.own_zid,
+            face.id,
+            send.peer_zid,
+            Crossing::Push(push.as_push())
+        );
+        let encoded = carrier.encoded(|| self.client_carrier_encodes.bump());
+        match self.credited_send_shared(face.id, send, push, encoded, reliable, express, priority) {
+            egress::Credited::Sent => {
+                self.note_sent(true);
+                true
+            }
+            egress::Credited::Held => true,
+            egress::Credited::Refused => false,
+        }
+    }
+
+    /// Whether a face of a fan-out is sent the carrier's shared bytes rather than a message of its
+    /// own: the Put goes through the credit stage (reliable, not droppable, sent on behalf of a face
+    /// that can be gated, no shared memory), and no egress interceptor is installed to read it or
+    /// rewrite its QoS for one destination.
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    fn sends_shared(&self, push: &PushOwned, reliable: bool) -> bool {
+        reliable
+            && self.held_push_lane(push).is_some()
+            && self.egress_interceptors.read().is_empty()
+    }
+
+    /// With `pubsub-ts-stack` a router records its routing on the message once for each destination
+    /// it is sent to, so no two faces are sent the same bytes.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn sends_shared(&self, _push: &PushOwned, _reliable: bool) -> bool {
+        false
     }
 
     /// The egress both doors share: the egress interceptors over `context`, the QoS overwrite, the
@@ -9534,8 +9607,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         // Re-literalized once, from the stamped Push, by the first region whose route
         // has a client (payload / encoding / attachment preserved, literal keyexpr for
-        // the client leaf); the fan-out clones it per matching client. `keyexpr` is
-        // resolved once by the [`route_push`](Self::route_push) head.
+        // the client leaf); every matching client of every region is handed that one
+        // carrier, encoded at most once (`SharedCarrier`). `keyexpr` is resolved once
+        // by the [`route_push`](Self::route_push) head.
         //
         // A client subscriber is a LEAF, not a routing-graph node: reset the Push's
         // routing source node-id to 0 (set_push_source(_, 0) omits the ext, zenoh's
@@ -9546,8 +9620,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        let carry = || client_carrier(stamp.for_egress()?, keyexpr);
-        let mut carrier: Option<LiteralPush> = None;
+        let carry = || client_carrier(stamp.for_egress()?, keyexpr).map(SharedCarrier::new);
+        let mut carrier: Option<SharedCarrier> = None;
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -9576,7 +9650,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // cost follows the subscribers and not the faces the router holds.
             let _ =
                 self.fan_out_to_held_faces(region, &clients, reliable, priority, express, |id| {
-                    (id != inbound).then(|| carrier.clone())
+                    (id != inbound).then_some(carrier)
                 });
         }
     }
@@ -20797,6 +20871,7 @@ mod tests {
             sink.reset();
         }
         let asked = RefCell::new(Vec::new());
+        let carrier = SharedCarrier::new(literal_put("demo/c1"));
         let (visits, skips) = (fwd.fan_out_face_visits(), fwd.held_route_closed_skips());
         let sent = fwd.on_tables().fan_out_to_held_faces(
             client_tier,
@@ -20806,7 +20881,7 @@ mod tests {
             false,
             |id| {
                 asked.borrow_mut().push(id);
-                Some(literal_put("demo/c1"))
+                Some(&carrier)
             },
         );
         assert_eq!(sent, 1, "face 2 was sent the Put");
@@ -20857,13 +20932,14 @@ mod tests {
             fwd.deregister(FaceId(1));
             sink.reset();
             let skips = fwd.held_route_closed_skips();
+            let carrier = SharedCarrier::new(literal_put("demo/held"));
             let sent = fwd.on_tables().fan_out_to_held_faces(
                 route[0].tier,
                 &route,
                 true,
                 Priority::DEFAULT,
                 false,
-                |_| Some(literal_put("demo/held")),
+                |_| Some(&carrier),
             );
             assert_eq!(sent, 0, "{}", sharing.id());
             assert_eq!(
@@ -20939,6 +21015,169 @@ mod tests {
             .expect("literal push");
         let carrier = client_carrier(&literal, "demo/own").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/own");
+    }
+
+    /// The payload the fan-out tests publish.
+    const FAN_PAYLOAD: &[u8] = b"fan-out-payload";
+
+    /// A Put of `keyexpr` whose congestion control blocks, so the router may not drop it and
+    /// sends it through the credit stage.
+    fn blocking_put_of(keyexpr: &str) -> NetworkMessage {
+        let meta = wz_session_core::metadata::PushMetadata {
+            qos: Some(
+                wz_session_core::sample::QosLevel::DEFAULT
+                    .with_congestion(wz_session_core::qos::CongestionControl::Block),
+            ),
+            ..wz_session_core::metadata::PushMetadata::default()
+        };
+        NetworkMessage::Push(Box::new(
+            wz_session_core::push_build::build_push_literal_with_meta(keyexpr, FAN_PAYLOAD, &meta)
+                .expect("build push"),
+        ))
+    }
+
+    /// A router with one publishing client face (returned) and `subscribers` client faces that
+    /// subscribe `keyexpr`, every subscriber's link emptied of what the set-up sent it.
+    fn clients_subscribed_to(
+        keyexpr: &str,
+        subscribers: usize,
+    ) -> (RouterForwarder, Vec<Arc<RecordingLinkDriver>>, FaceId) {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let publisher = FaceId(1);
+        let (publishing, _) = face(zid(0xAB), WIRE_CLIENT);
+        fwd.register(publisher, &publishing);
+        let sinks: Vec<_> = (0..subscribers)
+            .map(|i| {
+                let id = FaceId(2 + i as u64);
+                let peer = Zid::from_slice(&(0x3000_0000_u32 + i as u32).to_be_bytes());
+                let (client, sink) = face(peer, WIRE_CLIENT);
+                fwd.register(id, &client);
+                forward_one(&fwd, id, declare_sub(keyexpr));
+                sink
+            })
+            .collect();
+        for sink in &sinks {
+            sink.reset();
+        }
+        (fwd, sinks, publisher)
+    }
+
+    /// The network messages a delivered frame carries, without the frame's own header.
+    fn frame_messages(frame: &[u8]) -> Vec<u8> {
+        use crate::session_glue::{parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } = parse_inbound(frame).expect("parse a frame")
+        else {
+            panic!("the delivered bytes are not a Frame");
+        };
+        payload.to_vec()
+    }
+
+    /// A Put the router may not drop, fanned out to eight client subscribers, is encoded once for
+    /// the whole fan-out, and every subscriber is sent the same message, which carries the Put's
+    /// payload. Turned red by a fan-out that encodes the carrier again for each face, or that sends
+    /// one face other bytes than the rest.
+    #[test]
+    fn a_fan_out_to_many_clients_encodes_its_carrier_once() {
+        const SUBSCRIBERS: usize = 8;
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", SUBSCRIBERS);
+        let encodes = fwd.client_carrier_encodes();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes() - encodes,
+            1,
+            "one encode for {SUBSCRIBERS} subscribers"
+        );
+        let messages: Vec<Vec<u8>> = sinks
+            .iter()
+            .map(|sink| {
+                assert_eq!(
+                    sink.frame_count(),
+                    1,
+                    "every subscriber is sent the Put once"
+                );
+                frame_messages(&sink.frame_bytes(0))
+            })
+            .collect();
+        assert!(
+            messages.iter().all(|message| *message == messages[0]),
+            "every subscriber is sent the same message"
+        );
+        assert!(
+            messages[0]
+                .windows(FAN_PAYLOAD.len())
+                .any(|window| window == FAN_PAYLOAD),
+            "the message carries the Put's payload"
+        );
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        assert_eq!(
+            fwd.client_carrier_encodes() - encodes,
+            2,
+            "the next Put is a fan-out of its own, encoded once"
+        );
+    }
+
+    /// A session sends a Push as its shared encoding in the same message it sends the Push itself
+    /// in: the probe of the shared bytes and the probe of the message put the same bytes in their
+    /// frames. Turned red by a shared send that frames anything but the encoding it is handed.
+    #[test]
+    fn a_push_sent_as_its_encoding_is_framed_as_the_push_itself() {
+        use wz_session_core::session_actions::EncodedPush;
+        let push = match blocking_put_of("demo/framed") {
+            NetworkMessage::Push(push) => *push,
+            _ => unreachable!("blocking_put_of builds a Push"),
+        };
+        let (as_message, message_sink) = recording_actions();
+        let (as_bytes, bytes_sink) = recording_actions();
+        as_message
+            .try_send_network_message_qos(
+                NetworkMessage::Push(Box::new(push.clone())),
+                true,
+                false,
+                Priority::DEFAULT,
+            )
+            .expect("the message is sent");
+        as_bytes
+            .try_send_encoded_push_qos(
+                &push,
+                &EncodedPush::of(&push),
+                true,
+                false,
+                Priority::DEFAULT,
+            )
+            .expect("the bytes are sent");
+        assert_eq!(message_sink.frame_count(), 1);
+        assert_eq!(bytes_sink.frame_count(), 1);
+        assert_eq!(
+            frame_messages(&bytes_sink.frame_bytes(0)),
+            frame_messages(&message_sink.frame_bytes(0)),
+        );
+    }
+
+    /// The Puts whose fan-out is not sent as shared bytes encode no shared carrier: one the router
+    /// may drop, and one on a best-effort channel, keep the send they had and still reach every
+    /// subscriber, a copy each; one nobody subscribes reaches nobody. Turned red by a shared
+    /// encoding made for a Put outside the credit stage, or for a fan-out with no destination.
+    #[test]
+    fn a_fan_out_outside_the_credit_stage_encodes_no_shared_carrier() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 3);
+        let encodes = fwd.client_carrier_encodes();
+        let droppable = wz_session_core::push_build::build_push_literal("demo/fan", FAN_PAYLOAD)
+            .expect("build push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(droppable)));
+        forward_one_reliability(&fwd, publisher, blocking_put_of("demo/fan"), false);
+        forward_one(&fwd, publisher, blocking_put_of("demo/nobody"));
+        assert_eq!(
+            fwd.client_carrier_encodes(),
+            encodes,
+            "no fan-out above is sent as shared bytes"
+        );
+        for sink in &sinks {
+            assert_eq!(
+                sink.frame_count(),
+                2,
+                "the droppable and the best-effort Put each reach every subscriber"
+            );
+        }
     }
 
     /// R2879 (open-debt item 751, step 5) — a CLIENT-sourced Push leaves its one

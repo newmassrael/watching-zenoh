@@ -262,18 +262,18 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 #[cfg(not(feature = "time-hlc"))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
     ("drop_k1", CongestionControl::Drop, 1, 8, 472),
-    ("block_k1", CongestionControl::Block, 1, 10, 602),
+    ("block_k1", CongestionControl::Block, 1, 7, 233),
     ("drop_k16", CongestionControl::Drop, 16, 68, 6_142),
-    ("block_k16", CongestionControl::Block, 16, 85, 7_262),
+    ("block_k16", CongestionControl::Block, 16, 22, 893),
 ];
 
 /// The same cases in a build with `time-hlc`.
 #[cfg(feature = "time-hlc")]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
     ("drop_k1", CongestionControl::Drop, 1, 14, 526),
-    ("block_k1", CongestionControl::Block, 1, 17, 720),
+    ("block_k1", CongestionControl::Block, 1, 13, 361),
     ("drop_k16", CongestionControl::Drop, 16, 89, 6_466),
-    ("block_k16", CongestionControl::Block, 16, 107, 7_650),
+    ("block_k16", CongestionControl::Block, 16, 28, 1_231),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at

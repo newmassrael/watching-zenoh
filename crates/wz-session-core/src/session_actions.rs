@@ -3221,6 +3221,57 @@ pub enum Unsent {
     Failed(SendWireError),
 }
 
+/// A Push encoded once, for a sender that hands one message to many sessions (a router's fan-out
+/// of one Put to its subscribers): each session copies these bytes into a frame of its own, under
+/// its own sequence number, and neither copies, measures nor encodes the message again
+/// ([`SessionLinkActions::try_send_encoded_push_qos`]).
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPush {
+    bytes: alloc::vec::Vec<u8>,
+}
+
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+impl EncodedPush {
+    /// `push` as the bytes a frame carries it in.
+    pub fn of(push: &crate::wire::PushOwned) -> Self {
+        let mut bytes =
+            alloc::vec::Vec::with_capacity(crate::frame_encode::push_capacity_hint(push));
+        // Through the encoder the send path frames a Push with (`push_body` over a sink of the
+        // build's `EncodeBuf`), so an image links the Push's writers once, not a second copy of
+        // them for a sink over a vector.
+        {
+            let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
+            crate::frame_encode::push_body(push)(&mut sink)
+                .expect("a Vec grows, so its sink is infallible");
+        }
+        Self { bytes }
+    }
+
+    /// The encoded message.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// What [`SessionLinkActions::try_send_encoded_push_qos`] did not send. The caller still holds
+/// the Push, so nothing is handed back.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug)]
+pub enum UnsentShared {
+    /// The link had no room, and the call did not wait for any: nothing was sent, counted as a
+    /// drop, or closed ([`Unsent::NoRoom`]).
+    NoRoom,
+    /// The message is a chain of fragments the link's queue cannot hold whole, and nothing was
+    /// sent ([`Unsent::Chain`]).
+    Chain,
+    /// The send failed for a reason that sending again will not change.
+    Failed(SendWireError),
+    /// The Push carries a buffer of shared memory, which is mapped for each peer inside the
+    /// transaction its message is built in: it is sent as a message, not as shared bytes.
+    Unshareable,
+}
+
 /// R2923 / R2926 — what the unicast dispatch found when it put a message on its conduit's link:
 /// the message is on the link's queue, or no room was found within its deadline (a congestion
 /// drop), or it is a chain of fragments that the sender asked not to wait for.
@@ -12474,6 +12525,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         self.send_network_message_qos(msg, reliable, express, priority)
             .map_err(Unsent::Failed)
+    }
+
+    /// [`Self::try_send_network_message_qos`] for a Push encoded once and sent to many sessions:
+    /// the frame is built from `encoded`'s bytes, so this session neither copies, measures nor
+    /// encodes the message itself. `encoded` is [`EncodedPush::of`] `push`, and `push` is
+    /// read only for what is decided before the frame is built: its congestion control, and the
+    /// class the network counters charge it to.
+    ///
+    /// What it does not send is answered without the message ([`UnsentShared`]): the caller holds
+    /// the Push and makes the message only when it is to be held or sent with a wait. A Push that
+    /// carries a buffer of shared memory is refused unsent ([`UnsentShared::Unshareable`]): its
+    /// slices are mapped for this session's peer inside a transaction the message is built in.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    pub fn try_send_encoded_push_qos(
+        &self,
+        push: &crate::wire::PushOwned,
+        encoded: &EncodedPush,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Result<(), UnsentShared> {
+        debug_assert_eq!(
+            encoded.as_bytes().len(),
+            crate::frame_encode::push_capacity_hint(push),
+            "the bytes are the encoding of the Push they are sent for"
+        );
+        #[cfg(feature = "session-extshm")]
+        if let crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
+            if !crate::put_payload::shm_descriptors(put).is_empty() {
+                return Err(UnsentShared::Unshareable);
+            }
+        }
+        let bytes = encoded.as_bytes();
+        let ended = self.dispatch_network_message_at(
+            DispatchStage::Probe,
+            priority,
+            reliable,
+            crate::declare_ext_qos::read_push_qos(push),
+            bytes.len(),
+            self.outbound_push_class(push),
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                sce_forge_runtime::codec::SceSink::write_bytes(sink, bytes)
+            }),
+        );
+        match ended {
+            Ok(Dispatched::Sent) => {
+                #[cfg(feature = "transport-batching")]
+                if express {
+                    self.flush_express(priority);
+                }
+                #[cfg(not(feature = "transport-batching"))]
+                let _ = express;
+                Ok(())
+            }
+            Ok(Dispatched::NoRoom) => Err(UnsentShared::NoRoom),
+            #[cfg(feature = "transport-fragmentation")]
+            Ok(Dispatched::Chain) => Err(UnsentShared::Chain),
+            Err(e) => Err(UnsentShared::Failed(e)),
+        }
     }
 
     /// Promise one frame of room on the link a message of `reliable` and `priority` leaves on,
