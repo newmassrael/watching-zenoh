@@ -101,12 +101,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use wz_session_core::encoded_push::EncodedPush;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::{CongestionControl, Priority};
-use wz_session_core::session_actions::{EncodedPush, Unsent, UnsentShared};
+use wz_session_core::session_actions::{Unsent, UnsentShared};
 
 use super::face_runtime::{FaceRuntime, SendFace};
-use super::held_route::LiteralPush;
+use super::held_route::SharedCarrier;
 use super::{peer_label, OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
@@ -659,47 +660,59 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     }
 
     /// [`Self::credited_send`] of the carrier of a fan-out, sent as the bytes it was encoded to
-    /// once for every face: the message is made of the carrier only when it is held, sent as a
-    /// chain with a wait, or carries shared memory, which the shared bytes cannot.
+    /// once for every face (`encoded`, under the one key form every client face is sent): the
+    /// message is made of the carrier only when it is held, sent as a chain with a wait, or
+    /// carries shared memory, which the shared bytes cannot. A carrier whose message cannot be
+    /// made is refused.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn credited_send_shared(
         &self,
         dest: FaceId,
         face: SendFace<'_>,
-        carrier: &LiteralPush<'_>,
+        carrier: &SharedCarrier<'_>,
         encoded: &EncodedPush,
         reliable: bool,
         express: bool,
         priority: Priority,
     ) -> Credited {
+        let message = || {
+            carrier
+                .message(|| self.client_carrier_copies.bump())
+                .map(|message| message.into_message())
+        };
         if behind_held(face, Lane::Data) {
-            let msg = carrier.clone().into_message();
+            let Some(msg) = message() else {
+                return Credited::Refused;
+            };
             self.hold_and_recheck(dest, face, msg, reliable, express, priority);
             return Credited::Held;
         }
-        match face.runtime.actions.try_send_encoded_push_qos(
-            carrier.as_push(),
-            encoded,
+        let unsent = match face.runtime.actions.try_send_encoded_push_qos(
+            encoded.spliced(),
             reliable,
             express,
             priority,
         ) {
-            Ok(()) => Credited::Sent,
-            Err(UnsentShared::NoRoom) => {
-                let msg = carrier.clone().into_message();
+            Ok(()) => return Credited::Sent,
+            Err(UnsentShared::Failed(_)) => return Credited::Refused,
+            Err(unsent) => unsent,
+        };
+        let Some(msg) = message() else {
+            return Credited::Refused;
+        };
+        match unsent {
+            UnsentShared::NoRoom => {
                 self.hold_and_recheck(dest, face, msg, reliable, express, priority);
                 Credited::Held
             }
-            Err(UnsentShared::Chain) => {
-                let msg = carrier.clone().into_message();
+            UnsentShared::Chain => {
                 self.send_chain_off_thread(face.runtime, msg, reliable, express, priority);
                 Credited::Sent
             }
-            Err(UnsentShared::Failed(_)) => Credited::Refused,
-            Err(UnsentShared::Unshareable) => {
-                let msg = carrier.clone().into_message();
+            UnsentShared::Unshareable => {
                 self.credited_send(dest, face, msg, reliable, express, priority)
             }
+            UnsentShared::Failed(_) => Credited::Refused,
         }
     }
 

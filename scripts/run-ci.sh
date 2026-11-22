@@ -7983,13 +7983,15 @@ layer_c1ay_cargo_test_router_hat() {
     # Every C1AY router_forward guard +2 with step 3c of the staged policy binding (the forwarder
     # clock snapshot test among them), the number each command printed on a build host.
     # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward 341" 341 \
+    # 341 -> 356 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward 356" 356 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
     # 335 -> 343: the five and the three of the first guard's note.
     # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward qos 346" 346 \
+    # 346 -> 361 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward qos 361" 361 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -8030,7 +8032,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 353 -> 359, printed on a build host (the six of `router_forward 330`).
     # 359 -> 367: the five and the three of the first guard's note.
     # 369 -> 370 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward mcast-faces 370" 370 \
+    # 370 -> 385 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward mcast-faces 385" 385 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -8059,7 +8062,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 332 -> 338, printed on pc2 (the six of `router_forward 330`).
     # 338 -> 346: the five and the three of the first guard's note.
     # 348 -> 349 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward 349" 349 \
+    # 349 -> 364 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward 364" 364 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -8083,7 +8087,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 335 -> 341, printed on pc2 (the six of `router_forward 330`).
     # 341 -> 349: the five and the three of the first guard's note.
     # 351 -> 352 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward hotreload 352" 352 \
+    # 352 -> 367 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward hotreload 367" 367 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -8109,7 +8114,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 390 -> 399: the five, the one and the three (token tables) of the first guard's note.
     # 401 -> 402, printed on the build host: a peer node's liveliness subscriber asks its routers.
     # 402 -> 403 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward 403" 403 \
+    # 403 -> 418 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward 418" 418 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -8120,7 +8126,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 324 -> 330, printed on pc2 (the six of `router_forward 330`).
     # 330 -> 338: the five and the three of the first guard's note.
     # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward multicast 341" 341 \
+    # 341 -> 356 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward multicast 356" 356 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -8140,7 +8147,8 @@ layer_c1ay_cargo_test_router_hat() {
     # partitioning node reports for each face, which only this arm's features reach.
     # 335 -> 343: the five and the three of the first guard's note.
     # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward linkstate 346" 346 \
+    # 346 -> 361 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward linkstate 361" 361 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -8166,7 +8174,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 2026-11-18 -- 338 -> 344, printed on pc2 (the six of `router_forward 330`).
     # 344 -> 352: the five and the three of the first guard's note.
     # 354 -> 355 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1AY router_forward interest broker 355" 355 \
+    # 355 -> 370 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
+    _runci_guarded_test "C1AY router_forward interest broker 370" 370 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -10940,7 +10949,8 @@ layer_c1x_cargo_test_routing_routes() {
     # 22 -> 24, counted from the source: the same two, beside the four `router_forward` tests the
     # name filters select under `routing-router-hat` (20 + 4).
     # 24 -> 28: the same four (24 + 4).
-    _runci_guarded_test "C1X route cache router 28" 28 \
+    # 28 -> 29 (2026-11-22, measured by guarded_count_gate.py on a build host): one more case the name filters select, from the router changes of this day.
+    _runci_guarded_test "C1X route cache router 29" 29 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
@@ -12555,7 +12565,8 @@ layer_c1h_arbitrary_subset_matrix() {
 # and its `fan_out_value_path` file 4. `--lib` keeps doctests out of the
 # count.
 layer_c1sb_switchboard_crates() {
-    _runci_guarded_test "C1sb wz-switchboard-codegen" 29 \
+    # 29 -> 31 (2026-11-22, measured by guarded_count_gate.py on a build host): the two `generate_spec_value` tests of census W10 (Round 4598).
+    _runci_guarded_test "C1sb wz-switchboard-codegen" 31 \
         cargo test -p wz-switchboard-codegen --lib --quiet || return 1
     _runci_guarded_test "C1sb wz-switchboard-example" 15 \
         cargo test -p wz-switchboard-example --lib --quiet || return 1

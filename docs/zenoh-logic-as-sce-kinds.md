@@ -169,10 +169,10 @@ them; section 4.1 maps each slice's letters.
 
 | Code | Missing element | Rows | SCE evidence |
 |---|---|---|---|
-| U1 | A table keyed by a runtime value (id, zid, keyexpr, name) that a machine owns and mutates: bind, replace, unbind, lookup by key, a counted refusal when full | 143 (S1 12, S2 18, S3 1, S4 34, S5 14, S6 18, S7 28, S8 3, S9 6, S10 3, S11 3, S12 3) | a `sce-static` statechart has no bounded-collection variable; statechart `list<T>` variables append, clear and read by index only; `bounded-collection` addresses entries by handle. SCE ADR 0108 answers it (Rust landed, C11 next) |
+| U1 | A table keyed by a runtime value (id, zid, keyexpr, name) that a machine owns and mutates: bind, replace, unbind, lookup by key, a counted refusal when full | 143 (S1 12, S2 18, S3 1, S4 34, S5 14, S6 18, S7 28, S8 3, S9 6, S10 3, S11 3, S12 3) | a `sce-static` statechart has no bounded-collection variable; statechart `list<T>` variables append, clear and read by index only; `bounded-collection` addresses entries by handle. SCE ADR 0108 answers it, landed on the Interpreter, Rust and C11; section 7.4 reads the rows whose only gap it is |
 | U2a | Text as data: parse, produce, slice and compare texts (locators, keys, selectors, ACL subjects) | 63 (S1 8, S6 15, S7 20, S9 3, S10 6, S11 5, S12 6) | a record's string has one write and one comparison; `list<T>` refuses a string element |
 | U2b | A table keyed by a text | 22 (S5 4, S7 3, S8 2, S9 1, S10 4, S11 6, S12 2) | a lookup keyed by a text is refused; ADR 0108's map admits a text key |
-| U3 | A record or list element that holds bytes, a list or a collection | 20 (S1 5, S4 8, S7 1, S8 3, S11 3) | a record's fields are fixed-width numbers, `bool`, `enum:` or a bounded string. A bounded `bytes` field is accepted (SCE `docs/SCE_ACCEPTED_SUBSET.md`, "A byte string"), which S1 to S6 read as refused; section 8 |
+| U3 | A record or list element that holds bytes, a list or a collection | 20 (S1 5, S4 8, S7 1, S8 3, S11 3) | a record's fields are fixed-width numbers, `bool`, `enum:` or a bounded string. A bounded `bytes` field is accepted (SCE `docs/SCE_ACCEPTED_SUBSET.md`, "A byte string"), which S1 to S6 read as refused; section 7.4 reads the 20 rows again |
 | U4 | A statechart or algorithm step that encodes or decodes a codec value and branches on the result | 11 (S1 9, S3 1, S10 1) | calls are defined between algorithms only; no text lets an algorithm call a codec. Answered by the boundary binding (section 5) |
 | U5 | Recursive data: keyexpr trie, JSON5 value tree, persistent-map trie, shm `AllocPolicy` tree | 21 (S3 1, S4 3, S5 6, S6 7, S8 1, S11 3) | no tree kind exists; `docs/rfc-sce-protocol-synthesis.md` §5.H deferred it |
 | U6 | A general graph: shortest-path trees, reachability, removal of detached nodes | 9 (S4 7, S11 2) | no kind holds a graph |
@@ -264,23 +264,40 @@ What this changes in the catalogue of section 4:
   and a full table answers `full`.
 
 The order, as the SCE session set it and the owner confirmed it (the boundary
-binding before ADR 0100):
+binding before ADR 0100). What has landed was read on SCE `origin/main`
+`635dd67664a` on 2026-11-22.
 
-1. **ADR 0108 step 6, then step 7.** Step 5, the Rust bounded map and set,
-   landed on SCE main on 2026-11-19. Step 6 is C11. At step 7 wz moves its pin,
-   once, and U1's rows open.
+1. **ADR 0108, a statechart's table by key.** Landed through step 7b on
+   2026-11-20: the map and the set on the Interpreter, Rust and C11, an
+   algorithm's map slot (read or `inout`), and the numerical reference. wz's pin
+   moved to `7f52c3d78ee` in Round 4594, which also makes a Rust map's storage a
+   parameter of its type (`Inline` or `Heap`). The `Linear` storage wz asked for
+   small MCU tables (no hash, no seed) is not on SCE main yet. Section 7.4 reads
+   U1's rows against it.
 2. **The literal-shift fix.** `(1 << m)` typed as the literal's width in every
-   backend; the keyexpr dynamic programmes carry a local `one` until wz's pin
-   moves. Landed on SCE main on 2026-11-20; a shift count at or past the width is
-   still unstated, and wz's are below 64.
-3. **A freestanding C11 gate.** Every fixture is compiled and linked for a
-   Cortex-M target with no host library, with a per-fixture size ratchet and a
-   run under qemu. Until it exists, nothing says the C11 emission is a C build.
-4. **The boundary-binding ADR, with the lend contract.** U4, W4 and W5, and the
-   build entry another repository calls: the `sce-codegen` command line with its
-   diagnostics, a CMake module for a C build and a `build.rs` helper for a Rust
-   one (section 5.1's binding 1 is a deployment's build). wz's `xtask`, which
-   links `sce_build` directly, moves to that entry afterwards.
+   backend. Landed on 2026-11-20; a shift count at or past the width is still
+   unstated, and wz's are below 64.
+3. **A freestanding C11 gate (ADR 0110).** Every fixture compiled and linked for
+   a Cortex-M target with no host library, with a per-fixture size ratchet and a
+   run under qemu. Accepted on 2026-11-20 and landed through its step 5.
+4. **The boundary binding with the lend contract (ADR 0111).** Accepted on
+   2026-11-22: a link imported as an event type, a batch split into events with
+   the receive pool's slots lent, the send side's stages and idle, a pool whose
+   count is a run-time value up to its build bound (U16), and an ask answered
+   later (U18). U4, W4 and W5, and the build entry another repository calls (the
+   `sce-codegen` command line, a CMake module, a `build.rs` helper) are in it.
+   Before its implementation the SCE session put:
+   - **4a.** What a value may hold, each found by wz's probes at the pin:
+     (i) Rust copies no record with a bounded byte-string field into a map,
+     where C11 does; (ii) a statechart variable's record field or element that
+     is a list (ADR 0086 §7.3); (iii) a map whose value is a map or a list (ADR
+     0108 D10, by D12: a nested place, a write in place, a put of an empty
+     container, a seed per depth; queued on SCE with Rust and C11); (iv) a list
+     of texts.
+   - **4b.** U17's own ADR: a full queue that drops or evicts, with several
+     producers.
+   - **4c.** U7: a pool of statechart instances by key (ADR 0108's keys with
+     ADR 0045's child sessions).
 5. **ADR 0100.** The codec census's L1 to L5: a masked tag, refusal by rule,
    fixed values, value ranges, and where a list ends. Then, in this order:
    - **5b. A field over several bit runs, and a word under a mask** (amends ADR
@@ -315,12 +332,12 @@ The SCE session placed 5b to 5d and 8 on 2026-11-20, after section 5.1's
 decision and the questions of watching-zenoh-79's catalogue design; items 1 to
 7 did not move.
 
-Not yet scheduled with the SCE session: U3 (a record that holds a list), U5, U6
-and U7 (trees, graphs and pools of instances), U13 and U14, and the four
-elements S7 to S10 found: U16 and U17 (a queue's run-time capacity and its full
-policy, which the C ABIs' channels need), U18 (a delivery applied inside the
-call that posted it, which zenoh-c's contract needs). U15 is decided below. U9 is
-U1 once a single deadline is a statechart timer (section 4.2). U10 and U12 are
+Of the elements this census found missing, U3 is in 4a, U16 and U18 in ADR
+0111, U17 in 4b and U7 in 4c. Not yet scheduled: U5, U6, U13 and U14 (trees,
+graphs, a step reading another component's value, a document generic over the
+application's types), whose rows wz sent the SCE session for the record, to be
+placed after the zenoh-pico preset. U15 is decided below. U9 is U1 once a single
+deadline is a statechart timer (section 4.2). U10 and U12 are
 per preset: on MCU, `ARCHITECTURE.md` §2.3 excludes them, and whether they move
 for AP is a decision. P rows are measured one by one when their slice moves.
 
@@ -561,6 +578,49 @@ Recorded, not changed.
   the engine never runs a C callback under its lock (S7 row 6). Both doors
   state it as their contract (S12 rows 13 and 41).
 
+### 7.4 U1's rows and U3's rows against SCE at the pin (2026-11-22)
+
+Read at wz's pin `7f52c3d78ee`, where ADR 0108's map and set run on the
+Interpreter, Rust and C11 (section 5, item 1). What the pin accepts was checked
+in `docs/SCE_ACCEPTED_SUBSET.md` ("Map and set variables" to "An algorithm's
+map slot") and, for the shapes in doubt, by `sce-codegen check` on probe
+documents. Each row's code was read again at today's lines; several of the
+slices' line numbers have moved.
+
+**The 51 rows whose only gap is U1** (S1 to S6 by their letter M, S7 to S12 by
+the code; 17,930 lines).
+| Verdict | Rows | What decides it |
+|---|---|---|
+| Fits now: 24 | S1 68; S2 8, 9, 10, 14, 17, 21, 27, 30, 32, 37, 43; S4 25, 26, 55; S5 41, M2, M4, M5, M17; S7 3, 4; S9 9; S11 2 | Every table is a `map<K, V>[N]` or `set<K>[N]` of accepted keys and values, written by put, remove and clear and walked in first-put order; callbacks, sinks, handles and sockets stay in a host table under the same key. S2 30's AP rule is already generated (section 7.1) and S5 M5 waits for its MCU move. S5 41 and S5 M17 own no keyed table (two slots; pools of host objects), so U1 was a misreading for them. S5 M2 needs its key, `Endpoint(slot) | Node(zid)`, written as a record of a kind and its fields. S7 3's bound is a configured `max_faces`, so its `N` is a build constant at least the configured value |
+| Waits for a nested value, item 4a (iii): 6 | S1 47; S2 34; S4 23; S5 61; S7 52, 76 | A value holds a set, a map, a queue or an optional list: the member scope's three sets (S1 47, which also runs one machine per member, U7), the consolidation cache inside each pending query (S2 34), a hat's own tables (S4 23), a request's optional path list (S5 61), a listener's replay queue (S7 52), a match's set of faces and a face's map of matches (S7 76) |
+| Has no stated bound: 10 | S1 55; S2 7, 39, 44; S4 24, 58; S7 10, 13; S8 53; S10 22 | Every table fits the map, and nothing states how many entries it may hold (W16) |
+| Reads a minimum by deadline: 3 | S2 31, 42; S7 18 | `next_deadline_ms` and the ticker's next due take the least deadline. A walk folds it (a P row to measure); S2 31 also lets two pending queries share a request id, which one key cannot hold, and S7 18 states no bound |
+| Walks in key order: 4 | S2 41; S4 61; S5 17, 57 | The accepted walk is in first-put order. S5 57 puts the protocols on the wire in ascending order and S2 41 drops a lost link's tokens lowest id first, with a second map kept in step; S4 61 and S5 17 order replies and admin leaves by key. S5 17 and S5 57 state no bound either |
+| Has a key the pin does not accept: 2 | S1 61; S4 73 | A key that is a sum type carrying data (`PeerKey`, `MeshDialKey` with an address or a path) needs a record encoding first; S1 61 also holds a generated machine in every entry (U7) and walks its keys in order |
+| Reads entries by place: 1 | S7 8 | The declaration replay finds the n-th entry of a kind and moves every face's cursor when one is inserted or removed; a map reads by key only |
+| Owns no table yet: 1 | S8 47 | A chunk's holders are an `Arc`'s strong count; a machine needs a chunk id the host mints and a bound on live chunks |
+
+- **W16, tables with no bound.** Ten keyed tables state no limit on how many
+  entries they hold (section 7.4): the link book (S1 55), the namespace ingress
+  sets (S2 7), the matching watches (S2 39), the declaration sync (S2 44), a
+  face's declaration numbers (S4 24), the matching interests (S4 58), the
+  cooperative engine's interests, write filters and match listeners (S7 10) and
+  its held `ResponseFinal`s (S7 13), the C ABI's SHM client storage (S8 53) and
+  the mesh client's held declarations (S10 22). S7 13 is the sharpest: `caps.rs`
+  states `MAX_PENDING_FINALS`, and the cooperative engine never reads it.
+
+**U3's 20 rows.** Read with a bounded byte-string field accepted, which S1 to S6
+read as refused, and checked by probes: a list of records with a `bytes[16]`
+field passes on every lane; a map whose value is such a record passes on C11 and
+is refused by Rust; a statechart record with a list field, a map whose value is a
+map, and a map whose value is a list are refused on every lane.
+
+| Rows | What they hold | Leaves U3 with |
+|---|---|---|
+| S1 8, 13, 16; S7 72; S8 31, 61; S11 15, 35 | A record with a bounded byte string and no list | Now as a list element; as a map value once 4a (i) lands |
+| S1 58, 63; S4 48, 49, 60, 72 | A record with a list field | 4a (ii) |
+| S4 3, 7, 8, 13; S8 59; S11 29 | A collection whose element is a collection (a hat's tables, nested maps, a ring per key) | 4a (iii); S4 13's table is the SCE session's fixture `linkstate_interest`, refused until then |
+
 ## 8. Open points
 
 - U4 rests on the absence of any text that lets an algorithm call a codec. If
@@ -573,9 +633,6 @@ Recorded, not changed.
 - The classification of the analyzer (`wz-capture` and the crates that follow
   it, `docs/zenoh-logic-as-sce-kinds/crates.md`) is outside this census.
   `wz-tls-record` is classified in S9 although it is the analyzer's.
-- U3's rows in S1 and S4 were read with a `bytes` field refused. SCE accepts a
-  bounded one, so the rows whose record holds bytes and no list are to be
-  re-read; some move to K.
 - S9 reads the chip drivers' protocols (bring-up, PHY negotiation, OA-TC6;
   about 2.4k lines) as K. If a whole chip driver is read as seam, they are S.
 - S8 row 37: zenoh-c's FIFO channel is K only if the producer's end of stream
