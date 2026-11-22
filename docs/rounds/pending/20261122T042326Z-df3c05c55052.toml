@@ -1,0 +1,19 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Two items whose sessions ended unlanded are carried to main. Layer G builds its seven target triples at once, each in a target directory of its own, as many at a time as the run was granted cores; measured on one 32-core build host the lane went from 340 s and 127 s (serial, first and warm) to 210 s and 26 s (concurrent, first and warm), with the same 107 step verdicts, and the per-triple directories hold 5.7 GB against 3.26 GB. The cargo-mutants tool entry hands its installer the table it reads the pin from, since the tool store copies only install_inputs.
+'''
+changes = '''
+- scripts/run-ci.sh: Layer G's steps move into _layer_g_target, run per triple in a subshell with CARGO_TARGET_DIR under crates/target/layer-g and CARGO_BUILD_JOBS an equal share of BX_GRANT_CORES (else nproc); lines print in triple order, every red triple is named.
+- scripts/lib/lane_build_restore_gate.py: the three compiles declarations name _layer_g_target.
+- bx.toml: tools.cargo-mutants install_inputs adds deploy/mutation_ratchet.json and its comment says the installer reads it.
+- docs/hosted-red-acks.md: one row for run 44965297393.
+'''
+verification = '''
+- Layer G on one build host (32 cores), grant as bx learned it: serial 340 s then 127 s; concurrent 210 s (2 at a time) then 26 s (7 at a time); all four runs 107 G step lines, 105 OK and 2 SKIP, the same set.
+- 27 scripts/lib gates with a --check mode over run-ci.sh pass on the change; bash -n and shellcheck -S warning are clean; every G.N step and echo of main is in _layer_g_target.
+- Hosted cross-mcu has no Rust cache, so its Layer G is a first build each run (499-544 s of a 2418-2556 s job under a 45 min limit).
+'''
+carry = '''
+- Hosted cross-mcu disk headroom with per-triple directories is unmeasured; read the next cross-mcu job.
+- The C1cc red of run 44965297393 (oracle sender did not deliver at the message size threshold) is not in the rc4e-red repayment list.
+'''
