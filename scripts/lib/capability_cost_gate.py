@@ -191,6 +191,8 @@ RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
 # linked with the same script (`reference_build`). The script's path in the file is from
 # `crates/`, where cargo runs the linker; the reference's link runs in its CMake tree, so it is
 # given the script's absolute path.
+# The file names GNU ld itself, the one linker that honours the discard, so the form is the same
+# outside this gate.
 DISCARD_UNWIND_CONFIG = ".cargo/capi-discard-unwind-tables.toml"
 DISCARD_UNWIND_SCRIPT = "wz-capi-pico/link/discard-unwind-tables.ld"
 DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
@@ -2636,9 +2638,9 @@ def cmd_selftest() -> int:
     expect("a library not asked to pack is not held to DT_RELR",
            link_findings("t", Measured(900, [], 3)) == [])
     discard = (CRATES / DISCARD_UNWIND_CONFIG).read_text(encoding="utf-8")
-    expect("the discard file links a Linux library with the script, and nothing else",
+    expect("the discard file links a Linux library with the script by GNU ld, and nothing else",
            config_rustflags(discard, "x86_64-unknown-linux-gnu", linux_gnu)
-           == ["-C", f"link-arg={DISCARD_UNWIND_LINK}"]
+           == ["-C", f"link-arg={GNU_LD}", "-C", f"link-arg={DISCARD_UNWIND_LINK}"]
            and config_rustflags(discard, "x86_64-pc-windows-msvc", windows_msvc) == [])
     expect("the script the discard names is in the tree, as the linker reads it from crates/",
            (CRATES / DISCARD_UNWIND_SCRIPT).is_file()

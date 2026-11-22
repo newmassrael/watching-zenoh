@@ -11,8 +11,9 @@
  *
  * INSERT keeps the linker's own script and puts this statement after `.text`, ahead of the
  * `.eh_frame` statement of that script, so every `.eh_frame` input section is matched here
- * first; with none left, the linker writes no `.eh_frame_hdr` either. GNU ld and lld take an
- * INSERT script; mold takes no SECTIONS command and refuses the link.
+ * first; with none left, the linker writes no `.eh_frame_hdr` either. GNU ld honours it, so the
+ * configuration names GNU ld; lld builds `.eh_frame` from its input sections apart and keeps it
+ * (measured with LLD 22.1.6), and mold takes no SECTIONS command and refuses the link.
  */
 SECTIONS
 {

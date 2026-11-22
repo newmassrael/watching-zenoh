@@ -210,7 +210,8 @@ so the prebuilt `core` and `alloc` keep theirs. Read in the no_std form: `.eh_fr
 `.eh_frame_hdr` 3,828 (32,788 together), and `.gcc_except_table` 72.
 
 **What was done** (`build(capi-pico): Discard the prebuilt unwind tables of the no_std form`).
-`crates/.cargo/capi-discard-unwind-tables.toml` links a Linux build with
+`crates/.cargo/capi-discard-unwind-tables.toml` links a Linux build by GNU ld (`-fuse-ld=bfd`,
+named in the file: `fix(capi-pico): Link the form without unwind tables with GNU ld`) with
 `crates/wz-capi-pico/link/discard-unwind-tables.ld`, an `INSERT AFTER .text` script: the linker
 keeps its own script, and the inserted `/DISCARD/` statement precedes that script's `.eh_frame`
 statement, so it takes every `.eh_frame` input section first. With none left the linker writes no
@@ -219,9 +220,8 @@ cargo runs the compiler, and so the linker, in for a member of the workspace. Th
 names the file after `capi-nostd.toml` and `capi-packed-relocs.toml`; the gate holds the library
 to having no `.eh_frame` (`link_findings`), and `wz-capi-pico`'s build script refuses the
 script in any build that is not `os-posix`, since a build with `std` unwinds a panic to the door
-that catches it (`ffi::guarded`). The form without the file keeps the tables, for a linker that
-takes no INSERT script (mold refuses `SECTIONS`) and for a user who wants them for a debugger or
-a profiler.
+that catches it (`ffi::guarded`). The form without the file keeps the tables, for a host without
+GNU ld and for a user who wants them for a debugger or a profiler.
 
 **Why nothing needs them.** What reads `.eh_frame` at run time, and why the no_std library has
 none of it:
@@ -290,11 +290,14 @@ without tables may also change a little code), so the ratio reads about 1.50. Th
 not touched.
 
 **Compatibility.** Linux only (the file's table is `cfg(target_os = "linux")`); Windows keeps
-its tables, which its exception handling reads (`capi-nostd.toml`). GNU ld and lld take the
-INSERT script and the discard of `.eh_frame` (the Linux kernel's arm64 script discards it the
-same way under both); mold refuses the link, by its own message. The gate links with neither a
-caller's mold nor any other linker the caller's cargo configuration names
-(`fix(gate): Build configured size cases apart from the caller's config`).
+its tables, which its exception handling reads (`capi-nostd.toml`). Only GNU ld honours the
+discard: the main session's first reading on hkl002, linked by the toolchain's lld (LLD 22.1.6),
+kept `.eh_frame` and the gate refused it by name (lld builds `.eh_frame` from its input
+sections apart from the script's matching), and mold refuses a `SECTIONS` script. So the file
+names GNU ld itself; its `-fuse-ld=bfd` comes after a linker the caller's own configuration names
+for the target (cargo joins the target's table before the `cfg` tables), so the C compiler takes
+it. The gate links every case with GNU ld in any event (`fix(gate): Link both arms of every case
+with GNU ld`) and keeps refusing a library that still has `.eh_frame`.
 
 ### T8: owned records in a build that lends every one (record buffer landed in round 2)
 
