@@ -363,20 +363,27 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
     }
 }
 
-/// An arena whose chains are staged into buffers a session's arena lent ([`LentByteCells`]): a
-/// buffer for each chain the staging claimed when it was made, which go back to their table when
-/// it is dropped, and a chain at most as long as a buffer and as `CAP`. The buffers are as long
-/// as the session's bound on a rejoined message, so the bound is the buffer's and nothing is
-/// allocated when a chain starts or grows.
+/// An arena whose chains are staged into buffers of a table a session's arena lent
+/// ([`LentByteCells`]): a chain claims a buffer of the table when its first fragment arrives and
+/// gives it back when it ends, completed, aborted or timed out, so the links of a session share one
+/// table and a buffer is held only while a chain is open in it. A chain is at most as long as a
+/// buffer and as `CAP`. The buffers are as long as the session's bound on a rejoined message, so
+/// the bound is the buffer's and nothing is allocated when a chain starts or grows.
 ///
-/// A staging made with fewer buffers than its Router has slots serves fewer chains at once: a
-/// chain that finds every buffer taken is refused as pool exhaustion, which the Router's per-peer
-/// quota keeps a link's one peer from reaching when the staging holds a buffer for each chain the
-/// quota admits.
+/// A chain that finds every buffer of the table held, by this staging's chains or another's, or
+/// this staging's own chains at their count, is refused as pool exhaustion, which the Router
+/// answers by dropping the chain and the session counts; zenoh-pico drops a chain whose buffer it
+/// cannot allocate (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`). So [`ChainStaging::available`] is the smaller
+/// of the chains this staging may still open and the buffers its table has free, and the Router's
+/// open chains and it need not sum to `SLOTS`.
 pub struct LentStaging<const SLOTS: usize, const CAP: usize> {
+    /// The table a chain claims its buffer from; none for a staging that serves no chain.
+    cells: Option<LentByteCells>,
+    /// The buffer each open chain holds, at the chain's index.
     bufs: [Option<ByteBuf>; SLOTS],
-    /// Which buffers a chain holds.
-    open: [bool; SLOTS],
+    /// The most chains open at once, at most `SLOTS`.
+    chains: usize,
     /// The longest chain: a buffer's length, at most `CAP`.
     capacity: usize,
 }
@@ -391,21 +398,13 @@ pub struct LentChain {
 }
 
 impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
-    /// A staging of `chains` buffers of `cells`, at most `SLOTS`, claimed now: fewer when the
-    /// table has fewer free.
-    pub fn claim(cells: &LentByteCells, chains: usize) -> Self {
-        let mut claimed = 0usize;
-        let bufs = core::array::from_fn(|_| {
-            if claimed < chains {
-                claimed += 1;
-                cells.claim()
-            } else {
-                None
-            }
-        });
+    /// A staging of at most `chains` chains open at once, at most `SLOTS`, each claiming a buffer
+    /// of `cells` when it starts. Nothing is claimed now.
+    pub fn over(cells: &LentByteCells, chains: usize) -> Self {
         Self {
-            bufs,
-            open: [false; SLOTS],
+            cells: Some(*cells),
+            bufs: core::array::from_fn(|_| None),
+            chains: chains.min(SLOTS),
             capacity: cells.size().min(CAP),
         }
     }
@@ -414,8 +413,9 @@ impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
     /// buffers for.
     pub fn none() -> Self {
         Self {
+            cells: None,
             bufs: core::array::from_fn(|_| None),
-            open: [false; SLOTS],
+            chains: 0,
             capacity: 0,
         }
     }
@@ -424,14 +424,23 @@ impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
     pub const fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// How many of its chains hold a buffer now.
+    fn held(&self) -> usize {
+        self.bufs.iter().filter(|buf| buf.is_some()).count()
+    }
 }
 
 impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStaging<SLOTS, CAP> {
     type Chain = LentChain;
 
     fn acquire(&mut self) -> Option<Self::Chain> {
-        let at = (0..SLOTS).find(|&at| self.bufs[at].is_some() && !self.open[at])?;
-        self.open[at] = true;
+        if self.held() >= self.chains {
+            return None;
+        }
+        let at = (0..SLOTS).find(|&at| self.bufs[at].is_none())?;
+        let cells = self.cells?;
+        self.bufs[at] = Some(cells.claim()?);
         Some(LentChain {
             at,
             len: 0,
@@ -440,7 +449,8 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
     }
 
     fn release(&mut self, chain: Self::Chain) {
-        self.open[chain.at] = false;
+        // Dropped, the buffer is its table's again, for the next chain of any link of the session.
+        self.bufs[chain.at] = None;
     }
 
     fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
@@ -496,9 +506,10 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
     }
 
     fn available(&self) -> usize {
-        (0..SLOTS)
-            .filter(|&at| self.bufs[at].is_some() && !self.open[at])
-            .count()
+        let free = self
+            .cells
+            .map_or(0, |cells| cells.capacity().saturating_sub(cells.in_use()));
+        self.chains.saturating_sub(self.held()).min(free)
     }
 }
 

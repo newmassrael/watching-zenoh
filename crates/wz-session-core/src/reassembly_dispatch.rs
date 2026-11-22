@@ -2027,7 +2027,7 @@ mod tests {
         let mut d: ReassemblyDispatcher<4, 64, LentStaging<4, 64>> =
             ReassemblyDispatcher::with_staging(
                 ReassemblyConfig::new(2, 5_000),
-                LentStaging::claim(&cells, 2),
+                LentStaging::over(&cells, 2),
             );
         let mut out = None;
         d.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
@@ -2060,7 +2060,7 @@ mod tests {
         let d = ReassemblyDispatcher::init_in(
             &mut place,
             ReassemblyConfig::new(2, 5_000),
-            LentStaging::claim(&cells, 2),
+            LentStaging::over(&cells, 2),
         );
         assert_eq!(
             (
@@ -2085,35 +2085,105 @@ mod tests {
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
         assert_eq!(d.capacity_refusals(), 1);
-        assert_eq!(cells.in_use(), 2, "the Router holds the buffers it claimed");
+        assert_eq!(cells.in_use(), 0, "the ended chain gave it back");
+        d.ingest(frag(PEER_A, true, 5, 1, b"aaaa"), MASK, 0, |_| {});
+        assert_eq!(cells.in_use(), 1, "an open chain holds a buffer");
         // SAFETY: `init_in` wrote the whole Router into `place`, and it is dropped once.
         unsafe { place.assume_init_drop() };
-        assert_eq!(cells.in_use(), 0, "dropped in place, it gives them back");
+        assert_eq!(cells.in_use(), 0, "dropped in place, it gives it back");
     }
 
-    /// A lent staging serves as many chains as it claimed buffers, gives a buffer back when its
-    /// chain ends, and gives every buffer back to its table when it is dropped.
+    /// A lent staging claims a buffer of its table when a chain starts and gives it back when the
+    /// chain ends: none is held while no chain is open, no more chains than its count are open at
+    /// once, and a staging dropped with a chain open gives that buffer back.
     #[test]
-    fn a_lent_staging_serves_the_buffers_it_claimed() {
+    fn a_lent_staging_claims_a_buffer_when_a_chain_starts() {
         use crate::chain_staging::{ChainStaging, LentStaging};
 
         let cells = lent_cells(8, 3);
-        let mut staging = LentStaging::<4, 64>::claim(&cells, 2);
-        assert_eq!((staging.available(), cells.in_use()), (2, 2));
+        let mut staging = LentStaging::<4, 64>::over(&cells, 2);
+        assert_eq!((staging.available(), cells.in_use()), (2, 0));
         assert_eq!(staging.capacity(), 8, "a buffer's length, under CAP");
         let first = staging.acquire().expect("a buffer");
-        let second = staging.acquire().expect("the other buffer");
+        assert_eq!(cells.in_use(), 1, "the first chain claimed one");
+        let _second = staging.acquire().expect("the other buffer");
         assert!(staging.acquire().is_none(), "no third chain");
+        assert_eq!(cells.in_use(), 2, "the refused chain claimed nothing");
         staging.release(first);
-        assert_eq!(staging.available(), 1);
-        staging.release(second);
+        assert_eq!((staging.available(), cells.in_use()), (1, 1));
         drop(staging);
         assert_eq!(
             cells.in_use(),
             0,
-            "dropped, the staging gave its buffers back"
+            "dropped, the staging gave the open chain's buffer back"
         );
         assert_eq!(LentStaging::<4, 64>::none().available(), 0);
+    }
+
+    /// The stagings of two links over their session's one table share its buffers: a chain of one
+    /// link that finds every buffer held by the other's is refused, and the buffer the other's
+    /// chain gives back when it ends serves it.
+    #[test]
+    fn two_stagings_over_one_table_share_its_buffers() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let cells = lent_cells(8, 1);
+        let mut one = LentStaging::<4, 64>::over(&cells, 2);
+        let mut other = LentStaging::<4, 64>::over(&cells, 2);
+        let held = one.acquire().expect("the table's buffer");
+        assert_eq!(other.available(), 0, "the table has none free");
+        assert!(other.acquire().is_none(), "the other link finds none");
+        one.release(held);
+        assert_eq!(other.available(), 1);
+        let again = other.acquire().expect("the buffer given back");
+        assert_eq!(cells.in_use(), 1);
+        other.release(again);
+        assert_eq!(cells.in_use(), 0);
+    }
+
+    /// Two links' Routers over their session's one table of one buffer: the second link's chain
+    /// that begins while the first's is open is refused as pool exhaustion, which drops it, and
+    /// the first's completes whole; once it has, a chain of the second link begins.
+    #[test]
+    fn a_chain_past_the_sessions_buffers_is_refused_as_pool_exhaustion() {
+        use crate::chain_staging::LentStaging;
+
+        let cells = lent_cells(8, 1);
+        let mut first: ReassemblyDispatcher<4, 64, LentStaging<4, 64>> =
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                LentStaging::over(&cells, 2),
+            );
+        let mut second: ReassemblyDispatcher<4, 64, LentStaging<4, 64>> =
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                LentStaging::over(&cells, 2),
+            );
+        assert_eq!(
+            first.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            second.ingest(frag(PEER_B, true, 1, 1, b"cccc"), MASK, 0, |_| {
+                panic!("refused, no deliver")
+            }),
+            IngestOutcome::Refused(RefuseReason::PoolExhausted)
+        );
+        assert_eq!(second.active_chains(), 0, "it holds no slot");
+        let mut out = None;
+        assert_eq!(
+            first.ingest(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |m| {
+                out = Some(m.to_vec())
+            }),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(out.as_deref(), Some(&b"aaaabbbb"[..]));
+        assert_eq!(cells.in_use(), 0);
+        assert_eq!(
+            second.ingest(frag(PEER_B, true, 2, 1, b"cccc"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(cells.in_use(), 1);
     }
 
     /// A reservation is staged as far as it was filled, and a commit past it is refused.
@@ -2122,7 +2192,7 @@ mod tests {
         use crate::chain_staging::{ChainStaging, LentStaging, StagingError};
 
         let cells = lent_cells(8, 1);
-        let mut staging = LentStaging::<1, 64>::claim(&cells, 1);
+        let mut staging = LentStaging::<1, 64>::over(&cells, 1);
         let mut chain = staging.acquire().expect("a buffer");
         staging.append(&mut chain, b"ab").expect("room");
         staging

@@ -34,11 +34,13 @@
 //!   first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
-//! - the buffers each link of the session stages the chains of its fragmented messages in, one
-//!   for each chain it stages at once (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`), each
-//!   as long as the largest message the session rejoins (`PICO_FRAG_MAX_BYTES`, under the build's,
-//!   which a chain past it is ended at, as pico ends one), with the flags that say which are lent
-//!   (`SessionArena::lend_reassembly`), lent after the lane;
+//! - the buffers the links of the session stage the chains of their fragmented messages in, one
+//!   table for the session (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`, one for each
+//!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
+//!   arrives and given back when the chain ends, each as long as the largest message the session
+//!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
+//!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
+//!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
 //!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
@@ -260,7 +262,7 @@ pub struct ArenaPlan {
     lane_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
-    /// How many such buffers, for every link the session may hold.
+    /// How many such buffers, in the one table the session's links share.
     reassembly_chains: usize,
     entities: EntityRows,
     gets: GetTables,
@@ -294,7 +296,7 @@ impl ArenaPlan {
                 Quota::at_most(limits.delivery_lane_bytes()),
             )?,
             reassembly_bytes,
-            reassembly_chains: times(LENT_CHAINS, links)?,
+            reassembly_chains: LENT_CHAINS,
             entities: EntityRows::default(),
             gets: GetTables::default(),
             peers: FacePeers::default(),
@@ -338,7 +340,8 @@ impl ArenaPlan {
             LentByteCells::FLAG_BYTES,
         );
         plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes);
-        // The links' reassembly buffers, lent next (`SessionArena::lend_reassembly`).
+        // The session's reassembly buffers, which its links share, lent next
+        // (`SessionArena::lend_reassembly`).
         plan.put(
             "reassembly flags",
             "PICO_FRAG_MAX_BYTES",
@@ -535,7 +538,7 @@ impl ArenaPlan {
     }
 
     /// The length of each buffer a link stages a fragmented message's chain in, and how many
-    /// buffers the arena lends for every link the session may hold.
+    /// buffers the session's one table holds, which its links share.
     pub fn reassembly(&self) -> (usize, usize) {
         (self.reassembly_bytes, self.reassembly_chains)
     }
@@ -826,10 +829,10 @@ impl SessionArena {
         Ok((NonNull::new(base).ok_or(refused)?, bytes))
     }
 
-    /// Lend the links' reassembly buffers `plan` lays out, next after the lane: a table the session
-    /// holds for its life, from which each link claims a buffer for each chain it stages at once
-    /// when its session starts and gives them back when it ends. Refused only by an arena reserved
-    /// by another plan.
+    /// Lend the session's reassembly buffers `plan` lays out, next after the lane: a table the
+    /// session holds for its life, from which a link claims a buffer when a chain's first fragment
+    /// arrives and gives it back when the chain ends. Refused only by an arena reserved by another
+    /// plan.
     pub(crate) fn lend_reassembly(
         &mut self,
         plan: &ArenaPlan,

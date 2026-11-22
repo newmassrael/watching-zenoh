@@ -99,11 +99,16 @@ pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
 }
 
 /// How many chains of one link's copying receive are staged at once in buffers its session lent:
-/// the chains the per-peer quota admits, since a unicast link carries one peer.
+/// the chains the per-peer quota admits, since a unicast link carries one peer. It is also how many
+/// buffers the session's one table holds, which its links share, each claimed when a chain's first
+/// fragment arrives: one for each reliability a peer has a chain open in, as zenoh-pico keeps one
+/// defragmentation buffer for each (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+/// `_z_wbuf_t _dbuf_best_effort;`).
 pub const LENT_CHAINS: usize = crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize;
 
 /// The staging of a Router whose chains lie in buffers a session's arena lent
-/// ([`LentStaging`]), each at most the build's `PICO_FRAG_MAX_BYTES` long.
+/// ([`LentStaging`]), each claimed when its chain starts and at most the build's
+/// `PICO_FRAG_MAX_BYTES` long.
 pub type LentChains = LentStaging<MCU_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
 
 /// The reassembly Router of a session whose chains stage into buffers its arena lent: the pool's
@@ -779,7 +784,7 @@ mod tests {
             .expect("the memory holds the table");
         let mut reasm = lent_reassembly(
             &SessionPolicy::defaults(),
-            LentChains::claim(&cells, LENT_CHAINS),
+            LentChains::over(&cells, LENT_CHAINS),
         );
         assert_eq!(reasm.max_message_bytes(), caps::PICO_FRAG_MAX_BYTES);
         reasm.ingest(frag(1, 1, b"0123456789"), MASK, 0, |_| {});
@@ -791,8 +796,8 @@ mod tests {
     }
 
     /// The lent Router built in its place is the one `lent_reassembly` returns: the same ceiling,
-    /// the same chains bounded by their buffers, and dropped where it lies it gives the buffers it
-    /// claimed back to the session's table.
+    /// the same chains bounded by their buffers, a buffer held only while its chain is open, and
+    /// dropped where it lies it gives the buffer of an open chain back to the session's table.
     #[test]
     fn a_lent_router_built_in_place_bounds_a_chain_by_its_buffer() {
         use core::mem::MaybeUninit;
@@ -814,7 +819,7 @@ mod tests {
         let reasm = lent_reassembly_in(
             &mut place,
             &SessionPolicy::defaults(),
-            LentChains::claim(&cells, LENT_CHAINS),
+            LentChains::over(&cells, LENT_CHAINS),
         );
         assert_eq!(reasm.max_message_bytes(), caps::PICO_FRAG_MAX_BYTES);
         assert_eq!(reasm.staging_available(), LENT_CHAINS);
@@ -824,10 +829,12 @@ mod tests {
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
         assert_eq!(reasm.staging_available(), LENT_CHAINS);
-        assert_eq!(cells.in_use(), LENT_CHAINS);
+        assert_eq!(cells.in_use(), 0, "the ended chain gave its buffer back");
+        reasm.ingest(frag(3, 1, b"0123"), MASK, 0, |_| {});
+        assert_eq!(cells.in_use(), 1, "an open chain holds one buffer");
         // SAFETY: `lent_reassembly_in` wrote the whole Router into `place`; it is dropped once.
         unsafe { place.assume_init_drop() };
-        assert_eq!(cells.in_use(), 0, "the buffers went back with the Router");
+        assert_eq!(cells.in_use(), 0, "the buffer went back with the Router");
     }
 
     /// The deadline sweep — the per-tick half of the drive loop — reclaims

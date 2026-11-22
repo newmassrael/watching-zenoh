@@ -551,11 +551,12 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     );
 }
 
-/// Each link the session may hold is lent a buffer for each chain it stages at once, as long as
-/// the session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
+/// The session is lent one table of reassembly buffers its links share, a buffer for each chain
+/// one peer stages at once however many links the session may hold, each as long as the
+/// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
 /// session lowers it to, and a value over the build's refuses the plan under its own name.
 #[test]
-fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
+fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length() {
     use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 
     let config = CoopConfig {
@@ -563,14 +564,24 @@ fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&built, "reassembly buffers").count, 3 * LENT_CHAINS);
+    assert_eq!(row(&built, "reassembly buffers").count, LENT_CHAINS);
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
         caps::PICO_FRAG_MAX_BYTES
     );
+    assert_eq!(built.reassembly(), (caps::PICO_FRAG_MAX_BYTES, LENT_CHAINS));
+    let one_link = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
     assert_eq!(
+        one_link.reassembly(),
         built.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, 3 * LENT_CHAINS)
+        "the table does not grow with the links"
     );
     let mut lowered = SessionLimits::defaults();
     if lowered
