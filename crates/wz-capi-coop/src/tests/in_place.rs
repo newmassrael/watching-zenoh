@@ -90,8 +90,10 @@ fn the_walk_holds_a_record_buffer_of_no_size_where_the_tables_take_no_owned_reco
     use wz_session_core::network_message::{new_record_buf, RecordBuf};
     let mut record = new_record_buf();
     record.clear();
-    assert!(
-        OWNED_RECORDS || core::mem::size_of::<RecordBuf>() == 0,
-        "a build that lends every record holds a buffer of no size"
-    );
+    const {
+        assert!(
+            OWNED_RECORDS || core::mem::size_of::<RecordBuf>() == 0,
+            "a build that lends every record holds a buffer of no size"
+        );
+    }
 }
