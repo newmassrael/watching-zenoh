@@ -99,23 +99,63 @@ matcher (item 5). None of these figures is measured; the QEMU count after the me
 | b7ec952dc | 3 | the fan over the seven other planes, the watches' staging and three of the four face lookups a record, ~400 to 1000 | `tests::a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup`: 8 Pushes, 8 to the subscribers alone, 8 face lookups (32 before), none to the fan |
 | 6c1711159 | 12 | the box and its free for a sample that carries an encoding, ~250, and the box that was never freed | `wz-capi-pico` `pubsub::tests::a_samples_encoding_is_held_in_its_marshal`: the loaned encoding's handle lies inside the marshal |
 
+The branch after it (`rx-cost-3`):
+
+| Commit | Item | Removed per sample (estimate) | Test that counts it |
+|---|---|---|---|
+| f127d5089 | 12, queries | the box made for every query that carried an encoding, never freed | `wz-capi-pico` `query::tests::a_querys_encoding_is_held_in_its_marshal` |
+| 6ef38844a | 7, 8 | the lane's lock: the offer, the take that completes the head before it, the empty take (2 to 3 pairs a sample) | `tests::lane::a_delivery_on_another_thread_gives_the_room_back_with_no_lock`, `tests::lane::the_lane_hands_its_samples_on_in_order_to_one_delivery_at_a_time` |
+| ffddef3d0 | 8 | the kept callbacks' lock (`resolved`, 1 pair a pass): a compare-exchange | `engine::try_cell_tests::a_held_cell_is_not_taken_again_until_it_is_let_go` |
+| 58fc0293c | 7 | the copy of the sample into the lane (~400 + one payload copy) and its hand-on, for a sample delivered in place | `tests::a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing` (8 of 8 lent, 0 written into the lane); `tests::lane::a_sample_whose_parts_lie_in_the_lent_datagram_is_handed_where_they_lie` |
+
 ## Lock pairs of one received sample, counted from the source
 
 One Push of one subscriber, read by one `zp_read`, in a build with `local-subscriber`, `query`,
 `queryable` and `liveliness`, release build (no `Gated`):
 
-| Lock | Before af33c7f04 | After 6c1711159 |
-|---|---|---|
-| Session (wait, step, the handed-leg queue; item 9) | 3 | 3 |
-| Lane: gate | 2 | 0 |
-| Lane: the sink's offer | 1 | 1 |
-| Lane: `take_front`, `complete`, the empty `take_front` of each pass, `is_idle` | 5 | 2 |
-| Deliverers' set (`Delivering`) | 2 | 0 (atomics) |
-| Running callbacks (`Running`) | 2 | 0 (atomics) |
-| Kept callbacks (`resolved`, a try) | 2 | 1 |
-| Matching, queries, ended legs, two passes | 5 | 0 (words) |
-| The subscriber's callback | 1 | 1 |
-| Total | 23 | 8 |
+| Lock | Before af33c7f04 | After 6c1711159 | After 58fc0293c |
+|---|---|---|---|
+| Session (wait, step, the handed-leg queue; item 9) | 3 | 3 | 3 |
+| Lane: gate | 2 | 0 | 0 |
+| Lane: the sink's offer | 1 | 1 | 0 (written under the session's lock) |
+| Lane: `take_front`, `complete`, the empty `take_front` of each pass, `is_idle` | 5 | 2 | 0 (an SCE queue, a CAS word) |
+| Deliverers' set (`Delivering`) | 2 | 0 (atomics) | 0 |
+| Running callbacks (`Running`) | 2 | 0 (atomics) | 0 |
+| Kept callbacks (`resolved`, a try) | 2 | 1 | 0 (a CAS) |
+| Matching, queries, ended legs, two passes | 5 | 0 (words) | 0 |
+| The subscriber's callback | 1 | 1 | 1 |
+| Total | 23 | 8 | 4 |
+
+Copies of the payload after the socket read: one into the lane (item 7) before 58fc0293c; none for a
+sample delivered where it lies, which is every sample of a link that leaves its datagram in place
+(UDP) read by a thread that is not inside a callback with nothing older waiting. A sample that is
+not (a re-entered read, a chain rejoined from fragments, a stream link) is still written into the
+lane once, and handed on with no lock. The key of a sample delivered in place is copied beside it
+(a key composed from an alias lies in a frame of the dispatch).
+
+The brief's target, one pair a sample, is not reached: the session's lock is taken three times a read
+(item 9, the branch that reads the step clock once), and each subscriber's callback has a mutex of its
+own, kept so a delivery from the read task and one from the program's own read never overlap.
+
+How the hand-off is made without a lock (`crates/wz-capi-coop/src/lane.rs`, `SharedLane`): the
+session writes the lane under its own lock; each sample it publishes is handed to the deliveries as a
+handle (event slot, offset) through a queue generated from `sources/session/delivery_lane_queue.scxml`
+(SCE `queue`, one producer, one consumer, wait-free: the Lamport ring), and comes back through a
+second queue of the same document once its callbacks have returned. The producer is single because
+every writer holds the session's lock; the consumer is single because a delivery holds the lane's
+delivery word (a compare-exchange). The ring publishes with a Release store of its index and reads with
+an Acquire load, so a sample's record and bytes are seen by the delivery that pops its handle. A
+sample's record is not the queue's element: it holds a source info and a variant per kind, which an
+element of scalars cannot, so it waits in its event slot, a cell of its own, which the handle's push
+hands over and its return hands back.
+
+zenoh-pico holds nothing of the session while the callback runs: the session mutex is taken and let go
+of inside the lookup of the subscriptions (`vendor/zenoh-pico/src/session/subscription.c` @
+`_z_session_mutex_unlock(zn);`, in `_z_subscription_get_infos`) before the callbacks are called
+(`vendor/zenoh-pico/src/session/subscription.c` @ `sub_info->_callback(&sample, sub_info->_arg);`), and
+its receive buffer stays valid because the one reader that fills it is the thread running the
+callback. wz may be stepped from several threads, so a sample delivered where it lies holds the links
+back (no receive, no service) until its callbacks return.
 
 A second sample in the same read adds three: its offer, the take that completes the head before it,
 its callback. The brief's target, one pair a sample beside atomics, is not reached: the two lane
@@ -129,7 +169,14 @@ across steps, and no spin for a droppable put.
 
 ## What is next, in order of expected gain
 
-1. Item 7: deliver from the kept datagram instead of a copy in the lane. Not done on
+0. Done on `rx-cost-3`: item 7 for a link that leaves its datagram in place (58fc0293c). Open beside
+   it: a lwIP link (`ip_stack`) gives its slot back when the lend returns and so answers
+   `lends_until_next_receive` false; claiming the slot until the callback returns is the next step
+   there. The transport counters (`transport-stats`) now count a lent record by its class
+   (6cc5137dc) for the unicast receive; the multicast receive still decodes owned under them. A build
+   with `rx-lent-control` and without `rx-control` lends an Oam as a record of an unknown id, which
+   the counters file as undecoded where the owned walk files an Oam.
+1. Item 7, as it stood before this branch: deliver from the kept datagram instead of a copy in the lane. Not done on
    `rx-cost-2`: the callback runs with no lock of the library held, and the step holds the
    session for the whole walk of the datagram, so a sample delivered in place needs the walk to
    stop after its record (the link already keeps the datagram it stopped in), the session let go,
