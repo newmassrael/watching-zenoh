@@ -17,6 +17,12 @@ use wz_session_core::sink::SampleView;
 
 use super::{config, open, open_with, until, CatchAll, Engine, Router};
 
+/// What each subscriber of [`subscribe_putting`] was handed: its index and the payload.
+type Handed = Arc<Mutex<Vec<(usize, Vec<u8>)>>>;
+
+/// The answer of the put the first subscriber of [`subscribe_putting`] made from its callback.
+type InnerPut = Arc<Mutex<Option<Result<usize, FanoutError>>>>;
+
 /// A subscriber that counts what it is handed.
 fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<AtomicUsize>) {
     let count = Arc::new(AtomicUsize::new(0));
@@ -287,12 +293,7 @@ fn a_put_the_lane_cannot_hold_for_a_running_callback_reaches_no_subscriber() {
 /// Three subscribers of the session's own on `demo/l/fan`, each recording what it is handed in
 /// `handed`; the first, handed `outer`, puts on the same key from inside its callback, `inner`
 /// itself or, when `inner_len` is not zero, that many bytes, and records the put's answer.
-fn subscribe_putting(
-    engine: &Arc<Engine>,
-    handed: &Arc<Mutex<Vec<(usize, Vec<u8>)>>>,
-    inner: &Arc<Mutex<Option<Result<usize, FanoutError>>>>,
-    inner_len: usize,
-) {
+fn subscribe_putting(engine: &Arc<Engine>, handed: &Handed, inner: &InnerPut, inner_len: usize) {
     let session = Arc::downgrade(engine);
     for subscriber in 0..3usize {
         let handed = handed.clone();

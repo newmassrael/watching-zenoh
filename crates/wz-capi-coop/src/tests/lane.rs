@@ -626,10 +626,9 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
     let Some(mut lane) = lane(1024, 1) else {
         // A build that keeps the lane's limits to its own values has no such lane: its debug form
         // ends as the test expects of it.
-        assert!(
-            !cfg!(debug_assertions),
-            "a record the gate let through found no room: no such lane in this build"
-        );
+        #[cfg(debug_assertions)]
+        panic!("a record the gate let through found no room: no such lane in this build");
+        #[cfg(not(debug_assertions))]
         return;
     };
     lane.offer(1, &best_effort(8));
