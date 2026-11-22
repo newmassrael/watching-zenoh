@@ -1209,14 +1209,25 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 ))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordForm {
-    /// Every record is decoded into its owned message. Absent from a build that
-    /// lends its control records (`rx-lent-control`) unless it keeps an owned
-    /// reader for its counters (`transport-stats`), its namespace strip
-    /// (`routing-namespace`) or its tests: there no record of a frame read in
-    /// place is ever an owned message, and the owned walk is not linked.
+    /// Every record is decoded into its owned message: the form of a build that has no record to
+    /// lend (no `rx-lent-control` and no lendable codec), of a message rejoined from fragments
+    /// whose namespace is stripped off its owned outcome (`reassembly` with
+    /// `routing-namespace`), and of the tests. Any other build lends what it can, and has no use
+    /// for it.
     #[cfg(all(
         feature = "alloc",
-        any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+        any(
+            test,
+            all(
+                not(feature = "rx-lent-control"),
+                not(any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response"
+                ))
+            ),
+            all(feature = "reassembly", feature = "routing-namespace")
+        )
     ))]
     Owned,
     /// A Push, a Request and a Response are decoded where the payload lies and
