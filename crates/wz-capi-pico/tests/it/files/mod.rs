@@ -14,6 +14,7 @@ mod blocking_callback_keeps_session;
 mod client_only_dials_a_listener;
 mod client_only_refuses_a_listener;
 mod connectivity_events;
+mod coop_tcp_teardown;
 mod decl_watch_doors;
 mod e2e_doors;
 mod fragmentation_roundtrip;

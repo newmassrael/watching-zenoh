@@ -1009,6 +1009,27 @@ jobs:
           done
           [ "$overall" = PASS ]
 
+      - name: the cooperative engine's teardown over tcp (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 30
+        continue-on-error: true
+        shell: bash
+        run: |
+          # Two peers over tcp/ on the loopback exchange round trips, the listening one answering
+          # from inside its subscriber's callback; then each teardown call of the dialling one
+          # returns in time, with its peer open and with its peer gone
+          # (crates/wz-capi-pico/tests/it/files/coop_tcp_teardown.rs). The summary is read: a
+          # filter that selects nothing passes.
+          rc=0
+          out="$(cd crates && cargo test -p wz-capi-pico --no-default-features \
+            --features engine-coop,peer,multi-thread --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
+          echo "$out"
+          verdict=FAIL
+          if [ "$rc" = 0 ] && grep -q '^test result: ok\. 2 passed' <<<"$out"; then verdict=PASS; fi
+          echo "capi-coop on ${RUNNER_OS}: the teardown over tcp: $verdict"
+          echo "capi-coop on ${RUNNER_OS}: the teardown over tcp: $verdict" >> "$GITHUB_STEP_SUMMARY"
+          [ "$verdict" = PASS ]
+
       - name: a single-threaded pico C program on the cooperative engine (observed)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 25

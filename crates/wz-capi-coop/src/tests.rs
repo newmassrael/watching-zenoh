@@ -1694,6 +1694,7 @@ mod arena;
 mod closure_drops;
 mod congestion;
 mod decl_watch;
+mod dial_in_flight;
 mod entity_tables;
 #[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
 mod face_table;
@@ -1722,6 +1723,7 @@ mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
+mod redial_wait;
 mod replay;
 #[cfg(all(
     feature = "shared-key-ids",

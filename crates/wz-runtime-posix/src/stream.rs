@@ -86,6 +86,53 @@ impl PosixTcpSocket {
     }
 }
 
+impl PosixTcpSocket {
+    /// Begin a connection to `to` and return without waiting for it: the socket is non-blocking
+    /// until [`StreamSocket::connected`] finds the connection made, and blocking from then on, as
+    /// a socket [`Self::connect`] made is. A refusal the kernel knows at once is the error here.
+    pub fn connect_started(to: SocketAddr) -> Result<Self, PosixNetError> {
+        let fd = stream_socket(&to)?;
+        // Owned from here, so an early return closes it.
+        let this = Self {
+            fd,
+            local: to,
+            peer: to,
+        };
+        set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
+        set_nonblocking(fd, true).map_err(PosixNetError::NonBlocking)?;
+        let peer = RawAddr::of(to);
+        // SAFETY: `peer` is a live socket address of the length passed.
+        if unsafe { libc::connect(fd, peer.as_ptr(), peer.size()) } != 0 {
+            match errno() {
+                // Under way, which `connected` reads; a signal does not stop it either.
+                libc::EINPROGRESS | libc::EINTR => {}
+                refused => return Err(PosixNetError::Connect(refused)),
+            }
+        }
+        Ok(this)
+    }
+
+    /// The error a connection begun without waiting ended with (`SO_ERROR`), 0 when it was made.
+    fn connect_error(&self) -> Result<c_int, PosixNetError> {
+        let mut error: c_int = 0;
+        let mut len = core::mem::size_of::<c_int>() as libc::socklen_t;
+        // SAFETY: `error` and `len` are live and writable, and `len` is `error`'s size.
+        let rc = unsafe {
+            libc::getsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut error as *mut c_int).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(PosixNetError::Connect(errno()));
+        }
+        Ok(error)
+    }
+}
+
 /// The host's TCP connect as a stack's dial: the stream a `tcp/` link runs over is a plain
 /// connection.
 #[derive(Debug, Clone, Copy, Default)]
@@ -96,6 +143,10 @@ impl StreamDial for PosixTcpDial {
 
     fn dial(&self, to: SocketAddr) -> Result<PosixTcpSocket, LinkOpenError> {
         PosixTcpSocket::connect(to).map_err(open_refused)
+    }
+
+    fn dial_started(&self, to: SocketAddr) -> Result<PosixTcpSocket, LinkOpenError> {
+        PosixTcpSocket::connect_started(to).map_err(open_refused)
     }
 
     wz_runtime_coop::with_heap_link_seams! {
@@ -292,6 +343,21 @@ impl StreamSocket for PosixTcpSocket {
             }
         }
         Ok(())
+    }
+
+    // A connect under way reports room once it ends, made or refused, and `SO_ERROR` says which.
+    fn connected(&mut self) -> Result<bool, PosixNetError> {
+        if !poll_writable(self.fd, 0) {
+            return Ok(false);
+        }
+        match self.connect_error()? {
+            0 => {}
+            refused => return Err(PosixNetError::Connect(refused)),
+        }
+        set_nonblocking(self.fd, false).map_err(PosixNetError::NonBlocking)?;
+        self.local = name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)?;
+        self.peer = name_of(self.fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
+        Ok(true)
     }
 
     fn wait_readable(&self, timeout_ms: c_int) {
@@ -533,6 +599,53 @@ mod tests {
         fn drop(&mut self) {
             // SAFETY: `fd` is this guard's own descriptor, closed exactly once.
             unsafe { libc::close(self.fd) };
+        }
+    }
+
+    /// A connect begun without waiting is made once the listener has it, names both its ends from
+    /// then on and carries bytes; one to a port nobody listens on is refused, at once or when it is
+    /// asked.
+    #[test]
+    fn a_connect_begun_without_waiting_is_made_or_refused_when_asked() {
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let port = listener.local_addr().expect("its port").port();
+        let mut near = PosixTcpSocket::connect_started(at(port)).expect("a connect begun");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !near.connected().expect("the connect is not refused") {
+            assert!(Instant::now() < until, "the connect was never made");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (mut far, _) = listener.accept().expect("the far end");
+        assert_eq!(near.peer(), listener.local_addr().unwrap());
+        assert_eq!(near.local(), far.peer_addr().unwrap());
+        near.send_parts(&[b"made"])
+            .expect("a made connection carries bytes");
+        let mut got = [0u8; 4];
+        far.read_exact(&mut got).expect("the bytes");
+        assert_eq!(&got, b"made");
+
+        let held = RefusingPort::hold();
+        match PosixTcpSocket::connect_started(at(held.port)) {
+            Err(PosixNetError::Connect(e)) => assert_eq!(e, libc::ECONNREFUSED),
+            Err(other) => panic!("a different error: {other:?}"),
+            Ok(mut refused) => {
+                let until = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match refused.connected() {
+                        Ok(false) => {
+                            assert!(Instant::now() < until, "the refusal never came");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(PosixNetError::Connect(e)) => {
+                            assert_eq!(e, libc::ECONNREFUSED);
+                            break;
+                        }
+                        other => panic!("a connect to a port nobody listens on: {other:?}"),
+                    }
+                }
+            }
         }
     }
 
