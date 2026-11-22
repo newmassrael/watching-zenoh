@@ -200,7 +200,7 @@ pub(crate) enum DeclKind {
 
 /// The undeclaration of one declaration a member that left still held, by the id it reached the
 /// session's observer under: handed over owned ([`Self::owned`]) or, where the group's records
-/// are lent, lent ([`Self::lent`]).
+/// are lent, lent (`Self::lent`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Retraction {
     kind: DeclKind,
