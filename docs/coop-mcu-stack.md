@@ -70,6 +70,9 @@ initial declarations reaches the observer's fan (168 + 4,896). Either is about 1
 | 7 | `network_message::decode_one_record` | 2,720 | the copying receive (a refused frame's batch, a reassembled chain, a frame payload read out of line) | An owned `NetworkMessage` decoded on the stack. | The lent-only receive of the no-heap track leaves most of it out of the build; read again on the next image. | open |
 | 8 | `make_subscriber_callback` closure | 560 | read task, beside the fan | The C sample view (`SampleMarshal`) built, then moved through `with_metadata(self)`, then bound. | Candidate: the metadata filled in place. Not on the deepest chain (`read` 104 + `deliver` 384 + 560 + the program's callback). | open |
 | 9 | `reassembly_dispatch::Slot::replace` | 624 | a slot whose machine answered outside its chart | A fresh slot built by value. Rare. | none | open |
+| 10 | `Registry::new` (with `FaceRows::lent`) | 55,040 (8,960) | open (main), under the engine's assembly | Each face's set of tables (18,192 B: the peer's alias table and its three declaration tables are inline at the build's capacity, about 4.4 KB each) built by value in `FaceRows::lent` and moved into `FaceTables`, then into the face vector or the spares: four copies of 18 KB in one frame. | A set is written where the registry keeps it: `FaceTables::rowless_in`, never inlined, writes a set of no rows in the spare capacity of the registry's vector (`PeerTables::init_in`, never inlined, writes the peer's tables field by field), and `FaceTables::lend` lends it its rows there (`PeerTables::lend_rows`, `SubscriberPeer::lend_rows`), in the order the plan counts. `PeerTables::lent` and its `Default` go through the same two, so the by-value tables are the same tables. | done |
+| 11 | `Core::remove_face`, `Registry::give_back`, `Core::end_links` | 36,352, 18,176, 18,176 | a face's loss, the session's end, an open that fails once the engine is built | A face's set taken out of the face vector by value (`Vec::remove`), taken apart, and put together again as a `FaceRows` pushed on the spares. | A set is never moved. The registry keeps every set in one vector for the session's life; a face that comes takes a free set where it lies (a lent one first, else one of no rows), and one that goes empties it there (`FaceTables::give_back`: its gets cleared, its peer forgotten, its id `UNHELD`). The faces are the sets a face holds, the dial role's first. | done |
+| 12 | `CoopEngine::assemble` (`z_open` before finding 3) | 16,116 (16,128) | open (main) | The delivery lane (`SampleLane`, about 8.9 KB, 6,144 B of it the event records) built by value, moved into its mutex and the mutex into its `Arc`: copies of 6,144 and 1,300 B in the frame. | `SampleLane::shared_over`, never inlined, makes the `Arc` of an uninitialised mutex and has `Mutex::new_in` write the mutex there and `SampleLane::over_in` write the lane in the mutex's cell, each event slot empty where it lies. `Mutex::new_in` is `wz-capi-port`'s on each backend: the kernel's and the host calls' write both fields in place; `std`'s, a host's, makes the value in a place of its frame and moves it once. | done |
 
 ## What 1 and 2 should give
 
@@ -105,6 +108,40 @@ alone. A dial the network answers later runs its handshake's first steps under `
 instead of under `dial_from`; the sum is about the same. The open with no locator adds
 `open_request`, the window and the machine's turn, and has returned before the dial.
 
+## What 10 to 12 should give
+
+The image of 2026-11-22 that carried the no-heap track's lent tables did not boot: arm W's main
+thread overflowed inside `z_open`, its stack pointer below the start of SRAM. The frames above are
+read from that image (and, for 12, from the image of the tree that made finding 3, where the open's
+assembly is a frame of its own); the figures after the changes are estimates from what each change
+takes out of a frame, not a measurement.
+
+| frame | image | expected | what it holds after the change |
+|---|---|---|---|
+| `Registry::new` | 55,040 | under 1 KB | The application's tables lent by value (a few hundred bytes) and the registry's vector; no set. |
+| `FaceRows::lent` | 8,960 | gone | The type is gone; a set is `FaceTables`, built in place. |
+| `FaceTables::rowless_in` | new | under 0.5 KB | The set's gets (tens of bytes) and the pointers to its fields. |
+| `PeerTables::init_in` | new | 0.5 to 4.5 KB | At most one inline table of the peer's (about 4.4 KB) where the compiler builds a table's default beside its field and copies it, and a few hundred bytes where it writes the default in the field. Off the open's dial chain: it has returned before the dial. |
+| `FaceTables::lend`, `PeerTables::lend_rows` | new | under 0.5 KB | Spans of the arena (the lent tables are a pointer, a length and their bounds). |
+| `Core::remove_face` | 36,352 | under 0.5 KB | The face (112 B) taken out of the face vector; the set is emptied where it lies. |
+| `Registry::give_back` | 18,176 | gone | Now `FaceTables::give_back`, which clears in place and holds no table. |
+| `Core::end_links` | 18,176 | under 1 KB | The faces' links ended; the sets emptied in place. |
+| `CoopEngine::assemble` | 16,116 | 3 to 5 KB | The config, the arena's spans and the core moved into the engine's allocation; no lane. |
+| `SampleLane::over_in` | new | about 1.5 KB | The lane's bookkeeping (`DeliveryLane`, about 1.3 KB) where the compiler builds it beside its field. |
+| `SampleLane::shared_over` | new | under 0.2 KB | The `Arc` and the maker. |
+
+No frame of the image is expected over half the 16 KB stack. The main thread's chain under
+`z_open` is the deeper of the assembly (`z_open` 316, `assemble` 3 to 5 KB, `Registry::new`, the
+set's two frames, `PeerTables::init_in`: about 5 to 11 KB, returned before the dial) and the dial
+and the session's first steps (about 3.5 to 4.5 KB after 1 to 4).
+
+The image's frames are now held by `scripts/lib/stack_frame_gate.py`, row `zephyr-mcu-speed-w`,
+which `scripts/mcu-speed.sh` runs on each image of arm W it builds: a frame over 8,192 bytes, or a
+chain of direct calls under `z_open` over the 16,384-byte main stack, refuses the run before the
+image boots, naming the frame. The row commits no worst-chain figure yet: the first reading of the
+image after these changes commits it as `peak`, which then holds the chain within the gate's
+tolerance as the other rows do.
+
 ## Gates and images the changes touch
 
 Commit 1 changes the cooperative engine's open path only: `SessionPump::build_in` now takes the
@@ -123,6 +160,14 @@ document's reader now select through the same two functions, `select_policy` and
 `select_stated_limit`, as `resolve_under_into` does) and `scouting_host` (`ScoutWindow::new`
 writes the window through `write_in`). An image whose chains the two gates hold and that resolves
 policies or scouts may see those frames move.
+
+The changes for 10 to 12 touch `wz-session-core`'s `PeerTables` (its `Default` and `lent` now go
+through `init_in` and `lend_rows`) and `SubscriberPeer::lent`, which every image whose sessions
+hold a peer's tables of the lent policy links, the cooperative engine's registry and delivery lane,
+and `wz-capi-port`'s mutex, which gains `new_in` on each backend. The fixed-memory images make
+their peer tables with `PeerTables::new`, which on their profile is the static policy's `const`
+`new_static` and does not reach `init_in`; their rows of the two stack gates are not expected to
+move by these changes, which the next reading of each says.
 
 ## Verifying
 
@@ -144,3 +189,13 @@ policies or scouts may see those frames move.
   wz-capi-coop --features listen,scout-datagram --lib -- a_config_made_inside_the_open
   an_open_whose_dial_is_refused a_window_built_in_its_place` and `cargo test -p wz-capi-pico --lib
   the_open_resolves_the_snapshots_the_record_of_origins_resolves`.
+- The frames of 10 to 12 in the image: `bash scripts/mcu-speed.sh --sizes 8` runs
+  `python3 scripts/lib/stack_frame_gate.py --check zephyr-mcu-speed-w --elf <image>` on each arm W
+  image it builds and keeps its report beside the build logs (`stack-W-<threads>.log`); the
+  prologues of `Registry::new`, `FaceTables::rowless_in`, `PeerTables::init_in`,
+  `Core::remove_face`, `Core::end_links`, `CoopEngine::assemble` and `SampleLane::over_in`.
+- The unit tests of 10 to 12: `cargo test -p wz-session-core --lib -- peer_tables_lent_in_place
+  peer_tables_refused_their_rows_in_place`, `cargo test -p wz-capi-coop --lib --
+  engine::registry::tests a_lane_built_in_its_shared_place`, `cargo test -p wz-capi-port --lib --
+  a_mutex_made_in_its_place a_maker_that_lends_back_another_place` and, for the host calls'
+  backend, `cargo test -p wz-capi-port --features os-sys --lib -- sys::tests`.
