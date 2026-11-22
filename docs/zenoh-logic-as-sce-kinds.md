@@ -493,6 +493,13 @@ The list above is the census as taken. This list records what changed since.
   The zenoh-c ABI's listeners now install the watch first, as upstream does, and
   hold what it is told while the history is reported, reporting it after in
   order, as the zenoh-pico ABI's listeners already did.
+- **W10, fixed (2026-11-22).** `wz-ap-demo-app`'s `register_bindings` restated
+  the sidecar's two rows by hand, so its dynamic registry and the generated
+  static dispatch agreed only by inspection. The switchboard generator now also
+  writes the parsed sidecar as a value (`out/wz-ap-demo-app/switchboard_spec.rs`),
+  from the same parse as the dispatch, and `register_bindings` hands it to
+  `SwitchboardRegistry::apply_spec`, which owns the mapping from a document row
+  to a registry row. The demo reads no YAML at run time.
 - **The reset-generation pilot (S2 row 30 and S5 row M5), half done.** The rule
   is `sources/algorithms/take_generation.scxml`, an algorithm that takes the
   table `inout` (SCE ADR 0108, a `map<record, uint64>` keyed by the zid as its

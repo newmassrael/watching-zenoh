@@ -46,7 +46,8 @@ use sce_build::{
 };
 #[cfg(feature = "switchboards")]
 use wz_switchboard_codegen::{
-    generate, parse_codec_facts, parse_event_schema_facts, parse_machine_facts, GenInput,
+    generate, generate_spec_value, parse_codec_facts, parse_event_schema_facts,
+    parse_machine_facts, GenInput,
 };
 #[cfg(feature = "switchboards")]
 use wz_switchboard_schema::SwitchboardSpec;
@@ -629,6 +630,11 @@ struct Switchboard {
     /// Codec stems; each emits a consumed `<codec>.rs` + its forge-AST, and
     /// `parse_codec_facts` keys on the same stem.
     codecs: &'static [&'static str],
+    /// Census W10 -- also write `switchboard_spec.rs`, the sidecar as the value
+    /// an AP host hands to `SwitchboardRegistry::apply_spec`. Only for a
+    /// consumer that registers the document on a dynamic registry; the others
+    /// would carry a file nothing includes.
+    spec_value: bool,
 }
 
 #[cfg(feature = "switchboards")]
@@ -640,6 +646,7 @@ const SWITCHBOARDS: &[Switchboard] = &[
         machine: "sensor_monitor",
         schemas: &["temp_update_schema"],
         codecs: &["temp_payload"],
+        spec_value: true,
     },
     Switchboard {
         krate: "wz-switchboard-example",
@@ -648,6 +655,7 @@ const SWITCHBOARDS: &[Switchboard] = &[
         machine: "sensor_monitor",
         schemas: &["temp_update_schema", "humidity_update_schema"],
         codecs: &["temp_payload", "humidity_payload"],
+        spec_value: false,
     },
     Switchboard {
         krate: "mcu-noheap-probe",
@@ -656,6 +664,7 @@ const SWITCHBOARDS: &[Switchboard] = &[
         machine: "thermostat",
         schemas: &["temp_reading_schema"],
         codecs: &["temp_reading_codec"],
+        spec_value: false,
     },
 ];
 
@@ -763,6 +772,11 @@ fn regen_switchboards(root: &Path) {
         }
         std::fs::write(out.join("dispatch_switchboard.rs"), &dispatch)
             .unwrap_or_else(|e| panic!("write dispatch_switchboard.rs: {e}"));
+        // Written only after `generate` accepted the same spec above.
+        if sb.spec_value {
+            std::fs::write(out.join("switchboard_spec.rs"), generate_spec_value(&spec))
+                .unwrap_or_else(|e| panic!("write switchboard_spec.rs: {e}"));
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
     println!("xtask: regenerated 3 switchboards into out/{{wz-ap-demo-app,wz-switchboard-example,mcu-noheap-probe}}");

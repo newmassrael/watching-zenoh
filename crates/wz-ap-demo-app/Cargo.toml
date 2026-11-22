@@ -48,6 +48,9 @@ wz-session-core = { path = "../wz-session-core", features = ["switchboard"] }
 sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # SceCursor / codec runtime for the generated temp_payload decoder + encoder.
 sce-forge-runtime = { path = "../../vendor/sce/backends/rust/forge-runtime" }
+# Census W10 — the sidecar model: the generated `switchboard_spec()` builds a
+# `SwitchboardSpec` value that `register_bindings` hands to `apply_spec`.
+wz-switchboard-schema = { path = "../wz-switchboard-schema" }
 
 # R311y22c — no [build-dependencies]: the switchboard 2-stage codegen
 # (sce-codegen --emit-ast + wz-switchboard-codegen) moved to the committed
