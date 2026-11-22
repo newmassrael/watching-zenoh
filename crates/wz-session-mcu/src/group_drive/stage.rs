@@ -14,6 +14,17 @@
 //! pump, given the stage ([`MulticastPump::attach_tx_stage`](super::MulticastPump::attach_tx_stage)),
 //! writes the datagrams it holds and advertises what it wrote.
 //!
+//! What the producers push is written by whoever holds the session, as well as by the pump: a
+//! holder that shares the group's transport with the pump ([`GroupLink`]) writes what the stage
+//! holds on its own thread once its push returns ([`GroupLink::write_staged`]), as zenoh-pico's
+//! put writes a multicast message on the caller's thread, and the pump writes what is left to it (a
+//! datagram a full socket refused, a reply its own dispatch staged). Both write through the stage's
+//! one writer, so a JOIN advertises what either wrote.
+//!
+//! A batch window ([`GroupTxStage::batch_start`]) holds each conduit's messages in one open frame
+//! until the frame fills, an express message takes it, or the window is flushed, as the tokio
+//! engine's group producer batches: until then nothing of it is on a lane for either writer.
+//!
 //! The waiting is the host's: a producer whose lane is full runs the host's tasks, in which the
 //! group's pump writes what its socket takes, and waits on the socket ([`GroupTxPace`]).
 //!
@@ -32,16 +43,18 @@
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
-use core::cell::{Cell, RefCell};
+use core::cell::{Cell, Ref, RefCell};
+use core::net::SocketAddr;
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
+use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_session_core::limits::{MaxMulticastRepliesHeld, SessionLimits};
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 use wz_session_core::multicast_tx::{
-    multicast_tx_conduit, multicast_tx_push, MulticastTxDatagram, MulticastTxItem,
-    MulticastTxLanes, MulticastTxQueue,
+    multicast_tx_conduit, multicast_tx_push, multicast_tx_push_batched, MulticastBatch,
+    MulticastTxDatagram, MulticastTxItem, MulticastTxLanes, MulticastTxQueue,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
@@ -85,8 +98,10 @@ pub struct GroupTxStage {
 
 struct Inner {
     params: MulticastParams,
-    /// The sequence numbers of the group's conduits, held by one push at a time.
-    minted: RefCell<MulticastTxConduits>,
+    /// The group's conduits, held by one push, or one flush of the batch window, at a time.
+    conduits: RefCell<Conduits>,
+    /// Whether the batch window is open ([`GroupTxStage::batch_start`]).
+    window_open: Cell<bool>,
     lanes: RefCell<Lanes>,
     /// What was pushed while another push held the conduits, in the order it was pushed, each
     /// with whether it holds a reply slot.
@@ -96,6 +111,25 @@ struct Inner {
     replies: Cell<usize>,
     /// How many replies were dropped for want of a slot.
     dropped: Cell<u32>,
+    /// What was written of the stage, by the pump or by the holder.
+    writer: RefCell<Writer>,
+}
+
+/// The sequence numbers each conduit mints, and each conduit's open frame while the batch window
+/// is open: the two a push of the conduit changes together, as the tokio engine's group keeps a
+/// conduit's minter and its window under the conduit's one lock.
+struct Conduits {
+    minted: MulticastTxConduits,
+    windows: [MulticastBatch; Priority::NUM],
+}
+
+/// The writing side of the stage: the datagram a full socket refused, offered again before
+/// anything else; each conduit past the last sequence number written on it, which the JOIN
+/// advertises; and how many datagrams a failed send lost.
+struct Writer {
+    held: Option<MulticastTxDatagram>,
+    on_wire: MulticastTxConduits,
+    lost: u32,
 }
 
 /// The lanes' bound and congestion marks, and the datagrams queued on them in the order they were
@@ -126,12 +160,15 @@ impl GroupTxStage {
     }
 
     fn held_to(params: &MulticastParams, quota: MaxMulticastRepliesHeld) -> Self {
+        let mask = sn::mask_from_res(params.seq_num_res);
         Self {
             inner: Rc::new(Inner {
                 params: params.clone(),
-                minted: RefCell::new(MulticastTxConduits::new(sn::mask_from_res(
-                    params.seq_num_res,
-                ))),
+                conduits: RefCell::new(Conduits {
+                    minted: MulticastTxConduits::new(mask),
+                    windows: core::array::from_fn(|_| MulticastBatch::new()),
+                }),
+                window_open: Cell::new(false),
                 lanes: RefCell::new(Lanes {
                     bound: MulticastTxLanes::of_group(params),
                     queued: VecDeque::new(),
@@ -139,6 +176,11 @@ impl GroupTxStage {
                 deferred: RefCell::new(VecDeque::new()),
                 replies: Cell::new(0),
                 dropped: Cell::new(0),
+                writer: RefCell::new(Writer {
+                    held: None,
+                    on_wire: MulticastTxConduits::new(mask),
+                    lost: 0,
+                }),
             }),
             quota,
         }
@@ -159,7 +201,7 @@ impl GroupTxStage {
     /// Put `item`, a reply, on the stage without waiting, whatever its lane holds, counted on the
     /// lane: a reply the group's own dispatch stages runs inside the pump it would wait for. It
     /// takes a reply slot, or is dropped and counted ([`Self::dropped`]) when none is free.
-    fn admit_reply(&self, item: MulticastTxItem) {
+    pub(super) fn admit_reply(&self, item: MulticastTxItem) {
         let inner = &*self.inner;
         if !self.quota.get().admits(inner.replies.get() + 1) {
             inner.dropped.set(inner.dropped.get().saturating_add(1));
@@ -182,24 +224,51 @@ impl GroupTxStage {
         reply: bool,
     ) -> PushOutcome {
         let inner = &*self.inner;
-        let Ok(mut minted) = inner.minted.try_borrow_mut() else {
+        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
             inner.deferred.borrow_mut().push_back((item, reply));
             return PushOutcome::Pushed;
         };
         let conduit = multicast_tx_conduit(&item, &inner.params);
+        let Conduits { minted, windows } = &mut *conduits;
+        let window = &mut windows[conduit as usize];
+        let windowed = inner.window_open.get();
+        if !windowed {
+            // A frame the window left open leaves ahead of the message, which keeps its order; it
+            // is no reply's, so it is put on its lane apart from the reply's walk.
+            window.flush(
+                conduit,
+                &inner.params,
+                &mut StageQueue {
+                    lanes: &inner.lanes,
+                    pace: None,
+                    reply: false,
+                },
+            );
+        }
         let mut queue = StageQueue {
             lanes: &inner.lanes,
             pace,
             reply,
         };
-        let outcome = multicast_tx_push(
-            item,
-            &mut *minted,
-            &inner.params,
-            &inner.params.tx_queue,
-            &mut queue,
-        );
-        drop(minted);
+        let outcome = if windowed {
+            multicast_tx_push_batched(
+                item,
+                minted,
+                &inner.params,
+                &inner.params.tx_queue,
+                &mut queue,
+                window,
+            )
+        } else {
+            multicast_tx_push(
+                item,
+                minted,
+                &inner.params,
+                &inner.params.tx_queue,
+                &mut queue,
+            )
+        };
+        drop(conduits);
         // A reply that put no datagram on a lane (one its codec could not frame) holds no slot.
         if queue.reply {
             inner.replies.set(inner.replies.get() - 1);
@@ -213,7 +282,7 @@ impl GroupTxStage {
     /// Push what was kept while the conduits were held, once nothing holds them.
     fn push_deferred(&self) {
         loop {
-            if self.inner.minted.try_borrow_mut().is_err() {
+            if self.inner.conduits.try_borrow_mut().is_err() {
                 return;
             }
             let next = self.inner.deferred.borrow_mut().pop_front();
@@ -256,11 +325,6 @@ impl GroupTxStage {
         self.inner.dropped.get()
     }
 
-    /// The ring mask of the group's sequence numbers.
-    pub(super) fn mask(&self) -> u64 {
-        sn::mask_from_res(self.inner.params.seq_num_res)
-    }
-
     /// Whether nothing is queued on the stage for the group's pump to write.
     pub fn is_empty(&self) -> bool {
         self.inner.lanes.borrow().queued.is_empty() && self.inner.deferred.borrow().is_empty()
@@ -270,6 +334,106 @@ impl GroupTxStage {
     /// dropped for want of a slot is not among them ([`Self::dropped`]).
     pub fn drops(&self, priority: Priority) -> u32 {
         self.inner.lanes.borrow().bound.drops(priority)
+    }
+
+    /// Open the batch window (zenoh-pico `zp_batch_start` on a multicast transport): from now on a
+    /// message joins its conduit's open frame instead of leaving as a datagram of its own, until
+    /// the frame fills, an express message takes it, or the window is flushed or closed
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_n_msg_inner(`).
+    /// Opening an open window changes nothing.
+    pub fn batch_start(&self) {
+        self.inner.window_open.set(true);
+    }
+
+    /// Put every conduit's open frame on its lane, the most urgent conduit first, and keep the
+    /// window open (zenoh-pico `zp_batch_flush`). No room is asked: a frame was given its room
+    /// when it was opened. A flush asked while a push holds the conduits, which only a pass of the
+    /// host inside that push's wait for room could ask, leaves the frames to the next flush.
+    pub fn batch_flush(&self) {
+        let inner = &*self.inner;
+        let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
+            return;
+        };
+        let mut queue = StageQueue {
+            lanes: &inner.lanes,
+            pace: None,
+            reply: false,
+        };
+        for (wire, window) in conduits.windows.iter_mut().enumerate() {
+            window.flush(Priority::from_wire(wire as u8), &inner.params, &mut queue);
+        }
+    }
+
+    /// Close the batch window and put every conduit's open frame on its lane (zenoh-pico
+    /// `zp_batch_stop`): closed before the flush, as pico stops batching before it sends the
+    /// batch, so a push after this sends its message alone.
+    pub fn batch_stop(&self) {
+        self.inner.window_open.set(false);
+        self.batch_flush();
+    }
+
+    /// Whether the writer holds a datagram the socket had no room for: what is queued after it
+    /// waits behind it.
+    pub fn holds(&self) -> bool {
+        self.inner.writer.borrow().held.is_some()
+    }
+
+    /// How many datagrams of the stage a send the stack failed lost, whoever wrote them.
+    pub(super) fn lost(&self) -> u32 {
+        self.inner.writer.borrow().lost
+    }
+
+    /// The conduits as written: what the JOIN advertises. A member re-seeds what it expects from
+    /// every JOIN, so a JOIN that advertised a sequence number minted and not yet written would
+    /// have the member drop that datagram as stale when it came.
+    pub(super) fn on_wire(&self) -> Ref<'_, MulticastTxConduits> {
+        Ref::map(self.inner.writer.borrow(), |writer| &writer.on_wire)
+    }
+
+    /// Offer the socket the datagram it had no room for at an earlier write: whether it still has
+    /// none.
+    pub(super) fn offer_held<T: GroupTransport + ?Sized>(&self, transport: &mut T) -> bool {
+        let held = self.inner.writer.borrow_mut().held.take();
+        match held {
+            Some(datagram) => self.offer(transport, datagram),
+            None => false,
+        }
+    }
+
+    /// Take what the lanes hold and offer it to the socket, until the lanes are empty or the
+    /// socket has no room.
+    pub(super) fn write<T: GroupTransport + ?Sized>(&self, transport: &mut T) {
+        while !self.holds() {
+            let Some(datagram) = self.take() else {
+                return;
+            };
+            self.offer(transport, datagram);
+        }
+    }
+
+    /// Offer `datagram` to the socket: whether it had no room, in which case the writer holds the
+    /// datagram for the next write.
+    fn offer<T: GroupTransport + ?Sized>(
+        &self,
+        transport: &mut T,
+        datagram: MulticastTxDatagram,
+    ) -> bool {
+        let sent = transport.try_send_to_group(&datagram.bytes);
+        let mut writer = self.inner.writer.borrow_mut();
+        match sent {
+            GroupSend::Full => {
+                writer.held = Some(datagram);
+                return true;
+            }
+            GroupSend::Failed => writer.lost = writer.lost.saturating_add(1),
+            GroupSend::Sent => {}
+        }
+        // A datagram whose send failed is done with too: its sequence number will never arrive,
+        // and advertising past it keeps a member from waiting for it.
+        writer
+            .on_wire
+            .written(datagram.priority, datagram.reliable, datagram.sn);
+        false
     }
 }
 
@@ -322,8 +486,9 @@ impl MulticastTxQueue for StageQueue<'_> {
         // A lane answers congested at once on what its writer last did: a droppable message meets
         // the mark of a drop, or one that may not wait meets the lane full. A writer on a thread of
         // its own drains the moment its socket takes again, lowering the mark before the next
-        // producer reads it; this stage's writer runs only in a pass of the host, so once the
-        // socket takes again the pass is given first, and the lane is asked again on what it wrote.
+        // producer reads it; this stage's writer runs only when a push returns or in a pass of the
+        // host, so once the socket takes again the pass is given first, and the lane is asked
+        // again on what it wrote.
         // A socket that is still full leaves the answer standing, with nothing run.
         if at_once == Some(LinkRoom::Congested) && !pace.ended() && pace.wait_writable(0) {
             pace.pass();
@@ -373,96 +538,106 @@ impl MulticastTxQueue for StageQueue<'_> {
     }
 }
 
-/// The pump's side of a stage: the datagram it took and its socket had no room for, and the
-/// conduits as written, which its JOIN advertises.
-pub(super) struct StageWriter {
-    stage: GroupTxStage,
-    /// Taken from the stage and refused by a full socket: offered again before anything else.
-    held: Option<MulticastTxDatagram>,
-    /// Each conduit past the last sequence number written on it.
-    on_wire: MulticastTxConduits,
+/// A group's transport, shared by the group's session task and the holder of the session: the
+/// task opens it as the session's link, reads it, beacons on it and lets it go; the holder writes
+/// on it what the session's producers put on the group's stage ([`Self::write_staged`]), on the
+/// thread that holds the session, as zenoh-pico's put writes a multicast message on its caller's
+/// thread (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_n_msg_inner(`).
+/// The task is handed one clone as its transport and the holder keeps another; both are the same
+/// transport.
+pub struct GroupLink<T>(Rc<LinkCell<T>>);
+
+/// What the clones of a [`GroupLink`] share: the transport, and whether the session holds it open
+/// as its link.
+struct LinkCell<T> {
+    transport: RefCell<T>,
+    open: Cell<bool>,
 }
 
-impl StageWriter {
-    /// The writer of `stage`, nothing written yet.
-    pub(super) fn new(stage: GroupTxStage) -> Self {
-        let on_wire = MulticastTxConduits::new(stage.mask());
-        Self {
-            stage,
-            held: None,
-            on_wire,
+impl<T> Clone for GroupLink<T> {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl<T: GroupTransport> GroupLink<T> {
+    /// `transport`, to be shared: not open until the session's task opens it.
+    pub fn new(transport: T) -> Self {
+        Self(Rc::new(LinkCell {
+            transport: RefCell::new(transport),
+            open: Cell::new(false),
+        }))
+    }
+
+    /// Write what `stage` holds to the group, on the caller's thread: the datagram the socket
+    /// refused at an earlier write first, then what the lanes hold, until they are empty or the
+    /// socket has no room, the rest left to the next write. Nothing is written on a link the
+    /// session has not opened or has let go of, where the session's own JOIN would not have gone
+    /// ahead of it, nor while the session's task has the transport in hand, which only a callback
+    /// of its read could ask from: the task's next step writes it.
+    pub fn write_staged(&self, stage: &GroupTxStage) {
+        if !self.0.open.get() {
+            return;
+        }
+        let Ok(mut transport) = self.0.transport.try_borrow_mut() else {
+            return;
+        };
+        if !stage.offer_held(&mut *transport) {
+            stage.write(&mut *transport);
         }
     }
+}
 
-    /// The conduits as written: what the JOIN advertises. A member re-seeds what it expects from
-    /// every JOIN, so a JOIN that advertised a sequence number minted and not yet written would
-    /// have the member drop that datagram as stale when it came.
-    pub(super) fn on_wire(&self) -> &MulticastTxConduits {
-        &self.on_wire
+impl<T: GroupTransport> GroupTransport for GroupLink<T> {
+    fn open(&mut self) -> bool {
+        let opened = self.0.transport.borrow_mut().open();
+        self.0.open.set(opened);
+        opened
     }
 
-    /// Whether the stage has a reply slot for another offer of the pump's pull seam: the pump
-    /// stops pulling when it has none, so what the seam holds waits there, under its own bound.
-    pub(super) fn takes_offer(&self) -> bool {
-        self.stage.has_reply_slot()
+    fn close(&mut self) {
+        self.0.open.set(false);
+        self.0.transport.borrow_mut().close();
     }
 
-    /// Whether the writer holds a datagram its socket had no room for.
-    pub(super) fn holds(&self) -> bool {
-        self.held.is_some()
+    fn service(&self) {
+        self.0.transport.borrow().service();
     }
 
-    /// Put `item`, an offer of the pump's pull seam, on the stage as a reply is put on it, so its
-    /// sequence number comes from the stage's one minter.
-    pub(super) fn admit(&self, item: MulticastTxItem) {
-        self.stage.admit_reply(item);
+    fn carrier_up(&self) -> bool {
+        self.0.transport.borrow().carrier_up()
     }
 
-    /// Offer the socket the datagram it had no room for at an earlier step: whether it still has
-    /// none. `lost` counts a datagram whose send failed.
-    pub(super) fn offer_held<T: GroupTransport + ?Sized>(
-        &mut self,
-        transport: &mut T,
-        lost: &mut u32,
-    ) -> bool {
-        match self.held.take() {
-            Some(datagram) => self.offer(transport, datagram, lost),
-            None => false,
-        }
+    fn send_to_group(&mut self, datagram: &[u8]) {
+        self.0.transport.borrow_mut().send_to_group(datagram);
     }
 
-    /// Take what the stage holds and offer it to the socket, until the stage is empty or the
-    /// socket has no room. `lost` counts a datagram whose send failed.
-    pub(super) fn write<T: GroupTransport + ?Sized>(&mut self, transport: &mut T, lost: &mut u32) {
-        while self.held.is_none() {
-            let Some(datagram) = self.stage.take() else {
-                return;
-            };
-            self.offer(transport, datagram, lost);
-        }
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        self.0.transport.borrow_mut().try_send_to_group(datagram)
     }
 
-    /// Offer `datagram` to the socket: whether it had no room, in which case the writer holds the
-    /// datagram for the next step.
-    fn offer<T: GroupTransport + ?Sized>(
-        &mut self,
-        transport: &mut T,
-        datagram: MulticastTxDatagram,
-        lost: &mut u32,
-    ) -> bool {
-        match transport.try_send_to_group(&datagram.bytes) {
-            GroupSend::Full => {
-                self.held = Some(datagram);
-                return true;
-            }
-            GroupSend::Failed => *lost = lost.saturating_add(1),
-            GroupSend::Sent => {}
-        }
-        // A datagram whose send failed is done with too: its sequence number will never arrive,
-        // and advertising past it keeps a member from waiting for it.
-        self.on_wire
-            .written(datagram.priority, datagram.reliable, datagram.sn);
-        false
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        self.0.transport.borrow().wait_for_room(timeout_us)
+    }
+
+    fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
+        self.0.transport.borrow().writability()
+    }
+
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        self.0.transport.borrow().readiness()
+    }
+
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        self.0.transport.borrow_mut().recv_with(f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        self.0.transport.borrow().keeps_input()
+    }
+
+    fn keep(&mut self) {
+        self.0.transport.borrow_mut().keep();
     }
 }
 
@@ -493,7 +668,7 @@ mod tests {
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
-    use super::{next_out, GroupTxPace, GroupTxStage, Queued};
+    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, Queued};
     use crate::group_drive::MulticastPump;
 
     /// A clock that never moves: the beacon, due at every step, is what moves the pump.
@@ -1117,5 +1292,137 @@ mod tests {
         assert_eq!(taking.now_us.get(), 0, "and nothing was waited for");
         assert_eq!(stage.drops(Priority::DEFAULT), 2, "the put is no drop");
         assert!(!stage.is_empty(), "the put is queued for the pump");
+    }
+
+    /// The holder's write goes only on a link the session holds open: on one not yet opened, and
+    /// while the session's task has the transport in hand, nothing is written and the stage keeps
+    /// it; once opened, the write takes what the stage holds on to the socket; once the session
+    /// let the link go, nothing more is written.
+    #[test]
+    fn the_holder_writes_only_on_a_link_the_session_holds_open() {
+        let wire = Rc::new(RefCell::new(Wire {
+            room: 4,
+            ..Wire::default()
+        }));
+        let link = GroupLink::new(Socket(Rc::clone(&wire)));
+        let stage = GroupTxStage::new(&params());
+        push_at_once(&stage, put("first"));
+        link.write_staged(&stage);
+        assert!(
+            taken(&wire).is_empty(),
+            "a link not yet opened is not written"
+        );
+        assert!(!stage.is_empty(), "and the stage keeps what it holds");
+
+        let mut session_side = link.clone();
+        assert!(session_side.open());
+        {
+            let _in_hand = link.0.transport.borrow_mut();
+            link.write_staged(&stage);
+        }
+        assert!(
+            taken(&wire).is_empty(),
+            "a transport the task has in hand is left to the task"
+        );
+
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first"], "the open link is written");
+        assert!(stage.is_empty());
+
+        session_side.close();
+        push_at_once(&stage, put("second"));
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first"], "a link let go of is not written");
+    }
+
+    /// The holder writes what the stage holds on the session's open link, on its own: what the
+    /// socket has room for leaves at once, what it refuses is held, which the pump then sees and
+    /// puts its JOIN behind, and offered first at the next write; and the pump's next JOIN
+    /// advertises what the holder wrote.
+    #[test]
+    fn the_holder_writes_the_stage_and_the_join_advertises_what_it_wrote() {
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let link = GroupLink::new(Socket(Rc::clone(&wire)));
+        let params = params();
+        let runtime = CoopRuntime::new(Frozen);
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let stage = GroupTxStage::new(&params);
+        let mut session_side = link.clone();
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut nothing = || None;
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut session_side,
+        );
+        pump.attach_tx_stage(stage.clone());
+
+        // The session's first step: its JOIN, with nothing written.
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join"]);
+
+        wire.borrow_mut().room = 1;
+        push_at_once(&stage, put("first"));
+        push_at_once(&stage, put("second"));
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["join", "first"], "what the socket took");
+        assert!(stage.holds(), "and what it refused, held");
+        assert!(pump.tx_held(), "which the pump sees");
+
+        // Still full: the held datagram and the JOIN behind it wait.
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first"]);
+
+        wire.borrow_mut().room = 1;
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["join", "first", "second"]);
+        assert!(!stage.holds());
+
+        assert!(pump.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&wire), ["join", "first", "second", "join"]);
+        assert_eq!(advertised(&wire), [0, 2], "what the holder wrote");
+        assert_eq!(pump.tx_lost(), 0);
+    }
+
+    /// Inside a batch window a conduit's messages join one open frame and nothing is on a lane;
+    /// the flush puts that frame on its lane as one datagram, with the window still open, so the
+    /// next message opens a frame of its own; the stop puts that one on its lane and closes the
+    /// window, after which a message is a datagram of its own at once. Each frame took one
+    /// sequence number.
+    #[test]
+    fn a_batch_window_holds_a_conduits_messages_in_one_frame_until_it_is_flushed() {
+        let carries = |bytes: &[u8], payload: &str| {
+            bytes
+                .windows(payload.len())
+                .any(|window| window == payload.as_bytes())
+        };
+        let stage = GroupTxStage::new(&params());
+        stage.batch_start();
+        push_at_once(&stage, put("first"));
+        push_at_once(&stage, put("second"));
+        assert!(stage.is_empty(), "the window holds both, on no lane");
+
+        stage.batch_flush();
+        let both = stage.take().expect("the window's frame");
+        assert!(stage.take().is_none(), "one datagram for both");
+        assert!(carries(&both.bytes, "first") && both.bytes.ends_with(b"second"));
+
+        push_at_once(&stage, put("third"));
+        assert!(stage.is_empty(), "the window is still open");
+        stage.batch_stop();
+        let third = stage.take().expect("the stop's frame");
+        assert!(third.bytes.ends_with(b"third"));
+        assert!(stage.take().is_none());
+
+        push_at_once(&stage, put("first"));
+        let alone = stage.take().expect("a closed window holds nothing back");
+        assert!(alone.bytes.ends_with(b"first"));
+        assert_eq!([both.sn, third.sn, alone.sn], [0, 1, 2]);
     }
 }

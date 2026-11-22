@@ -285,7 +285,7 @@ mod stage;
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
-pub use stage::{GroupTxPace, GroupTxStage};
+pub use stage::{GroupLink, GroupTxPace, GroupTxStage};
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic
@@ -1109,14 +1109,15 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // What the data emit could not hand the socket: the datagrams a full socket left for the
     // next step, and the count of those that were lost.
     tx_backlog: TxBacklog,
-    // The stage the group's producers push onto framed and numbered, as its writer holds it, with
-    // the conduits as written; `None` for a pump that frames what its pull seam yields itself.
+    // The stage the group's producers push onto framed and numbered, which holds what was written
+    // of it, by this pump or by the session's holder; `None` for a pump that frames what its pull
+    // seam yields itself.
     #[cfg(all(
         feature = "alloc",
         not(feature = "session-slot"),
         feature = "codec-push"
     ))]
-    staged: Option<stage::StageWriter>,
+    staged: Option<GroupTxStage>,
     next_join_ms: u64,
     next_sweep_ms: u64,
     iter: usize,
@@ -1177,15 +1178,16 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
 
     /// Write from `stage`, which the group's producers push onto framed and numbered
     /// ([`GroupTxStage::push`]), as the tokio engine's group writer writes its pipeline: each JOIN
-    /// advertises the sequence numbers written, and what the pull seam yields is put on the stage
-    /// too, so that the stage numbers everything the group sends.
+    /// advertises the sequence numbers written, by this pump or by a holder that writes the stage
+    /// itself ([`GroupLink::write_staged`]), and what the pull seam yields is put on the stage too,
+    /// so that the stage numbers everything the group sends.
     #[cfg(all(
         feature = "alloc",
         not(feature = "session-slot"),
         feature = "codec-push"
     ))]
     pub fn attach_tx_stage(&mut self, stage: GroupTxStage) {
-        self.staged = Some(stage::StageWriter::new(stage));
+        self.staged = Some(stage);
     }
 
     /// Hand the session what the group delivers only while `gate` has room for it: before each
@@ -1306,15 +1308,24 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             not(feature = "session-slot"),
             feature = "codec-push"
         ))]
-        if self.staged.as_ref().is_some_and(stage::StageWriter::holds) {
+        if self.staged.as_ref().is_some_and(GroupTxStage::holds) {
             return true;
         }
         self.tx_backlog.holds()
     }
 
     /// How many datagrams of the data emit were lost since the pump was made: to a send the stack
-    /// failed, and, on a build that keeps none back, to a socket with no room for them.
+    /// failed, and, on a build that keeps none back, to a socket with no room for them. With a
+    /// stage, its datagrams a failed send lost are counted too, whoever wrote them.
     pub fn tx_lost(&self) -> u32 {
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "session-slot"),
+            feature = "codec-push"
+        ))]
+        if let Some(stage) = self.staged.as_ref() {
+            return self.tx_backlog.lost.saturating_add(stage.lost());
+        }
         self.tx_backlog.lost
     }
 
@@ -1359,7 +1370,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             not(feature = "session-slot"),
             feature = "codec-push"
         ))]
-        let staged = &mut self.staged;
+        let staged = &self.staged;
         let next_join_ms = &mut self.next_join_ms;
         let next_sweep_ms = &mut self.next_sweep_ms;
         let iter = &mut self.iter;
@@ -1475,8 +1486,8 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             not(feature = "session-slot"),
             feature = "codec-push"
         ))]
-        if let Some(writer) = staged.as_mut() {
-            full = writer.offer_held(&mut *transport, &mut tx_backlog.lost) || full;
+        if let Some(stage) = staged.as_ref() {
+            full = stage.offer_held(&mut *transport) || full;
         }
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         if now >= *next_join_ms && !full {
@@ -1488,8 +1499,14 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                 not(feature = "session-slot"),
                 feature = "codec-push"
             ))]
-            let advertised = match staged.as_ref() {
-                Some(writer) => writer.on_wire(),
+            let written = staged.as_ref().map(GroupTxStage::on_wire);
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "session-slot"),
+                feature = "codec-push"
+            ))]
+            let advertised = match written.as_deref() {
+                Some(on_wire) => on_wire,
                 None => &*tx_sn,
             };
             #[cfg(not(all(
@@ -1533,17 +1550,17 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             not(feature = "session-slot"),
             feature = "codec-push"
         ))]
-        let staged_tx = match staged.as_mut() {
-            Some(writer) => {
+        let staged_tx = match staged.as_ref() {
+            Some(stage) => {
                 // Pulled while the stage has a reply slot for it; the rest waits on the seam.
-                while writer.takes_offer() {
+                while stage.has_reply_slot() {
                     let Some(offer) = next_tx() else {
                         break;
                     };
-                    writer.admit(offer);
+                    stage.admit_reply(offer);
                 }
                 if !full {
-                    writer.write(&mut *transport, &mut tx_backlog.lost);
+                    stage.write(&mut *transport);
                 }
                 true
             }
@@ -1831,7 +1848,7 @@ where
         // The holder waits for the group's input no longer than this.
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         if let Some(due) = &due {
-            due.publish(pump.next_due_us(), pump.tx_held());
+            due.publish(pump.next_due_us());
         }
         yield_now().await;
     }
@@ -1992,39 +2009,25 @@ impl JoinAsk {
 }
 
 /// When a group session is next due with nothing arriving on it ([`MulticastPump::next_due_us`]),
-/// and whether its socket had no room for a datagram it holds, as of the session's last step: what
-/// the session's holder waits for the group's input no longer than, beside that input. One clone is
-/// the holder's and one the session's ([`MulticastSessionSeed::with_due`]).
+/// as of the session's last step: what the session's holder waits for the group's input no longer
+/// than, beside that input. Whether its socket holds a datagram back is the stage's to say, live
+/// (`GroupTxStage::holds`), since the holder writes the stage too. One clone is the holder's and
+/// one the session's ([`MulticastSessionSeed::with_due`]).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 #[derive(Clone, Debug, Default)]
-pub struct GroupDue(alloc::rc::Rc<DueCell>);
-
-/// What a [`GroupDue`] holds.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[derive(Debug, Default)]
-struct DueCell {
-    due_us: core::cell::Cell<Option<u64>>,
-    tx_held: core::cell::Cell<bool>,
-}
+pub struct GroupDue(alloc::rc::Rc<core::cell::Cell<Option<u64>>>);
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl GroupDue {
     /// When the session is next due, as a reading of its runtime's clock in microseconds; `None`
     /// until it has stepped, which makes it due at once.
     pub fn due_us(&self) -> Option<u64> {
-        self.0.due_us.get()
+        self.0.get()
     }
 
-    /// Whether, at its last step, the session's socket had no room for a datagram it holds: what
-    /// the session's producers queue since then waits behind it.
-    pub fn tx_held(&self) -> bool {
-        self.0.tx_held.get()
-    }
-
-    /// The session's step published when it is next due and whether its socket holds it back.
-    fn publish(&self, due_us: u64, tx_held: bool) {
-        self.0.due_us.set(Some(due_us));
-        self.0.tx_held.set(tx_held);
+    /// The session's step published when it is next due.
+    fn publish(&self, due_us: u64) {
+        self.0.set(Some(due_us));
     }
 }
 

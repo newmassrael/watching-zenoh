@@ -4873,30 +4873,68 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         FilteredPut::Sent(outcome)
     }
 
+    /// Each group the session joined opens a window too, and is counted as a link is: a group's
+    /// window holds what the session sends on the group, as pico's batch holds what it sends on
+    /// its multicast transport.
     fn batch_start_all(&self) -> usize {
         self.live().map_or(0, |core| {
-            core.0
+            let links = core
+                .0
                 .ups()
                 .filter(|actions| actions.batch_start().is_ok())
-                .count()
+                .count();
+            #[cfg(feature = "group")]
+            let groups = core
+                .0
+                .groups
+                .iter()
+                .filter(|group| group.batch_start())
+                .count();
+            #[cfg(not(feature = "group"))]
+            let groups = 0;
+            links + groups
         })
     }
 
+    /// Each group's window is written by this call, on the caller's thread, as a link's is.
     fn batch_flush_all(&self) -> usize {
         self.live().map_or(0, |core| {
-            core.0
+            let links = core
+                .0
                 .ups()
                 .filter(|actions| actions.batch_flush().is_ok())
-                .count()
+                .count();
+            #[cfg(feature = "group")]
+            let groups = core
+                .0
+                .groups
+                .iter()
+                .filter(|group| group.batch_flush())
+                .count();
+            #[cfg(not(feature = "group"))]
+            let groups = 0;
+            links + groups
         })
     }
 
+    /// Each group's window is closed and what it held written by this call.
     fn batch_stop_all(&self) -> usize {
         self.live().map_or(0, |core| {
-            core.0
+            let links = core
+                .0
                 .ups()
                 .filter(|actions| actions.batch_stop().is_ok())
-                .count()
+                .count();
+            #[cfg(feature = "group")]
+            let groups = core
+                .0
+                .groups
+                .iter()
+                .filter(|group| group.batch_stop())
+                .count();
+            #[cfg(not(feature = "group"))]
+            let groups = 0;
+            links + groups
         })
     }
 

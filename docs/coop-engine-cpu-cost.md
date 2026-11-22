@@ -54,13 +54,12 @@ Publisher: `fan_out` hands a put on a group to `GroupFace::publish`
 payload copied, `push_build::build_push_literal_with_meta`,
 `crates/wz-session-core/src/push_build.rs:732`), boxes it, and pushes it onto the group's stage
 (`crates/wz-session-mcu/src/group_drive/stage.rs:153`), where it is framed with its sequence
-number into a datagram vector of its own. Nothing is written: the stage is written by the group's
-pump, which is a task of the session and runs only in a step (the engine's own test says so,
-`crates/wz-capi-coop/src/tests/group.rs:1542`, "pushed, and not yet written"). A read task that
-is already waiting on the group socket is not woken by the push, so the datagram waits for that wait
-to end: the next datagram in, or the read step's bound (`Z_CONFIG_SOCKET_TIMEOUT`,
-`crates/wz-capi-pico/src/session.rs:222`). A publisher that puts faster than that fills the lane,
-and then runs the whole of the session's tasks on its own thread to drain it (`GroupTxPace::pass`,
+number into a datagram vector of its own. Until row 1's change below, nothing was written there:
+the stage was written by the group's pump, a task of the session that runs only in a step, and a
+read task already waiting on the group socket was not woken by the push, so the datagram waited for
+that wait to end: the next datagram in, or the read step's bound (`Z_CONFIG_SOCKET_TIMEOUT`,
+`crates/wz-capi-pico/src/session.rs:222`). A publisher that put faster than that filled the lane,
+and then ran the whole of the session's tasks on its own thread to drain it (`GroupTxPace::pass`,
 `SessionPace::pass` in `engine/group.rs`).
 
 zenoh-pico writes a multicast message on the caller's thread, through the same
@@ -97,9 +96,18 @@ by string per message on receive (the registry's match memo, `fire_into_memoized
   puts a job that ran back and takes the next under one more (part of row 4). Test:
   `tests::ticker::a_read_with_no_job_due_takes_the_session_once_for_its_jobs`.
 * Both tests count the takes through a test seam (`CoopEngine::takes`, `#[cfg(test)]`).
+* A put on a group is written by the thread that puts it, before the put returns (row 1). The group's
+  transport is shared by its task and its face (`GroupLink`, `crates/wz-session-mcu/src/group_drive/stage.rs`);
+  the stage keeps what was written (the datagram a full socket refused, the conduits as written,
+  which the JOIN advertises), so the face and the task write through one writer, and the task
+  writes only what is left to it. A batch window on the group (`zp_batch_start`) holds the puts
+  in one frame per conduit until the flush, an express put, or the stop, which write it on the
+  calling thread. Tests: `tests::group::woken::a_put_on_the_group_is_written_by_the_putting_thread_before_it_returns`,
+  `tests::group::woken::inside_a_batch_window_a_put_on_the_group_is_written_at_the_flush`.
 
-Rows 1 to 3 cross into `wz-session-mcu` and `wz-session-core` and are left for their own items;
-row 1 is the one to take first.
+Rows 2 and 3 cross into `wz-session-core` and are left for their own items. Row 2 needs a
+borrowed form of a put with its metadata and aliased key for the group's push, and lanes that hold
+datagrams in slots the session lends rather than in vectors of their own.
 
 ## 6. Measuring this engine
 

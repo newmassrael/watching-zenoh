@@ -5,9 +5,13 @@
 //!
 //! A group's session is the session shell's (`wz_session_mcu::group_drive`), the one an MCU image
 //! runs, hosted as a task of the session's local set as each link's session is: its JOIN beacon,
-//! the members it admits, its lease sweep, the per-member order of what they send and the writing
-//! of what it sends are that session's, and every rule they follow is the session core's
-//! (`multicast_dispatch`, `multicast_rx`, `multicast_tx`). The dispatcher keeps each member's
+//! the members it admits, its lease sweep and the per-member order of what they send are that
+//! session's, and every rule they follow is the session core's (`multicast_dispatch`,
+//! `multicast_rx`, `multicast_tx`). What the session sends on the group is written by the thread
+//! that sends it, which holds the session, as zenoh-pico's put writes a multicast message on its
+//! caller's thread: the group's transport is shared by its task and its face (`GroupLink`), and
+//! the task writes only what is left to it, a datagram a full socket refused and the replies its
+//! own dispatch staged. The dispatcher keeps each member's
 //! declarations apart from the moment it is built (`MulticastConfig::of_group`, the config the
 //! tokio engine's group face builds its dispatcher from too), since two members number their
 //! entities alike.
@@ -15,7 +19,7 @@
 //! What this module adds is the hosting: the group's tables in the session's registry, where what
 //! a member sends is dispatched as a peer's frames are; the stage the session pushes its own
 //! messages onto, framed and numbered as the tokio engine's group producer pushes them, beside the
-//! replies its dispatch stages, which the group's task writes from; the members the group's JOINs
+//! replies its dispatch stages, with its batch window; the members the group's JOINs
 //! admitted; and the stop the session's close asks for, after which the task tells the group it
 //! leaves.
 
@@ -53,8 +57,8 @@ use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupTxPace, GroupTxStage, JoinAsk,
-    MulticastSessionSeed,
+    spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupLink, GroupTxPace, GroupTxStage,
+    JoinAsk, MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -265,8 +269,11 @@ pub(super) struct GroupFace {
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
     /// The group's stage, which the session's messages and the group's replies are pushed onto,
-    /// framed and numbered, and which its task writes.
+    /// framed and numbered, and which the face writes after each push and its task at each step.
     tx: GroupTxStage,
+    /// The group's transport, which the task opens, reads and lets go of, and which the face
+    /// writes the stage on ([`Self::write_staged`]).
+    link: GroupLink<Watched>,
     /// What a message of the session waits with on a full lane ([`Self::push`]).
     pace: Rc<dyn Pace>,
     /// The group socket's wait for room, asked from outside its task; `None` for a stack that
@@ -350,12 +357,15 @@ impl GroupFace {
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
-        let seed: MulticastSessionSeed<Watched, GROUP_MEMBERS> = MulticastSessionSeed::new(
+        // Shared by the task, which opens it as the session's link, and the face, which writes on
+        // it what the session pushes.
+        let link = GroupLink::new(Watched {
+            inner: transport,
+            took: Rc::clone(&took),
+        });
+        let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
             config,
-            Watched {
-                inner: transport,
-                took: Rc::clone(&took),
-            },
+            link.clone(),
             params,
             policy,
             u64::from(GROUP_TICK_MS),
@@ -382,8 +392,8 @@ impl GroupFace {
             let stop = Rc::clone(&stop);
             move || stop.get()
         };
-        // Everything the group sends is pushed onto its stage, which the task writes from: the
-        // task's pull seam yields nothing.
+        // Everything the group sends is pushed onto its stage, which the face and the task write
+        // from: the task's pull seam yields nothing.
         let task = spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop);
         Self {
             id,
@@ -397,6 +407,7 @@ impl GroupFace {
             #[cfg(feature = "query")]
             next_request: Cell::new(0),
             tx,
+            link,
             pace,
             room,
             input,
@@ -426,8 +437,54 @@ impl GroupFace {
     /// one, where a unicast one closes its link
     /// (`io/zenoh-transport/src/multicast/tx.rs` @ `fn schedule_on_link(&self, msg: NetworkMessageRef) -> ZResult<bool> {`).
     /// What is pushed while the group's session ends is lost with its link.
+    ///
+    /// The face writes what the push put on the stage on the caller's thread, before this returns,
+    /// as zenoh-pico's put writes it (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a batch window that holds the
+    /// message puts nothing on a lane, and its flush writes it.
     fn push(&self, item: MulticastTxItem) -> PushOutcome {
-        self.tx.push(item, self)
+        let outcome = self.tx.push(item, self);
+        self.write_staged();
+        outcome
+    }
+
+    /// Write what the group's stage holds on the group's socket, on this thread, until the stage
+    /// is empty or the socket has no room; what it refuses is offered again first at the next
+    /// write, the face's or the task's.
+    fn write_staged(&self) {
+        self.link.write_staged(&self.tx);
+    }
+
+    /// Open the group's batch window (zenoh-pico `zp_batch_start` on its multicast transport):
+    /// whether it was opened, which it is not on a group whose session ended.
+    pub(super) fn batch_start(&self) -> bool {
+        if self.has_ended() {
+            return false;
+        }
+        self.tx.batch_start();
+        true
+    }
+
+    /// Write what the group's batch window holds and keep it open (zenoh-pico `zp_batch_flush`):
+    /// whether the group was flushed, which one whose session ended is not.
+    pub(super) fn batch_flush(&self) -> bool {
+        if self.has_ended() {
+            return false;
+        }
+        self.tx.batch_flush();
+        self.write_staged();
+        true
+    }
+
+    /// Close the group's batch window and write what it held (zenoh-pico `zp_batch_stop`):
+    /// whether the group was stopped, which one whose session ended is not.
+    pub(super) fn batch_stop(&self) -> bool {
+        if self.has_ended() {
+            return false;
+        }
+        self.tx.batch_stop();
+        self.write_staged();
+        true
     }
 
     /// The group socket's wait for room, which a message of the session that finds the session
@@ -607,13 +664,22 @@ impl GroupFace {
 
     /// When the group must next be looked at, on the session's clock in microseconds, with nothing
     /// arriving on it: its session's next beacon or sweep, as its last step said, or at once when
-    /// it has not stepped yet, when it ended and its end is still to be read, or when the session
-    /// pushed onto its stage what its socket has room for, which only a step writes; once its end
-    /// was read, when it is joined again. `None`: nothing is due.
+    /// it has not stepped yet, when it ended and its end is still to be read, or when its stage
+    /// holds what its socket has room for (a reply its dispatch staged); no later than its tick
+    /// while the socket holds a datagram back, whichever write it refused, as the task's own sweep
+    /// tick offers it again; once its end was read, when it is joined again. `None`: nothing is
+    /// due.
     pub(super) fn due_us(&self) -> Option<u64> {
         match &self.task {
             Some(task) if task.is_finished() => Some(0),
-            Some(_) if !self.tx.is_empty() && !self.due.tx_held() => Some(0),
+            Some(_) if self.tx.holds() => {
+                let tick_us = self
+                    .pace
+                    .now_us()
+                    .saturating_add(u64::from(GROUP_TICK_MS) * 1_000);
+                Some(self.due.due_us().map_or(0, |due_us| due_us.min(tick_us)))
+            }
+            Some(_) if !self.tx.is_empty() => Some(0),
             Some(_) => Some(self.due.due_us().unwrap_or(0)),
             None => self.rejoin_at_us,
         }
@@ -861,8 +927,9 @@ impl GroupFace {
     /// Put a publication on the group, naming its key by the declaration the group was told when
     /// it is told the session's keyexprs (`GroupDeclarations::declares_keyexprs`), and in full
     /// otherwise, as a group whose session tells it its entities, or less, is. Built by the session
-    /// core's Push builders, as a link's is, and framed with the sequence number of its channel as
-    /// it is pushed onto the group's stage. A group whose session ended is sent nothing.
+    /// core's Push builders, as a link's is, framed with the sequence number of its channel as it
+    /// is pushed onto the group's stage, and written by this call ([`Self::push`]). A group whose
+    /// session ended is sent nothing.
     pub(super) fn publish(&self, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         if self.has_ended() {
             return Ok(0);
@@ -897,11 +964,12 @@ impl GroupFace {
     }
 }
 
-/// A message of the session that waits for room on the group's stage runs the session's tasks, in
-/// which the group's own writes what its socket takes, waits on the group's socket, and spends the
-/// session's clock; a group whose session ended has nothing to wait for.
+/// A message of the session that waits for room on the group's stage writes what the group's
+/// socket takes, runs the session's tasks, waits on the group's socket, and spends the session's
+/// clock; a group whose session ended has nothing to wait for.
 impl GroupTxPace for GroupFace {
     fn pass(&self) {
+        self.write_staged();
         self.pace.pass();
     }
 

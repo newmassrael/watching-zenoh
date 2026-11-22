@@ -975,8 +975,8 @@ mod congested {
         let (member, stack, transport) = open_filling();
         stack.full.store(true, Ordering::SeqCst);
 
-        // Two fill the lane; the third finds room once the group's task takes the first, which
-        // the socket then keeps it from writing.
+        // The first put's own write takes it off its lane, and the socket keeps it from writing
+        // it; the two after it fill the lane.
         for _ in 0..3 {
             let took = put_with(&member, CongestionControl::Drop);
             assert!(
@@ -1070,7 +1070,7 @@ mod congested {
             "CONTROL: a socket with room"
         );
         stack.full.store(true, Ordering::SeqCst);
-        // The third put has the group's task offer the socket a datagram, which it refuses.
+        // Each put offers the socket a datagram, which it refuses.
         for _ in 0..3 {
             put_with(&member, CongestionControl::Drop);
         }
@@ -1278,6 +1278,15 @@ mod cut {
         }
     }
 
+    /// How many JOINs the socket took.
+    fn joins_on(wire: &Mutex<Vec<Vec<u8>>>) -> usize {
+        wire.lock()
+            .unwrap()
+            .iter()
+            .filter(|datagram| decode_join(datagram).is_some())
+            .count()
+    }
+
     /// The sequence number of a datagram on the reliable channel: a frame's, or a fragment's.
     fn reliable_sn(datagram: &[u8]) -> Option<u64> {
         match parse_inbound(datagram) {
@@ -1327,11 +1336,17 @@ mod cut {
             "the chain found no room for a fragment"
         );
 
-        // A JOIN asked while the socket is full waits for it, behind what the writer holds.
+        // A JOIN asked while the socket is full waits for it, behind what the writer holds, and
+        // leaves at the group's next step once the socket takes datagrams again: the put after it
+        // waits for it, since the put writes what is staged itself.
         assert_eq!(first.engine.send_join_on_groups(), 1);
+        let joins_in_the_cut = joins_on(&first.wire);
         first.writable();
-        put(&first.engine, "demo/group/small", b"after-the-cut");
         SessionDrive::start_read_task(&*first.engine).expect("the first's read task starts");
+        eventually("the JOIN asked during the cut to leave", || {
+            joins_on(&first.wire) > joins_in_the_cut
+        });
+        put(&first.engine, "demo/group/small", b"after-the-cut");
         eventually("the second to hear the put after the cut", || {
             heard
                 .lock()
@@ -1423,10 +1438,11 @@ mod woken {
     }
 
     /// A member's stack alone on the group: it joins [`GROUP`] and keeps each datagram its session
-    /// sends; what the members send is what the test hands in.
+    /// sends, with the thread that sent it; what the members send is what the test hands in.
     #[derive(Default)]
     struct Alone {
         sent: Mutex<Vec<Vec<u8>>>,
+        threads: Mutex<Vec<std::thread::ThreadId>>,
         link: Mutex<Option<LinkHandle>>,
     }
 
@@ -1443,6 +1459,11 @@ mod woken {
 
         fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
             self.0.sent.lock().unwrap().push(bytes.to_vec());
+            self.0
+                .threads
+                .lock()
+                .unwrap()
+                .push(std::thread::current().id());
             ProgramSend::Wrote(bytes.len())
         }
 
@@ -1525,29 +1546,159 @@ mod woken {
         SessionDrive::close(&*member);
     }
 
-    /// A put the session pushed onto its group before a read is written by that read without
-    /// waiting: only a step of the group writes it, so it makes the group due at once.
+    /// Ten puts on the group are ten datagrams, each written by the putting thread before its put
+    /// returns, with one take of the session a put and no read run: nothing waits for a step of
+    /// the group, or for a read to wake, to leave, as zenoh-pico's put writes a multicast message
+    /// on its caller's thread.
     #[test]
-    fn a_put_pushed_before_a_read_is_written_by_it_without_waiting() {
+    fn a_put_on_the_group_is_written_by_the_putting_thread_before_it_returns() {
         let (member, stack, _transport) = open_alone(PosixClock, 5_000);
-        let written = || {
+        let here = std::thread::current().id();
+        let sent_before = stack.sent.lock().unwrap().len();
+        let takes_before = member.takes.core.load(Ordering::SeqCst);
+        for at in 0..10u8 {
+            let payload = [b'p', at];
+            put(&member, "demo/group/now", &payload);
+            let sent = stack.sent.lock().unwrap();
+            assert_eq!(
+                sent.len(),
+                sent_before + usize::from(at) + 1,
+                "put {at} was written before it returned"
+            );
+            assert!(sent
+                .last()
+                .is_some_and(|datagram| datagram.ends_with(&payload)));
+        }
+        assert!(
+            stack.threads.lock().unwrap()[sent_before..]
+                .iter()
+                .all(|thread| *thread == here),
+            "every one on the putting thread"
+        );
+        assert_eq!(
+            member.takes.core.load(Ordering::SeqCst) - takes_before,
+            10,
+            "one take of the session a put"
+        );
+        SessionDrive::close(&*member);
+    }
+
+    /// A put made while a read waits on the group's socket is written by the putting thread before
+    /// the put returns: the read, on a thread of its own, has no part in it, and the datagram it
+    /// waits for ends its wait after.
+    #[test]
+    fn a_put_made_while_a_read_waits_is_written_by_the_putting_thread() {
+        let (member, stack, transport) = open_alone(PosixClock, 5_000);
+        let link = stack.link.lock().unwrap().expect("the group was joined");
+        let reading = {
+            let member = Arc::clone(&member);
+            std::thread::spawn(move || {
+                SessionDrive::read(&*member, false).expect("the session is open");
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        put(&member, "demo/group/now", b"while-a-read-waits");
+        let took = started.elapsed();
+        assert!(
             stack
                 .sent
                 .lock()
                 .unwrap()
-                .iter()
-                .any(|datagram| datagram.ends_with(b"pushed-before-the-read"))
-        };
-        put(&member, "demo/group/now", b"pushed-before-the-read");
-        assert!(!written(), "pushed, and not yet written");
-        let started = Instant::now();
-        SessionDrive::read(&*member, false).expect("the session is open");
-        assert!(
-            started.elapsed() < Duration::from_millis(2_500),
-            "the read waited {:?}",
-            started.elapsed()
+                .last()
+                .is_some_and(|datagram| datagram.ends_with(b"while-a-read-waits")),
+            "written before the put returned"
         );
-        assert!(written(), "the read wrote it");
+        assert_eq!(
+            stack.threads.lock().unwrap().last(),
+            Some(&std::thread::current().id()),
+            "by the putting thread"
+        );
+        assert!(
+            took < Duration::from_millis(1_000),
+            "the put took {took:?}, as long as a read's wait"
+        );
+        transport
+            .received(link, &[0u8; 4], Some(source(9).as_str()))
+            .expect("handed in");
+        reading.join().expect("the read");
+        SessionDrive::close(&*member);
+    }
+
+    /// Whether `datagram` carries `payload` anywhere in it.
+    fn carries(datagram: &[u8], payload: &[u8]) -> bool {
+        datagram
+            .windows(payload.len())
+            .any(|window| window == payload)
+    }
+
+    /// Inside a batch window a put on the group is held, not written: the flush writes the
+    /// window's puts as one datagram and keeps the window open; an express put takes the window's
+    /// frame with it at once; the stop writes what is left and closes the window, after which a
+    /// put is written by itself again. Every write is the calling thread's.
+    #[test]
+    fn inside_a_batch_window_a_put_on_the_group_is_written_at_the_flush() {
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let sent = || stack.sent.lock().unwrap().clone();
+        let before = sent().len();
+        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+        put(&member, "demo/group/a", b"batched-first");
+        put(&member, "demo/group/b", b"batched-second");
+        assert_eq!(sent().len(), before, "the window holds both");
+
+        assert_eq!(member.batch_flush_all(), 1);
+        let flushed = sent();
+        assert_eq!(flushed.len(), before + 1, "one datagram for both");
+        let frame = flushed.last().expect("the window's frame");
+        assert!(carries(frame, b"batched-first") && frame.ends_with(b"batched-second"));
+
+        put(&member, "demo/group/c", b"batched-third");
+        assert_eq!(sent().len(), before + 1, "the window is still open");
+        member
+            .publish_on_wire_all(
+                "demo/group/d",
+                &WireKey::literal(),
+                b"express",
+                &PublishOptions::put()
+                    .with_locality(Locality::Remote)
+                    .with_express(true),
+            )
+            .expect("a put the group carries");
+        let expressed = sent();
+        assert_eq!(
+            expressed.len(),
+            before + 2,
+            "the express put takes the window's frame with it"
+        );
+        let frame = expressed.last().expect("the express frame");
+        assert!(carries(frame, b"batched-third") && frame.ends_with(b"express"));
+
+        put(&member, "demo/group/e", b"batched-fourth");
+        assert_eq!(sent().len(), before + 2, "held again");
+        assert_eq!(member.batch_stop_all(), 1);
+        let stopped = sent();
+        assert_eq!(stopped.len(), before + 3, "the stop writes what is left");
+        assert!(stopped
+            .last()
+            .is_some_and(|datagram| datagram.ends_with(b"batched-fourth")));
+
+        put(&member, "demo/group/f", b"unbatched");
+        let after = sent();
+        assert_eq!(
+            after.len(),
+            before + 4,
+            "a closed window holds nothing back"
+        );
+        assert!(after
+            .last()
+            .is_some_and(|datagram| datagram.ends_with(b"unbatched")));
+        let here = std::thread::current().id();
+        assert!(
+            stack.threads.lock().unwrap()[before..]
+                .iter()
+                .all(|thread| *thread == here),
+            "every write the calling thread's"
+        );
         SessionDrive::close(&*member);
     }
 }
