@@ -504,6 +504,12 @@ mod tests {
         );
     }
 
+    /// Every name a build can turn on at once: each but the tokio engine, which a pico build
+    /// names only without a cooperative one.
+    fn every_name_one_engine_has(id: &str) -> bool {
+        id != "engine-tokio"
+    }
+
     #[test]
     fn the_zenoh_c_abi_states_its_layout_arm_and_the_pico_abi_has_none() {
         let c = of_build("c", |_| false, |_| None);
@@ -512,7 +518,9 @@ mod tests {
         let arm_on = of_build("c", |id| c.arm.iter().any(|(a, _)| *a == id), |_| None);
         assert!(arm_on.arm.iter().all(|(_, on)| *on));
         assert_ne!(arm_on.digest(), c.digest());
-        assert!(of_build("pico", |_| true, |_| None).arm.is_empty());
+        assert!(of_build("pico", every_name_one_engine_has, |_| None)
+            .arm
+            .is_empty());
     }
 
     #[test]
@@ -535,7 +543,7 @@ mod tests {
     #[test]
     fn a_statement_lists_the_capabilities_of_its_abi_only() {
         for abi in ["core", "pico", "c"] {
-            let s = of_build(abi, |_| true, |_| None);
+            let s = of_build(abi, every_name_one_engine_has, |_| None);
             let want: Vec<&str> = items::CAPABILITIES
                 .iter()
                 .filter(|(_, abis)| abis.contains(&abi))
