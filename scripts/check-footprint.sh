@@ -1168,8 +1168,18 @@ declare -A BASELINE_MC_TEXT=(
     # slot by 8 bytes (deploy/session_slot_bytes.json). It is not split by symbol at this reading,
     # and the reading host's offset over hosted is not established: a hosted reading that differs
     # moves this again. data and bss were not read out of their bands. Old: 84112.
-    ["thumbv7m-none-eabi"]=84480
-    ["thumbv7em-none-eabihf"]=84300
+    #
+    # 2026-11-22 -- thumbv7m 84480 -> 85116 (+636), thumbv7em-hf 84300 -> 85152 (+852), read by
+    # the fleet's second Layer Q preflight of the same branch (b15fa99ef), past the band on both.
+    # The growth is the group's send and receive of that branch: a group put written on the
+    # thread that puts it through the stage the face and the task share, with a batch window that
+    # holds puts until a flush, an express put or a stop (3c80bbe54), and the receive commits with
+    # it (0f398e8a7, a19c9b15e); thumbv7em-hf also carries the receive growth of the reading above
+    # (25a67b9e0, b78f3887e), which was inside its band then. It is not split by symbol at this
+    # reading, and the reading host's offset over hosted is not established: a hosted reading that
+    # differs moves this again. data and bss were not read out of their bands. Old: 84480/84300.
+    ["thumbv7m-none-eabi"]=85116
+    ["thumbv7em-none-eabihf"]=85152
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
