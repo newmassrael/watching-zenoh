@@ -33,7 +33,7 @@ use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use core::any::Any;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -1333,6 +1333,12 @@ struct FilterEntry {
     asked: bool,
     /// Whether the session's own entities count toward the filter (`local-subscriber`).
     count_local: bool,
+    /// What the peers' declarations answered for the filter, with the registry's count of writes
+    /// it was read at (`Registry::faces_written`): kept for the puts after it until a face's
+    /// tables are written, as zenoh-pico's filter keeps its state between the declarations that
+    /// move it (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h` @
+    /// `return ctx->state == WRITE_FILTER_ACTIVE;`).
+    peers: Cell<Option<(u64, bool)>>,
 }
 
 /// One Interest the session holds open, and how many hold it.
@@ -3946,21 +3952,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Whether a peer declared what `plane` counts on `keyexpr`.
     fn peer_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
-        let registry = core.registry.borrow();
-        let subscribers = PublisherCriterion::new(keyexpr, Locality::Remote);
         // Any face's peer: a write filter holds a write back only when none of them wants it.
-        let matched = registry.faces().any(|face| match plane {
-            FilterPlane::Subscribers => face.peer.remote_subscribers.has_matching_for(&subscribers),
-            FilterPlane::Queryables { complete_required } => face
-                .peer
-                .remote_queryables
-                .has_matching_for(&QuerierCriterion::new(
-                    keyexpr,
-                    Locality::Remote,
-                    complete_required,
-                )),
-        });
-        matched
+        core.registry.borrow().peers_declare(plane, keyexpr)
     }
 
     /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
@@ -4072,7 +4065,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.filters
             .iter()
             .find(|f| f.id == id)
-            .is_some_and(|f| !Self::plane_matches(core, f.plane, &f.keyexpr, f.count_local))
+            .is_some_and(|f| !Self::filter_matches(core, f))
     }
 
     /// [`Self::filter_active_in`], except on a session that holds a group the filter does not
@@ -4091,16 +4084,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Self::filter_active_in(core, id)
     }
 
-    /// What a write filter or a matching listener on `plane` reads: a peer's declaration, or with
-    /// `count_local` one of the session's own.
-    fn plane_matches(
-        core: &Core<L, C>,
-        plane: FilterPlane,
-        keyexpr: &str,
-        count_local: bool,
-    ) -> bool {
-        Self::peer_matches(core, plane, keyexpr)
-            || (count_local && Self::local_matches(core, plane, keyexpr))
+    /// What write filter `entry` reads: a peer's declaration, or with `count_local` one of the
+    /// session's own. The peers' half is the one kept ([`Self::peers_match_kept`]); the session's
+    /// own subscribers change by no face and are asked each time.
+    fn filter_matches(core: &Core<L, C>, entry: &FilterEntry) -> bool {
+        Self::peers_match_kept(core, entry)
+            || (entry.count_local && Self::local_matches(core, entry.plane, &entry.keyexpr))
+    }
+
+    /// Whether a peer declared what filter `entry` counts: the answer it keeps while no face's
+    /// tables were written since it was read, else read again and kept.
+    fn peers_match_kept(core: &Core<L, C>, entry: &FilterEntry) -> bool {
+        let registry = core.registry.borrow();
+        let written = registry.faces_written();
+        if let Some((read_at, matched)) = entry.peers.get() {
+            if read_at == written {
+                return matched;
+            }
+        }
+        let matched = registry.peers_declare(entry.plane, &entry.keyexpr);
+        entry.peers.set(Some((written, matched)));
+        matched
+    }
+
+    /// How often what the peers declared was searched since the open: what a test of the cost of
+    /// a filtered put counts. Read under the lock, uncounted as a take.
+    #[cfg(test)]
+    pub(crate) fn peer_looks(&self) -> usize {
+        lock(&self.core).0.registry.borrow().peer_looks()
     }
 
     /// Tell every matching listener on the subscribers' plane that counts the session's own
@@ -4630,7 +4641,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| lock(&queue).flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
-        // filter reads ([`Self::plane_matches`]), so the listener and the filter cannot differ.
+        // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         let watch = {
             let mut registry = core.registry.borrow_mut();
             match plane {
@@ -4775,6 +4786,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 keyexpr: key,
                 asked: ask.is_some(),
                 count_local,
+                peers: Cell::new(None),
             },
         );
         Some(id)
