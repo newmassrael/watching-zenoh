@@ -37,7 +37,7 @@ allocates nothing per destination on the same path (section 3).
 
 A Put from a client face to client subscribers, with the line each step is at:
 
-Once per Put:
+Once per Put, before the change of row 4 (section 5):
 
 - The face's thread takes the tables for the message (`crates/wz-runtime-tokio/src/router_forward.rs:14991`,
   inside the loop over the frame's messages).
@@ -115,7 +115,7 @@ taken in this round. Each row says how to confirm it.
 | 1 | The routing thread writes each subscriber's frame to its socket itself. Once one Put takes the routing thread longer than 8 us, every subscriber's link has been quiet that long by the next Put, so each Put to each subscriber is a write system call on the one thread, with no batch | `flush_inline` and its thresholds (section 2); the TCP link installs the inline write (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`) | the producer only notifies; the face's task writes, in batches | largest, if confirmed: a write call costs microseconds where upstream's per-face cost is an encode into memory; the feedback (slower Put, more inline writes) fits a gap that grows with N | the routing thread never does a destination's I/O: a send made on behalf of a fan-out stages and wakes, and the inline write is kept for a sender's own lone message. **Done** (section 5): a router marks the link of every face it holds as its writer's alone, by the node's role and not by a timing threshold. The gain is to be read off the D13 cells and a count of write calls per thread on the router (`perf trace -s`) against Puts routed |
 | 2 | The carrier was copied, boxed, measured and encoded for every subscriber: 4 of the 5 allocations and 400 of the 444 bytes a subscriber added (measured after the change, section 5), two walks of the message | `crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`; the steps of section 2 | a stack `Push` and a reference count | second; all of the per-subscriber allocation a forward made but one | encode once, share the bytes: **done in this round** for a Put the credit stage sends (section 5) |
 | 3 | Locks and atomics per subscriber: the egress chain's read lock, the held queue's mutex, the chain mark (`SeqCst`), the conduit's mutex, the staged counter and the flush flag | section 2 | the stage's one mutex and one notify | small to moderate; each is uncontended, and cache lines move between the routing thread and the writers | read the egress chain once per fan-out; read the held queue's emptiness from an atomic beside it; `Acquire` where no total order is read |
-| 4 | Per Put, not per subscriber: the tables taken per message rather than per frame, the key resolved to an owned `String`, the carrier deep-copied, the memo read by hashing key text | section 2; 5 of the 10 allocations of a forward to one subscriber | one read lock, a mapping-id lookup, a cached `Arc` route | most of the 1-subscriber and 8 B gap (3.3 and 3.2 times), little of the 16-subscriber one | take the tables once per frame; key the client memo by the inbound face's mapping id; forward a literal Put's received bytes when nothing in it changes |
+| 4 | Per Put, not per subscriber: the tables taken per message rather than per frame, the key resolved to an owned `String`, the carrier deep-copied, the memo read by hashing key text | section 2; 5 of the 10 allocations of a forward to one subscriber | one read lock, a mapping-id lookup, a cached `Arc` route | most of the 1-subscriber and 8 B gap (3.3 and 3.2 times), little of the 16-subscriber one | take the tables once per frame; key the client memo by the inbound face's mapping id; forward a literal Put's received bytes when nothing in it changes. **Done** (section 5), but for an aliased Put's carrier, which is still a copy re-keyed once a fan-out |
 | 5 | A frame buffer allocated per frame on a path that lends no slot (the immediate path, `crates/wz-session-core/src/session_actions.rs:11059` for the staged one) | the fifth per-subscriber allocation of the record | batches reused through a refill ring | small; zero where the link lends slots (`transport-tx-lend`) | a pool of batch buffers per link, which the lending links already have: confirm the router's links take that path under fan-out |
 | 6 | Every delivered Put names its key as text, re-literalized for the client leaf | `client_carrier` (section 2) | the direction's key expression, chosen per face | small; at an 8 B payload the key text is a large part of the message, so fewer messages fit a batch | confirm by a capture of both arms what upstream sends to a client subscriber; if it is an id, declare the key to the face once and send by id |
 
@@ -189,3 +189,57 @@ A blocking forward to sixteen subscribers allocates 74 % fewer times and asks fo
 The one allocation a subscriber still costs is its frame (row 5); the one a fan-out adds is the shared
 encoding. The `time-hlc` record is measured on its own and is not written here. No throughput figure
 of the D13 cells was taken after the change; that is the next run of `ap_matrix.py`.
+
+### Row 4: the costs paid once a Put
+
+Four changes, each its own commit with the count that holds it.
+
+- **The tables once for a run of a frame's messages.** A face's frame takes the tables for reading
+  once for a run of consecutive reading messages (Puts, queries, replies), up to
+  `TABLE_READS_PER_GUARD` (64) of them (`ReadRun` in `forward_frame`,
+  `crates/wz-runtime-tokio/src/router_forward.rs`), as it already did for a run of declarations. A
+  message that writes ends the run, and so does a message whose route owes the node's own session
+  a call (a subscriber or a queryable the node hosts): the call is made before the next message is
+  routed, as it was when each message took the tables alone. The count is
+  `RouterForwarder::frame_table_reads`; the tests are the four at the end of
+  `crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs`.
+- **The key lent, not copied.** The key of a literal Put is its own suffix and the key of a Put that
+  names an alias with no suffix is the face's alias: both are lent to the route, and only an alias
+  with a suffix is composed (`lent_keyexpr`). The within-tier leg takes the key the route head
+  resolved instead of resolving it again. The test is
+  `a_puts_key_is_lent_unless_a_suffix_must_be_composed`.
+- **A literal Put fanned out as it came.** A literal Put that names no routing source is already
+  what a client is sent (`client_carrier`), so the fan-out lends it (`LiteralPush::lent`,
+  `crates/wz-runtime-tokio/src/router_forward/held_route.rs`) and a face that must be sent a
+  message of its own is sent a copy, as before. Whether a Put names a source, of any value, is
+  `push_names_a_source` (`crates/wz-session-core/src/push_routing_context.rs`). The count is
+  `RouterForwarder::client_carrier_copies`; the tests are
+  `a_literal_put_is_fanned_out_without_a_copy_and_an_aliased_one_with_one` and
+  `the_client_leg_carries_a_literal_whatever_the_put_named`.
+- **The client legs of an aliased Put kept on its face.** A Put that names an alias of its face with
+  no suffix finds the client legs of its route by the face and the alias id (`AliasRoutes` in
+  `held_route.rs`, `client_leg_for` in `router_forward.rs`), not by the hash of its key in the
+  memo all faces share. A leg is served only while the tables hold the memo it was read from and
+  that memo is at their inputs, so every change that moves a leg (a subscriber declared or
+  withdrawn, a face that leaves) has it read again, and the face is given empty legs whenever its
+  aliases change. The tests are `an_aliased_put_is_routed_by_the_leg_its_face_keeps_for_the_alias`
+  and `an_alias_leg_is_served_only_with_the_memo_it_was_read_from`.
+
+Not done in this round:
+
+- An aliased Put's carrier is still a copy, re-keyed to a literal, once a fan-out. Re-keying only
+  the encoded key needs the shared send to take what it reads of the Push apart from a message:
+  `try_send_encoded_push_qos` reads the Push it is sent for (its congestion control, and the
+  statistics class, which resolves its key by the session's own mappings). That is also the case of
+  row 6, a face whose mapping wants another key form.
+- The bytes a fan-out shares are encoded once from the lent message, not taken from the frame it
+  arrived in: a decoded message keeps no span of the wire.
+- A literal Put's client legs are still found by the hash of its key in the memo all faces share.
+
+What the allocation budget of the uncongested forward should show
+(`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs`, a literal Put of `demo/x` from a client,
+one Put a frame), not yet measured: every case of both records falls by the same amount a forward,
+since what was removed is paid once a Put. The key's `String` (one allocation, 6 bytes) and the
+carrier's copy (the allocations a `PushOwned` clone makes, its key text among them) go. Taking the tables once a frame and the legs kept for an
+alias move none of the four cases, which send one literal Put a frame.
+
