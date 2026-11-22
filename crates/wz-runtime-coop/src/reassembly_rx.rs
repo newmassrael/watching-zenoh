@@ -117,6 +117,17 @@ pub fn lent_reassembly(policy: &SessionPolicy, chains: LentChains) -> LentReasse
     LentReassembly::with_staging(mcu_reassembly_config(policy), chains)
 }
 
+/// [`lent_reassembly`] built in `place` and lent back: the Router a session's pump holds, made in
+/// the pump's own field (`SessionPump::with_router_in`), so its kilobytes never pass through the
+/// stack of the call that opens the session.
+pub fn lent_reassembly_in<'a>(
+    place: &'a mut core::mem::MaybeUninit<LentReassembly>,
+    policy: &SessionPolicy,
+    chains: LentChains,
+) -> &'a mut LentReassembly {
+    LentReassembly::init_in(place, mcu_reassembly_config(policy), chains)
+}
+
 #[cfg(feature = "rx-in-place")]
 pub use in_place::{
     in_place_reassembly, ArenaChain, InPlaceReassembly, PoolStorage, ReassemblyArena,
@@ -777,6 +788,46 @@ mod tests {
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
         assert_eq!(reasm.staging_available(), LENT_CHAINS);
+    }
+
+    /// The lent Router built in its place is the one `lent_reassembly` returns: the same ceiling,
+    /// the same chains bounded by their buffers, and dropped where it lies it gives the buffers it
+    /// claimed back to the session's table.
+    #[test]
+    fn a_lent_router_built_in_place_bounds_a_chain_by_its_buffer() {
+        use core::mem::MaybeUninit;
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::Arena;
+        use wz_session_core::reassembly_dispatch::AbortReason;
+
+        #[repr(C, align(16))]
+        struct Memory([u8; 256]);
+
+        let mut memory = Memory([0; 256]);
+        // SAFETY: as in `a_lent_router_bounds_a_chain_by_its_buffer`: the Router is dropped
+        // below, and the table after it, both before the memory.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), 256) };
+        let cells = arena
+            .lend_byte_cells(16, LENT_CHAINS)
+            .expect("the memory holds the table");
+        let mut place = MaybeUninit::<LentReassembly>::uninit();
+        let reasm = lent_reassembly_in(
+            &mut place,
+            &SessionPolicy::defaults(),
+            LentChains::claim(&cells, LENT_CHAINS),
+        );
+        assert_eq!(reasm.max_message_bytes(), caps::PICO_FRAG_MAX_BYTES);
+        assert_eq!(reasm.staging_available(), LENT_CHAINS);
+        reasm.ingest(frag(1, 1, b"0123456789"), MASK, 0, |_| {});
+        let r = reasm.ingest(frag(2, 0, b"0123456789"), MASK, 0, |_| {
+            panic!("past the buffer, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(reasm.staging_available(), LENT_CHAINS);
+        assert_eq!(cells.in_use(), LENT_CHAINS);
+        // SAFETY: `lent_reassembly_in` wrote the whole Router into `place`; it is dropped once.
+        unsafe { place.assume_init_drop() };
+        assert_eq!(cells.in_use(), 0, "the buffers went back with the Router");
     }
 
     /// The deadline sweep — the per-tick half of the drive loop — reclaims

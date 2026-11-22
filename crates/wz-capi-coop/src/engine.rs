@@ -63,7 +63,7 @@ use wz_capi_port::{
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
-use wz_runtime_coop::reassembly_rx::{lent_reassembly, LentChains, LENT_CHAINS};
+use wz_runtime_coop::reassembly_rx::{lent_reassembly_in, LentChains, LENT_CHAINS};
 use wz_runtime_coop::session_drive::{
     spawn_session_with_router, wait_any, LinkReadiness, LinkWritability, OpenedLink,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
@@ -1727,11 +1727,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         // The link's fragmented messages are staged in buffers of the session's arena, as many
         // chains at once as the table has buffers free for it; a chain that finds none is refused
-        // and counted, and the buffers go back when the session over the link ends.
-        let reassembly = lent_reassembly(
-            &self.policy,
-            LentChains::claim(&self.reassembly, LENT_CHAINS),
-        );
+        // and counted, and the buffers go back when the session over the link ends. The buffers
+        // are claimed now; the Router over them is written in the pump's own field when the task
+        // first runs, so its slot machines are not a value on this call's stack.
+        let chains = LentChains::claim(&self.reassembly, LENT_CHAINS);
+        let policy = self.policy;
         let task = spawn_session_with_router(
             &self.local,
             link.clone(),
@@ -1742,7 +1742,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 role,
                 max_iters: None,
             },
-            reassembly,
+            move |place| lent_reassembly_in(place, &policy, chains),
             dispatch,
         );
         self.local.run_until_idle();
