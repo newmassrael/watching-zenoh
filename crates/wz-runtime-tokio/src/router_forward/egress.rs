@@ -103,9 +103,10 @@ use std::time::Instant;
 
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::{CongestionControl, Priority};
-use wz_session_core::session_actions::Unsent;
+use wz_session_core::session_actions::{EncodedPush, Unsent, UnsentShared};
 
 use super::face_runtime::{FaceRuntime, SendFace};
+use super::held_route::LiteralPush;
 use super::{peer_label, OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
@@ -331,6 +332,14 @@ impl Lane {
             Self::Control => 1,
         }
     }
+}
+
+/// Whether what is sent to `face` in `lane` goes behind what the face holds there, or behind a
+/// chain being sent to it there, whatever room its link has now: a message that went past its
+/// predecessors would put one source's messages out of order.
+fn behind_held(face: SendFace<'_>, lane: Lane) -> bool {
+    !face.runtime.held.lane(lane).guard().is_empty()
+        || face.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst)
 }
 
 /// What a destination face holds, a queue for each [`Lane`].
@@ -564,6 +573,12 @@ impl RouterForwarder {
             NetworkMessage::Response(response) => return self.held_response(response),
             _ => return None,
         };
+        self.held_push_lane(push)
+    }
+
+    /// [`Self::held_lane`] of a reliable Push: sent on behalf of a face that can be gated, its QoS
+    /// not one that drops it, and its payload not a buffer of shared memory.
+    pub(super) fn held_push_lane(&self, push: &wz_session_core::wire::PushOwned) -> Option<Lane> {
         self.credit.source()?;
         #[cfg(feature = "transport-shm")]
         if let wz_session_core::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
@@ -618,13 +633,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         express: bool,
         priority: Priority,
     ) -> Credited {
-        // Behind what the destination already holds in the message's lane, or a chain it is
-        // being sent in that lane, whatever room it has now: a message that went past its
-        // predecessors would put one source's messages out of order.
-        let lane = Lane::of(&msg);
-        if !face.runtime.held.lane(lane).guard().is_empty()
-            || face.runtime.chain_in_flight[lane.index()].load(Ordering::SeqCst)
-        {
+        if behind_held(face, Lane::of(&msg)) {
             self.hold_and_recheck(dest, face, msg, reliable, express, priority);
             return Credited::Held;
         }
@@ -646,6 +655,51 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Credited::Sent
             }
             Err(Unsent::Failed(_)) => Credited::Refused,
+        }
+    }
+
+    /// [`Self::credited_send`] of the carrier of a fan-out, sent as the bytes it was encoded to
+    /// once for every face: the message is made of the carrier only when it is held, sent as a
+    /// chain with a wait, or carries shared memory, which the shared bytes cannot.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn credited_send_shared(
+        &self,
+        dest: FaceId,
+        face: SendFace<'_>,
+        carrier: &LiteralPush,
+        encoded: &EncodedPush,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Credited {
+        if behind_held(face, Lane::Data) {
+            let msg = carrier.clone().into_message();
+            self.hold_and_recheck(dest, face, msg, reliable, express, priority);
+            return Credited::Held;
+        }
+        match face.runtime.actions.try_send_encoded_push_qos(
+            carrier.as_push(),
+            encoded,
+            reliable,
+            express,
+            priority,
+        ) {
+            Ok(()) => Credited::Sent,
+            Err(UnsentShared::NoRoom) => {
+                let msg = carrier.clone().into_message();
+                self.hold_and_recheck(dest, face, msg, reliable, express, priority);
+                Credited::Held
+            }
+            Err(UnsentShared::Chain) => {
+                let msg = carrier.clone().into_message();
+                self.send_chain_off_thread(face.runtime, msg, reliable, express, priority);
+                Credited::Sent
+            }
+            Err(UnsentShared::Failed(_)) => Credited::Refused,
+            Err(UnsentShared::Unshareable) => {
+                let msg = carrier.clone().into_message();
+                self.credited_send(dest, face, msg, reliable, express, priority)
+            }
         }
     }
 

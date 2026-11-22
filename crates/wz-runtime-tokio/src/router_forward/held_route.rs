@@ -18,8 +18,11 @@
 //! held route sends only a [`LiteralPush`], whose key is a literal by construction, so its key is
 //! read off the message and no alias table is asked ([`HeldFaceContext`]).
 
+use std::cell::OnceCell;
+
 use super::face_runtime::{FaceRuntime, SendFace};
 use super::*;
+use wz_session_core::session_actions::EncodedPush;
 use wz_session_core::wireexpr_resolve::id_and_suffix;
 
 /// One face of a client leg's route: what the router holds of it that is fixed while it is up.
@@ -86,6 +89,43 @@ impl LiteralPush {
     /// The message to send.
     pub(super) fn into_message(self) -> NetworkMessage {
         NetworkMessage::Push(Box::new(self.0))
+    }
+
+    /// The Push itself, to be read.
+    pub(super) fn as_push(&self) -> &PushOwned {
+        &self.0
+    }
+}
+
+/// The carrier of one fan-out to the client faces, and the bytes it encodes to, made at most once
+/// however many faces the fan-out reaches. Every face the carrier can be sent to as those bytes is
+/// sent them; a face is handed a copy of the message only when it must hold it, send it another
+/// way, or have it read by an interceptor.
+pub(super) struct SharedCarrier {
+    push: LiteralPush,
+    encoded: OnceCell<EncodedPush>,
+}
+
+impl SharedCarrier {
+    /// The fan-out of `push`, encoded by the first face that is sent the bytes.
+    pub(super) fn new(push: LiteralPush) -> Self {
+        Self {
+            push,
+            encoded: OnceCell::new(),
+        }
+    }
+
+    /// The carrier, for a face that is sent a message of its own.
+    pub(super) fn push(&self) -> &LiteralPush {
+        &self.push
+    }
+
+    /// The carrier's bytes, encoded on the first call; `on_encode` runs then and on no other call.
+    pub(super) fn encoded(&self, on_encode: impl FnOnce()) -> &EncodedPush {
+        self.encoded.get_or_init(|| {
+            on_encode();
+            EncodedPush::of(&self.push.0)
+        })
     }
 }
 
@@ -165,5 +205,23 @@ mod tests {
         assert_eq!(context.full_keyexpr(&literal).as_deref(), Some("demo/a"));
         assert_eq!(context.full_keyexpr(&aliased), None);
         assert_eq!(context.subject(), Some(peer));
+    }
+
+    /// The carrier is encoded on the first ask and on no other, and what every ask is handed is
+    /// the Push's own encoding. Turned red by a carrier that encodes again for each face.
+    #[test]
+    fn a_shared_carrier_is_encoded_once_however_often_it_is_asked() {
+        let push = build_push_literal("demo/a", b"x").expect("build literal push");
+        let expected = EncodedPush::of(&push);
+        let carrier = SharedCarrier::new(LiteralPush::new(push).expect("a literal Push is taken"));
+        let encodes = std::cell::Cell::new(0usize);
+        for _ in 0..3 {
+            assert_eq!(
+                carrier.encoded(|| encodes.set(encodes.get() + 1)),
+                &expected
+            );
+        }
+        assert_eq!(encodes.get(), 1, "one encode for three asks");
+        assert_eq!(carrier.push().keyexpr(), "demo/a");
     }
 }
