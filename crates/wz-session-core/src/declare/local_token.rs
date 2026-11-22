@@ -209,6 +209,10 @@ impl LocalTokenRegistry<Profile> {
 }
 
 impl<P: Storage> LocalTokenRegistry<P> {
+    /// The bytes one held token takes in the table's storage: its key's text with it where the
+    /// storage policy keeps the text in the row.
+    pub const ROW_BYTES: usize = core::mem::size_of::<LocalToken<P>>();
+
     /// Hold the registry to the `MAX_LOCAL_TOKENS` its creator resolved: a registration that
     /// would leave more tokens than `quota` admits is refused ([`RegisterError::TableFull`]), and
     /// the tokens already held are kept, as a lowered soft limit keeps what it holds.

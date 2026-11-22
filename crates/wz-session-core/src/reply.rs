@@ -1131,6 +1131,11 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
 }
 
 impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
+    /// The bytes one pending query takes in the table's storage: the key its replies are held to
+    /// with it where the storage policy keeps the text in the row, and its sink as the table holds
+    /// it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<Pending<C, P>>();
+
     /// Hold the registry to the `MAX_PENDING_QUERIES` its creator resolved: a registration that
     /// would leave more queries pending than `quota` admits is refused
     /// ([`RegisterError::TableFull`]), and the queries already pending are kept, as a lowered

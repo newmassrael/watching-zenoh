@@ -2319,6 +2319,73 @@ void wz_ext_internal_message_payload_null(
 bool wz_ext_internal_message_payload_check(
     const wz_ext_owned_message_payload_t *this_);
 
+/* ================================================ the most memory a session holds
+ *
+ * What a session holds at most, part by part, computed from the limits it
+ * opened under: the snapshot its open resolved from the config, the limits of
+ * a document handed to wz_ext_config_document included. A program reads it
+ * once its session is open, to know what the limits it chose cost before the
+ * session runs. Part of the unstable surface,
+ * and present only in a build with the session-memory capability.
+ *
+ * THE ROWS. Each table the session keeps to a limit is two rows: the
+ * table's storage (its entries, each the size of the table's own row type
+ * as the library is built) and what each entry keeps beside the storage (a
+ * key's text where the row does not hold it, a callback's box). Then the
+ * session's handle, and each link's transmit queue, receive buffer and
+ * reassembly, from the numbers the session's links were opened with. A row
+ * names the limit, or the build's value, that sizes it (basis; empty for a
+ * part every session has once).
+ *
+ * THE BOUNDS. A fixed table counts its capacity; a growable one its quota,
+ * and the storage a vector that doubles as it fills may reach (twice the
+ * entries, at least four), and a key's text up to the session's
+ * MAX_KEYEXPR_BYTES, written as a string that doubles. A session that only
+ * dials holds one link. A row the session holds to no bound (a quota of no
+ * bound, a listener that accepts links to no bound, a PICO_FRAG_MAX_BYTES of
+ * no bound) has bounded 0, and then so has the report: total_bytes is the
+ * sum of the rows that are bounded.
+ *
+ * ENFORCED. 1 when the build also refuses past every row's count and entry
+ * size, so that total_bytes is a bound the session cannot pass. Every table
+ * refuses a key longer than the session's MAX_KEYEXPR_BYTES, whatever its
+ * storage.
+ *
+ * What an engine makes beside the tables (its runtime, its threads, the
+ * closures' captures) is sized by no limit and is outside the rows, as are
+ * the objects behind the handles a program holds. */
+
+typedef struct wz_ext_session_memory_t {
+  size_t total_bytes; /* the sum of the rows that are bounded */
+  size_t rows;        /* rows wz_ext_session_memory_row reports */
+  uint8_t bounded;    /* 1 when every row is: total_bytes is then the most */
+  uint8_t enforced;   /* 1 when the build refuses past every row as well */
+  uint8_t reserved[6];
+} wz_ext_session_memory_t;
+
+typedef struct wz_ext_session_memory_row_t {
+  const char *part;   /* what holds the bytes; static */
+  const char *basis;  /* the limit or build value that sizes it; static */
+  size_t count;       /* items; 0 when bounded is 0 */
+  size_t entry_bytes; /* the bytes of one item */
+  size_t total_bytes; /* count * entry_bytes; 0 when bounded is 0 */
+  uint8_t bounded;    /* 1 when the row has a count */
+  uint8_t enforced;   /* 1 when the build refuses past it */
+  uint8_t reserved[6];
+} wz_ext_session_memory_row_t;
+
+/* The most session holds, in out. A closed session reports what it held
+ * while open. Z_OK; Z_ERR_NULL for a NULL out or a NULL session. */
+z_result_t wz_ext_session_memory(const z_loaned_session_t *session,
+                                 wz_ext_session_memory_t *out);
+
+/* Row index of what session holds, in out, rows counted from 0 in the order
+ * wz_ext_session_memory sums them. Z_OK; Z_ERR_NULL for a NULL out or a NULL
+ * session; Z_EINVAL for an index past the last row, out then as it was. */
+z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
+                                     size_t index,
+                                     wz_ext_session_memory_row_t *out);
+
 /* ================================================ the extension interface
  *
  * What the doors of the additional features (end-to-end protection,
