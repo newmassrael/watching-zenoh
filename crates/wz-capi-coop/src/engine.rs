@@ -2163,20 +2163,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .accepting_inactivity_ms
                 .saturating_mul(1000),
         );
-        self.push_opening(id, wire, deadline_us);
-    }
-
-    /// Add a face that holds `wire`, whose handshake is given up at `deadline_us`. It is told the
-    /// session's declarations at the pace the dial role's face is.
-    fn push_opening(&mut self, id: FaceId, wire: Wire<C>, deadline_us: u64) {
-        let pacing = self.dial().replay.pacing();
-        self.faces.push(Face {
+        self.push_face(
             id,
-            link: Link::Opening {
+            Link::Opening {
                 wire,
                 next: 0,
                 deadline_us,
             },
+        );
+    }
+
+    /// Add a face whose link is `link`: a dial under way or a handshake. It is told the session's
+    /// declarations at the pace the dial role's face is.
+    fn push_face(&mut self, id: FaceId, link: Link<C>) {
+        let pacing = self.dial().replay.pacing();
+        self.faces.push(Face {
+            id,
+            link,
             replay: Replay::with_pacing(pacing),
         });
     }
@@ -2700,15 +2703,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             endpoint: String::from(endpoint),
             pending,
         });
-        let pacing = core.dial().replay.pacing();
-        core.faces.push(Face {
+        core.push_face(
             id,
-            link: Link::Dialing {
+            Link::Dialing {
                 next: 0,
                 deadline_us,
             },
-            replay: Replay::with_pacing(pacing),
-        });
+        );
         Ok(id)
     }
 
