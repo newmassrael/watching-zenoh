@@ -591,23 +591,27 @@ slices' line numbers have moved.
 the code; 17,930 lines).
 | Verdict | Rows | What decides it |
 |---|---|---|
-| Fits now: 24 | S1 68; S2 8, 9, 10, 14, 17, 21, 27, 30, 32, 37, 43; S4 25, 26, 55; S5 41, M2, M4, M5, M17; S7 3, 4; S9 9; S11 2 | Every table is a `map<K, V>[N]` or `set<K>[N]` of accepted keys and values, written by put, remove and clear and walked in first-put order; callbacks, sinks, handles and sockets stay in a host table under the same key. S2 30's AP rule is already generated (section 7.1) and S5 M5 waits for its MCU move. S5 41 and S5 M17 own no keyed table (two slots; pools of host objects), so U1 was a misreading for them. S5 M2 needs its key, `Endpoint(slot) | Node(zid)`, written as a record of a kind and its fields. S7 3's bound is a configured `max_faces`, so its `N` is a build constant at least the configured value |
+| Fits now: 25 | S1 68; S2 8, 9, 10, 14, 17, 21, 27, 30, 32, 37, 43; S4 25, 26, 55; S5 41, M2, M4, M5, M17; S7 3, 4, 13; S9 9; S11 2 | Every table is a `map<K, V>[N]` or `set<K>[N]` of accepted keys and values, written by put, remove and clear and walked in first-put order; callbacks, sinks, handles and sockets stay in a host table under the same key. S2 30's AP rule is already generated (section 7.1) and S5 M5 waits for its MCU move. S5 41 and S5 M17 own no keyed table (two slots; pools of host objects), so U1 was a misreading for them. S5 M2 needs its key, `Endpoint(slot) | Node(zid)`, written as a record of a kind and its fields. S7 3's bound is a configured `max_faces`, so its `N` is a build constant at least the configured value. S7 13 states its bound since W16's first table (below): a `map<record:FinalKey, record:FinalHold>[N]` and a `set<record:FinalKey>[N]`, checked by a probe at the pin (Rust and C11 ok) |
 | Waits for a nested value, item 4a (iii): 6 | S1 47; S2 34; S4 23; S5 61; S7 52, 76 | A value holds a set, a map, a queue or an optional list: the member scope's three sets (S1 47, which also runs one machine per member, U7), the consolidation cache inside each pending query (S2 34), a hat's own tables (S4 23), a request's optional path list (S5 61), a listener's replay queue (S7 52), a match's set of faces and a face's map of matches (S7 76) |
-| Has no stated bound: 10 | S1 55; S2 7, 39, 44; S4 24, 58; S7 10, 13; S8 53; S10 22 | Every table fits the map, and nothing states how many entries it may hold (W16) |
+| Has no stated bound: 9 | S1 55; S2 7, 39, 44; S4 24, 58; S7 10; S8 53; S10 22 | Every table fits the map, and nothing states how many entries it may hold (W16) |
 | Reads a minimum by deadline: 3 | S2 31, 42; S7 18 | `next_deadline_ms` and the ticker's next due take the least deadline. A walk folds it (a P row to measure); S2 31 also lets two pending queries share a request id, which one key cannot hold, and S7 18 states no bound |
 | Walks in key order: 4 | S2 41; S4 61; S5 17, 57 | The accepted walk is in first-put order. S5 57 puts the protocols on the wire in ascending order and S2 41 drops a lost link's tokens lowest id first, with a second map kept in step; S4 61 and S5 17 order replies and admin leaves by key. S5 17 and S5 57 state no bound either |
 | Has a key the pin does not accept: 2 | S1 61; S4 73 | A key that is a sum type carrying data (`PeerKey`, `MeshDialKey` with an address or a path) needs a record encoding first; S1 61 also holds a generated machine in every entry (U7) and walks its keys in order |
 | Reads entries by place: 1 | S7 8 | The declaration replay finds the n-th entry of a kind and moves every face's cursor when one is inserted or removed; a map reads by key only |
 | Owns no table yet: 1 | S8 47 | A chunk's holders are an `Arc`'s strong count; a machine needs a chunk id the host mints and a bound on live chunks |
 
-- **W16, tables with no bound.** Ten keyed tables state no limit on how many
+- **W16, tables with no bound.** Nine keyed tables state no limit on how many
   entries they hold (section 7.4): the link book (S1 55), the namespace ingress
   sets (S2 7), the matching watches (S2 39), the declaration sync (S2 44), a
   face's declaration numbers (S4 24), the matching interests (S4 58), the
-  cooperative engine's interests, write filters and match listeners (S7 10) and
-  its held `ResponseFinal`s (S7 13), the C ABI's SHM client storage (S8 53) and
-  the mesh client's held declarations (S10 22). S7 13 is the sharpest: `caps.rs`
-  states `MAX_PENDING_FINALS`, and the cooperative engine never reads it.
+  cooperative engine's interests, write filters and match listeners (S7 10),
+  the C ABI's SHM client storage (S8 53) and the mesh client's held
+  declarations (S10 22). The tenth, the cooperative engine's held
+  `ResponseFinal`s (S7 13), read `caps.rs`'s `MAX_PENDING_FINALS` nowhere. Since
+  2026-11-22 it is held to the session's `MAX_PENDING_FINALS`, and a request
+  with no row left is refused before its callback runs, with no reply and no
+  Final, as zenoh-pico refuses a query it cannot build and as the session
+  core refuses a request it cannot owe a Final for.
 
 **U3's 20 rows.** Read with a bounded byte-string field accepted, which S1 to S6
 read as refused, and checked by probes: a list of records with a `bytes[16]`
