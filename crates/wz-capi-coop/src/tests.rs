@@ -946,11 +946,11 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
 }
 
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
-/// subscriber's callback where they lie: none is written into the delivery lane, which has no
-/// lock, and each holds the link back only until its callback returns, the next read going on
-/// from the record after it. A read that finds nothing hands nothing out. One thread delivers, so
-/// the list of the threads delivering beside it is never taken. The CONTROL is the count of the
-/// samples handed to the subscriber.
+/// subscriber's callback where they lie: each is handed on through the delivery lane, which has
+/// no lock, as its key and its subscriber alone, its payload read in the datagram, and holds the
+/// link back only until its callback returns. A read that finds nothing hands nothing out. One
+/// thread delivers, so the list of the threads delivering beside it is never taken. The CONTROL is
+/// the count of the samples handed to the subscriber.
 #[test]
 fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let router = Router::start(CatchAll::None);
@@ -1004,8 +1004,8 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     );
     assert_eq!(
         engine.lane_handed() - handed,
-        0,
-        "and none written into the lane"
+        SAMPLES,
+        "and none handed on but those, none copied into the lane"
     );
     assert_eq!(
         engine.delivery_list_takes(),

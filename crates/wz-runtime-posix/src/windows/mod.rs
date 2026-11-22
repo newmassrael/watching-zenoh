@@ -311,6 +311,8 @@ pub(crate) fn keep_from_children(socket: ws::SOCKET) -> bool {
 /// it already has, and without waiting at 0. A failed wait is a quiet socket: the read that
 /// follows reads and reports the error.
 pub(crate) fn poll_readable(socket: ws::SOCKET, timeout_ms: i32) -> bool {
+    #[cfg(test)]
+    READABLE_POLLS.with(|polls| polls.set(polls.get() + 1));
     let mut fd = ws::WSAPOLLFD {
         fd: socket,
         events: ws::POLLRDNORM,
@@ -319,6 +321,18 @@ pub(crate) fn poll_readable(socket: ws::SOCKET, timeout_ms: i32) -> bool {
     // SAFETY: one live `WSAPOLLFD`; the timeout bounds the wait.
     let ready = unsafe { ws::WSAPoll(&mut fd, 1, timeout_ms) };
     ready > 0 && fd.revents != 0
+}
+
+/// The `WSAPoll`s for input [`poll_readable`] made on this thread, which the tests of a read
+/// count.
+#[cfg(test)]
+pub(crate) fn readable_polls() -> usize {
+    READABLE_POLLS.with(core::cell::Cell::get)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static READABLE_POLLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// Whether `socket` takes more bytes (or has failed, which the write that follows reports) within

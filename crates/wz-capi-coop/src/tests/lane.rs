@@ -14,7 +14,7 @@ use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::{
     EncodingHint, QosLevel, Sample, SampleKind, SourceInfo, TimestampHint,
 };
-use wz_session_core::sink::SampleView;
+use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use wz_capi_port::SubId;
 
@@ -587,12 +587,25 @@ fn the_lane_hands_its_samples_on_in_order_to_one_delivery_at_a_time() {
     assert!(lane.deliver().is_some(), "let go, the side is free again");
 }
 
-/// A sample whose parts lie in the datagram a link lends the step is handed to its callbacks where
-/// they lie, once for every subscriber it reaches, and holds the links back until it is given
-/// back; one offered while a delivery runs, or whose payload lies elsewhere, is written into the
-/// lane instead.
+/// A best-effort put on `demo/lane` whose payload is borrowed where it lies, as a sample read in
+/// place is.
+fn borrowed(payload: &[u8]) -> BorrowedSample<'_> {
+    BorrowedSample {
+        keyexpr: "demo/lane",
+        payload,
+        kind: SampleKind::Put,
+        reliability: Reliability::BestEffort,
+    }
+}
+
+/// The samples whose parts lie in the datagram a link lends the step are handed to their
+/// callbacks where they lie: every sample of the datagram in the one step, in the order they came,
+/// each written into the lane as its key and its subscriber's id alone (13 bytes here, where a copy
+/// takes 17). They hold the link back from its next receive until the last is given back, and not
+/// from the records after them. The CONTROLS: a sample offered while a delivery runs, and one
+/// whose payload lies elsewhere, are written into the lane whole and hold nothing back.
 #[test]
-fn a_sample_whose_parts_lie_in_the_lent_datagram_is_handed_where_they_lie() {
+fn the_samples_lying_in_a_lent_datagram_are_handed_where_they_lie() {
     use crate::lane::{LaneGate, SharedLane};
     use wz_runtime_coop::session_drive::SessionDatagramLink;
 
@@ -601,60 +614,165 @@ fn a_sample_whose_parts_lie_in_the_lent_datagram_is_handed_where_they_lie() {
     };
     let lane = alloc::sync::Arc::new(SharedLane::new(lane));
     // SAFETY (every hold, the gate and the lending here): this thread is the lane's one writer,
-    // as a session's step is under its lock, and the sample's payload stands for the datagram it
-    // lies in, which outlives every use below.
+    // as a session's step is under its lock, and the datagram outlives every use below.
     let gate = unsafe { LaneGate::new(Quiet, lane.clone(), room(32)) };
-    let sample = filled(8, 7);
-    let datagram = sample.payload();
-    let offer = |subscribers: &[SubId], sample: &Sample| {
-        unsafe { lane.set_lending(Some(datagram)) };
-        let mut held = unsafe { lane.held() };
-        for subscriber in subscribers {
-            held.offer_sample(*subscriber, sample);
-        }
-        held.seal_all();
-        drop(held);
-        unsafe { lane.set_lending(None) };
-    };
-    offer(&[1, 2], &sample);
-    assert!(!gate.takes_input(), "the lent datagram holds the link back");
-    assert_eq!(lane.handed_on(), 0, "nothing was written into the lane");
-    let delivery = lane.deliver().expect("one delivery");
-    let lent = delivery.take_lent().expect("the sample was lent");
-    assert_eq!(
-        lent.sample().payload().as_ptr(),
-        datagram.as_ptr(),
-        "handed where it lies"
-    );
-    assert_eq!(lent.sample().keyexpr(), "demo/lane");
-    assert_eq!(lent.sample().subscribers().collect::<Vec<_>>(), vec![1, 2]);
-    drop(lent);
+    let datagram = [1u8, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3];
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    for (subscriber, payload) in (1..).zip(datagram.chunks(4)) {
+        unsafe { lane.held() }.offer_sample(subscriber, &borrowed(payload));
+        assert!(
+            lane.lends_a_datagram(),
+            "the sample held open lies in the datagram"
+        );
+        assert!(gate.takes_input(), "and holds back no record after it");
+    }
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
     assert!(
-        delivery.take().is_none(),
-        "nothing was written into the lane"
+        lane.lends_a_datagram(),
+        "handed on, they hold the link back"
     );
+    assert_eq!(lane.handed_on(), 3, "the three handed on in the one step");
+    assert_eq!(lane.lent_count(), 3, "each lying in the datagram");
+    assert!(
+        unsafe { lane.held() }.takes_a_read(room(256 - 3 * (9 + 4))),
+        "each wrote its key and its subscriber's id, and not its payload"
+    );
+    let delivery = lane.deliver().expect("one delivery");
+    let mut seen = Vec::new();
+    while let Some((item, head)) = delivery.take() {
+        // The other items exist only where their planes are built.
+        #[cfg(any(feature = "liveliness", feature = "query"))]
+        let LaneItem::Sample(sample) = item
+        else {
+            panic!("samples were offered");
+        };
+        #[cfg(not(any(feature = "liveliness", feature = "query")))]
+        let LaneItem::Sample(sample) = item;
+        seen.push((
+            sample.subscribers().collect::<Vec<_>>(),
+            sample.payload().as_ptr(),
+            sample.keyexpr().to_owned(),
+        ));
+        assert!(
+            lane.lends_a_datagram(),
+            "the link is held back until the last is given back"
+        );
+        drop(head);
+    }
     drop(delivery);
-    assert!(gate.takes_input(), "given back, the link is read again");
+    assert_eq!(
+        seen,
+        [1usize, 2, 3]
+            .map(|n| (
+                vec![n as SubId],
+                datagram[(n - 1) * 4..].as_ptr(),
+                "demo/lane".to_owned()
+            ))
+            .to_vec(),
+        "each handed where it lies, in the order they came"
+    );
+    assert!(
+        !lane.lends_a_datagram(),
+        "given back, the link is read again"
+    );
 
     let running = lane.deliver().expect("a delivery runs");
-    offer(&[3], &sample);
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.held() }.offer_sample(4, &borrowed(&datagram[..4]));
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
     assert_eq!(
-        lane.handed_on(),
-        1,
+        (lane.handed_on(), lane.lent_count()),
+        (4, 3),
         "offered while a delivery runs, the sample is written into the lane"
     );
+    assert!(!lane.lends_a_datagram(), "and holds nothing back");
     while let Some((_, head)) = running.take() {
         drop(head);
     }
     drop(running);
 
-    offer(&[4], &filled(8, 9));
+    let elsewhere = [9u8; 4];
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.held() }.offer_sample(5, &borrowed(&elsewhere));
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
     assert_eq!(
-        lane.handed_on(),
-        2,
+        (lane.handed_on(), lane.lent_count()),
+        (5, 3),
         "a payload outside the lent datagram is written into the lane"
     );
-    assert_eq!(lane.lent_count(), 1, "one sample was lent");
+    assert!(!lane.lends_a_datagram(), "and holds nothing back");
+}
+
+/// A link that lends one datagram where it lies, as UDP and a stream do.
+struct Lends(Vec<u8>);
+
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Lends {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        None
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        f(&self.0);
+        true
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+}
+
+/// The samples of a datagram a link's gate lends the step are offered with no hold of the lane
+/// each, and handed on together by the one hold the gate takes when the walk ends: three samples,
+/// one hold, where a hold a sample took three. The room the gate asks before each record is left
+/// after each all the same. The CONTROL is a sample offered with no datagram lent, which takes a
+/// hold of its own.
+#[test]
+fn the_samples_of_a_lent_datagram_are_handed_on_by_one_hold() {
+    use crate::lane::{LaneGate, SharedLane};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let Some(lane) = lane(256, 8) else {
+        return;
+    };
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane));
+    let datagram = vec![1u8, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3];
+    // SAFETY (every offer, hold and the gate here): this thread is the lane's one writer, as a
+    // session's step is under its lock.
+    let gate = unsafe { LaneGate::new(Lends(datagram), lane.clone(), room(32)) };
+    let holds = lane.holds();
+    let walked = gate.recv_with(&mut |datagram| {
+        for (subscriber, payload) in (1..).zip(datagram.chunks(4)) {
+            unsafe { lane.offer_sample(subscriber, &borrowed(payload)) };
+            assert!(gate.takes_input(), "the room is left after each record");
+        }
+    });
+    assert!(walked, "the link lent its datagram");
+    assert_eq!(
+        lane.holds() - holds,
+        1,
+        "one hold for the datagram's three samples"
+    );
+    assert_eq!(
+        (lane.handed_on(), lane.lent_count()),
+        (2, 2),
+        "the two sealed samples handed on together, lying where they lie"
+    );
+    assert!(lane.lends_a_datagram(), "the one held open lies there too");
+    unsafe { lane.held() }.seal_all();
+    assert_eq!((lane.handed_on(), lane.lent_count()), (3, 3));
+
+    let holds = lane.holds();
+    unsafe { lane.offer_sample(4, &best_effort(8)) };
+    assert_eq!(
+        lane.holds() - holds,
+        1,
+        "CONTROL: a sample offered with no datagram lent takes a hold of its own"
+    );
 }
 
 /// A sample offered for several subscribers is written once and handed to each of them, in the
