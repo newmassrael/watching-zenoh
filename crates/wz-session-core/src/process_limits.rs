@@ -14,6 +14,7 @@
 use crate::caps;
 use crate::limit_binding::{Quota, UnlentRows};
 use crate::limits::RuntimeLimits;
+use crate::policy_document::{Origin, ResolvedLimits};
 
 /// How many rows each machine of the process holds, lent from a runtime's limits under the build's
 /// values.
@@ -73,6 +74,74 @@ impl ProcessRows {
             message_catalog_entries,
             e2e_supervised_streams,
         })
+    }
+}
+
+/// What one resolution of a runtime's limits states of the rows of the process's machines: the rows
+/// of each limit a layer stated, and nothing of the limits left at the build's value, which state
+/// nothing to agree or disagree with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStatement {
+    /// The checkpoints of the supervisor, where stated (`SUPERVISION_CHECKPOINTS`).
+    pub supervision_checkpoints: Option<usize>,
+    /// The messages of one catalog, where stated (`MESSAGE_CATALOG_ENTRIES`).
+    pub message_catalog_entries: Option<usize>,
+    /// The streams of one reception supervisor, where stated (`E2E_SUPERVISED_STREAMS`).
+    pub e2e_supervised_streams: Option<usize>,
+}
+
+impl ProcessStatement {
+    /// What `limits`, a creator's resolution, states of the process's machines: refused, naming
+    /// the limit, where a stated value is over the build's.
+    pub fn of(limits: &ResolvedLimits) -> Result<Self, ProcessRefused> {
+        let rows = ProcessRows::of(&limits.runtime)?;
+        let stated = |limit: &str| {
+            !matches!(
+                limits.provenance.origin(limit),
+                None | Some(Origin::BuildDefault)
+            )
+        };
+        Ok(Self {
+            supervision_checkpoints: stated("SUPERVISION_CHECKPOINTS")
+                .then_some(rows.supervision_checkpoints),
+            message_catalog_entries: stated("MESSAGE_CATALOG_ENTRIES")
+                .then_some(rows.message_catalog_entries),
+            e2e_supervised_streams: stated("E2E_SUPERVISED_STREAMS")
+                .then_some(rows.e2e_supervised_streams),
+        })
+    }
+
+    /// Whether it states none of the rows.
+    pub const fn is_empty(&self) -> bool {
+        self.supervision_checkpoints.is_none()
+            && self.message_catalog_entries.is_none()
+            && self.e2e_supervised_streams.is_none()
+    }
+
+    /// Whether `rows` holds every row it states.
+    pub fn agrees_with(&self, rows: &ProcessRows) -> bool {
+        let agrees = |stated: Option<usize>, held: usize| match stated {
+            None => true,
+            Some(stated) => stated == held,
+        };
+        agrees(self.supervision_checkpoints, rows.supervision_checkpoints)
+            && agrees(self.message_catalog_entries, rows.message_catalog_entries)
+            && agrees(self.e2e_supervised_streams, rows.e2e_supervised_streams)
+    }
+
+    /// `rows` with every row it states in place of the one held.
+    pub fn over(&self, rows: ProcessRows) -> ProcessRows {
+        ProcessRows {
+            supervision_checkpoints: self
+                .supervision_checkpoints
+                .unwrap_or(rows.supervision_checkpoints),
+            message_catalog_entries: self
+                .message_catalog_entries
+                .unwrap_or(rows.message_catalog_entries),
+            e2e_supervised_streams: self
+                .e2e_supervised_streams
+                .unwrap_or(rows.e2e_supervised_streams),
+        }
     }
 }
 
@@ -183,6 +252,58 @@ mod tests {
                 crate::limit_binding::LimitValue::Integer(caps::SUPERVISION_CHECKPOINTS + 1)
             )),
         }
+    }
+
+    /// A resolution states the rows of the limits a layer stated and nothing of the others; it
+    /// agrees with rows that hold what it states, and its rows over held ones replace those alone.
+    #[test]
+    fn a_statement_holds_the_rows_a_layer_stated_and_nothing_else() {
+        use crate::policy::SessionPolicy;
+        use crate::policy_document::{resolve_under, Base, LimitStatement, Overrides};
+
+        assert_eq!(
+            ProcessStatement::of(&ResolvedLimits::unchanged(
+                crate::limits::SessionLimits::defaults(),
+                RuntimeLimits::defaults()
+            )),
+            Ok(ProcessStatement::default())
+        );
+        if MessageCatalogEntries::DOMAIN.is_singleton() || caps::MESSAGE_CATALOG_ENTRIES < 2 {
+            return;
+        }
+        let stated = [LimitStatement::new(
+            "MESSAGE_CATALOG_ENTRIES",
+            crate::limit_binding::LimitValue::Integer(1),
+        )];
+        let Ok(resolved) = resolve_under(
+            Base::node(SessionPolicy::defaults()),
+            Overrides {
+                limits: &stated,
+                ..Overrides::default()
+            },
+        ) else {
+            panic!("one is inside the domain");
+        };
+        let statement = ProcessStatement::of(&resolved.limits).expect("one is under the build's");
+        assert_eq!(
+            statement,
+            ProcessStatement {
+                message_catalog_entries: Some(1),
+                ..ProcessStatement::default()
+            }
+        );
+        assert!(!statement.is_empty());
+        assert!(!statement.agrees_with(&ProcessRows::BUILD));
+        let over = statement.over(ProcessRows::BUILD);
+        assert_eq!(
+            over,
+            ProcessRows {
+                message_catalog_entries: 1,
+                ..ProcessRows::BUILD
+            }
+        );
+        assert!(statement.agrees_with(&over));
+        assert!(ProcessStatement::default().agrees_with(&over));
     }
 
     /// No bound stated is the build's value, as the storage it lends from has no more.

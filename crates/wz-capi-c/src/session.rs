@@ -352,7 +352,9 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::Aggregation
         | OpenRefusal::StatsNotInBuild
         | OpenRefusal::Policies
-        | OpenRefusal::ConnectPastLimit => Z_EINVAL,
+        | OpenRefusal::ConnectPastLimit
+        | OpenRefusal::ProcessLimitOverBuild { .. }
+        | OpenRefusal::ProcessLimitsTaken => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
@@ -541,6 +543,12 @@ pub(crate) unsafe fn open_session(
         Ok(plan) => plan,
         Err(refusal) => return refusal_code(refusal),
     };
+    // The limits of the process's machines the document states hold the process to them, before
+    // anything is bound or dialled; an open that would change those a machine was made under is
+    // refused as one that states a value the build refuses.
+    if let Err(refusal) = plan.admit_process_limits() {
+        return refusal_code(refusal);
+    }
     #[cfg(all(
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
@@ -1264,5 +1272,23 @@ mod policy_document_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An open refused for the limits of the process's machines, over the build's value or other
+    /// than those a machine was made under, is a value this ABI refuses, as a refused document is.
+    #[test]
+    fn a_refused_limit_of_the_process_is_an_invalid_value() {
+        assert_eq!(refusal_code(OpenRefusal::ProcessLimitsTaken), Z_EINVAL);
+        assert_eq!(
+            refusal_code(OpenRefusal::ProcessLimitOverBuild {
+                limit: "MESSAGE_CATALOG_ENTRIES"
+            }),
+            Z_EINVAL
+        );
     }
 }

@@ -47,6 +47,7 @@ use wz_runtime_tokio::zenoh_config::{
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::limits::{RuntimeLimits, SessionLimits};
+use wz_session_core::process_limits::ProcessStatement;
 use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
@@ -402,6 +403,17 @@ pub enum OpenRefusal {
     /// as `wz/limits` states it, [`ConfigIngestError::ConnectPastLimit`]). A node bounded to
     /// fewer peers does not open on a part of the list.
     ConnectPastLimit,
+    /// `wz/limits` states a limit of the process's machines (`SUPERVISION_CHECKPOINTS`,
+    /// `MESSAGE_CATALOG_ENTRIES`, `E2E_SUPERVISED_STREAMS`) over the build's value, which a stage
+    /// after the build may only lower.
+    ProcessLimitOverBuild {
+        /// The limit's id.
+        limit: &'static str,
+    },
+    /// `wz/limits` states a limit of the process's machines other than the one a machine of the
+    /// process was made under ([`OpenPlan::admit_process_limits`]). The process has one runtime,
+    /// so a session that opened on another would state two.
+    ProcessLimitsTaken,
 }
 
 impl OpenRefusal {
@@ -431,6 +443,16 @@ impl OpenRefusal {
             Self::StatsNotInBuild => "stats/filters",
             Self::Policies => "wz/profile, wz/policies, wz/limits",
             Self::ConnectPastLimit => "connect/endpoints, wz/limits/MAX_STATIC_CONNECT",
+            Self::ProcessLimitOverBuild { limit } => match limit.as_bytes() {
+                b"SUPERVISION_CHECKPOINTS" => "wz/limits/SUPERVISION_CHECKPOINTS",
+                b"MESSAGE_CATALOG_ENTRIES" => "wz/limits/MESSAGE_CATALOG_ENTRIES",
+                b"E2E_SUPERVISED_STREAMS" => "wz/limits/E2E_SUPERVISED_STREAMS",
+                _ => "wz/limits",
+            },
+            Self::ProcessLimitsTaken => {
+                "wz/limits/SUPERVISION_CHECKPOINTS, wz/limits/MESSAGE_CATALOG_ENTRIES, \
+                 wz/limits/E2E_SUPERVISED_STREAMS"
+            }
         }
     }
 }
@@ -968,6 +990,10 @@ pub struct OpenPlan {
     /// handed to the machines of the node the open runs: the directory of the locators it dials
     /// from reads its bound here and never from the build.
     pub runtime_limits: RuntimeLimits,
+    /// What the document's `wz/limits` states of the machines the process holds apart from any
+    /// session, already lent under the build's values; the open holds the process to it
+    /// ([`Self::admit_process_limits`]).
+    pub process_limits: ProcessStatement,
 }
 
 /// The policies and the limits an open from `node` (the document the open read, or `None` when
@@ -1374,6 +1400,11 @@ impl OpenPlan {
         if admit_connect_list(connect.len(), &snapshot.limits.runtime).is_err() {
             return Err(OpenRefusal::ConnectPastLimit);
         }
+        let process_limits = ProcessStatement::of(&snapshot.limits).map_err(|refused| {
+            OpenRefusal::ProcessLimitOverBuild {
+                limit: refused.limit,
+            }
+        })?;
         // `transport/link/protocols`, when the document states it, is the whitelist of the
         // unicast links the node makes: an endpoint to listen on or dial whose protocol it leaves
         // out is refused, as upstream refuses it when it makes the link manager. A group is a
@@ -1462,7 +1493,29 @@ impl OpenPlan {
             session_policy,
             session_limits: snapshot.limits.session,
             runtime_limits: snapshot.limits.runtime,
+            process_limits,
         })
+    }
+
+    /// Hold the process to what the document states of the limits of its machines, before the
+    /// open binds or dials anything: the one snapshot of the process's runtime
+    /// (`wz_capi_port::runtime_limits`) takes the stated rows while no machine of the process has
+    /// been made, and once one has, an open that states the rows it was made under, or none,
+    /// proceeds and one that states others is refused ([`OpenRefusal::ProcessLimitsTaken`]). A
+    /// reading of the plan that opens nothing (`config-verdict`) does not call it.
+    pub fn admit_process_limits(&self) -> Result<(), OpenRefusal> {
+        use wz_capi_port::runtime_limits::{self, StateRefused};
+
+        if self.process_limits.is_empty() {
+            return Ok(());
+        }
+        match runtime_limits::agree(&self.process_limits) {
+            Ok(_) => Ok(()),
+            Err(StateRefused::Taken) => Err(OpenRefusal::ProcessLimitsTaken),
+            Err(StateRefused::Limit(refused)) => Err(OpenRefusal::ProcessLimitOverBuild {
+                limit: refused.limit,
+            }),
+        }
     }
 
     /// A description of the plan that holds no secret: what the document decided, one fact per
@@ -1978,6 +2031,81 @@ mod tests {
         assert_eq!(
             resolve_snapshot(None).limits.runtime,
             RuntimeLimits::defaults()
+        );
+    }
+
+    /// The limits of the process's machines a document states: one over the build's value refused
+    /// by its name when the plan is made; the stated rows taken by the process's one snapshot
+    /// while no machine of it has been made; and after one has, an open that states the same rows
+    /// or none proceeds and one that states others is refused. One test, as the snapshot is the
+    /// process's and the steps follow one another.
+    #[test]
+    fn an_open_holds_the_process_to_the_limits_of_its_machines() {
+        use wz_session_core::caps;
+        use wz_session_core::limit_binding::LimitSpec;
+        use wz_session_core::limits::MessageCatalogEntries;
+
+        let document = |value: usize| {
+            format!("{{ wz: {{ limits: {{ MESSAGE_CATALOG_ENTRIES: {value} }} }} }}")
+        };
+        let plan = |value: usize| {
+            plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:7447"],
+                &[],
+                &document(value),
+            )
+        };
+        // Over the build's value, refused by name, or by the domain where it leaves the value out.
+        match plan(caps::MESSAGE_CATALOG_ENTRIES + 1) {
+            Err(OpenRefusal::ProcessLimitOverBuild { limit }) => {
+                assert_eq!(limit, "MESSAGE_CATALOG_ENTRIES");
+                assert_eq!(
+                    OpenRefusal::ProcessLimitOverBuild { limit }.key(),
+                    "wz/limits/MESSAGE_CATALOG_ENTRIES"
+                );
+            }
+            Err(OpenRefusal::Policies) => {}
+            other => panic!(
+                "over the build's value: {:?}",
+                other.map(|plan| plan.describe())
+            ),
+        }
+        if MessageCatalogEntries::DOMAIN.is_singleton() || caps::MESSAGE_CATALOG_ENTRIES < 2 {
+            return;
+        }
+        let none = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], "{}")
+            .unwrap_or_else(|refusal| panic!("no limit: {refusal:?}"));
+        assert!(none.process_limits.is_empty());
+        let one = plan(1).unwrap_or_else(|refusal| panic!("one: {refusal:?}"));
+        let two = plan(2).unwrap_or_else(|refusal| panic!("two: {refusal:?}"));
+        assert_eq!(one.process_limits.message_catalog_entries, Some(1));
+        // No machine of the process has been made: the open's rows become the process's.
+        assert_eq!(one.admit_process_limits(), Ok(()));
+        assert_eq!(
+            wz_capi_port::runtime_limits::held().message_catalog_entries,
+            1
+        );
+        // A machine is made under them.
+        assert_eq!(
+            wz_capi_port::runtime_limits::take().message_catalog_entries,
+            1
+        );
+        assert_eq!(
+            one.admit_process_limits(),
+            Ok(()),
+            "the same value proceeds"
+        );
+        assert_eq!(none.admit_process_limits(), Ok(()), "no value proceeds");
+        assert_eq!(
+            two.admit_process_limits(),
+            Err(OpenRefusal::ProcessLimitsTaken),
+            "another value is refused"
+        );
+        assert_eq!(
+            wz_capi_port::runtime_limits::held().message_catalog_entries,
+            1,
+            "a refused open changes nothing"
         );
     }
 
