@@ -43,7 +43,8 @@
 //! initialises and owns for its life, and, when the `e2e-supervision-notify` policy is
 //! `last-value`, a byte area of one cell per stream for the last payload, which a loss hands back
 //! so that a receiver that delivers a value with the loss has one. The number of streams is
-//! bounded by the storage and by the build's `E2E_SUPERVISED_STREAMS`.
+//! bounded by the storage and by the streams its creator lends it from the runtime's
+//! `E2E_SUPERVISED_STREAMS`, at most the build's (`crate::process_limits::ProcessRows`).
 //!
 //! The table is keyed by stream, one row each, which a statechart cannot hold; it is this sans-I/O
 //! host, and the machine says only when the table is re-based. The deadline comparison is the
@@ -163,7 +164,7 @@ pub enum CreateRefused {
 pub enum AddRefused {
     /// The period or the factor is 0, or their product is longer than [`MAX_DEADLINE_TICKS`].
     DeadlineOutOfRange,
-    /// The table holds as many streams as its storage or the build's `E2E_SUPERVISED_STREAMS`.
+    /// The table holds as many streams as its storage or the streams it was lent.
     Full,
 }
 
@@ -240,18 +241,21 @@ impl<'a> StreamSupervisor<'a> {
     /// cut into cells of `value_cell` bytes, one per stream. It judges nothing until
     /// `start_delay` ticks after the first poll that has a clock, and the condition holds until
     /// the application says otherwise. Under [`Notify::StatusOnly`] `values` and `value_cell`
-    /// are not read, and may be empty and 0.
+    /// are not read, and may be empty and 0. It holds at most `streams`, the rows its creator lends
+    /// it from the runtime's `E2E_SUPERVISED_STREAMS` (`crate::process_limits::ProcessRows`),
+    /// whatever the storage holds beyond them.
     pub fn new(
         slots: &'a mut [StreamSlot],
         values: &'a mut [u8],
         value_cell: usize,
         start_delay: u32,
         notify: Notify,
+        streams: usize,
     ) -> Result<Self, CreateRefused> {
         if start_delay > MAX_TIMEOUT_TICKS {
             return Err(CreateRefused::DelayOutOfRange);
         }
-        let capacity = slots.len().min(crate::caps::E2E_SUPERVISED_STREAMS);
+        let capacity = slots.len().min(streams);
         let cell = match notify {
             Notify::StatusOnly => 0,
             Notify::LastValue => {
@@ -312,8 +316,7 @@ impl<'a> StreamSupervisor<'a> {
         self.count == 0
     }
 
-    /// How many streams the table can hold: its storage, at most the build's
-    /// `E2E_SUPERVISED_STREAMS`.
+    /// How many streams the table can hold: its storage, at most the streams it was lent.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -593,9 +596,12 @@ mod tests {
         told.iter().map(|loss| loss.stream).collect()
     }
 
+    /// The streams a supervisor is lent where the runtime states nothing.
+    const BUILD_STREAMS: usize = crate::process_limits::ProcessRows::BUILD.e2e_supervised_streams;
+
     /// A supervisor with no start delay, telling the status only.
     fn status_only(slots: &mut [StreamSlot]) -> StreamSupervisor<'_> {
-        StreamSupervisor::new(slots, &mut [], 0, 0, Notify::StatusOnly).unwrap()
+        StreamSupervisor::new(slots, &mut [], 0, 0, Notify::StatusOnly, BUILD_STREAMS).unwrap()
     }
 
     #[test]
@@ -758,8 +764,15 @@ mod tests {
     #[test]
     fn nothing_is_judged_before_the_start_delay_from_the_first_poll_with_a_clock() {
         let mut slots = [StreamSlot::EMPTY; 1];
-        let mut supervisor =
-            StreamSupervisor::new(&mut slots, &mut [], 0, 500, Notify::StatusOnly).unwrap();
+        let mut supervisor = StreamSupervisor::new(
+            &mut slots,
+            &mut [],
+            0,
+            500,
+            Notify::StatusOnly,
+            BUILD_STREAMS,
+        )
+        .unwrap();
         let stream = supervisor.add(10, 1, 3, true).unwrap();
         assert_eq!(supervisor.phase(), Phase::Unclocked);
         assert!(poll_at(&mut supervisor, None).is_empty());
@@ -782,8 +795,15 @@ mod tests {
     #[test]
     fn a_start_delay_across_a_wrap_of_the_clock_is_counted_modulo_the_counter() {
         let mut slots = [StreamSlot::EMPTY; 1];
-        let mut supervisor =
-            StreamSupervisor::new(&mut slots, &mut [], 0, 100, Notify::StatusOnly).unwrap();
+        let mut supervisor = StreamSupervisor::new(
+            &mut slots,
+            &mut [],
+            0,
+            100,
+            Notify::StatusOnly,
+            BUILD_STREAMS,
+        )
+        .unwrap();
         supervisor.add(10, 1, 3, true).unwrap();
         assert!(poll(&mut supervisor, u32::MAX - 49).is_empty());
         assert!(poll(&mut supervisor, 49).is_empty());
@@ -929,8 +949,15 @@ mod tests {
     fn under_last_value_a_loss_hands_back_the_last_payload_and_a_long_one_is_refused() {
         let mut slots = [StreamSlot::EMPTY; 2];
         let mut values = [0u8; 8];
-        let mut supervisor =
-            StreamSupervisor::new(&mut slots, &mut values, 4, 0, Notify::LastValue).unwrap();
+        let mut supervisor = StreamSupervisor::new(
+            &mut slots,
+            &mut values,
+            4,
+            0,
+            Notify::LastValue,
+            BUILD_STREAMS,
+        )
+        .unwrap();
         let kept = supervisor.add(10, 1, 1, true).unwrap();
         let never = supervisor.add(10, 1, 2, true).unwrap();
         assert!(poll(&mut supervisor, 0).is_empty());
@@ -972,12 +999,21 @@ mod tests {
     fn storage_and_ranges_that_cannot_be_held_are_refused_by_name() {
         let mut slots = [StreamSlot::EMPTY; 2];
         assert_eq!(
-            StreamSupervisor::new(&mut slots, &mut [], 0, 0, Notify::LastValue).err(),
+            StreamSupervisor::new(&mut slots, &mut [], 0, 0, Notify::LastValue, BUILD_STREAMS)
+                .err(),
             Some(CreateRefused::NoValueCell)
         );
         let mut values = [0u8; 7];
         assert_eq!(
-            StreamSupervisor::new(&mut slots, &mut values, 4, 0, Notify::LastValue).err(),
+            StreamSupervisor::new(
+                &mut slots,
+                &mut values,
+                4,
+                0,
+                Notify::LastValue,
+                BUILD_STREAMS
+            )
+            .err(),
             Some(CreateRefused::ValueStorageShort)
         );
         assert_eq!(
@@ -986,7 +1022,8 @@ mod tests {
                 &mut [],
                 0,
                 MAX_TIMEOUT_TICKS + 1,
-                Notify::StatusOnly
+                Notify::StatusOnly,
+                BUILD_STREAMS
             )
             .err(),
             Some(CreateRefused::DelayOutOfRange)
@@ -1022,6 +1059,31 @@ mod tests {
         }
         assert_eq!(supervisor.add(10, 1, 1, false), Err(AddRefused::Full));
         assert_eq!(supervisor.len(), crate::caps::E2E_SUPERVISED_STREAMS);
+    }
+
+    /// A runtime that lends fewer streams than the storage holds: the table holds that many, and
+    /// the next is refused as a full table with nothing added.
+    #[test]
+    fn the_table_holds_the_streams_it_was_lent_whatever_the_storage() {
+        let mut slots = [StreamSlot::EMPTY; 4];
+        let mut supervisor =
+            StreamSupervisor::new(&mut slots, &mut [], 0, 0, Notify::StatusOnly, 2).unwrap();
+        assert_eq!(supervisor.capacity(), 2);
+        assert_eq!(supervisor.add(10, 1, 1, false), Ok(0));
+        assert_eq!(supervisor.add(10, 1, 1, false), Ok(1));
+        assert_eq!(supervisor.add(10, 1, 1, false), Err(AddRefused::Full));
+        assert_eq!(supervisor.len(), 2);
+        assert_eq!(supervisor.stream_errors(2), None);
+    }
+
+    /// Under last-value the value area is needed for the streams lent, not for all the storage.
+    #[test]
+    fn the_value_area_is_needed_for_the_streams_lent() {
+        let mut slots = [StreamSlot::EMPTY; 4];
+        let mut values = [0u8; 8];
+        let supervisor =
+            StreamSupervisor::new(&mut slots, &mut values, 4, 0, Notify::LastValue, 2).unwrap();
+        assert_eq!(supervisor.capacity(), 2);
     }
 
     #[test]

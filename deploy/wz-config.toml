@@ -3353,15 +3353,16 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: no RuntimeLimits exists where the supervisor is made. Only the tokio node
-# holds one, and it makes no supervisor; the one supervisor of the process is made by the first
-# call of a supervision door of the pico or C ABI, and those doors hold no RuntimeLimits.
-read = "build"
+# The one supervisor of a C ABI's process is made by the first call of a supervision door, from
+# the process's runtime limits (wz-capi-port runtime_limits, ProcessRows of wz-session-core); the
+# build's value sizes its storage and a stated value is lent under it.
+read = "snapshot"
 wire = "none"
 help = '''
 How many checkpoints the node's supervisor watches. Each is a deadline an
 application feeds, and the node is healthy only while every checkpoint that is
-supervised has been fed in time. At least 1 and at most 64.
+supervised has been fed in time. At least 1 and at most 64. The build's value
+sizes the supervisor; a run-time document may only lower it.
 '''
 
 [limit.upstream]
@@ -3378,16 +3379,17 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "open"
-# Read from the build: no RuntimeLimits exists where a reception supervisor is made. Only the
-# tokio node holds one, and it makes no reception supervisor; `wz_ext_stream_supervisor_new`
-# makes it, and the pico and C doors hold no RuntimeLimits.
-read = "build"
+# `wz_ext_stream_supervisor_new` makes a reception supervisor with the rows the process's runtime
+# limits lend it (wz-capi-port runtime_limits, ProcessRows of wz-session-core), under the build's
+# value.
+read = "snapshot"
 wire = "none"
 help = '''
 How many periodic streams one reception supervisor holds. The table of streams
 is storage the application gives the supervisor when it makes it, one fixed row
 per stream, so this bounds how many rows of it are used and sizes nothing; a
-stream added past it is refused. At least 1.
+stream added past it is refused. At least 1. A run-time document may only lower
+the build's value.
 '''
 
 [limit.upstream]
@@ -3561,15 +3563,15 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: no RuntimeLimits exists where a catalog is made. Only the tokio node holds
-# one, and it makes no catalog; `wz_ext_message_catalog_new` makes it, and the pico and C doors
-# hold no RuntimeLimits.
-read = "build"
+# `wz_ext_message_catalog_new` reads a catalog against the messages the process's runtime limits
+# lend it (wz-capi-port runtime_limits, ProcessRows of wz-session-core), under the build's value.
+read = "snapshot"
 wire = "none"
 help = '''
 How many messages one message catalog declares, when the message-catalog
 capability is on. A catalog that declares more is refused when it is read, and
 the generator of a fixed-memory image refuses to write its tables. At least 1.
+A run-time document may only lower the build's value.
 '''
 
 [limit.upstream]

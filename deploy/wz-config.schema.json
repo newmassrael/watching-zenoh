@@ -1077,6 +1077,38 @@
               "x-wz-binding-fixed": "none",
               "x-wz-wire": "timing"
             },
+            "SUPERVISION_CHECKPOINTS": {
+              "description": "How many checkpoints the node's supervisor watches.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 4,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "E2E_SUPERVISED_STREAMS": {
+              "description": "How many periodic streams one reception supervisor holds.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "quota",
+              "x-wz-scope": "runtime",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "APP_LINK_QUEUE_BYTES": {
               "description": "The most bytes one link of a transport the program supplies queues in either direction: what the program handed in and the session has not read, and what a session that cannot wait handed over and the program has not taken.",
               "oneOf": [
@@ -1111,6 +1143,25 @@
               "x-wz-driven": "local",
               "x-wz-storage": "both",
               "x-wz-scope": "entity",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "build",
+              "x-wz-wire": "none"
+            },
+            "MESSAGE_CATALOG_ENTRIES": {
+              "description": "How many messages one message catalog declares, when the message-catalog capability is on.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "local",
+              "x-wz-storage": "both",
+              "x-wz-scope": "runtime",
               "x-wz-binding-heap": "open",
               "x-wz-binding-fixed": "build",
               "x-wz-wire": "none"

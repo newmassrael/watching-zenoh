@@ -71,6 +71,28 @@ z_result_t wz_ext_config_profile(z_loaned_config_t *config,
 z_result_t wz_ext_config_document(z_loaned_config_t *config,
                                   const char *json5);
 
+/* The limits of the process's runtime, from a zenoh JSON5 document of which
+ * only the wz member's wz/limits is read: the limits of the machines the
+ * process makes apart from any session, its supervisor
+ * (SUPERVISION_CHECKPOINTS), its message catalogs (MESSAGE_CATALOG_ENTRIES)
+ * and its reception supervisors (E2E_SUPERVISED_STREAMS). Each is at most the
+ * build's value, which sizes what the build reserves; a limit the document
+ * does not state keeps the build's value, and a second call replaces the
+ * first. In a build with the config-document capability.
+ *
+ * ORDER. The process's first such machine takes the limits: the first call
+ * of a wz_ext_supervision_* function, wz_ext_stream_supervisor_new or
+ * wz_ext_message_catalog_new. A program states them before that call; a call
+ * of this function after it answers Z_EINVAL and the process keeps the
+ * limits it took.
+ *
+ * Text that is no JSON5 object, a wz member of a refused shape, a profile, a
+ * policy, key ids, a limit of a session, a limit the build does not have or
+ * decides alone, and a value the build's domain leaves out or that is over
+ * the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever the call
+ * comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
+z_result_t wz_ext_runtime_limits_document(const char *json5);
+
 /* A clock the program registers, which z_timestamp_new then stamps with in
  * place of the system clock: a disciplined hardware clock, or a time master
  * on the device's bus. Part of the unstable surface, and present only in a
@@ -211,8 +233,9 @@ uint32_t wz_ext_event_dropped(void);
 /* The node's supervisor: checkpoints a program feeds, each with a deadline, and
  * a hook that runs once for a checkpoint that missed its deadline. Part of the
  * unstable surface, and present only in a build with the supervision
- * capability. How many checkpoints there are is a build limit
- * (SUPERVISION_CHECKPOINTS), numbered from 0.
+ * capability. How many checkpoints there are is a limit of the process's
+ * runtime (SUPERVISION_CHECKPOINTS, wz_ext_runtime_limits_document), at most
+ * the build's, numbered from 0.
  *
  * A program that must keep making progress starts a checkpoint with a timeout
  * and feeds it on every pass, and calls wz_ext_supervision_check on its own
@@ -242,20 +265,20 @@ z_result_t wz_ext_supervision_set_hook(wz_ext_supervision_hook_fn *hook,
 
 /* Begin supervising a checkpoint, with a deadline timeout_ms after now and
  * after each feed. A checkpoint already supervised is left as it is. Z_OK;
- * Z_ERR_INVALID for a checkpoint the build does not have, or a timeout of 0 or
- * past 2147483647. */
+ * Z_ERR_INVALID for a checkpoint the process does not watch, or a timeout of
+ * 0 or past 2147483647. */
 z_result_t wz_ext_supervision_start(uint8_t checkpoint, uint32_t timeout_ms);
 
 /* The program made progress: start the checkpoint's deadline again. A
  * checkpoint that is not armed ignores it, so a feed after an expiry does not
  * hide it (the build's supervision-after-expiry policy can have such a feed
  * supervise the checkpoint again). Z_OK; Z_ERR_INVALID for a checkpoint the
- * build does not have. */
+ * process does not watch. */
 z_result_t wz_ext_supervision_feed(uint8_t checkpoint);
 
 /* Stop supervising a checkpoint. Z_OK; Z_ERR_GENERIC when its hook is running:
  * it does not stop until the hook returns; Z_ERR_INVALID for a checkpoint the
- * build does not have. */
+ * process does not watch. */
 z_result_t wz_ext_supervision_stop(uint8_t checkpoint);
 
 /* Look at every supervised checkpoint now and run the hook once for each whose
@@ -490,7 +513,8 @@ bool wz_ext_internal_segment_sender_check(
  * byte area of one cell per slot, where the last payload of each stream is
  * kept for the loss to hand back. The supervisor writes both when it is made
  * and owns them until it is dropped. How many streams one supervisor holds is
- * at most the build's E2E_SUPERVISED_STREAMS.
+ * at most the process's E2E_SUPERVISED_STREAMS
+ * (wz_ext_runtime_limits_document), itself at most the build's.
  *
  * TIME is milliseconds in 32 bits that wrap: the program's clock, given at
  * creation, or the library's monotonic clock when it gives none.
@@ -2021,8 +2045,9 @@ typedef struct wz_ext_message_entry_t {
   uint32_t reserved;
 } wz_ext_message_entry_t;
 
-/* Read and judge the catalog text, against the build's
- * MESSAGE_CATALOG_ENTRIES, REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS,
+/* Read and judge the catalog text, against the process's
+ * MESSAGE_CATALOG_ENTRIES (wz_ext_runtime_limits_document) and the build's
+ * REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS,
  * INSTANCE_KEY_FIELDS and INSTANCES_PER_MESSAGE. this_ holds
  * the null state on every error; refusal may be NULL and, on
  * _Z_ERR_CONFIG_INVALID_VALUE (-89), holds why: the refusal's word (the
@@ -2414,7 +2439,7 @@ z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
  * side allocates is freed by the other. */
 
 #define WZ_EXT_INTERFACE_MAJOR 1
-#define WZ_EXT_INTERFACE_MINOR 1
+#define WZ_EXT_INTERFACE_MINOR 2
 
 typedef struct wz_ext_interface_version_t {
     uint32_t struct_size;
@@ -2454,6 +2479,23 @@ typedef struct wz_ext_session_facts_t {
 } wz_ext_session_facts_t;
 z_result_t wz_ext_interface_session_facts(const z_loaned_session_t *session,
                                           wz_ext_session_facts_t *out);
+
+/* What the library says of the process's runtime: the rows its limits lend
+ * each machine a door of the additional features makes, how many messages
+ * one message catalog may declare (MESSAGE_CATALOG_ENTRIES) and how many
+ * streams one reception supervisor may hold (E2E_SUPERVISED_STREAMS). A door
+ * asks it when it makes a machine, so the process's limits are taken from
+ * then on (wz_ext_runtime_limits_document). Added in minor version 2. 24
+ * bytes on a 64-bit target, 16 on a 32-bit one.
+ *
+ * Z_OK; Z_ERR_NULL for a NULL out; Z_EINVAL as above, nothing taken. */
+typedef struct wz_ext_runtime_facts_t {
+    uint32_t struct_size;
+    uint32_t reserved;
+    size_t message_catalog_entries;
+    size_t e2e_supervised_streams;
+} wz_ext_runtime_facts_t;
+z_result_t wz_ext_interface_runtime_facts(wz_ext_runtime_facts_t *out);
 
 /* Where the bytes of a payload are, in place: the library keeps a payload in
  * one buffer, so the view is the whole payload, copied from nothing and

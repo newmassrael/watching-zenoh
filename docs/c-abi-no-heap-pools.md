@@ -343,10 +343,13 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   MAX_ADVANCED_SOURCES per subscriber; a ring per publisher; the oldest sample leaves when the
   ring is full, as a cache of that depth does.
 - **End-to-end protection**: `E2E_SENDER_SLOTS`, `E2E_SUPERVISED_STREAMS`,
-  `SUPERVISION_CHECKPOINTS`; fixed tables; a stream past them is refused at its door with
-  `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
-- **Catalogs**: `MESSAGE_CATALOG_ENTRIES`, `INSTANCE_KEY_FIELDS`, `INSTANCES_PER_MESSAGE`; a
-  schema text read into the process block pool; past them, refused at the door.
+  `SUPERVISION_CHECKPOINTS`; fixed tables. The last two are limits of the process's runtime
+  (`wz_ext_runtime_limits_document`, stated before the first such machine is made), lent under the
+  build's values (`ProcessRows`, `wz-session-core` `process_limits.rs`); a stream past them is
+  refused at its door with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
+- **Catalogs**: `MESSAGE_CATALOG_ENTRIES` (the process's runtime, as above), `INSTANCE_KEY_FIELDS`,
+  `INSTANCES_PER_MESSAGE`; a schema text read into the process block pool; past them, refused at
+  the door.
 - **Scouting**: NEW MAX_SCOUT_HELLOS per window and each Hello's locators at most
   `MAX_ADMIN_LOCATORS`; a Hello is handed to the callback from a buffer of the window and not kept.
 - **Admin space**: `MAX_ADMIN_REPLY_BYTES`, `MAX_ADMIN_LOCATORS`, `MAX_ADMIN_SESSION_LINKS`; the

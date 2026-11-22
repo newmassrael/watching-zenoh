@@ -70,6 +70,24 @@ pub unsafe extern "C" fn wz_ext_additional_interface(
     })
 }
 
+/// The rows the process's runtime lends each machine a door makes, as the core reports them
+/// (`wz_ext_interface_runtime_facts`), for the door that makes one: from then on the process's
+/// limits are taken.
+#[cfg(any(feature = "e2e-supervision", feature = "message-catalog"))]
+pub(crate) fn runtime_facts() -> Result<crate::ext_interface::wz_ext_runtime_facts_t, ZResult> {
+    use crate::ext_interface::{wz_ext_interface_runtime_facts, wz_ext_runtime_facts_t};
+
+    // SAFETY: the struct is integers alone, for which every byte pattern is a value.
+    let mut facts: wz_ext_runtime_facts_t = unsafe { core::mem::zeroed() };
+    // The struct is a few dozen bytes.
+    facts.struct_size = size_of::<wz_ext_runtime_facts_t>() as u32;
+    // SAFETY: a local the door may write, its size stated.
+    match unsafe { wz_ext_interface_runtime_facts(&mut facts) } {
+        Z_OK => Ok(facts),
+        code => Err(code),
+    }
+}
+
 /// Whether doors built against the interface version `needed` (major, minor) run over a core that
 /// answers `answered`: the same major version, and the same minor version or a later one.
 fn runs_on(needed: (u16, u16), answered: (u16, u16)) -> bool {

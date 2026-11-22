@@ -28,7 +28,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::ffi::{c_char, c_void, CStr};
 
-use wz_app_frame::message_catalog::{build_limits, Catalog};
+use wz_app_frame::message_catalog::{limits_with_messages, Catalog};
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::{z_internal_string_null, z_string_copy_from_substr};
@@ -166,8 +166,9 @@ unsafe fn utf8_arg<'a>(text: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(text).to_str().ok()
 }
 
-/// Read and judge the catalog `text` (JSON5), against this build's `MESSAGE_CATALOG_ENTRIES`,
-/// `REPLAY_DEPTH_MAX` and `E2E_SENDER_SLOTS`.
+/// Read and judge the catalog `text` (JSON5), against the messages the process's
+/// `MESSAGE_CATALOG_ENTRIES` lends a catalog and this build's `REPLAY_DEPTH_MAX` and
+/// `E2E_SENDER_SLOTS`.
 ///
 /// `this_` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
 /// gravestone on success and, on `_Z_ERR_CONFIG_INVALID_VALUE`, why: the refusal's word (the
@@ -197,7 +198,11 @@ pub unsafe extern "C" fn wz_ext_message_catalog_new(
         let Some(text) = utf8_arg(text) else {
             return Z_EINVAL;
         };
-        let catalog = match Catalog::parse(text, build_limits()) {
+        let messages = match crate::additional::runtime_facts() {
+            Ok(facts) => facts.message_catalog_entries,
+            Err(code) => return code,
+        };
+        let catalog = match Catalog::parse(text, limits_with_messages(messages)) {
             Ok(catalog) => catalog,
             Err(why) => {
                 write_refusal(refusal, &why.to_string());

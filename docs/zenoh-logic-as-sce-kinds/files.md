@@ -320,6 +320,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/observation/supervision.rs` | S7 | |
 | `crates/wz-capi-port/src/os.rs` | S7 | |
 | `crates/wz-capi-port/src/query.rs` | S7 | |
+| `crates/wz-capi-port/src/runtime_limits.rs` | S7 | |
 | `crates/wz-capi-port/src/sync.rs` | S7 | |
 | `crates/wz-capi-port/src/time_base.rs` | S7 | |
 | `crates/wz-capi-port/src/tls_material.rs` | S7 | |
@@ -805,6 +806,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/policy_document.rs` | S10 | |
 | `crates/wz-session-core/src/policy_generated.rs` | S3 | |
 | `crates/wz-session-core/src/pool_gauge.rs` | S3 | |
+| `crates/wz-session-core/src/process_limits.rs` | S10 | |
 | `crates/wz-session-core/src/publish_options.rs` | S2 | |
 | `crates/wz-session-core/src/pubsub.rs` | S2 | |
 | `crates/wz-session-core/src/pubsub/in_place.rs` | S2 | |

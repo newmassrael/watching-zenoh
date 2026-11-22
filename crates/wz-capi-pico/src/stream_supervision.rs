@@ -378,6 +378,10 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
         if slot_count == 0 || u32::try_from(slot_count).is_err() {
             return Z_ERR_INVALID;
         }
+        let streams = match crate::additional::runtime_facts() {
+            Ok(facts) => facts.e2e_supervised_streams,
+            Err(code) => return code,
+        };
         let notify = resolve_policy().e2e_supervision_notify();
         let value_area: &'static mut [u8] = match notify {
             Notify::StatusOnly => &mut [],
@@ -397,11 +401,17 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
             rows.add(row).write(StreamSlot::EMPTY);
         }
         let table: &'static mut [StreamSlot] = core::slice::from_raw_parts_mut(rows, slot_count);
-        let supervisor =
-            match StreamSupervisor::new(table, value_area, value_cell, start_delay_ms, notify) {
-                Ok(supervisor) => supervisor,
-                Err(refusal) => return create_code(refusal),
-            };
+        let supervisor = match StreamSupervisor::new(
+            table,
+            value_area,
+            value_cell,
+            start_delay_ms,
+            notify,
+            streams,
+        ) {
+            Ok(supervisor) => supervisor,
+            Err(refusal) => return create_code(refusal),
+        };
         let state = State {
             supervisor,
             clock: Clock {
@@ -429,7 +439,7 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
 ///
 /// Returns `Z_ERR_NULL` for a null supervisor or the gravestone; `Z_ERR_INVALID` for a period or a
 /// factor of 0, or a deadline past 2147483646 ms; `Z_ERR_OVERFLOW` when the table holds as many
-/// streams as its storage or the build's `E2E_SUPERVISED_STREAMS`; `Z_OK` otherwise.
+/// streams as its storage or as the process's `E2E_SUPERVISED_STREAMS` lends it; `Z_OK` otherwise.
 ///
 /// # Safety
 /// `this_` is null or a loaned supervisor; `out_stream` is null or writable.

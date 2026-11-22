@@ -22,6 +22,18 @@
 //!   reliabilities a link rejoins apart, as upstream keeps one buffer for each; a snapshot that
 //!   states no bound leaves the row without a count.
 //!
+//! Then the machines the process holds apart from any session, each counted once, from the rows
+//! the process's runtime limits lend them (`wz_capi_port::runtime_limits`), in a build with each:
+//!
+//! - the process's supervisor of checkpoints, whose storage is the build's
+//!   `SUPERVISION_CHECKPOINTS` checkpoints however many of them the runtime has it watch;
+//! - one message catalog: as many messages as the runtime's `MESSAGE_CATALOG_ENTRIES` lends it,
+//!   each the reader's own row, whose texts are beside it and not counted, so the row is not
+//!   enforced;
+//! - one reception supervisor: the rows of the program's storage it may use, as many as the
+//!   runtime's `E2E_SUPERVISED_STREAMS` lends it. The storage is the program's, so this is the
+//!   bound of what is used of it.
+//!
 //! A session that only dials holds one link. A listening session on the tokio engine accepts links
 //! to no bound, and a session on a group rejoins the messages of every member, so their link rows
 //! have no count; on the cooperative engine a listening session holds at most the faces its open
@@ -38,6 +50,7 @@
 use core::ffi::c_char;
 
 use wz_session_core::limits::SessionLimits;
+use wz_session_core::process_limits::ProcessRows;
 use wz_session_core::session_memory::{session_tables, Captures, MemoryRow, SessionMemory};
 
 use crate::ffi::guarded;
@@ -117,8 +130,13 @@ impl Default for MemoryBasis {
 /// The rows this ABI adds to the session core's: the handle and the link rows of the module docs.
 const ABI_ROWS: usize = 4;
 
+/// The rows of the machines the process holds apart from any session, one for each this build has.
+const PROCESS_ROWS: usize = cfg!(feature = "supervision") as usize
+    + cfg!(feature = "message-catalog") as usize
+    + cfg!(feature = "e2e-supervision") as usize;
+
 const _: () = assert!(
-    wz_session_core::session_memory::SESSION_TABLE_ROWS + ABI_ROWS
+    wz_session_core::session_memory::SESSION_TABLE_ROWS + ABI_ROWS + PROCESS_ROWS
         <= wz_session_core::session_memory::MEMORY_ROWS
 );
 
@@ -151,8 +169,14 @@ pub(crate) fn links_of(listen: Option<&str>) -> Option<usize> {
 }
 
 impl MemoryBasis {
-    /// The session's report: the session core's rows for its limits, and this ABI's.
+    /// The session's report: the session core's rows for its limits, this ABI's, and those of the
+    /// machines of the process under the rows its runtime limits lend them.
     pub(crate) fn report(&self) -> SessionMemory {
+        self.report_with(&wz_capi_port::runtime_limits::held())
+    }
+
+    /// [`Self::report`], the process's machines lent `process`.
+    fn report_with(&self, process: &ProcessRows) -> SessionMemory {
         let mut memory = session_tables(&self.limits, &Captures::default());
         let per_link = |items: usize| self.links.and_then(|links| links.checked_mul(items));
         let rows = [
@@ -190,8 +214,46 @@ impl MemoryBasis {
                 .push(row)
                 .expect("the rows fit: asserted when the build is made");
         }
+        push_process_rows(&mut memory, process);
         memory
     }
+}
+
+/// Add the rows of the machines the process holds apart from any session to `memory`, `process`
+/// the rows its runtime limits lend them (the module docs): one for each machine the build has.
+// A build without some of the machines leaves `memory` or `process` unread.
+#[allow(unused_variables)]
+fn push_process_rows(memory: &mut SessionMemory, process: &ProcessRows) {
+    #[cfg(feature = "supervision")]
+    memory
+        .push(MemoryRow {
+            part: c"process supervisor",
+            basis: c"SUPERVISION_CHECKPOINTS",
+            count: Some(1),
+            entry_bytes: core::mem::size_of::<wz_session_core::supervisor::BuildSupervisor>(),
+            enforced: true,
+        })
+        .expect("the rows fit: asserted when the build is made");
+    #[cfg(feature = "message-catalog")]
+    memory
+        .push(MemoryRow {
+            part: c"message catalog entries",
+            basis: c"MESSAGE_CATALOG_ENTRIES",
+            count: Some(process.message_catalog_entries),
+            entry_bytes: core::mem::size_of::<wz_app_frame::message_catalog::Message>(),
+            enforced: false,
+        })
+        .expect("the rows fit: asserted when the build is made");
+    #[cfg(feature = "e2e-supervision")]
+    memory
+        .push(MemoryRow {
+            part: c"stream supervisor rows",
+            basis: c"E2E_SUPERVISED_STREAMS",
+            count: Some(process.e2e_supervised_streams),
+            entry_bytes: core::mem::size_of::<wz_session_core::stream_supervisor::StreamSlot>(),
+            enforced: true,
+        })
+        .expect("the rows fit: asserted when the build is made");
 }
 
 /// `row` as the C door hands it over.
@@ -337,13 +399,17 @@ mod tests {
         assert_eq!(links_of(Some("udp/224.0.0.224:7446#iface=lo")), None);
     }
 
-    /// A session whose open stated nothing reports the session core's rows and this ABI's four,
-    /// and no total, as its links have no bound; its handle is the row of one.
+    /// A session whose open stated nothing reports the session core's rows, this ABI's four and
+    /// one for each machine of the process the build has, and no total, as its links have no
+    /// bound; its handle is the row of one.
     #[test]
     fn a_basis_with_no_bound_on_its_links_reports_no_total() {
         let memory = MemoryBasis::default().report();
         let tables = session_tables(&SessionLimits::defaults(), &Captures::default());
-        assert_eq!(memory.rows().len(), tables.rows().len() + ABI_ROWS);
+        assert_eq!(
+            memory.rows().len(),
+            tables.rows().len() + ABI_ROWS + PROCESS_ROWS
+        );
         assert_eq!(&memory.rows()[..tables.rows().len()], tables.rows());
         let handle = memory.rows()[tables.rows().len()];
         assert_eq!(handle.part, c"session handle");
@@ -352,6 +418,60 @@ mod tests {
             Some(core::mem::size_of::<PicoSessionHandle>())
         );
         assert_eq!(memory.total(), None);
+    }
+
+    /// The rows of the process's machines follow the rows its runtime lends them: a runtime that
+    /// lends fewer catalog entries and stream rows reports fewer bytes for them, and the
+    /// supervisor's storage, which the build's value sizes, stays as it was.
+    #[test]
+    fn the_process_rows_follow_what_the_runtime_lends() {
+        let lowered = ProcessRows {
+            supervision_checkpoints: 1,
+            message_catalog_entries: 1,
+            e2e_supervised_streams: 1,
+        };
+        let basis = MemoryBasis::default();
+        let (build, low) = (
+            basis.report_with(&ProcessRows::BUILD),
+            basis.report_with(&lowered),
+        );
+        let row = |memory: &SessionMemory, part: &CStr| {
+            memory
+                .rows()
+                .iter()
+                .find(|row| row.part == part)
+                .map(|row| (row.count, row.entry_bytes))
+        };
+        assert_eq!(
+            row(&build, c"process supervisor"),
+            row(&low, c"process supervisor")
+        );
+        #[cfg(feature = "message-catalog")]
+        {
+            let entry = core::mem::size_of::<wz_app_frame::message_catalog::Message>();
+            assert_eq!(
+                row(&build, c"message catalog entries"),
+                Some((Some(ProcessRows::BUILD.message_catalog_entries), entry))
+            );
+            assert_eq!(
+                row(&low, c"message catalog entries"),
+                Some((Some(1), entry))
+            );
+        }
+        #[cfg(feature = "e2e-supervision")]
+        {
+            let entry = core::mem::size_of::<wz_session_core::stream_supervisor::StreamSlot>();
+            assert_eq!(
+                row(&build, c"stream supervisor rows"),
+                Some((Some(ProcessRows::BUILD.e2e_supervised_streams), entry))
+            );
+            assert_eq!(row(&low, c"stream supervisor rows"), Some((Some(1), entry)));
+        }
+        assert_eq!(
+            low.rows().len(),
+            build.rows().len(),
+            "a machine's row is there whatever it is lent"
+        );
     }
 
     /// The link rows are each link's queue, buffer and reassembly times the links.

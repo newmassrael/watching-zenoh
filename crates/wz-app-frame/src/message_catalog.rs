@@ -122,7 +122,7 @@ pub enum RefusalKind {
     SupervisionWithoutPeriod,
     /// A replay depth of 0 or above the build's `REPLAY_DEPTH_MAX`.
     ReplayDepthOutOfRange,
-    /// More messages than the build's `MESSAGE_CATALOG_ENTRIES`.
+    /// More messages than the `MESSAGE_CATALOG_ENTRIES` it is read under.
     TooManyMessages,
     /// A protection that names no e2e profile of the catalog.
     UnknownE2eProfile,
@@ -863,7 +863,7 @@ impl Catalog {
                 RefusalKind::TooManyMessages,
                 path,
                 format!(
-                    "{} messages, and the build's MESSAGE_CATALOG_ENTRIES is {}",
+                    "{} messages, and the MESSAGE_CATALOG_ENTRIES it is read under is {}",
                     items.len(),
                     limits.messages
                 ),
@@ -1675,11 +1675,21 @@ fn table_message(table: &Table, row: &MessageRow, path: &str) -> Result<Json5Val
     Ok(Json5Value::Object(entries))
 }
 
-/// The bounds of this build: its `MESSAGE_CATALOG_ENTRIES`, `REPLAY_DEPTH_MAX`,
-/// `E2E_SENDER_SLOTS`, `INSTANCE_KEY_FIELDS` and `INSTANCES_PER_MESSAGE`.
+/// The bounds of a runtime that states nothing: the messages its `MESSAGE_CATALOG_ENTRIES` lends a
+/// catalog at the build's value, and the rest as [`limits_with_messages`] reads them.
 pub fn build_limits() -> Limits {
+    limits_with_messages(
+        wz_session_core::process_limits::ProcessRows::BUILD.message_catalog_entries,
+    )
+}
+
+/// The bounds a catalog is read against: `messages`, the messages the runtime's
+/// `MESSAGE_CATALOG_ENTRIES` lends one catalog under the build's value
+/// (`wz_session_core::process_limits::ProcessRows`), and this build's `REPLAY_DEPTH_MAX`,
+/// `E2E_SENDER_SLOTS`, `INSTANCE_KEY_FIELDS` and `INSTANCES_PER_MESSAGE`.
+pub fn limits_with_messages(messages: usize) -> Limits {
     Limits {
-        messages: wz_session_core::caps::MESSAGE_CATALOG_ENTRIES,
+        messages,
         replay_depth_max: wz_session_core::caps::REPLAY_DEPTH_MAX,
         sender_slots: wz_session_core::caps::E2E_SENDER_SLOTS,
         key_fields: wz_session_core::caps::INSTANCE_KEY_FIELDS,

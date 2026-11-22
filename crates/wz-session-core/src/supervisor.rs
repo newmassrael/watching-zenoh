@@ -72,14 +72,22 @@ const fn assert_checkpoint_count(checkpoints: usize) {
     );
 }
 
-/// The supervisor a build has: `SUPERVISION_CHECKPOINTS` checkpoints.
+/// The supervisor a build has: storage for the build's `SUPERVISION_CHECKPOINTS` checkpoints, the
+/// most a runtime may state.
 pub type BuildSupervisor = Supervisor<{ crate::caps::SUPERVISION_CHECKPOINTS }>;
 
 impl BuildSupervisor {
-    /// A supervisor of the build's size, under the `supervision-after-expiry` policy of `policy`,
-    /// the snapshot of the runtime that supervises.
-    pub fn for_policy(policy: &crate::policy::SessionPolicy) -> Self {
-        Self::new(policy.supervision_after_expiry())
+    /// A supervisor of the build's size that watches the checkpoints `rows` lends it from the
+    /// runtime's limits, under the `supervision-after-expiry` policy of `policy`: the snapshots of
+    /// the runtime that supervises.
+    pub fn of_snapshots(
+        policy: &crate::policy::SessionPolicy,
+        rows: &crate::process_limits::ProcessRows,
+    ) -> Self {
+        Self::watching(
+            policy.supervision_after_expiry(),
+            rows.supervision_checkpoints,
+        )
     }
 }
 
@@ -184,9 +192,11 @@ impl Checkpoint {
     }
 }
 
-/// `N` checkpoints and the rule that the node is healthy only while all of them are armed.
+/// Storage for `N` checkpoints, the first `watched` of which it supervises, and the rule that the
+/// node is healthy only while all of those are armed.
 pub struct Supervisor<const N: usize> {
     checkpoints: [Checkpoint; N],
+    watched: usize,
     after_expiry: AfterExpiry,
 }
 
@@ -194,11 +204,32 @@ impl<const N: usize> Supervisor<N> {
     /// `N` checkpoints, none supervised, and what an expired one does on the next feed. A program
     /// that names an `N` of 0 or past [`MAX_CHECKPOINTS`] does not compile.
     pub fn new(after_expiry: AfterExpiry) -> Self {
+        Self::watching(after_expiry, N)
+    }
+
+    /// Storage for `N` checkpoints of which the first `checkpoints` are supervised, at most `N`:
+    /// a checkpoint past them is one there is none of. The storage is the build's, and a runtime
+    /// that states fewer checkpoints watches fewer of them.
+    pub fn watching(after_expiry: AfterExpiry, checkpoints: usize) -> Self {
         const { assert_checkpoint_count(N) };
         Self {
             checkpoints: core::array::from_fn(|_| Checkpoint::new()),
+            watched: checkpoints.min(N),
             after_expiry,
         }
+    }
+
+    /// How many checkpoints are supervised: their numbers are `0` to one less than this.
+    pub fn checkpoints(&self) -> usize {
+        self.watched
+    }
+
+    fn held(&self) -> &[Checkpoint] {
+        &self.checkpoints[..self.watched]
+    }
+
+    fn held_mut(&mut self) -> &mut [Checkpoint] {
+        &mut self.checkpoints[..self.watched]
     }
 
     /// Begin supervising checkpoint `index`: its deadline is `timeout` ticks after `now`, and
@@ -208,7 +239,7 @@ impl<const N: usize> Supervisor<N> {
             return Err(StartRefused::TimeoutOutOfRange);
         }
         let checkpoint = self
-            .checkpoints
+            .held_mut()
             .get_mut(index)
             .ok_or(StartRefused::NoSuchCheckpoint)?;
         if checkpoint.state() == SupervisionState::Disarmed {
@@ -223,7 +254,7 @@ impl<const N: usize> Supervisor<N> {
     /// that under [`AfterExpiry::Rearm`] a feed to one that expired starts it again.
     pub fn feed(&mut self, index: usize, now: u32) {
         let after_expiry = self.after_expiry;
-        let Some(checkpoint) = self.checkpoints.get_mut(index) else {
+        let Some(checkpoint) = self.held_mut().get_mut(index) else {
             return;
         };
         match checkpoint.state() {
@@ -241,7 +272,7 @@ impl<const N: usize> Supervisor<N> {
 
     /// Stop supervising checkpoint `index`.
     pub fn stop(&mut self, index: usize) -> Stop {
-        let Some(checkpoint) = self.checkpoints.get_mut(index) else {
+        let Some(checkpoint) = self.held_mut().get_mut(index) else {
             return Stop::NoSuchCheckpoint;
         };
         if checkpoint.state() == SupervisionState::Expiring {
@@ -255,7 +286,7 @@ impl<const N: usize> Supervisor<N> {
     /// result says which hooks the host is to run.
     pub fn check(&mut self, now: u32) -> Check {
         let mut check = Check::default();
-        for (index, checkpoint) in self.checkpoints.iter_mut().enumerate() {
+        for (index, checkpoint) in self.held_mut().iter_mut().enumerate() {
             if checkpoint.state() == SupervisionState::Armed
                 && elapsed(now, checkpoint.last_feed, checkpoint.timeout)
             {
@@ -270,7 +301,7 @@ impl<const N: usize> Supervisor<N> {
 
     /// The expiry hook of checkpoint `index` returned.
     pub fn hook_done(&mut self, index: usize) {
-        if let Some(checkpoint) = self.checkpoints.get_mut(index) {
+        if let Some(checkpoint) = self.held_mut().get_mut(index) {
             if checkpoint.state() == SupervisionState::Expiring {
                 checkpoint.drive(SupervisionEvent::HookDone);
             }
@@ -279,7 +310,7 @@ impl<const N: usize> Supervisor<N> {
 
     /// The state of checkpoint `index`, or `None` if there is none.
     pub fn state(&self, index: usize) -> Option<SupervisionState> {
-        self.checkpoints.get(index).map(Checkpoint::state)
+        self.held().get(index).map(Checkpoint::state)
     }
 
     /// Whether the node is healthy: at least one checkpoint is supervised and every checkpoint
@@ -287,7 +318,7 @@ impl<const N: usize> Supervisor<N> {
     /// node that feeds a hardware watchdog from here does not feed it on the strength of nothing.
     pub fn is_healthy(&self) -> bool {
         let mut any = false;
-        for checkpoint in &self.checkpoints {
+        for checkpoint in self.held() {
             match checkpoint.state() {
                 SupervisionState::Armed => any = true,
                 SupervisionState::Disarmed => {}
@@ -305,9 +336,18 @@ mod tests {
     use super::*;
     use std::vec::Vec;
 
+    use crate::process_limits::ProcessRows;
+
     #[test]
     fn the_build_supervisor_has_the_builds_checkpoints_and_none_supervised() {
-        let supervisor = BuildSupervisor::for_policy(&crate::policy::SessionPolicy::defaults());
+        let supervisor = BuildSupervisor::of_snapshots(
+            &crate::policy::SessionPolicy::defaults(),
+            &ProcessRows::BUILD,
+        );
+        assert_eq!(
+            supervisor.checkpoints(),
+            crate::caps::SUPERVISION_CHECKPOINTS
+        );
         assert!(supervisor
             .state(crate::caps::SUPERVISION_CHECKPOINTS - 1)
             .is_some());
@@ -324,7 +364,8 @@ mod tests {
         use crate::policy::SessionPolicy;
         use crate::policy_binding::PolicyValue;
         assert_eq!(
-            BuildSupervisor::for_policy(&SessionPolicy::defaults()).after_expiry,
+            BuildSupervisor::of_snapshots(&SessionPolicy::defaults(), &ProcessRows::BUILD)
+                .after_expiry,
             AfterExpiry::DEFAULT
         );
         for &rule in <AfterExpiry as PolicyValue>::ALL {
@@ -335,12 +376,46 @@ mod tests {
                 continue;
             }
             assert_eq!(
-                BuildSupervisor::for_policy(&policy).after_expiry,
+                BuildSupervisor::of_snapshots(&policy, &ProcessRows::BUILD).after_expiry,
                 rule,
                 "{}",
                 rule.id()
             );
         }
+    }
+
+    /// A runtime that states fewer checkpoints than the build's storage holds watches that many:
+    /// the next one is none to start, feed, stop or read, and it never counts against health.
+    #[test]
+    fn a_supervisor_watches_the_checkpoints_its_runtime_lends_it() {
+        let rows = ProcessRows {
+            supervision_checkpoints: 1,
+            ..ProcessRows::BUILD
+        };
+        let mut supervisor =
+            Supervisor::<2>::watching(AfterExpiry::Latch, rows.supervision_checkpoints);
+        assert_eq!(supervisor.checkpoints(), 1);
+        assert_eq!(supervisor.start(0, 0, 5), Ok(()));
+        assert_eq!(
+            supervisor.start(1, 0, 5),
+            Err(StartRefused::NoSuchCheckpoint)
+        );
+        assert_eq!(supervisor.stop(1), Stop::NoSuchCheckpoint);
+        assert_eq!(supervisor.state(1), None);
+        supervisor.feed(1, 3);
+        assert!(supervisor.is_healthy());
+        assert!(supervisor.check(5).hook(0));
+        assert!(!supervisor.check(50).hook(1));
+    }
+
+    /// A count past the storage watches the whole storage and no more.
+    #[test]
+    fn a_supervisor_watches_no_more_than_its_storage() {
+        let supervisor = Supervisor::<2>::watching(AfterExpiry::Latch, 9);
+        assert_eq!(supervisor.checkpoints(), 2);
+        assert!(supervisor.state(1).is_some());
+        assert!(supervisor.state(2).is_none());
+        assert_eq!(Supervisor::<3>::new(AfterExpiry::Latch).checkpoints(), 3);
     }
 
     /// The ends of the count a supervisor compiles with: one checkpoint, and as many as a check
