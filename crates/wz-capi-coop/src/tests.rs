@@ -1017,6 +1017,12 @@ fn a_received_sample_takes_the_lane_twice_and_an_empty_read_not_at_all() {
 /// subscribers' tables reconciled, the drains, the Finals owed) is done under the one lookup of
 /// its face its dispatch made: the fan over every plane is handed none of them. The CONTROL is
 /// the subscriber's count of the samples it was handed.
+///
+/// A build with `transport-stats` lends no record: the session core walks each one owned, because
+/// its counters classify a received message by reading the owned message
+/// (`wz-session-core` `drive.rs` @ `RECORD_FORM`), and a counter that skipped a lent record would
+/// be a wrong number. There every Push reaches the fan as an owned message, so none is handed to
+/// the subscribers' plane alone and none is counted as a lent Push the fan was handed.
 #[test]
 fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
     let router = Router::start(CatchAll::None);
@@ -1048,15 +1054,20 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     let (alone_after, lookups_after, fanned_after) = engine.push_dispatches();
+    let lent = if cfg!(feature = "transport-stats") {
+        0
+    } else {
+        SAMPLES
+    };
     assert_eq!(
         alone_after - alone,
-        SAMPLES,
-        "each Push to the subscribers' plane alone"
+        lent,
+        "each lent Push to the subscribers' plane alone"
     );
     assert_eq!(
         lookups_after - lookups,
-        SAMPLES,
-        "one lookup of the face a Push, its drains included"
+        lent,
+        "one lookup of the face a lent Push, its drains included"
     );
     assert_eq!(
         fanned_after, fanned,
