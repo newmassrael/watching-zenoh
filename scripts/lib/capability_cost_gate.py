@@ -1226,7 +1226,12 @@ CASES: tuple[Case, ...] = (
     # one machine.
     # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
     # this day says: -49,636 on one machine; the budget moves by it and keeps its headroom.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_401_280,
+    # 2026-11-23, later -- the no-heap integration of this day read 6,404,412 in Layer C1cs on a
+    # build machine, 3,132 over: the cooperative engine's lent tables in place of heap ones, the
+    # receive lane on a queue of the SCE document, the send gate's atomics and the dial of the
+    # tcp and tls links begun without waiting. Not taken apart by symbol. Chosen with those
+    # changes; the budget is that reading.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_404_412,
          # 2026-11-22, alias -- an aliased Put fanned out to clients is encoded once and its key re-
          # written per face in place (`LeafPush`, `docs/router-fanout-cost.md` row 6): 6,449,020 on
          # the fleet (+1,432 over the budget, router builds only; the pico and MCU cases held at main's).
