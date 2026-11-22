@@ -59,17 +59,18 @@ fn a_job_runs_from_the_step_after_its_time_and_not_before() {
     engine.stop_ticker(id);
 }
 
-/// A read with no job due takes the session's lock once for its jobs, with its wait and its step
-/// three in all, where reading the clock and looking for a due job took a take each. The CONTROL
-/// is a read that runs a due job: one take more, to put the job back and look for the next.
+/// A read with no job due takes the session's lock for its wait and its step alone: the step
+/// looks for a due job under its own take, by its own reading of the clock, where the jobs took a
+/// take of their own. The CONTROL is a read that runs a due job: two takes more, one to take the
+/// job and one to put it back and look for the next.
 #[test]
-fn a_read_with_no_job_due_takes_the_session_once_for_its_jobs() {
+fn a_read_with_no_job_due_takes_the_session_for_its_wait_and_its_step_alone() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let takes = || engine.takes.core.load(Ordering::SeqCst);
     let before = takes();
     let _ = SessionDrive::read(&*engine, false);
-    assert_eq!(takes() - before, 3, "the wait, the step and the jobs");
+    assert_eq!(takes() - before, 2, "the wait and the step");
 
     let runs = Arc::new(AtomicUsize::new(0));
     let id = engine
@@ -82,7 +83,7 @@ fn a_read_with_no_job_due_takes_the_session_once_for_its_jobs() {
     assert_eq!(
         takes() - before,
         4,
-        "CONTROL: the run puts the job back and looks for the next in one take"
+        "CONTROL: the run takes the job in one take, puts it back and looks for the next in one more"
     );
     engine.stop_ticker(id);
 }

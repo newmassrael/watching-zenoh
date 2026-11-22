@@ -877,6 +877,31 @@ fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue
     );
 }
 
+/// A read step on a session with nothing due reads the session's clock once, after its tasks ran,
+/// and moves every face, sweeps the gets and looks for a due job by that one reading; its wait,
+/// with no deadline to work out, reads it not at all. The session's lock is taken twice: for the
+/// wait and for the step. The counts are the same in every build: the sweep of the gets, each
+/// face and the look for a due job share the step's reading and its take.
+#[test]
+fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let (reads, takes) = (
+        engine.clock_reads(),
+        engine.takes.core.load(Ordering::SeqCst),
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(engine.clock_reads() - reads, 1, "one reading for the step");
+    assert_eq!(
+        engine.takes.core.load(Ordering::SeqCst) - takes,
+        2,
+        "one take for the wait and one for the step"
+    );
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that

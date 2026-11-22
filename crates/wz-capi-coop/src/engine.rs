@@ -1080,6 +1080,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// ([`Self::idle_wait`]) and handed back after it ([`Self::give_back_waits`]), so a turn of
     /// the read allocates nothing once the buffer holds as many waits as the session has had.
     waits: Vec<Arc<dyn LinkReadiness>>,
+    /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
+    /// tests count.
+    #[cfg(test)]
+    clock_reads: core::cell::Cell<usize>,
     matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
     next_match: MatchId,
     #[cfg(feature = "queryable")]
@@ -1807,9 +1811,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// Move every face's link on, after the session was stepped; see [`Self::poll_face`]. `Err`
-    /// when the session ends, which only the dial role's face can bring about.
-    fn poll_links(&mut self, redial_ms: Option<u64>) -> Result<(), OpenError> {
+    /// Move every face's link on, after the session was stepped, against the step's reading of the
+    /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
+    /// role's face can bring about.
+    fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
         // The connections that arrived come first, so their handshakes are moved on in this pass.
         #[cfg(feature = "listen")]
         self.accept_links();
@@ -1819,7 +1824,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
         for at in (0..self.faces.len()).rev() {
-            self.poll_face(at, redial_ms)?;
+            self.poll_face(at, redial_ms, now_us)?;
         }
         Ok(())
     }
@@ -1833,8 +1838,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its lost or failed link takes the face with it. `Err` when the session ends: the dial
     /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
     /// gave no entropy.
-    fn poll_face(&mut self, at: usize, redial_ms: Option<u64>) -> Result<(), OpenError> {
-        let now_us = self.clock.now_us();
+    fn poll_face(
+        &mut self,
+        at: usize,
+        redial_ms: Option<u64>,
+        now_us: u64,
+    ) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
         let id = self.faces[at].id;
         let link = core::mem::replace(&mut self.faces[at].link, Link::Waiting { at_us: now_us });
@@ -2428,13 +2437,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .min()
     }
 
-    /// `most` milliseconds, or the whole milliseconds left until `due_ms` (rounded up, so a wait
-    /// never ends a clock reading before the time it waits for), whichever is less.
-    fn wait_until(&self, most: u32, due_ms: u64) -> u32 {
-        let left_us = due_ms
-            .saturating_mul(1000)
-            .saturating_sub(self.clock.now_us());
+    /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
+    /// so a wait never ends a clock reading before the time it waits for), whichever is less.
+    fn wait_until(most: u32, due_ms: u64, now_us: u64) -> u32 {
+        let left_us = due_ms.saturating_mul(1000).saturating_sub(now_us);
         u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
+    }
+
+    /// The session's clock, read: what a read's wait is worked out from and what its step moves
+    /// the links, sweeps the gets and looks for a due job against, each read once.
+    fn now_us(&self) -> u64 {
+        #[cfg(test)]
+        self.clock_reads.set(self.clock_reads.get() + 1);
+        self.clock.now_us()
+    }
+
+    /// The milliseconds of `now_us`, a step's reading of the clock, when a periodic job is due
+    /// by it: what the read runs its jobs against once its delivery is done.
+    #[cfg(feature = "ticker")]
+    fn jobs_due_at(&self, now_us: u64) -> Option<u64> {
+        let now_ms = now_us / 1000;
+        self.tickers
+            .next_due_ms()
+            .is_some_and(|due_ms| due_ms <= now_ms)
+            .then_some(now_ms)
+    }
+
+    /// A build without periodic jobs has none due.
+    #[cfg(not(feature = "ticker"))]
+    fn jobs_due_at(&self, _now_us: u64) -> Option<u64> {
+        None
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
@@ -2443,10 +2475,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&mut self) -> IdleWait {
         let most = self.config.idle_wait_ms;
+        // The clock is read the first time a deadline asks for it, and that reading serves every
+        // deadline after it: a wait with nothing due reads it not at all.
+        let mut clock_now: Option<u64> = None;
         // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
         #[cfg(feature = "query")]
         let most = match self.next_get_deadline_ms() {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is the next turn of a replay a link owes its peer, which is not due by input.
@@ -2456,13 +2495,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .filter_map(|face| face.replay.next_turn_ms())
             .min()
         {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is a periodic job the program started, which no input brings about either.
         #[cfg(feature = "ticker")]
         let most = match self.tickers.next_due_ms() {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is a group's turn: its task takes one datagram a step, so a group that took one
@@ -2475,7 +2522,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             0
         } else {
             let most = match self.groups.iter().filter_map(GroupFace::due_us).min() {
-                Some(due_us) => self.wait_until(most, due_us.div_ceil(1_000)),
+                Some(due_us) => Self::wait_until(
+                    most,
+                    due_us.div_ceil(1_000),
+                    *clock_now.get_or_insert_with(|| self.now_us()),
+                ),
                 None => most,
             };
             if self.groups.iter().any(GroupFace::unwaited) {
@@ -2508,7 +2559,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     }
                 }
                 Link::Waiting { at_us } => {
-                    dial_left_ms = Some(at_us.saturating_sub(self.clock.now_us()) / 1000);
+                    let now_us = *clock_now.get_or_insert_with(|| self.now_us());
+                    dial_left_ms = Some(at_us.saturating_sub(now_us) / 1000);
                 }
                 // Nothing to wait for until the face that holds the node is lost, which is
                 // another face's link.
@@ -2820,6 +2872,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             next_filter: 1,
             interests,
             waits: Vec::with_capacity(wait_room),
+            #[cfg(test)]
+            clock_reads: core::cell::Cell::new(0),
             matches,
             next_match: 1,
             #[cfg(feature = "queryable")]
@@ -2873,7 +2927,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 let spare = core.idle_wait().wait();
                 core.give_back_waits(spare);
                 core.local.run_until_idle();
-                core.poll_links(None)?;
+                let now_us = core.now_us();
+                core.poll_links(None, now_us)?;
             }
         }
         Ok(Arc::new_cyclic(|this| Self {
@@ -3079,6 +3134,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .map(|core| (core.0.dial().replay.pacing(), core.0.policy))
     }
 
+    /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
+    /// test of the cost of one read step counts. Read under the lock, uncounted as a take.
+    #[cfg(test)]
+    pub(crate) fn clock_reads(&self) -> usize {
+        lock(&self.core).0.clock_reads.get()
+    }
+
     /// Whether the peer of every established link has been told every declaration the session
     /// holds. A session with no link established owes nothing yet, so it is synced, as the slot
     /// node's is before a client has come: synced is a statement about established sessions, not
@@ -3197,18 +3259,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
     /// publish) takes the session's lock itself. One is taken at a time, so a job that stops
     /// another finds it not yet started, and each is put back a period after its run ended. What
-    /// is due is read against the time this call began, so a job that takes longer than its own
-    /// period runs once per call and does not keep the caller here.
+    /// is due is read against `started_ms`, the reading of the clock the read's step made, so a
+    /// job that takes longer than its own period runs once per call and does not keep the caller
+    /// here.
+    ///
+    /// A read calls this only when its step found a job due by that reading, so a read with
+    /// nothing due takes the lock for its jobs not at all. The first due job is taken under one
+    /// take, and a job that ran is put back and the next taken under one more.
     #[cfg(feature = "ticker")]
-    fn run_due_tickers(&self) {
-        // Every read steps here, almost always with nothing due: the clock is read and the first
-        // due job taken under one take of the lock, and a job that ran is put back and the next
-        // taken under one more.
-        let (started_ms, mut next) = match self.live() {
-            Some(mut core) => {
-                let started_ms = core.0.clock.now_us() / 1000;
-                (started_ms, core.0.tickers.take_next_due(started_ms))
-            }
+    fn run_due_tickers(&self, started_ms: u64) {
+        let mut next = match self.live() {
+            Some(mut core) => core.0.tickers.take_next_due(started_ms),
             None => return,
         };
         while let Some((id, tick)) = next {
@@ -3220,6 +3281,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             });
         }
     }
+
+    /// A build without periodic jobs has none due ([`Core::jobs_due_at`]).
+    #[cfg(not(feature = "ticker"))]
+    fn run_due_tickers(&self, _started_ms: u64) {}
 
     /// Hand out what the session delivered, with no lock held.
     ///
@@ -3816,14 +3881,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
-    /// that ended.
-    fn step(&self, core: &mut Core<L, C>) -> bool {
+    /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
+    /// does by that reading, which it returns; `None` once the session ended.
+    fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
         core.local.run_until_idle();
+        let now_us = core.now_us();
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
         {
-            let now_ms = core.clock.now_us() / 1000;
+            let now_ms = now_us / 1000;
             let mut registry = core.registry.borrow_mut();
             for gets in registry.all_gets_mut() {
                 gets.replies.sweep_timed_out(now_ms);
@@ -3838,9 +3905,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         let redial_ms = core.config.redial_ms;
-        if core.poll_links(redial_ms).is_err() {
+        if core.poll_links(redial_ms, now_us).is_err() {
             self.closed.store(true, Ordering::Release);
-            return false;
+            return None;
         }
         // A group told the session's keyexprs that came up, at the open or joined again, asks
         // for its members' with the session's next entity id, as the tokio engine's group asks
@@ -3854,7 +3921,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
-        true
+        Some(now_us)
     }
 
     /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder:
@@ -5695,20 +5762,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let spare = wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        let (stepped, handed) = match self.live() {
+        // One take of the session for the step: its links, what publishes handed to it, and
+        // whether a periodic job is due by the clock reading the step made.
+        let (stepped, handed, jobs_due_ms) = match self.live() {
             Some(mut core) => {
                 core.0.give_back_waits(spare);
                 let stepped = self.step(&mut core.0);
+                let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
                 // What publishes handed to the session while it was held leaves on this step too,
                 // so a program that only reads its session sends it.
-                (stepped, self.send_handed_now(&core.0))
+                (
+                    stepped.is_some(),
+                    self.send_handed_now(&core.0),
+                    jobs_due_ms,
+                )
             }
-            None => (false, VecDeque::new()),
+            None => (false, VecDeque::new(), None),
         };
         drop(handed);
         self.deliver();
-        #[cfg(feature = "ticker")]
-        self.run_due_tickers();
+        if let Some(started_ms) = jobs_due_ms {
+            self.run_due_tickers(started_ms);
+        }
         if stepped {
             Ok(())
         } else {
