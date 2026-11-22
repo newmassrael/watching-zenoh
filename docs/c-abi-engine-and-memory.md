@@ -245,7 +245,13 @@ state.
   thread-locals from the OS. No `#[global_allocator]` and no `extern crate alloc` in the graph,
   judged by `scripts/lib/no_allocator_link_gate.py` with the host libraries as rows. Gate: that
   link gate, the D9 rows (the largest single fall, section 5), the Layer Z and C1co legs on the
-  `no_std` build. Ratchet: the D9 rows and the link gate's table.
+  `no_std` build. Ratchet: the D9 rows and the link gate's table. The form is one feature of the
+  pico crate per host: `os-posix` on a POSIX host, `os-windows` on Windows (the MSVC targets:
+  Winsock waited on with `WSAPoll`, the Win32 slim reader/writer lock, condition variable and
+  threads, the performance counter, the system's random number generator, and the process heap
+  as the allocator until P2 ends). The Windows package builds it with `--stdlib nostd` beside the
+  `std` form, which the release ships until it is switched, and prints the size of the size
+  gate's client in both forms there, the one host that can read a Windows DLL.
 - **P5. The tokio engine path of the C libraries is deleted.** Preconditions: P3 at 0, and every
   upstream suite graded on the cooperative engine: zenoh-pico's API tests, zenoh-c's tests (Layer
   C1cc) once `wz-capi-c` has made its own P1 to P4 with its own coverage rows, and the Z8

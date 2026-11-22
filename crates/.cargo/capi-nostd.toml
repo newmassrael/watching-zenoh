@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # The cargo configuration of the pico C ABI's host library without `std` (`wz-capi-pico`'s
-# `os-posix`, profile `capi-nostd`), named on the command line and used with the host's own
-# target, from `crates/`:
+# `os-posix` and `os-windows`, profile `capi-nostd`), named on the command line and used with
+# the host's own target, from `crates/`:
 #
 #   cargo build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
 #       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu
+#   cargo build -p wz-capi-pico --no-default-features --features os-windows,link-udp \
+#       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-pc-windows-msvc
 #
 # A library that never unwinds needs no unwind tables, and a cargo profile cannot carry a code
 # generation flag on a stable toolchain, so the flag is here. With `--target` it reaches the
@@ -16,6 +18,7 @@
 # replaces this table, as it replaces every configured one.
 #
 # The flag is given to POSIX hosts only: a Windows build keeps its tables, which the system's own
-# exception handling reads.
+# exception handling reads, and needs no other flag: `panic = "abort"` is the profile's, and the
+# library names the C runtime it links itself (`src/os/no_std_host.rs` of `wz-capi-pico`).
 [target.'cfg(unix)']
 rustflags = ["-C", "force-unwind-tables=no"]
