@@ -104,8 +104,9 @@ pub trait StreamSocket: Sized {
     ///
     /// A stream that can is not asked for room before every frame ([`Self::wait_writable`]): the
     /// write is tried first, as a non-blocking write is, and the stream is asked only after a write
-    /// it did not take whole, until one goes through whole again. What a write leaves is then
-    /// written with [`Self::send_parts`], since a frame begun on a stream must end on it.
+    /// it did not take whole, until one goes through whole again. What a write leaves is the
+    /// link's to write, before anything after it, when the stream next has room: no call waits
+    /// for it.
     fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, Self::Error>> {
         let _ = parts;
         None
@@ -305,25 +306,123 @@ enum Front {
     TooLong,
 }
 
-/// The parts of a write after its first `taken` bytes, into `rest`, and how many there are: what
-/// a write the stream took only part of still owes.
-fn after<'p, const N: usize>(
-    parts: &[&'p [u8]; N],
-    taken: usize,
-    rest: &mut [&'p [u8]; N],
-) -> usize {
-    let mut skip = taken;
-    let mut count = 0;
+/// The most frames a stream link owes its stream at once: one for each slot its book can lend.
+const OWED: usize = u8::BITS as usize;
+
+/// What a stream link owes its stream: the rest of a frame the stream took only in part, or a
+/// frame handed over behind one ([`StreamDriver::write_owed`]).
+enum Owed {
+    /// Bytes `from .. end` of a slot of the link's, held out of its pool until they are written.
+    Slot {
+        slot: TxSlot,
+        from: usize,
+        end: usize,
+    },
+    /// A frame the session handed over as bytes, on a link with no slot free to keep it in:
+    /// written from `from` on.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    Bytes { bytes: Vec<u8>, from: usize },
+}
+
+impl Owed {
+    /// The slot the link holds for this, given back once it is written.
+    fn held_slot(&self) -> Option<TxSlot> {
+        match self {
+            Self::Slot { slot, .. } => Some(*slot),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            Self::Bytes { .. } => None,
+        }
+    }
+
+    /// `taken` more bytes of it were written.
+    fn advance(&mut self, taken: usize) {
+        match self {
+            Self::Slot { from, .. } => *from += taken,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            Self::Bytes { from, .. } => *from += taken,
+        }
+    }
+}
+
+/// The frames a stream link owes, oldest first, in a ring of [`OWED`] places.
+struct OwedQueue {
+    places: [Option<Owed>; OWED],
+    head: usize,
+    len: usize,
+}
+
+impl OwedQueue {
+    const fn new() -> Self {
+        Self {
+            places: [const { None }; OWED],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Put `owed` last; handed back when every place is taken.
+    fn push(&mut self, owed: Owed) -> Result<(), Owed> {
+        if self.len == OWED {
+            return Err(owed);
+        }
+        self.places[(self.head + self.len) % OWED] = Some(owed);
+        self.len += 1;
+        Ok(())
+    }
+
+    /// The oldest, still owed.
+    fn front_mut(&mut self) -> Option<&mut Owed> {
+        if self.len == 0 {
+            return None;
+        }
+        self.places[self.head].as_mut()
+    }
+
+    /// Take the oldest out.
+    fn pop(&mut self) -> Option<Owed> {
+        if self.len == 0 {
+            return None;
+        }
+        let owed = self.places[self.head].take();
+        self.head = (self.head + 1) % OWED;
+        self.len -= 1;
+        owed
+    }
+}
+
+/// Copy what `parts` hold after their first `skip` bytes into `out`, which is that long.
+fn copy_rest(parts: &[&[u8]], skip: usize, out: &mut [u8]) {
+    let mut skip = skip;
+    let mut at = 0;
     for &part in parts {
         if skip >= part.len() {
             skip -= part.len();
             continue;
         }
-        rest[count] = &part[skip..];
+        let rest = &part[skip..];
         skip = 0;
-        count += 1;
+        out[at..at + rest.len()].copy_from_slice(rest);
+        at += rest.len();
     }
-    count
+}
+
+/// What a link with no slot free keeps of `parts` after their first `skip` bytes (`len` of
+/// them): a copy on the heap.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn owed_bytes(parts: &[&[u8]], skip: usize, len: usize) -> Option<Owed> {
+    let mut bytes = vec![0u8; len];
+    copy_rest(parts, skip, &mut bytes);
+    Some(Owed::Bytes { bytes, from: 0 })
+}
+
+/// A build with no heap keeps what it owes in its slots alone.
+#[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+fn owed_bytes(_parts: &[&[u8]], _skip: usize, _len: usize) -> Option<Owed> {
+    None
 }
 
 /// Read the front of `held`, the bytes a buffer of `capacity` bytes holds.
@@ -374,6 +473,10 @@ pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
     /// its room, the write itself being the question. `false` before the first write and for a
     /// stream that cannot write without waiting, which is asked every time.
     room_known: Cell<bool>,
+    /// What the link owes the stream, oldest first: the rest of a frame the stream took in part,
+    /// and the frames handed over behind it. Written by the next step that finds the stream room
+    /// (a send, a question of room, the loop's service), never by waiting inside a call.
+    owed: RefCell<OwedQueue>,
 }
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
@@ -407,6 +510,7 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             error: Cell::new(None),
             owner_waits: false,
             room_known: Cell::new(false),
+            owed: RefCell::new(OwedQueue::new()),
         }
     }
 
@@ -490,41 +594,212 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
         }
     }
 
-    /// Write `parts` to the stream as the outcome the session counts: a write to a link that is
-    /// gone, or one the stack refuses (which ends the link), is REPORTED, not swallowed.
-    ///
-    /// The write is tried without waiting first, where the stream can
-    /// ([`StreamSocket::send_parts_now`]): taken whole, it says the stream had room, and the next
-    /// frame asks nothing; taken in part or not at all, the next frame asks the stream for room
-    /// again, and the rest of this one is written by waiting, as every write is on a stream that
-    /// cannot try.
-    fn send<const N: usize>(&self, parts: &[&[u8]; N]) -> LinkSendOutcome {
+    /// Whether the link owes the stream anything ([`Owed`]).
+    fn owes(&self) -> bool {
+        !self.owed.borrow().is_empty()
+    }
+
+    /// Write what the link owes the stream, oldest first, without waiting: `true` once nothing is
+    /// owed (or the link has ended, which gives back whatever it held), `false` when the stream
+    /// took less than all of it, the rest still owed for the next step that finds it room.
+    fn write_owed(&self) -> bool {
+        loop {
+            if self.lost.get().is_some() {
+                self.drop_owed();
+                return true;
+            }
+            let mut owed = self.owed.borrow_mut();
+            let Some(front) = owed.front_mut() else {
+                return true;
+            };
+            let rest: &[u8] = match &*front {
+                // SAFETY: the slot is held by the link (`Owed::Slot`), out of its pool until the
+                // pop below or `drop_owed` gives it back, so nothing writes it.
+                Owed::Slot { slot, from, end } => unsafe { self.tx.held(*slot, *from, *end) },
+                #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+                Owed::Bytes { bytes, from } => &bytes[*from..],
+            };
+            let want = rest.len();
+            let written = match self.socket.send_parts_now(&[rest]) {
+                Some(Ok(taken)) => Ok(taken),
+                Some(Err(e)) => Err(e),
+                // Not reached: only a stream that writes without waiting comes to owe anything.
+                None => self.socket.send_parts(&[rest]).map(|()| want),
+            };
+            match written {
+                Ok(taken) if taken < want => {
+                    front.advance(taken);
+                    return false;
+                }
+                Ok(_) => {
+                    if let Some(slot) = owed.pop().and_then(|done| done.held_slot()) {
+                        self.tx.release(slot);
+                    }
+                }
+                Err(e) => {
+                    drop(owed);
+                    self.fail(e);
+                    return true;
+                }
+            }
+        }
+    }
+
+    /// Give back everything the link holds for the stream: the link has ended, and nothing it
+    /// owed will be written.
+    fn drop_owed(&self) {
+        let mut owed = self.owed.borrow_mut();
+        while let Some(done) = owed.pop() {
+            if let Some(slot) = done.held_slot() {
+                self.tx.release(slot);
+            }
+        }
+        self.room_known.set(false);
+    }
+
+    /// The stream failed a write with `error`: the link ends, REPORTED and not swallowed.
+    fn fail(&self, error: S::Error) {
+        self.error.set(Some(error));
+        self.end(LostCause::OsError);
+        self.drop_owed();
+    }
+
+    /// Write bytes `from .. end` of `slot`, a frame the session handed over, prefix included. The
+    /// write is tried without waiting ([`StreamSocket::send_parts_now`]): taken whole, it says the
+    /// stream had room, the slot goes back, and the next frame asks nothing; taken in part or not
+    /// at all, the rest is owed, the slot held until it is written, and the next frame asks the
+    /// stream for room. Behind something already owed it is owed whole, so frames leave in the
+    /// order they were handed over. Nothing waits here; a stream that cannot try is written by
+    /// waiting, as it always was.
+    fn send_slot(&self, slot: TxSlot, from: usize, end: usize) -> LinkSendOutcome {
         if self.lost.get().is_some() {
+            self.tx.release(slot);
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
-        let written = match self.socket.send_parts_now(parts) {
-            None => self.socket.send_parts(parts),
-            Some(Ok(taken)) if taken >= parts.iter().map(|part| part.len()).sum::<usize>() => {
+        if !self.write_owed() {
+            return self.owe(Owed::Slot { slot, from, end }, 0);
+        }
+        if self.lost.get().is_some() {
+            self.tx.release(slot);
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        }
+        // SAFETY: the session handed the slot over and the link holds it: nothing writes it.
+        let frame = unsafe { self.tx.held(slot, from, end) };
+        match self.socket.send_parts_now(&[frame]) {
+            None => {
+                let written = self.socket.send_parts(&[frame]);
+                self.tx.release(slot);
+                self.written(written)
+            }
+            Some(Ok(taken)) if taken >= frame.len() => {
+                self.tx.release(slot);
                 self.room_known.set(true);
-                Ok(())
+                LinkSendOutcome::Sent
             }
             Some(Ok(taken)) => {
                 self.room_known.set(false);
-                let mut rest = [&[][..]; N];
-                let count = after(parts, taken, &mut rest);
-                self.socket.send_parts(&rest[..count])
+                self.owe(
+                    Owed::Slot {
+                        slot,
+                        from: from + taken,
+                        end,
+                    },
+                    taken,
+                )
             }
-            Some(Err(e)) => Err(e),
-        };
+            Some(Err(e)) => {
+                self.tx.release(slot);
+                self.written(Err(e))
+            }
+        }
+    }
+
+    /// Write a frame the session handed over as bytes (`parts`: its length and the batch), as
+    /// [`Self::send_slot`] does; what is owed of it is copied into a slot of the link's, or onto
+    /// the heap where the link lends none.
+    fn send_bytes(&self, parts: &[&[u8]]) -> LinkSendOutcome {
+        if self.lost.get().is_some() {
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        }
+        if !self.write_owed() {
+            return self.owe_copy(parts, 0);
+        }
+        if self.lost.get().is_some() {
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        }
+        let whole: usize = parts.iter().map(|part| part.len()).sum();
+        match self.socket.send_parts_now(parts) {
+            None => self.written(self.socket.send_parts(parts)),
+            Some(Ok(taken)) if taken >= whole => {
+                self.room_known.set(true);
+                LinkSendOutcome::Sent
+            }
+            Some(Ok(taken)) => {
+                self.room_known.set(false);
+                self.owe_copy(parts, taken)
+            }
+            Some(Err(e)) => self.written(Err(e)),
+        }
+    }
+
+    /// The outcome of a write that waited, or failed.
+    fn written(&self, written: Result<(), S::Error>) -> LinkSendOutcome {
         match written {
             Ok(()) => LinkSendOutcome::Sent,
             Err(e) => {
-                self.room_known.set(false);
-                self.error.set(Some(e));
-                self.end(LostCause::OsError);
+                self.fail(e);
                 LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
             }
         }
+    }
+
+    /// Keep what the stream has not taken of `parts` (all after their first `skip` bytes) to
+    /// write before anything after it.
+    fn owe_copy(&self, parts: &[&[u8]], skip: usize) -> LinkSendOutcome {
+        let len = parts
+            .iter()
+            .map(|part| part.len())
+            .sum::<usize>()
+            .saturating_sub(skip);
+        let owed = match self.tx.hold_filled(len, |out| copy_rest(parts, skip, out)) {
+            Some(slot) => Some(Owed::Slot {
+                slot,
+                from: 0,
+                end: len,
+            }),
+            None => owed_bytes(parts, skip, len),
+        };
+        match owed {
+            Some(owed) => self.owe(owed, skip),
+            None => self.cannot_owe(skip),
+        }
+    }
+
+    /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
+    /// taken: none for a frame that waits whole behind another.
+    fn owe(&self, owed: Owed, skip: usize) -> LinkSendOutcome {
+        let refused = self.owed.borrow_mut().push(owed);
+        match refused {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(owed) => {
+                if let Some(slot) = owed.held_slot() {
+                    self.tx.release(slot);
+                }
+                self.cannot_owe(skip)
+            }
+        }
+    }
+
+    /// The link has nowhere to keep a frame it owes. One of which nothing was written is refused,
+    /// as a frame the link lends no slot for is. One already begun on the stream cannot be: the
+    /// stream's framing is lost with its rest, so the link ends.
+    fn cannot_owe(&self, skip: usize) -> LinkSendOutcome {
+        if skip == 0 {
+            return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
+        }
+        self.end(LostCause::OsError);
+        self.drop_owed();
+        LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
     }
 }
 
@@ -535,7 +810,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         let Ok(len) = u16::try_from(bytes.len()) else {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         };
-        self.send(&[&len.to_le_bytes()[..], bytes])
+        self.send_bytes(&[&len.to_le_bytes()[..], bytes])
     }
 
     // The room is the stream's: the session asks before it builds a frame, and a stream that
@@ -546,12 +821,27 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     // stream that took more within the wait is counted as having answered at once: the stream
     // tells no time. A link that has ended answers room, so the send that follows reports the end.
     // A stream that took the last write whole without waiting is not asked: the next write is
-    // tried first, and one it does not take whole makes the frame after it ask again (`send`).
+    // tried first, and one it does not take whole makes the frame after it ask again
+    // (`send_slot`). A link that still owes the stream part of a frame has room once that is
+    // written: the wait for the stream to take bytes is what lets it be, within the message's wait.
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
-        if self.lost.get().is_some() || self.room_known.get() {
+        let wait_us = wait.wait_us();
+        let owed_written = self.write_owed();
+        if self.lost.get().is_some() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
-        let wait_us = wait.wait_us();
+        if !owed_written {
+            if self.socket.wait_writable(wait_us) && self.write_owed() {
+                return RoomAnswer::at_once(LinkRoom::Free);
+            }
+            return RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: wait_us,
+            };
+        }
+        if self.room_known.get() {
+            return RoomAnswer::at_once(LinkRoom::Free);
+        }
         if self.socket.wait_writable(wait_us) {
             RoomAnswer::at_once(LinkRoom::Free)
         } else {
@@ -587,10 +877,13 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         };
         match self
             .tx
-            .take_prefixed(slot, start, len, &length.to_le_bytes())
+            .frame_prefixed(slot, start, len, &length.to_le_bytes())
         {
-            Some(framed) => self.send(&[framed]),
-            None => LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+            Some((from, end)) => self.send_slot(slot, from, end),
+            None => {
+                self.tx.release(slot);
+                LinkSendOutcome::Dropped(LinkDropCause::Oversize)
+            }
         }
     }
 
@@ -600,11 +893,15 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
     fn open_blocking(&self) {}
 
-    // The session's Close frame has been written; the stream ends behind it, and the peer reads
-    // the end.
+    // The session's Close frame has been handed over; the stream ends behind it, and the peer
+    // reads the end. What the link still owes is tried once more, without waiting, and what the
+    // stream does not take then is not written: the peer reads a frame cut short by the end of
+    // the stream, which it takes as the end.
     fn close_blocking(&self) {
+        self.write_owed();
         self.socket.shutdown();
         self.end(LostCause::PeerClosed);
+        self.drop_owed();
     }
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
@@ -643,10 +940,19 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     for StreamDriver<S, B, T>
 {
     fn service(&self) {
+        // What the link owes the stream is written as far as the stream takes it, every step.
+        if self.owes() {
+            self.write_owed();
+        }
         // A whole batch already held (the last read brought two) is read without waiting, and a
-        // link its owner waits on does not wait here.
+        // link its owner waits on does not wait here. A link that still owes the stream waits its
+        // tick for room instead of for input, and writes on when it has some.
         if self.lost.get().is_none() && !self.batch_held() && !self.owner_waits {
-            self.socket.wait_readable(SERVICE_WAIT_MS);
+            if !self.owes() {
+                self.socket.wait_readable(SERVICE_WAIT_MS);
+            } else if self.socket.wait_writable(SERVICE_WAIT_MS as u64 * 1_000) {
+                self.write_owed();
+            }
         }
     }
 
@@ -729,8 +1035,11 @@ mod tests {
         /// The stream writes without waiting (`send_parts_now`); a pipe that does not is asked for
         /// room before every frame.
         tries: Cell<bool>,
-        /// How many bytes a write that does not wait takes; `None` takes them all.
+        /// How many bytes the writes that do not wait take before the stream would block; `None`
+        /// takes them all.
         takes: Cell<Option<usize>>,
+        /// The writes made by waiting (`send_parts`).
+        waited_writes: Cell<u32>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -752,6 +1061,7 @@ mod tests {
         }
 
         fn send_parts(&self, parts: &[&[u8]]) -> Result<(), Broken> {
+            self.waited_writes.set(self.waited_writes.get() + 1);
             self.writes.borrow_mut().push(parts.concat());
             Ok(())
         }
@@ -764,8 +1074,13 @@ mod tests {
             let taken = if self.full.get() {
                 0
             } else {
-                self.takes.get().map_or(all.len(), |n| n.min(all.len()))
+                self.takes
+                    .get()
+                    .map_or(all.len(), |left| left.min(all.len()))
             };
+            if let Some(left) = self.takes.get() {
+                self.takes.set(Some(left - taken));
+            }
             if taken > 0 {
                 self.writes.borrow_mut().push(all[..taken].to_vec());
             }
@@ -778,7 +1093,7 @@ mod tests {
 
         fn wait_writable(&self, timeout_us: u64) -> bool {
             self.room_waits.borrow_mut().push(timeout_us);
-            !self.full.get()
+            !self.full.get() && self.takes.get() != Some(0)
         }
 
         fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Broken> {
@@ -1250,46 +1565,58 @@ mod tests {
         );
     }
 
-    /// A write the stream takes only in part ends by waiting, so the frame leaves whole and in
-    /// order, and the frame after it asks the stream for room again, which answers by the wait; a
-    /// write taken whole again makes the question unneeded again.
+    /// A stream that takes half a frame and then would block leaves the call at once: the frame is
+    /// handed over, its rest is the link's to finish, nothing is written by waiting, and the
+    /// question of room says there is none while the rest is owed. A frame handed over meanwhile
+    /// waits behind it. The next step that finds the stream room writes the rest, then that frame,
+    /// in order; a write taken whole after that makes the question of room unneeded again.
     #[test]
-    fn a_write_taken_in_part_ends_by_waiting_and_the_next_frame_asks_for_room() {
+    fn a_frame_taken_half_is_finished_by_the_next_step_before_any_new_frame() {
         let link = link();
         link.socket.tries.set(true);
+        let frame = batch(b"twelve bytes");
+        let half = frame.len() / 2;
+        link.socket.takes.set(Some(half));
         assert_eq!(
-            link.send_blocking(b"first", Reliability::Reliable),
-            LinkSendOutcome::Sent
+            link.send_blocking(b"twelve bytes", Reliability::Reliable),
+            LinkSendOutcome::Sent,
+            "handed over: the rest is the link's"
         );
-        link.socket.takes.set(Some(3));
+        assert_eq!(*link.socket.writes.borrow(), [frame[..half].to_vec()]);
         assert_eq!(
-            link.send_blocking(b"second", Reliability::Reliable),
-            LinkSendOutcome::Sent
+            link.socket.waited_writes.get(),
+            0,
+            "nothing waited for the rest"
         );
-        assert_eq!(
-            link.socket.writes.borrow().concat(),
-            [batch(b"first"), batch(b"second")].concat(),
-            "both frames went out whole and in order"
-        );
-        assert_eq!(
-            link.socket.writes.borrow().len(),
-            3,
-            "the second in two writes: what was taken at once, and the rest"
-        );
-        assert!(link.socket.room_waits.borrow().is_empty());
-        link.socket.full.set(true);
         assert_eq!(
             link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
             RoomAnswer {
                 room: LinkRoom::Congested,
                 waited_us: 1_000
             },
-            "the stream is asked again, and has no room"
+            "no room while the rest is owed and the stream takes nothing"
         );
-        link.socket.full.set(false);
-        link.socket.takes.set(None);
         assert_eq!(
-            link.send_blocking(b"third", Reliability::Reliable),
+            link.send_blocking(b"next", Reliability::Reliable),
+            LinkSendOutcome::Sent,
+            "a frame handed over now waits behind the rest"
+        );
+        assert_eq!(link.socket.writes.borrow().len(), 1, "nothing more written");
+
+        link.socket.takes.set(None);
+        link.service();
+        assert_eq!(
+            link.socket.writes.borrow().concat(),
+            [frame, batch(b"next")].concat(),
+            "the rest first, then the frame behind it"
+        );
+        assert_eq!(link.socket.waited_writes.get(), 0);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free)
+        );
+        assert_eq!(
+            link.send_blocking(b"whole", Reliability::Reliable),
             LinkSendOutcome::Sent
         );
         assert_eq!(
@@ -1298,8 +1625,51 @@ mod tests {
         );
         assert_eq!(
             *link.socket.room_waits.borrow(),
-            [1_000],
-            "a write taken whole again: not asked"
+            [1_000, 1_000],
+            "asked while owing and once after; a write taken whole again: not asked"
+        );
+    }
+
+    /// A lent frame the stream takes only in part keeps its slot out of the pool until the rest is
+    /// written, so the session cannot be lent it again and write over the bytes still owed; once
+    /// the stream has taken them the slot is back.
+    #[test]
+    fn a_lent_frame_keeps_its_slot_until_the_stream_has_taken_it_all() {
+        let link = link();
+        link.socket.tries.set(true);
+        let grant = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a free slot");
+        let (base, _) = link.tx_slot_storage(grant.slot);
+        // SAFETY: the slot was just granted to this test, 32 bytes long, and five bytes past its
+        // headroom are inside it.
+        unsafe { core::ptr::copy_nonoverlapping(b"lent!".as_ptr(), base.add(grant.headroom), 5) };
+        link.socket.takes.set(Some(3));
+        assert_eq!(
+            link.tx_slot_send(
+                grant.slot,
+                grant.headroom,
+                5,
+                Reliability::Reliable,
+                Priority::DEFAULT
+            ),
+            LinkSendOutcome::Sent
+        );
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_some(),
+            "CONTROL: the other slot is free"
+        );
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_none(),
+            "the owed frame's slot is still held"
+        );
+        link.socket.takes.set(None);
+        link.service();
+        assert_eq!(link.socket.writes.borrow().concat(), batch(b"lent!"));
+        assert_eq!(link.socket.waited_writes.get(), 0);
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_some(),
+            "written, the slot is back"
         );
     }
 
