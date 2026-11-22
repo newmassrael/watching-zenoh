@@ -1155,7 +1155,7 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         ),
         None
     );
-    let (sink, _) = heard();
+    let (sink, subscribers) = heard();
     assert_ne!(
         engine.declare_matching_listener(
             FilterPlane::Subscribers,
@@ -1166,6 +1166,16 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
         0,
         "CONTROL: the subscribers' plane is held"
     );
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    // A peer's queryable is read past and kept nowhere: the declaration after it is heard.
+    router.send(Command::DeclareQueryable(2, "demo/**", false));
+    router.send(Command::UndeclareQueryable(2));
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the subscriber listener to match", || {
+        *subscribers.lock().unwrap() == [true]
+    });
     assert!(told.lock().unwrap().is_empty());
 }
 
