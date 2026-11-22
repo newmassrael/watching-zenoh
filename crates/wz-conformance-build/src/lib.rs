@@ -227,7 +227,16 @@ pub fn of_build(
             .iter()
             .any(|&feature| has_feature(feature));
     if coop && has_feature("engine-tokio") {
-        panic!("a pico build names one engine: `engine-tokio` beside a cooperative one is refused");
+        let named: Vec<&str> = items::COOP_ENGINE_FEATURES
+            .iter()
+            .copied()
+            .filter(|&feature| has_feature(feature))
+            .collect();
+        panic!(
+            "a pico build names one engine: `engine-tokio` beside {named:?} is refused; build \
+             the cooperative library with `--no-default-features`, or the tokio engine's \
+             without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
+        );
     }
     let platform = if abi == "pico" {
         items::PLATFORM_FEATURES
