@@ -25,14 +25,27 @@
 //! (`commons/zenoh-codec/src/zenoh/err.rs` @ `let bodec = Zenoh080Bounded::<u32>::new();`), so
 //! the receiver reads bytes from both libraries.
 //!
-//! The sender asks for its provider without waiting before it sends. Upstream builds the provider
-//! the first time anything asks and hands it to the promotion only once a later ask receives the
-//! built provider from the build (`io/zenoh-transport/src/common/shm/interop.rs` @
-//! `ProviderInitStateInner::Initializing(join_handle) => match join_handle.try_recv() {`). A
-//! BLOCKING ask receives it first (`zenoh-c/src/session.rs` @
-//! `waiter.recv_async().await.ok().flatten()`), after which the promotion never does. The
-//! non-blocking ask starts the build on both libraries and receives nothing, so every case below
-//! decides on the key alone.
+//! The sender asks for its provider, without blocking, until the provider has left its build, and
+//! only then sends. Upstream builds the provider the first time anything asks and hands it to the
+//! promotion only once a later ask receives the built provider from the build
+//! (`io/zenoh-transport/src/common/shm/interop.rs` @
+//! `ProviderInitStateInner::Initializing(join_handle) => match join_handle.try_recv() {`), and a
+//! message sent before that is sent as its bytes: a sender that waited a fixed time instead (2 s,
+//! once) left each case to how fast the host mapped the pool, and a hosted runner's was slower.
+//! A BLOCKING ask receives the build's word first (`zenoh-c/src/session.rs` @
+//! `waiter.recv_async().await.ok().flatten()`), after which upstream's promotion never does; that
+//! is upstream's defect and not a rule, and wz does not have it (its provider's state is a monitor
+//! every ask reads, `crates/wz-capi-c/src/shm.rs`,
+//! `a_blocking_ask_leaves_the_provider_ready_for_the_transport`). The non-blocking ask reads the
+//! word into the provider the transport uses on both libraries, so every case below decides on
+//! the key alone.
+//!
+//! No step of an exchange waits by the clock. The receiver is known to the sender by its
+//! subscriber on the key (the publisher's matching status), declared after the entity it takes the
+//! messages with; a reply's receiver asks once the sender's queryable is known to it (the
+//! querier's matching status), which the sender declares only once its provider is ready; the
+//! receiver leaves once it holds both messages, and the sender closes once it has left. The only
+//! times in the programs are deadlines that end a broken run.
 //!
 //! ## The subsystem: `transport/shared_memory/mode`
 //!
@@ -64,19 +77,27 @@ use wz_integration_tests::common::{
     zenoh_c_shared_library, PortReservation,
 };
 
-/// A sender that opens a session from the config file it is given, asks for the session's
-/// provider without waiting, and sends two plain payloads of one size of the kind its mode names:
-/// `put` puts them, `query` gets with each as the value, and `reply` answers each of the
-/// receiver's gets with one. Arguments: the config file, the key, the payload size in bytes, the
-/// mode.
-const SENDER: &str = r#"#include <stdio.h>
+/// A sender that opens a session from the config file it is given, waits for the session's
+/// provider to leave its build, waits for the receiver to be known, and sends two plain payloads
+/// of one size of the kind its mode names: `put` puts them, `query` gets with each as the value,
+/// and `reply` answers each of the receiver's gets with one; it closes once the receiver has left.
+/// Arguments: the config file, the key, the payload size in bytes, the mode.
+const SENDER: &str = r#"#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "zenoh.h"
 
+/* A bound on a broken run, never a wait the exchange relies on: every wait below ends on what it
+   waits for, and only a run where that never comes reaches this. */
+#define DEADLINE_MS 30000
+
 /* The payload every message carries. */
 static uint8_t *g_buf = NULL;
 static size_t g_size = 0;
+/* How many of the receiver's gets this session's queryable answered. */
+static atomic_int g_replied = 0;
 
 static void on_query(z_loaned_query_t *query, void *arg) {
     (void)arg;
@@ -84,6 +105,7 @@ static void on_query(z_loaned_query_t *query, void *arg) {
     z_bytes_copy_from_buf(&payload, g_buf, g_size);
     int rc = z_query_reply(query, z_query_keyexpr(query), z_move(payload), NULL);
     printf("reply rc=%d\n", rc);
+    atomic_fetch_add(&g_replied, 1);
 }
 
 static void get_with_value(const z_loaned_session_t *s, const z_loaned_keyexpr_t *ke, int i) {
@@ -98,11 +120,46 @@ static void get_with_value(const z_loaned_session_t *s, const z_loaned_keyexpr_t
     opts.timeout_ms = 1000;
     int rc = z_get(s, ke, "", z_move(closure), &opts);
     printf("get %d rc=%d\n", i, rc);
+    /* The get ends with its final, which the receiver's queryable sends once it has been handed
+       the value. */
     z_owned_reply_t reply;
     while (z_recv(z_loan(handler), &reply) == Z_OK) {
         z_drop(z_move(reply));
     }
     z_drop(z_move(handler));
+}
+
+/* Ask for the session's provider until it has left its build, taking nothing out of it. Upstream
+   builds the pool of `transport_optimization` in the background on first access and sends a
+   message above the threshold as a plain one until the pool is ready, so a wait by the clock
+   leaves the outcome to how fast the host maps the pool. The ask does not block: upstream's
+   blocking form receives the one word the build sends (`ShmProviderState::wait`), after which
+   the transport's own lazy provider never reads it and stays initializing, so every message
+   would go plain. A non-blocking ask reads that word into the provider the transport uses. */
+static z_shm_provider_state await_provider(const z_loaned_session_t *s) {
+    z_shm_provider_state state = Z_SHM_PROVIDER_STATE_INITIALIZING;
+    for (int waited_ms = 0; waited_ms < DEADLINE_MS; waited_ms += 10) {
+        z_owned_shared_shm_provider_t provider;
+        z_internal_shared_shm_provider_null(&provider);
+        z_obtain_shm_provider(s, false, &provider, &state);
+        z_shared_shm_provider_drop(z_shared_shm_provider_move(&provider));
+        if (state != Z_SHM_PROVIDER_STATE_INITIALIZING) { break; }
+        z_sleep_ms(10);
+    }
+    return state;
+}
+
+/* Wait until the publisher's matching status reads `want`: true once the receiver's
+   subscriber is known here, false once the receiver has left. */
+static bool await_matching(const z_loaned_publisher_t *pub, bool want) {
+    z_matching_status_t status;
+    status.matching = !want;
+    for (int waited_ms = 0; waited_ms < DEADLINE_MS; waited_ms += 10) {
+        if (z_publisher_get_matching_status(pub, &status) != Z_OK) { return false; }
+        if (status.matching == want) { return true; }
+        z_sleep_ms(10);
+    }
+    return false;
 }
 
 int main(int argc, char **argv) {
@@ -123,7 +180,12 @@ int main(int argc, char **argv) {
     if (z_open(&s, z_move(config), NULL) != Z_OK) { printf("open failed\n"); return 4; }
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, argv[2]) != Z_OK) { return 5; }
-    /* The queryable that replies is declared first, so that the receiver knows it when it asks. */
+
+    /* The provider first, so that every message below meets the key and not the build. */
+    printf("provider state=%d\n", (int)await_provider(z_loan(s)));
+
+    /* The queryable that replies is declared after the provider, so the receiver, which asks once
+       it sees the queryable, asks a session whose provider is ready. */
     z_owned_queryable_t qable;
     z_internal_queryable_null(&qable);
     if (reply) {
@@ -134,32 +196,32 @@ int main(int argc, char **argv) {
             return 7;
         }
     }
-    /* Let the receiver's declaration reach this session. */
-    z_sleep_ms(1500);
 
-    /* Start the provider's build and take nothing out of it. */
-    z_owned_shared_shm_provider_t provider;
-    z_internal_shared_shm_provider_null(&provider);
-    z_shm_provider_state state = Z_SHM_PROVIDER_STATE_ERROR;
-    z_obtain_shm_provider(z_loan(s), false, &provider, &state);
-    z_shared_shm_provider_drop(z_shared_shm_provider_move(&provider));
-    z_sleep_ms(2000);
+    /* The receiver is present once its subscriber on the key is known here; it declares that
+       subscriber after the entity it takes the messages with, and declarations arrive in order,
+       so that entity is known too. */
+    z_owned_publisher_t presence;
+    if (z_declare_publisher(z_loan(s), &presence, z_loan(ke), NULL) != Z_OK) {
+        printf("publisher failed\n");
+        return 8;
+    }
+    if (!await_matching(z_loan(presence), true)) { printf("receiver never matched\n"); return 9; }
 
     for (int i = 0; put && i < 2; i++) {
         z_owned_bytes_t payload;
         z_bytes_copy_from_buf(&payload, g_buf, g_size);
         int rc = z_put(z_loan(s), z_loan(ke), z_move(payload), NULL);
         printf("put %d rc=%d\n", i, rc);
-        z_sleep_ms(300);
     }
     for (int i = 0; query && i < 2; i++) {
         get_with_value(z_loan(s), z_loan(ke), i);
-        z_sleep_ms(300);
     }
-    /* The receiver asks from 5 s after it opened, which is after this session started its
-       provider's build. */
-    if (reply) { z_sleep_ms(4500); }
-    z_sleep_ms(1000);
+
+    /* The receiver leaves once it holds both messages, so its leaving is when this session may
+       close without taking a message with it. */
+    if (!await_matching(z_loan(presence), false)) { printf("receiver never left\n"); return 10; }
+    printf("replied=%d\n", atomic_load(&g_replied));
+    z_drop(z_move(presence));
     z_drop(z_move(qable));
     z_session_drop(z_session_move(&s));
     free(g_buf);
@@ -170,17 +232,24 @@ int main(int argc, char **argv) {
 /// A receiver with the real library's defaults that prints, for each payload it is handed of the
 /// kind its mode names, whether the payload is a shared-memory buffer and how long it is: `put`
 /// subscribes, `query` declares a queryable that reads each query's value, and `reply` gets
-/// twice, 5 s after it opened, and reads each reply. Arguments: the endpoint to listen on, the
-/// key, how many seconds a subscriber or a queryable runs, the mode.
-const RECEIVER: &str = r#"#include <stdio.h>
+/// twice once the sender's queryable is known and reads each reply. Every mode also holds a
+/// subscriber on the key, by which the sender knows it is present, and leaves once it holds both
+/// payloads. Arguments: the endpoint to listen on, the key, the deadline in seconds that ends a
+/// broken run, the mode.
+const RECEIVER: &str = r#"#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "zenoh.h"
+
+/* How many payloads this receiver has been handed. */
+static atomic_int g_handed = 0;
 
 static void report(const z_loaned_bytes_t *payload) {
     const z_loaned_shm_t *shm = NULL;
     int rc = z_bytes_as_loaned_shm(payload, &shm);
     printf("sample: shm=%s len=%zu\n", rc == 0 ? "yes" : "no", z_bytes_len(payload));
+    atomic_fetch_add(&g_handed, 1);
 }
 
 static void on_sample(z_loaned_sample_t *sample, void *arg) {
@@ -188,10 +257,16 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
     report(z_sample_payload(sample));
 }
 
+/* The subscriber that only says this receiver is present (`get` and `reply` modes). */
+static void on_presence(z_loaned_sample_t *sample, void *arg) {
+    (void)sample;
+    (void)arg;
+}
+
 static void on_query(z_loaned_query_t *query, void *arg) {
     (void)arg;
     const z_loaned_bytes_t *payload = z_query_payload(query);
-    if (payload == NULL) { printf("sample: no value\n"); return; }
+    if (payload == NULL) { printf("sample: no value\n"); atomic_fetch_add(&g_handed, 1); return; }
     report(payload);
 }
 
@@ -217,9 +292,12 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc != 5) { return 2; }
     const char *mode = argv[4];
-    if (strcmp(mode, "put") != 0 && strcmp(mode, "query") != 0 && strcmp(mode, "reply") != 0) {
-        return 2;
-    }
+    int put = strcmp(mode, "put") == 0;
+    int query = strcmp(mode, "query") == 0;
+    int reply = strcmp(mode, "reply") == 0;
+    if (!put && !query && !reply) { return 2; }
+    /* A bound on a broken run, never a wait the exchange relies on. */
+    int deadline_ms = atoi(argv[3]) * 1000;
     z_owned_config_t config;
     z_config_default(&config);
     char listen[512];
@@ -232,33 +310,59 @@ int main(int argc, char **argv) {
     if (rc != Z_OK) { return 3; }
     z_view_keyexpr_t ke;
     z_view_keyexpr_from_str(&ke, argv[2]);
-    if (strcmp(mode, "put") == 0) {
-        z_owned_closure_sample_t cb;
-        z_closure(&cb, on_sample, NULL, NULL);
-        z_owned_subscriber_t sub;
-        if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(cb), NULL) != Z_OK) {
-            printf("declare failed\n");
-            return 4;
-        }
-        z_sleep_s((size_t)atoi(argv[3]));
-        z_drop(z_move(sub));
-    } else if (strcmp(mode, "query") == 0) {
+
+    /* The entity the messages are taken with first, then the subscriber the sender reads this
+       receiver's presence from; in `put` mode the two are one. */
+    z_owned_queryable_t qable;
+    z_internal_queryable_null(&qable);
+    if (query) {
         z_owned_closure_query_t cb;
         z_closure(&cb, on_query, NULL, NULL);
-        z_owned_queryable_t qable;
         if (z_declare_queryable(z_loan(s), &qable, z_loan(ke), z_move(cb), NULL) != Z_OK) {
             printf("declare failed\n");
             return 4;
         }
-        z_sleep_s((size_t)atoi(argv[3]));
-        z_drop(z_move(qable));
+    }
+    z_owned_closure_sample_t scb;
+    if (put) {
+        z_closure(&scb, on_sample, NULL, NULL);
     } else {
-        z_sleep_ms(5000);
+        z_closure(&scb, on_presence, NULL, NULL);
+    }
+    z_owned_subscriber_t sub;
+    if (z_declare_subscriber(z_loan(s), &sub, z_loan(ke), z_move(scb), NULL) != Z_OK) {
+        printf("declare failed\n");
+        return 4;
+    }
+
+    if (reply) {
+        /* Ask once the sender's queryable is known here, which the sender declares only after
+           its provider is ready. */
+        z_owned_querier_t querier;
+        if (z_declare_querier(z_loan(s), &querier, z_loan(ke), NULL) != Z_OK) {
+            printf("querier failed\n");
+            return 5;
+        }
+        z_matching_status_t status;
+        status.matching = false;
+        for (int waited_ms = 0; waited_ms < deadline_ms && !status.matching; waited_ms += 10) {
+            if (z_querier_get_matching_status(z_loan(querier), &status) != Z_OK) { break; }
+            if (!status.matching) { z_sleep_ms(10); }
+        }
+        z_drop(z_move(querier));
+        if (!status.matching) { printf("queryable never matched\n"); return 6; }
         for (int i = 0; i < 2; i++) {
             ask(z_loan(s), z_loan(ke));
-            z_sleep_ms(300);
+        }
+    } else {
+        /* Leave once both messages are in hand. */
+        for (int waited_ms = 0; waited_ms < deadline_ms && atomic_load(&g_handed) < 2;
+             waited_ms += 10) {
+            z_sleep_ms(10);
         }
     }
+    z_drop(z_move(sub));
+    z_drop(z_move(qable));
     z_drop(z_move(s));
     return 0;
 }
@@ -310,9 +414,9 @@ int main(int argc, char **argv) {
 
 const KEY: &str = "demo/example/shm-session-keys";
 
-/// How long a receiver's subscriber or queryable runs: the sender's settle, warm-up and two puts
-/// or gets fit inside it.
-const RECEIVER_SECONDS: &str = "8";
+/// The receiver's deadline: it ends a run in which the sender never comes, and no exchange waits
+/// for it (the receiver leaves once it holds both payloads).
+const RECEIVER_SECONDS: &str = "60";
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
 fn oracle_or_note() -> Option<PathBuf> {
