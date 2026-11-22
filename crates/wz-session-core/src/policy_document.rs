@@ -930,26 +930,38 @@ fn apply<'a>(
     at: usize,
     statement: &Statement<'a>,
 ) -> Result<(), Reason<'a>> {
+    let index = select_policy(
+        table,
+        &mut resolved.policy,
+        &layer.statements[..at],
+        statement,
+    )?;
+    resolved.provenance.origins[index] = layer.origin;
+    Ok(())
+}
+
+/// `statement`, which its layer states after `earlier`, selected in `snapshot` by the policies of
+/// `table`, which a refusal leaves as it was: the place of the policy in `table`.
+fn select_policy<'a>(
+    table: &[PolicyEntry; POLICY_COUNT],
+    snapshot: &mut SessionPolicy,
+    earlier: &[Statement<'a>],
+    statement: &Statement<'a>,
+) -> Result<usize, Reason<'a>> {
     let (policy, value) = (statement.policy, statement.value);
     let Some(index) = table.iter().position(|entry| entry.id() == policy) else {
         return Err(Reason::UnknownPolicy { policy, value });
     };
     let entry = &table[index];
     let id = entry.id();
-    if layer.statements[..at]
-        .iter()
-        .any(|earlier| earlier.policy == policy)
-    {
+    if earlier.iter().any(|stated| stated.policy == policy) {
         return Err(Reason::StatedTwice { policy: id, value });
     }
     if entry.binding() == Binding::Build {
         return Err(Reason::BuildBound { policy: id, value });
     }
-    match entry.select(&mut resolved.policy, value) {
-        Ok(()) => {
-            resolved.provenance.origins[index] = layer.origin;
-            Ok(())
-        }
+    match entry.select(snapshot, value) {
+        Ok(()) => Ok(index),
         Err(SelectError::NoSuchValue) => Err(Reason::UnknownValue {
             policy: id,
             value,
@@ -1043,6 +1055,25 @@ fn apply_limit<'a>(
     earlier: &[LimitStatement<'a>],
     statement: &LimitStatement<'a>,
 ) -> Result<(), Reason<'a>> {
+    let runtime = holds_runtime.then_some(&mut resolved.runtime);
+    match select_stated_limit(&mut resolved.session, runtime, earlier, statement)? {
+        FoundLimit::Session(index) => resolved.provenance.session[index] = origin,
+        FoundLimit::Runtime(index) => resolved.provenance.runtime[index] = origin,
+        // A capacity is refused before anything is selected, so it is never what was selected.
+        FoundLimit::Capacity(_) => {}
+    }
+    Ok(())
+}
+
+/// `statement`, which its layer states after `earlier`, selected in `session`, or in `runtime`
+/// for a limit of a runtime when the creator holds one (`Some`), which a refusal leaves as they
+/// were: where the limit was found.
+fn select_stated_limit<'a>(
+    session: &mut SessionLimits,
+    runtime: Option<&mut RuntimeLimits>,
+    earlier: &[LimitStatement<'a>],
+    statement: &LimitStatement<'a>,
+) -> Result<FoundLimit, Reason<'a>> {
     let (limit, value) = (statement.limit, statement.value);
     let Some(found) = FoundLimit::find(limit) else {
         return Err(Reason::UnknownLimit { limit });
@@ -1052,24 +1083,21 @@ fn apply_limit<'a>(
         return Err(Reason::LimitStatedTwice { limit: id });
     }
     match found {
-        FoundLimit::Capacity(_) => Err(Reason::LimitBuildOnly { limit: id }),
+        FoundLimit::Capacity(_) => return Err(Reason::LimitBuildOnly { limit: id }),
         // Before the scope and the value: a limit no machine reads is refused whatever is stated.
-        _ if !found.is_read() => Err(Reason::LimitNotRead { limit: id }),
-        FoundLimit::Session(index) => {
-            select_limit(&SESSION_LIMITS[index], &mut resolved.session, value)?;
-            resolved.provenance.session[index] = origin;
-            Ok(())
-        }
-        FoundLimit::Runtime(_) if !holds_runtime => Err(Reason::LimitWrongScope {
-            limit: id,
-            scope: Scope::Runtime,
-        }),
-        FoundLimit::Runtime(index) => {
-            select_limit(&RUNTIME_LIMITS[index], &mut resolved.runtime, value)?;
-            resolved.provenance.runtime[index] = origin;
-            Ok(())
-        }
+        _ if !found.is_read() => return Err(Reason::LimitNotRead { limit: id }),
+        FoundLimit::Session(index) => select_limit(&SESSION_LIMITS[index], session, value)?,
+        FoundLimit::Runtime(index) => match runtime {
+            Some(runtime) => select_limit(&RUNTIME_LIMITS[index], runtime, value)?,
+            None => {
+                return Err(Reason::LimitWrongScope {
+                    limit: id,
+                    scope: Scope::Runtime,
+                })
+            }
+        },
     }
+    Ok(found)
 }
 
 /// `value` selected in `snapshot` through `entry`, which refuses what the build's domain leaves
@@ -1136,6 +1164,68 @@ pub fn resolve_under<'a>(
     } else {
         Err(refusals)
     }
+}
+
+/// [`resolve_under`] for a creator that keeps no record of where each value came from, written
+/// where its snapshots lie: the profile `overrides` names and then its statements over `policy`,
+/// and its limits over `limits`, the snapshot of a session's, for a creator that holds no
+/// runtime's limits ([`Base::session`]). Over the same snapshots it accepts what `resolve_under`
+/// accepts and writes the snapshots that resolves.
+///
+/// No [`Resolved`] and no [`Refusals`] is made: the origin of every policy and limit and room
+/// for eight refusals are what make a resolution heavy on the stack of an open that is to stay
+/// shallow. The first refusal ends the resolution and is answered; what was written by then is no
+/// resolution, and the caller drops it.
+// The refusal is held inline because the core has no heap to box it in.
+#[allow(clippy::result_large_err)]
+pub fn resolve_under_into<'a>(
+    overrides: Overrides<'_, 'a>,
+    policy: &mut SessionPolicy,
+    limits: &mut SessionLimits,
+) -> Result<(), Refusal<'a>> {
+    if let Some(id) = overrides.profile {
+        let Some(profile) = Profile::find(id) else {
+            return Err(Refusal {
+                layer: Origin::Api,
+                reason: Reason::UnknownProfile { profile: id },
+            });
+        };
+        write_layer(&POLICIES, policy, &profile.layer())?;
+    }
+    let api = Layer {
+        origin: Origin::Api,
+        statements: overrides.statements,
+    };
+    write_layer(&POLICIES, policy, &api)?;
+    for (at, statement) in overrides.limits.iter().enumerate() {
+        select_stated_limit(limits, None, &overrides.limits[..at], statement).map_err(
+            |reason| Refusal {
+                layer: Origin::Api,
+                reason,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Each statement of `layer` selected in `snapshot` by the policies of `table`, in its order, up
+/// to the first that is refused, which is answered.
+// The refusal is held inline because the core has no heap to box it in.
+#[allow(clippy::result_large_err)]
+fn write_layer<'a>(
+    table: &[PolicyEntry; POLICY_COUNT],
+    snapshot: &mut SessionPolicy,
+    layer: &Layer<'_, 'a>,
+) -> Result<(), Refusal<'a>> {
+    for (at, statement) in layer.statements.iter().enumerate() {
+        select_policy(table, snapshot, &layer.statements[..at], statement).map_err(|reason| {
+            Refusal {
+                layer: layer.origin,
+                reason,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// The profile of the build whose id is `id`, or `None` when `id` is; an id the build has no
@@ -2342,6 +2432,99 @@ mod tests {
             if let Outside::Pinned { only: kept } = why {
                 assert_eq!(kept, build, "{limit}");
             }
+        }
+    }
+
+    /// The resolution written into the snapshots answers what `resolve_under` answers for a
+    /// session's creator: the same snapshots when it accepts, and the first of its refusals when
+    /// it refuses, for no statement, a policy, a profile, a profile the build does not have, a
+    /// policy stated twice, a refused policy beside a limit, a limit, a limit the build does not
+    /// have, a limit no machine reads and a runtime's limit. Turned red by a path that selects
+    /// otherwise than the resolution that records where each value came from.
+    #[test]
+    fn a_resolution_written_into_the_snapshots_answers_what_resolve_under_answers() {
+        let base = SessionPolicy::defaults();
+        let ring = another::<EventRingFull>().unwrap_or(EventRingFull::DEFAULT);
+        let stated = [Statement::new("event-ring-full", id_of(ring))];
+        let twice = [
+            Statement::new("event-ring-full", id_of(ring)),
+            Statement::new("event-ring-full", id_of(EventRingFull::DEFAULT)),
+        ];
+        let no_such_policy = [Statement::new("no-such-policy", "on")];
+        let limit = [LimitStatement::new(
+            "MAX_SUBSCRIPTIONS",
+            LimitValue::Integer(other_subscriptions()),
+        )];
+        let no_such_limit = [LimitStatement::new("NO_SUCH_LIMIT", LimitValue::Integer(1))];
+        let not_read = [LimitStatement::new(
+            unread(&SESSION_LIMITS).id(),
+            LimitValue::Integer(1),
+        )];
+        let tasks = [LimitStatement::new("MAX_TASKS", LimitValue::Integer(4))];
+        let cases = [
+            Overrides::default(),
+            Overrides {
+                profile: None,
+                statements: &stated,
+                limits: &[],
+            },
+            Overrides {
+                profile: Some("upstream"),
+                statements: &[],
+                limits: &[],
+            },
+            Overrides {
+                profile: Some("no-such-profile"),
+                statements: &stated,
+                limits: &[],
+            },
+            Overrides {
+                profile: None,
+                statements: &twice,
+                limits: &[],
+            },
+            Overrides {
+                profile: None,
+                statements: &no_such_policy,
+                limits: &limit,
+            },
+            limits_alone(&limit),
+            limits_alone(&no_such_limit),
+            limits_alone(&not_read),
+            limits_alone(&tasks),
+        ];
+        for overrides in cases {
+            let recorded = resolve_under(base, overrides);
+            let mut policy = base;
+            let mut limits = SessionLimits::defaults();
+            let written = resolve_under_into(overrides, &mut policy, &mut limits);
+            match recorded {
+                Ok(resolved) => {
+                    assert_eq!(written, Ok(()), "{overrides:?}");
+                    assert_eq!(policy, resolved.policy, "{overrides:?}");
+                    assert_eq!(limits, resolved.limits.session, "{overrides:?}");
+                }
+                Err(refusals) => assert_eq!(
+                    written,
+                    Err(*refusals.iter().next().expect("a refusal is held")),
+                    "{overrides:?}"
+                ),
+            }
+        }
+        // CONTROL: a value stated over the build default is written into the snapshot.
+        if ring != EventRingFull::DEFAULT {
+            let mut policy = base;
+            let mut limits = SessionLimits::defaults();
+            let overrides = Overrides {
+                profile: None,
+                statements: &stated,
+                limits: &[],
+            };
+            assert_eq!(
+                resolve_under_into(overrides, &mut policy, &mut limits),
+                Ok(())
+            );
+            assert_ne!(policy, base, "the statement moved the snapshot");
         }
     }
 

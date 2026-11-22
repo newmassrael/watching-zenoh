@@ -275,12 +275,24 @@ fn pico_group(
     }
 }
 
-/// The policies a session [`z_open`] opens from a config runs under, and where each came from: the
+/// The policies and the session limits a session [`z_open`] opens from a config runs under: the
 /// one place this ABI decides them, resolved once and handed to the engine and to the session's
-/// handle. `policies` is what the config's doors stated (`ConfigState::policies`), composed over
-/// the build defaults ([`PolicyStatements::compose`]); `Z_ERR_CONFIG_INVALID_VALUE` when the build
-/// refuses any of it. The doors check a change through this before they keep it, so they and the
-/// open cannot judge a config differently.
+/// handle. `policies` is what the config's doors stated (`ConfigState::policies`), written over
+/// the build defaults ([`PolicyStatements::compose_into`]); `Z_ERR_CONFIG_INVALID_VALUE` when the
+/// build refuses any of it. The doors check a change through this before they keep it, so they
+/// and the open cannot judge a config differently.
+pub(crate) fn resolve_snapshots(
+    policies: &PolicyStatements,
+) -> Result<(SessionPolicy, SessionLimits), ZResult> {
+    let mut policy = SessionPolicy::defaults();
+    let mut limits = SessionLimits::defaults();
+    policies.compose_into(&mut policy, &mut limits)?;
+    Ok((policy, limits))
+}
+
+/// [`resolve_snapshots`] with where each value came from, which no door of this ABI reports: what
+/// the tests read the doors and the open against.
+#[cfg(test)]
 pub(crate) fn resolve_policy(
     policies: &PolicyStatements,
 ) -> Result<wz_session_core::policy_document::Resolved, ZResult> {
@@ -754,8 +766,7 @@ unsafe fn open_request(
     // comes back on another locator is found there and not here. The scout runs under the
     // snapshot of the open it finds a node for, and a config whose policies or limits the
     // build refuses opens nothing and scouts for nothing.
-    let resolved = resolve_policy(&cfg.policies)?;
-    let (policy, limits) = (resolved.policy, resolved.limits.session);
+    let (policy, limits) = resolve_snapshots(&cfg.policies)?;
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -1055,7 +1066,7 @@ struct OpenRequest {
     /// rustls configs from it, the cooperative engine the Mbed TLS channel's dial and listen.
     #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
     tls: CapiTlsConfig,
-    /// The policies the session runs under ([`resolve_policy`]), handed to the engine and kept
+    /// The policies the session runs under ([`resolve_snapshots`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
     /// The session limits the session runs under, resolved with [`Self::policy`]: the engine's

@@ -78,7 +78,7 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
             "the open refuses this config: its mode is neither client nor peer",
         )
     })?;
-    crate::session::resolve_policy(&cfg.policies).map_err(|code| {
+    crate::session::resolve_snapshots(&cfg.policies).map_err(|code| {
         (
             code,
             "the open refuses this config: the build refuses a policy it states",

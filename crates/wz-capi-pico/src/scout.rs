@@ -832,8 +832,7 @@ pub unsafe extern "C" fn z_scout(
     // the build refuses is refused with the open's code.
     let unstated = PolicyStatements::default();
     let snapshots =
-        crate::session::resolve_policy(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies))
-            .map(|resolved| (resolved.policy, resolved.limits.session));
+        crate::session::resolve_snapshots(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies));
     // The window's clock: the time base the config names, which `cfg` holds and is kept for the
     // window, or the system's.
     let clock = window::clock_of(cfg.as_deref());
