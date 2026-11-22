@@ -9768,6 +9768,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(used)
     }
 
+    /// [`Self::handle_inbound_consuming_into`] for the reader of the transport messages that carry
+    /// no data: a `Frame` or a `Fragment` is not decoded (`inbound::parse_control_consuming_into`).
+    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
+    pub(crate) fn handle_control_consuming_into(
+        &self,
+        bytes: &[u8],
+        out: &mut crate::inbound::InboundFrame,
+    ) -> Result<usize, crate::parse_error::InboundParseError> {
+        let used = crate::inbound::parse_control_consuming_into(bytes, out)?;
+        self.observe_inbound(out);
+        Ok(used)
+    }
+
     /// [`Self::handle_inbound_consuming_into`] over a unit that can be shared (see
     /// [`Self::handle_inbound_consuming_in`]).
     #[cfg(feature = "alloc")]

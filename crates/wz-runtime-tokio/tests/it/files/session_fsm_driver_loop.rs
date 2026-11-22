@@ -1780,6 +1780,42 @@ async fn a_message_that_is_not_a_frame_is_read_where_it_lies_and_the_datagram_re
     );
 }
 
+/// A Frame the in-place reader refuses is refused as the copying path refuses it, and read no
+/// further than its head: one whose head does not decode is a parse error, and one whose own
+/// extension chain holds an extension the Frame does not define, with the M bit set, is refused
+/// with nothing to report; either is a framing error, which takes the session to Closing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_the_in_place_reader_refuses_is_a_framing_error_read_no_further_than_its_head() {
+    use wz_session_core::drive::{dispatch_datagram, CopyReason, DatagramPath};
+    use wz_session_core::driver_loop::IterationEvent;
+    use wz_session_core::network_message::new_record_buf;
+
+    // [Frame(reliable)] with no sequence number; [Frame(reliable, Z, sn 1)] whose one extension
+    // is a unit of id 0xF with the M bit, which no Frame defines.
+    for (unit, reason, parse_error) in [
+        (vec![0x25], CopyReason::FrameHeadUndecodable, true),
+        (vec![0xA5, 0x01, 0x1F], CopyReason::FrameExtRefused, false),
+    ] {
+        let (actions, mut engine) = fresh_setup();
+        drive_to_sent_init_syn(&mut engine);
+        let mut record = new_record_buf();
+        let mut parse_errors = Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Poll(outcome) = event {
+                parse_errors.push(matches!(outcome, DriverLoopOutcome::ParseError(_)));
+            }
+        };
+        let path = dispatch_datagram(&unit, &actions, &mut engine, &mut record, &mut sink);
+        assert_eq!(path, DatagramPath::Copied(reason), "{unit:?}");
+        assert_eq!(parse_errors, [parse_error], "{unit:?}: one outcome");
+        assert_eq!(
+            engine.get_current_state(),
+            S::Closing,
+            "{unit:?}: the framing error closes"
+        );
+    }
+}
+
 /// A transport message behind the last record of a Frame is the next unit of the batch as well,
 /// where a frame used to take it for a record it could not read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

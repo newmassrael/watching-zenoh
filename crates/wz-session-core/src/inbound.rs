@@ -838,9 +838,23 @@ pub fn parse_inbound_consuming_into(
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
     #[cfg(feature = "alloc")]
-    let used = parse_unit_into(bytes, None, out)?;
+    let used = parse_unit_into::<true>(bytes, None, out)?;
     #[cfg(not(feature = "alloc"))]
-    let used = parse_unit_into(bytes, out)?;
+    let used = parse_unit_into::<true>(bytes, out)?;
+    refuse_unnamed_zid(out)?;
+    Ok(used)
+}
+
+/// [`parse_inbound_consuming_into`] for the reader of the transport messages that carry no data:
+/// a `Frame` or a `Fragment` is not decoded and reads as a message it does not take
+/// ([`InboundFrame::Unknown`]). The receive that reads its data units where they lie hands this
+/// reader every other unit, so it links no owned decode of a `Frame` or a `Fragment` through it.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+pub(crate) fn parse_control_consuming_into(
+    bytes: &[u8],
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
+    let used = parse_unit_into::<false>(bytes, None, out)?;
     refuse_unnamed_zid(out)?;
     Ok(used)
 }
@@ -852,7 +866,7 @@ pub fn parse_inbound_consuming_in_into(
     unit: &RxBytes,
     out: &mut InboundFrame,
 ) -> Result<usize, InboundParseError> {
-    let used = parse_unit_into(unit.as_slice(), Some(unit), out)?;
+    let used = parse_unit_into::<true>(unit.as_slice(), Some(unit), out)?;
     refuse_unnamed_zid(out)?;
     Ok(used)
 }
@@ -1233,6 +1247,10 @@ pub(crate) fn parse_fragment_in_place(
 /// they add to the deepest point of the stack; as a function of its own they are gone when it
 /// returns, and only the 720 bytes of its result stay.
 ///
+/// `DATA` says whether a `Frame` and a `Fragment` are decoded: the reader of a unit that carries
+/// no data (`parse_control_consuming_into`) is never handed one to read, and without it each
+/// reads as a message this decoder does not take, as a build with no allocator reads them.
+///
 /// The message is written into `out`, where the caller keeps it, and what is returned is where
 /// it ended: a message of 720 bytes handed back by value is a copy of it in every frame it passes
 /// through (the arm that builds it, this function, the one that decodes the unit, the one that
@@ -1240,7 +1258,7 @@ pub(crate) fn parse_fragment_in_place(
 /// `out` is left as it was when the unit does not decode and as far decoded as it got when a
 /// chain is not kept (a handshake chain past the bound, or a heap chain that does not decode).
 #[inline(never)]
-fn parse_unit_into(
+fn parse_unit_into<const DATA: bool>(
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
     out: &mut InboundFrame,
@@ -1269,7 +1287,7 @@ fn parse_unit_into(
         #[cfg(feature = "codec-close")]
         wire_const::T_MID_CLOSE => parse_close(bytes, out),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-        wire_const::T_MID_FRAME => {
+        wire_const::T_MID_FRAME if DATA => {
             let (head, payload_at) = decode_frame_head::<Vec<ExtEntryOwned>>(bytes)?;
             // The payload is the tail of the unit. With an origin it is a range
             // of it (a second reference to the storage when the unit is lent);
@@ -1298,7 +1316,7 @@ fn parse_unit_into(
             Ok(bytes.len())
         }
         #[cfg(all(feature = "alloc", feature = "reassembly"))]
-        wire_const::T_MID_FRAGMENT => {
+        wire_const::T_MID_FRAGMENT if DATA => {
             // The head mirrors a Frame's: the SN and the Z-gated chain after the
             // header, whose R (reliable) and M (more) bits are the flags; the
             // payload is the tail of the unit.
@@ -1391,9 +1409,9 @@ fn parse_unit(
 ) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut frame = InboundFrame::Unknown { mid: 0 };
     #[cfg(feature = "alloc")]
-    let used = parse_unit_into(bytes, origin, &mut frame)?;
+    let used = parse_unit_into::<true>(bytes, origin, &mut frame)?;
     #[cfg(not(feature = "alloc"))]
-    let used = parse_unit_into(bytes, &mut frame)?;
+    let used = parse_unit_into::<true>(bytes, &mut frame)?;
     Ok((frame, used))
 }
 

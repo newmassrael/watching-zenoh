@@ -2311,23 +2311,67 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
         (outcome, consumed)
     };
     #[cfg(feature = "alloc")]
-    let (outcome, consumed) = dispatch_control_in_place(unit, actions, engine);
+    let (outcome, consumed) = match refused_data_unit(unit, reason, actions, engine) {
+        Some(outcome) => (outcome, unit.len()),
+        None => dispatch_control_in_place(unit, actions, engine),
+    };
     on_event.event(crate::driver_loop::IterationEvent::Poll(&outcome));
     (DatagramPath::Copied(reason), consumed)
 }
 
+/// [`dispatch_copied`]'s answer to a `Frame` or a `Fragment` the in-place reader did not read,
+/// the copying path's answer made without decoding the unit a second time: one whose own
+/// extension chain a participant must refuse takes `framing.error`, and one whose head does not
+/// decode takes it too and reports the error its head's decode gives, each as the whole of its
+/// unit. `None` for any other unit, which [`dispatch_control_in_place`] reads: that reader
+/// decodes no `Frame` or `Fragment`, so a receive that is in place links no owned decode of
+/// either through it.
+#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
+    unit: &[u8],
+    reason: CopyReason,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> Option<DriverLoopOutcome> {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    let outcome = match reason {
+        // The head decoded: one transport message was read, as the copying path counts it.
+        CopyReason::FrameExtRefused | CopyReason::FragmentExtRefused => {
+            #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+            note_rx_transport_message(actions);
+            DriverLoopOutcome::AdvancedFsm
+        }
+        CopyReason::FrameHeadUndecodable => match crate::inbound::parse_frame_in_place(unit) {
+            Some(Err(err)) => DriverLoopOutcome::ParseError(err),
+            _ => DriverLoopOutcome::AdvancedFsm,
+        },
+        #[cfg(feature = "reassembly")]
+        CopyReason::FragmentHeadUndecodable => {
+            match crate::inbound::parse_fragment_in_place(unit) {
+                Some(Err(err)) => DriverLoopOutcome::ParseError(err),
+                _ => DriverLoopOutcome::AdvancedFsm,
+            }
+        }
+        _ => return None,
+    };
+    #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
+    let _ = actions;
+    engine.process_event(E::FramingError);
+    Some(outcome)
+}
+
 /// [`dispatch_copied`]'s read of a unit on a build with an allocator: the transport message at
-/// its front decoded where the link holds it (`SessionLinkActions::handle_inbound_consuming_into`,
-/// the decode the copying path makes of it), judged by [`decide_admitted`] when it is an event of
-/// the session's machine, and the engine given what the judgement decided once the reading's
-/// frame is gone. Answered with where the message ended: all of the unit when its extent is
-/// unknown or it does not decode, as the copying path reads such a unit no further.
+/// its front decoded where the link holds it (`SessionLinkActions::handle_control_consuming_into`,
+/// the decode the copying path makes of every message that carries no data), judged by
+/// [`decide_admitted`] when it is an event of the session's machine, and the engine given what the
+/// judgement decided once the reading's frame is gone. Answered with where the message ended: all
+/// of the unit when its extent is unknown or it does not decode, as the copying path reads such a
+/// unit no further.
 ///
-/// What it does not have is the copying path's decode of a `Frame`'s records into owned
-/// messages: a `Frame` comes here only when its head does not decode or its chain is refused,
-/// which the decode and the judgement refuse as the copying path does, and one that does not is a
-/// framing error, as on a build with no allocator. So a build whose receive is in place links no
-/// owned decode of a frame through it.
+/// What it does not have is the copying path's decode of a `Frame` or a `Fragment`: the one the
+/// in-place reader refused is answered before this ([`refused_data_unit`]), and one that still
+/// reaches it reads as a message the decode does not take, a framing error, as on a build with no
+/// allocator. So a build whose receive is in place links no owned decode of either through it.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 #[inline(never)]
 fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
@@ -2357,7 +2401,7 @@ fn read_control_in_place<R: SessionRuntime, T: TimeSource>(
 ) {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     let mut frame = InboundFrame::Unknown { mid: 0 };
-    let parsed = actions.handle_inbound_consuming_into(unit, &mut frame);
+    let parsed = actions.handle_control_consuming_into(unit, &mut frame);
     // R2825 — one transport message decoded off the front of the unit.
     #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
     if parsed.is_ok() {
