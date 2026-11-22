@@ -678,6 +678,9 @@ transport-link-unixpipe,transport-link-ws|"
     # receive): a Push and a get's reply read where the link's buffer holds them reach the
     # subscriber and the get. `query` is the get's.
     "wz-capi-coop|hook|query|tests::in_place::"
+    # The same with the lent-only receive the C library's final build selects (`rx-lent-only`): what
+    # the engine's links carry is delivered lent, with no owned projection to fall back on.
+    "wz-capi-coop|hook|query,rx-lent-only|tests::in_place::"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
@@ -1401,6 +1404,12 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # the host's parked waits (`host-lock`), which the open bounded by the session's clock is.
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
+    # The in-place receive that delivers only what it can lend (`rx-lent-only`, a selector): a
+    # Push or a Response the lent form cannot carry is refused where it lies and counted, which the
+    # tests of the two lent deliveries assert in this build where every other asserts the owned
+    # projection. The filters are the two modules' paths.
+    "wz-session-core|hook|rx-lent-only,pubsub-put,query-reply|pubsub::in_place::"
+    "wz-session-core|hook|rx-lent-only,pubsub-put,query-reply|reply::in_place::"
     # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
     # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also

@@ -60,6 +60,16 @@ const _: () = assert!(
      `wz-session-core/tx-lend-only` (the MCU lend-only profile) was unified into an AP build"
 );
 
+// And the receive side's twin. A record the AP reads where its frame lies and the lent form cannot
+// carry (a shared-memory sample, an instrumented message) is delivered through its owned
+// projection; `wz-session-core/rx-lent-only` (the cooperative C library's selector) refuses it
+// instead, which would drop those samples here.
+const _: () = assert!(
+    !wz_session_core::driver_loop::RX_LENT_ONLY,
+    "wz-runtime-tokio delivers through the owned projection what the lent form cannot carry; \
+     `wz-session-core/rx-lent-only` (the lent-only receive) was unified into an AP build"
+);
+
 // And for the session itself (fixed-memory step S5). A `session-slot` build holds a
 // session in a slot of a static table: its handle is a counted reference to the
 // slot, its sink a reference to the driver the slot holds, its parameters and

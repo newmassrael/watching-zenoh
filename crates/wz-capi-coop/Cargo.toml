@@ -282,6 +282,14 @@ declarations-synced-event = []
 # no dependency line: unified into a build that holds the tokio engine it would make that engine's
 # sessions refuse where they fall back, which `wz-runtime-tokio` refuses to build.
 tx-lend-only = ["wz-session-core/tx-lend-only"]
+# The lent-only receive (`wz-session-core`'s `rx-lent-only`): a record read in place that the lent
+# form cannot carry (a list of shared-memory slices, a key past the bounded buffer, a message with
+# a timestamp stack, none of which this engine's links carry) is a counted refusal, so the build
+# links no owned projection of a lent Push or Response. A SELECTOR, off by default and named by the
+# C library's final build beside `tx-lend-only`, for the reason that one is: unified into a build
+# that holds the tokio engine it would drop what that engine's sessions deliver through the
+# projection, which `wz-runtime-tokio` refuses to build.
+rx-lent-only = ["wz-session-core/rx-lent-only"]
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

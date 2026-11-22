@@ -369,6 +369,17 @@ rx-control = []
 # `routing-namespace`, which read owned messages. The slot profile has it (`session-slot`); a heap
 # engine whose receive is in place selects it. It changes nothing on the copying receive.
 rx-lent-control = []
+# The in-place receive delivers only what it can lend: a Push or a Response read where its frame lies
+# that the lent form cannot carry (a payload that is a list of shared-memory slices, a key past the
+# bounded buffer, a message that carries a timestamp stack) is refused and counted
+# (`InPlaceFallbacks` for a Push), never projected into an owned record, so the build links no owned
+# projection of a lent record. A SELECTOR, as `tx-lend-only` is: it is named by the final build of
+# a C library on the cooperative engine (`wz-capi-coop/rx-lent-only`), whose links carry none of
+# the three, and by no dependency line, because unified into the AP it would drop the shared-memory
+# samples and the instrumented messages its sessions deliver through the projection;
+# `wz-runtime-tokio` asserts at build time that it is off (`driver_loop::RX_LENT_ONLY`). A build
+# that selects every feature at once still compiles: the three are counted refusals there.
+rx-lent-only = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]

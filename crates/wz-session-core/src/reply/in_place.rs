@@ -339,17 +339,19 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             Ok(()) => {}
             #[cfg(all(
                 feature = "alloc",
+                not(feature = "rx-lent-only"),
                 any(feature = "pubsub-put", feature = "query-reply")
             ))]
             Err(Fallback::Sliced) => self.dispatch_owned_projection(response, spaces),
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
             Err(Fallback::KeyexprPastBound) => self.dispatch_owned_projection(response, spaces),
-            #[cfg(feature = "pubsub-ts-stack")]
+            #[cfg(all(feature = "pubsub-ts-stack", not(feature = "rx-lent-only")))]
             Err(Fallback::Instrumented) => self.dispatch_owned_projection(response, spaces),
-            // With no allocator there is no owned projection to fall back on: a reply the
-            // lent form cannot represent is dropped, and the pending get it answers
-            // ends by its own timeout, as it does for a reply that never came.
-            #[cfg(not(feature = "alloc"))]
+            // With no allocator, or in a build that lends only (`rx-lent-only`), there is no
+            // owned projection to fall back on: a reply the lent form cannot represent is
+            // dropped, and the pending get it answers ends by its own timeout, as it does for a
+            // reply that never came.
+            #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
             Err(_) => {
                 let _ = spaces;
             }
@@ -414,7 +416,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// the copying receive takes ([`Self::dispatch_response`]), so a reply the
     /// lent form cannot represent is delivered exactly as it always was. Heap
     /// profile only.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
     fn dispatch_owned_projection(
         &mut self,
         response: &ResponseView<'_>,
@@ -579,7 +581,11 @@ mod tests {
                 .expect("build"),
         ] {
             let (owned, lent) = both(&response);
+            #[cfg(not(feature = "rx-lent-only"))]
             assert_eq!(lent, owned, "the lent path is the owned one");
+            // A build that lends only refuses it where it lies.
+            #[cfg(feature = "rx-lent-only")]
+            assert!(lent.is_empty(), "refused where it lies: {lent:?}");
             assert_eq!(owned.len(), 1);
             assert_eq!(owned[0].ts_stack.as_ref(), Some(&stack));
             assert!(owned[0].routed, "it came in over a link");
@@ -671,7 +677,16 @@ mod tests {
         let mut delivered = 0;
         for (i, response) in cases.iter().enumerate() {
             let (owned, lent) = both(response);
-            assert_eq!(lent, owned, "case {i}");
+            // A build that lends only refuses, where it lies, the last case on the fixed backing,
+            // which cannot compose its key; it delivers every other case lent.
+            let refused = cfg!(feature = "rx-lent-only")
+                && crate::bounded::ENFORCES_CAPACITY
+                && i == cases.len() - 1;
+            if refused {
+                assert!(lent.is_empty(), "case {i}: {lent:?}");
+            } else {
+                assert_eq!(lent, owned, "case {i}");
+            }
             delivered += owned.len();
         }
         assert_eq!(delivered, cases.len() - 1, "every case but the lost one");

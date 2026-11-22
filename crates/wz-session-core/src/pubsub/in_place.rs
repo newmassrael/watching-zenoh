@@ -252,22 +252,24 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         let reliability = Reliability::from_reliable_bool(record.reliable());
         match self.deliver_lent(peer, push, reliability) {
             Ok(()) => {}
+            // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
-                #[cfg(feature = "alloc")]
+                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
-                #[cfg(feature = "alloc")]
+                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
                 self.in_place_fallbacks.instrumented =
                     self.in_place_fallbacks.instrumented.saturating_add(1);
+                #[cfg(not(feature = "rx-lent-only"))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
         }
@@ -353,7 +355,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// The fallback: the owned projection of `push`, delivered by the path the
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
     fn dispatch_owned_projection<Q: Storage>(
         &mut self,
         peer: &SubscriberPeer<Q>,
@@ -613,10 +615,14 @@ mod tests {
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].ts_stack.as_ref(), Some(&stack));
+        assert!(owned[0].routed, "it came in over a link");
+        #[cfg(not(feature = "rx-lent-only"))]
         assert_eq!(lent, owned, "the lent delivery is the owned one");
-        assert_eq!(lent.len(), 1);
-        assert_eq!(lent[0].ts_stack.as_ref(), Some(&stack));
-        assert!(lent[0].routed, "it came in over a link");
+        // A build that lends only refuses it where it lies.
+        #[cfg(feature = "rx-lent-only")]
+        assert!(lent.is_empty(), "refused where it lies: {lent:?}");
         assert_eq!(fallbacks.instrumented, 1);
 
         // One that carries none is delivered lent, and nothing falls back.
@@ -820,7 +826,11 @@ mod tests {
             slices: sce_forge_runtime::codec::Bounded::new(slices).unwrap(),
         };
         let (lent, owned, fallbacks) = both_ways(&push, "demo/s", |_| {});
+        #[cfg(not(feature = "rx-lent-only"))]
         assert_eq!(lent, owned);
+        // A build that lends only refuses it where it lies, and counts it all the same.
+        #[cfg(feature = "rx-lent-only")]
+        assert!(lent.is_empty(), "refused where it lies: {lent:?}");
         // Without the shared-memory transport the owned projection joins the
         // plain slices. With it, a list of slices goes through the un-swap, which
         // refuses it (and counts it) on a session that negotiated no shared
@@ -828,7 +838,7 @@ mod tests {
         #[cfg(not(feature = "transport-shm"))]
         {
             assert_eq!(owned.len(), 1);
-            assert_eq!(lent[0].payload, b"abcd");
+            assert_eq!(owned[0].payload, b"abcd");
         }
         #[cfg(feature = "transport-shm")]
         assert!(
@@ -862,7 +872,16 @@ mod tests {
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let (lent, owned, fallbacks) = both_ways(&push, "**", peer);
         assert_eq!(owned.len(), 1);
+        #[cfg(not(feature = "rx-lent-only"))]
         assert_eq!(lent, owned);
+        // A build that lends only delivers it where the key fits its buffer, which is every
+        // backing but the fixed one, and refuses it there.
+        #[cfg(feature = "rx-lent-only")]
+        assert_eq!(
+            lent.len(),
+            usize::from(!crate::bounded::ENFORCES_CAPACITY),
+            "{lent:?}"
+        );
         let refused = u32::from(crate::bounded::ENFORCES_CAPACITY);
         assert_eq!(
             fallbacks,

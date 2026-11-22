@@ -667,6 +667,14 @@ impl<'a> InPlaceFragment<'a> {
     }
 }
 
+/// Whether this build's in-place receive delivers only what it can lend (`rx-lent-only`): a
+/// record the lent form cannot carry is a counted refusal there, never an owned projection.
+///
+/// A constant and not only a `cfg`, as [`crate::tx_buf::TX_LEND_ONLY`] is, so a crate written for
+/// the profile that projects (the AP's `wz-runtime-tokio`, whose shared-memory samples and
+/// instrumented messages take the projection) refuses a build graph that unified the selector in.
+pub const RX_LENT_ONLY: bool = cfg!(feature = "rx-lent-only");
+
 /// One record of an inbound `Frame` decoded where the frame lies, with the
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.
