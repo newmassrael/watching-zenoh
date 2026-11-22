@@ -2585,6 +2585,11 @@ layer_c0_test_discipline() {
     _runci_leg perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --selftest
     _runci_leg perf_matrix.table --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling.json
     _runci_leg perf_matrix.table_windows --after perf_matrix.selftest -- python3 scripts/host-bench/perf_matrix.py --check-table deploy/pico_perf_ceiling_windows.json
+    # The MCU speed matrix's gate (docs/mcu-speed-matrix.md): its readers and rules over synthetic consoles
+    # and runs, and the committed table held to the rows of the default matrix on its platform. The runs it
+    # judges are scripts/mcu-speed.sh's, which no lane makes until the table is filled from a first run.
+    _runci_leg mcu_speed.selftest -- python3 scripts/host-bench/mcu_speed.py --selftest
+    _runci_leg mcu_speed.table --after mcu_speed.selftest -- python3 scripts/host-bench/mcu_speed.py --check-table deploy/pico_perf_ceiling_mcu.json
     # The AP superiority matrix (docs/ap-superiority-matrix.md, upstream-parity D13): its rules over
     # synthetic readings, and the committed table held to the matrix's rows with a debt on each row that
     # is not locked; a filled completeness row is held to the figure the tree states. The measuring run

@@ -282,7 +282,8 @@ the reference, near enough. More repetitions narrow it.
 subscriber. The multicast group is on `lo`; a group on a real interface is not measured here. A
 program-transport figure is wz with the probe's stream under it, so it holds the probe's own reading
 thread and copies. `ping` copies its payload into a new buffer for each round trip, in both arms
-alike. The peak RSS of a process covers its whole life, open and close included.
+alike. The peak RSS of a process covers its whole life, open and close included. Nothing here is an
+MCU's: the same rules held on an emulated MCU, per instruction, are docs/mcu-speed-matrix.md.
 
 ## 5. The gate
 

@@ -40,7 +40,7 @@
 //! accessor.
 
 use alloc::sync::Arc;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_void};
 
 use wz_capi_port::cancellation::CancellationToken;
 use wz_capi_port::FilterPlane;
@@ -84,14 +84,14 @@ pub struct z_querier_options_t {
     pub encoding: *mut c_void,
     pub target: z_query_target_t,
     pub consolidation: z_query_consolidation_t,
-    pub congestion_control: c_int,
+    pub congestion_control: crate::qos::z_congestion_control_t,
     pub is_express: bool,
     /// Only with `local-queryable` (`Z_FEATURE_LOCAL_QUERYABLE`), between
     /// `is_express` and `priority` as pico declares it, which moves `priority`
     /// from 24 to 28 and leaves the size at 48.
     #[cfg(feature = "local-queryable")]
     pub allowed_destination: crate::locality::z_locality_t,
-    pub priority: c_int,
+    pub priority: crate::qos::z_priority_t,
     pub timeout_ms: u64,
     pub accept_replies: z_reply_keyexpr_t,
 }

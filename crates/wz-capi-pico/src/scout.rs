@@ -656,14 +656,18 @@ pub unsafe extern "C" fn z_closure_hello_call(
 // z_scout
 // ---------------------------------------------------------------------------
 
-/// pico `z_scout_options_t` (`api/types.h:553-556`), 8 B measured:
+/// pico `z_what_t`, the bitmask of roles a scout asks for: a C enum, as wide as the target's C ABI
+/// makes it (`crate::c_enum`).
+pub type z_what_t = crate::c_enum::PicoEnum;
+
+/// pico `z_scout_options_t` (`api/types.h:553-556`), 8 B measured on a host:
 /// `{ uint32_t timeout_ms; z_what_t what; }`.
 #[repr(C)]
 pub struct z_scout_options_t {
     /// Total discovery budget in milliseconds.
     pub timeout_ms: u32,
     /// `z_what_t` bitmask of roles to scout for.
-    pub what: u32,
+    pub what: z_what_t,
 }
 
 /// Default scout options (pico `z_scout_options_default`) — the same values
@@ -675,17 +679,31 @@ pub struct z_scout_options_t {
 pub unsafe extern "C" fn z_scout_options_default(options: *mut z_scout_options_t) {
     if let Some(options) = options.as_mut() {
         options.timeout_ms = u32::try_from(SCOUTING_TIMEOUT_DEFAULT_MS).unwrap_or(u32::MAX);
-        options.what = SCOUTING_WHAT_DEFAULT as u32;
+        options.what = z_what_t::from(SCOUTING_WHAT_DEFAULT);
     }
 }
 
-/// A fresh random scouting identity, from the same OS entropy source the session plane mints its
+/// A fresh random scouting identity, from the same entropy source the session plane mints its
 /// per-session zid with, or `None` when there is none to draw (a profile that cannot open a
 /// session either), which asks as nobody.
 fn fresh_scout_zid() -> Option<SessionZid> {
     let mut zid = [0u8; 16];
-    getrandom::getrandom(&mut zid).ok()?;
+    draw_zid_bytes(&mut zid)?;
     SessionZid::new(&zid).ok()
+}
+
+/// The tokio engine's sessions draw from the host's generator, which the `getrandom` crate reads.
+#[cfg(feature = "engine-tokio")]
+fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
+    getrandom::getrandom(zid).ok()
+}
+
+/// The cooperative engine's sessions draw from the random source the build's host hands the engine
+/// (`crate::coop_host`): the host's kernel, or a Zephyr image's board, which has no `getrandom`.
+#[cfg(not(feature = "engine-tokio"))]
+fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
+    use wz_session_core::entropy::EntropySource;
+    crate::coop_host::entropy().try_fill_bytes(zid).ok()
 }
 
 /// What a scout reads from a pico config: each key's value, or pico's default for it.
@@ -1131,6 +1149,16 @@ mod tests {
     /// return value on the stack would pass a same-statement read and dangle
     /// the moment the caller stored it — this holds the pointer across a
     /// second call before reading through it.
+    /// A scout that names no id asks as a fresh one, drawn from the source the build's sessions
+    /// mint theirs from: two draws are two ids, and neither is the all-zero id no node has.
+    #[test]
+    fn a_scout_without_an_id_draws_a_fresh_one_each_time() {
+        let first = fresh_scout_zid().expect("the build's random source gave no id");
+        let second = fresh_scout_zid().expect("the build's random source gave no second id");
+        assert_eq!(first.as_slice().len(), 16);
+        assert!(first != second, "two draws gave one id");
+    }
+
     #[test]
     fn hello_lends_a_locator_array_that_outlives_the_call() {
         let state = HelloState::new(

@@ -12,13 +12,11 @@
 //! switch, each struct's field is read through one method named as the field
 //! (`locality_option_field`), so a caller is the same in both arms.
 
-use core::ffi::c_int;
-
 #[cfg(any(feature = "local-subscriber", feature = "local-queryable", test))]
 use wz_session_core::locality::Locality;
 
-/// pico `z_locality_t`, an enum passed as an `int`.
-pub type z_locality_t = c_int;
+/// pico `z_locality_t`, as wide as the target's C ABI makes it (`crate::c_enum`).
+pub type z_locality_t = crate::c_enum::PicoEnum;
 
 /// pico `Z_LOCALITY_ANY`: session-local and remote traffic.
 pub const Z_LOCALITY_ANY: z_locality_t = 0;

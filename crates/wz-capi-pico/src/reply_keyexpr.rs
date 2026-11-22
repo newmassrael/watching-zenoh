@@ -7,11 +7,9 @@
 //! It is here and not in either half so that a build with only one of the two planes still
 //! has it, and a build with neither does not.
 
-use core::ffi::c_int;
-
 /// pico `z_reply_keyexpr_t` (`api/constants.h:288-290`): the reply-keyexpr
-/// policy a query accepts.
-pub type z_reply_keyexpr_t = c_int;
+/// policy a query accepts, as wide as the target's C ABI makes it (`crate::c_enum`).
+pub type z_reply_keyexpr_t = crate::c_enum::PicoEnum;
 /// pico `Z_REPLY_KEYEXPR_ANY` — accept replies on any key (`constants.h:289`).
 pub const Z_REPLY_KEYEXPR_ANY: z_reply_keyexpr_t = 0;
 /// pico `Z_REPLY_KEYEXPR_MATCHING_QUERY` — accept only replies whose key
