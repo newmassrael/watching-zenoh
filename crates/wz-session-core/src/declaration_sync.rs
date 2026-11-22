@@ -132,7 +132,7 @@ pub fn finals_in_event(
 
     match event {
         IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-            for message in messages {
+            for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                 if let NetworkMessage::Declare(declare) = message {
                     if let (Some(interest_id), DeclareOwnedVariant::CodecZenohDeclFinal(_)) =
                         (declare.interest_id, &declare.body)
@@ -187,7 +187,7 @@ pub fn declaration_progress_in(
     };
     match event {
         IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-            for message in messages {
+            for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                 if let NetworkMessage::Declare(declare) = message {
                     note(declare.interest_id);
                 }

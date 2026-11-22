@@ -548,7 +548,10 @@ impl<P: Storage> LocalTokenRegistry<P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages(messages, peer_keyexpr_table, pending)
+                match crate::driver_loop::owned_records(messages) {
+                    Some(messages) => self.dispatch_messages(messages, peer_keyexpr_table, pending),
+                    None => 0,
+                }
             }
             // An Interest the in-place receive path lends where its frame
             // lies; a refused chain is counted as for the owned one.

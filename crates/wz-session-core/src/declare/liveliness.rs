@@ -311,7 +311,9 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages_unclaimed(messages, peer_keyexpr_table, claimed);
+                }
             }
             // A Declare the in-place receive path lends where its frame lies,
             // under the same claim as the owned one.

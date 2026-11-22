@@ -675,6 +675,48 @@ impl<'a> InPlaceFragment<'a> {
 /// instrumented messages take the projection) refuses a build graph that unified the selector in.
 pub const RX_LENT_ONLY: bool = cfg!(feature = "rx-lent-only");
 
+/// Whether a record decoded into its owned message can reach the session's tables in this build.
+/// `false` in a build that lends only (`rx-lent-only`) and lends every record, the control records
+/// too (`rx-lent-control`), whose tables read no owned message for an instrument of their own (the
+/// counters of `transport-stats`, the namespace strip of `routing-namespace`, a group's
+/// `multicast-declarations` and `multicast-ingress-gate`), that inflates no batch for the copying
+/// receive to read (`transport-compression`), and whose group, if it joins one, lends its records
+/// as a link's are lent. That build is the cooperative C library's, whose receive is in place: a
+/// `Poll(FramePayload)` it raises carries no message, and each table reads a batch through
+/// `owned_records`, so the tables' readers of owned messages are left out of its text.
+pub const OWNED_RECORDS: bool = !cfg!(all(
+    feature = "rx-lent-only",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace"),
+    not(feature = "multicast-declarations"),
+    not(feature = "multicast-ingress-gate"),
+    not(feature = "transport-compression"),
+    any(
+        feature = "session-unicast",
+        not(feature = "session-multicast")
+    )
+));
+
+/// The owned messages of a delivered batch, for a table that reads them: `messages` in a build
+/// whose tables take owned records ([`OWNED_RECORDS`]), and `None` in one that lends them all,
+/// whose batches carry none (a debug build stops at one that does).
+#[cfg(feature = "alloc")]
+#[inline(always)]
+pub fn owned_records(
+    messages: &[crate::network_message::NetworkMessage],
+) -> Option<&[crate::network_message::NetworkMessage]> {
+    if OWNED_RECORDS {
+        Some(messages)
+    } else {
+        debug_assert!(
+            messages.is_empty(),
+            "a build that lends every record delivers no owned one"
+        );
+        None
+    }
+}
+
 /// One record of an inbound `Frame` decoded where the frame lies, with the
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.
@@ -1154,9 +1196,13 @@ impl IterationEvent<'_, '_> {
         match self {
             IterationEvent::InPlace(record) => record.push().is_some(),
             #[cfg(feature = "alloc")]
-            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
-                .iter()
-                .any(|m| matches!(m, crate::network_message::NetworkMessage::Push(_))),
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+                owned_records(messages).is_some_and(|messages| {
+                    messages
+                        .iter()
+                        .any(|m| matches!(m, crate::network_message::NetworkMessage::Push(_)))
+                })
+            }
             _ => false,
         }
     }

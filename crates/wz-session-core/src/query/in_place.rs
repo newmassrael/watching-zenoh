@@ -30,9 +30,11 @@
 //! shared-memory un-swap BEFORE routing, on the owned path, which must still
 //! happen when routing then refuses it), and a Request whose resolved keyexpr is
 //! longer than [`KeyexprBuf`], which only the fixed bounded backing refuses. Each
-//! is still dispatched, as the copying path dispatches it.
+//! is still dispatched, as the copying path dispatches it, except in a build that lends only
+//! (`rx-lent-only`), which links no owned projection: there each reaches no queryable and is
+//! owed its Final, as a query that matched nobody is.
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
 use alloc::boxed::Box;
 
 use wz_codecs::query::QueryView;
@@ -179,20 +181,24 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
                     pending_final_rids.owe(request.rid, qos);
                 }
             }
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
                 self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
             }
-            #[cfg(feature = "pubsub-ts-stack")]
+            #[cfg(all(feature = "pubsub-ts-stack", not(feature = "rx-lent-only")))]
             Err(Fallback::Instrumented) => {
                 self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
             }
-            // With no allocator there is no owned projection to fall back on, so a
-            // Request the lent form cannot represent reaches no queryable, and is
-            // owed its Final as a query that matched nobody is: the requester's
-            // query ends with no reply, where a refused one would be left to time out.
-            #[cfg(not(feature = "alloc"))]
+            // With no allocator there is no owned projection to fall back on, and a build that
+            // lends only (`rx-lent-only`) links none, so a Request the lent form cannot represent
+            // reaches no queryable, and is owed its Final as a query that matched nobody is: the
+            // requester's query ends with no reply, where a refused one would be left to time out.
+            #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
+                pending_final_rids.owe(request.rid, qos);
+            }
+            #[cfg(all(feature = "pubsub-ts-stack", feature = "rx-lent-only"))]
+            Err(Fallback::Instrumented) => {
                 pending_final_rids.owe(request.rid, qos);
             }
         }
@@ -240,8 +246,8 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
     /// The fallback: the owned projection of `request`, dispatched by the path
     /// the copying receive takes ([`Self::dispatch_messages`]), so a Request the
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
-    /// it always did. Heap profile only.
-    #[cfg(feature = "alloc")]
+    /// it always did. Heap profile only, and not a build that lends only (`rx-lent-only`).
+    #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
     fn dispatch_owned_projection<S: crate::bounded::Storage>(
         &mut self,
         request: &RequestView<'_>,
@@ -454,7 +460,18 @@ mod tests {
         let mut finals = 0;
         for (i, request) in cases.iter().enumerate() {
             let (owned, lent) = both(request);
-            assert_eq!(lent, owned, "case {i}");
+            // A build that lends only refuses, where it lies, the last case on the fixed backing,
+            // which cannot compose its key: no queryable runs and nothing is staged, and the
+            // query is owed its Final, as one that matched nobody is.
+            let refused = cfg!(feature = "rx-lent-only")
+                && crate::bounded::ENFORCES_CAPACITY
+                && i == cases.len() - 1;
+            if refused {
+                assert!(lent.0.is_empty() && lent.1.is_empty(), "case {i}: {lent:?}");
+                assert_eq!(lent.2, owned.2, "case {i}: owed its Final either way");
+            } else {
+                assert_eq!(lent, owned, "case {i}");
+            }
             finals += owned.2.len();
         }
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");

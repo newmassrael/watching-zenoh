@@ -14690,7 +14690,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::driver_loop::IterationEvent::Poll(
                 crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
             ) => R::with_mutex_mut(&self.link_keys, |keys| {
-                for message in messages {
+                for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                     if let crate::network_message::NetworkMessage::Request(request) = message {
                         let body = &request.keyexpr.body;
                         let (id, suffix) = crate::wireexpr_resolve::id_and_suffix(body);

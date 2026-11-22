@@ -641,7 +641,9 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages(messages, peer_keyexpr_table);
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages(messages, peer_keyexpr_table);
+                }
             }
             // A Declare the in-place receive path lends where its frame lies.
             #[cfg(all(feature = "codec-declare", feature = "rx-lent-control"))]

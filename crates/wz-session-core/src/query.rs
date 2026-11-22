@@ -3566,12 +3566,14 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages(
-                    messages,
-                    peer_keyexpr_table,
-                    pending_replies,
-                    pending_final_rids,
-                );
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages(
+                        messages,
+                        peer_keyexpr_table,
+                        pending_replies,
+                        pending_final_rids,
+                    );
+                }
             }
             // A Request the in-place receive path lends: dispatched as a view
             // over the frame, owing its Final on the same rule.

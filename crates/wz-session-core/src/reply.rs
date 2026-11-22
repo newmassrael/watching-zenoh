@@ -1908,7 +1908,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages(messages, peer_keyexpr_table);
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages(messages, peer_keyexpr_table);
+                }
             }
             // A build that lends control records lends a `ResponseFinal` too: the
             // same rule as the owned one (`dispatch_response_final`), which reads the

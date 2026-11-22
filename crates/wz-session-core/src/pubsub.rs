@@ -1273,13 +1273,16 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                 messages, reliable, ..
             }) => {
-                let reliability = Reliability::from_reliable_bool(*reliable);
-                for message in messages {
-                    self.dispatch(peer, message, reliability);
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    let reliability = Reliability::from_reliable_bool(*reliable);
+                    for message in messages {
+                        self.dispatch(peer, message, reliability);
+                    }
                 }
             }
             // A frame of plain Puts, reported as where they lie in it: the stream
-            // lane, delivered without an owned message per record.
+            // lane, delivered without an owned message per record. The lane is the copying
+            // receive's, which a build whose tables take no owned record does not read by.
             #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
             IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
                 reliable,
@@ -1287,7 +1290,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 puts,
                 ..
             }) => {
-                self.dispatch_plain_puts(peer, *reliable, payload, puts);
+                if crate::driver_loop::OWNED_RECORDS {
+                    self.dispatch_plain_puts(peer, *reliable, payload, puts);
+                }
             }
             // A Push lent where its frame lies, and the control records lent beside
             // it where a build lends them: a Declare's alias is absorbed and a

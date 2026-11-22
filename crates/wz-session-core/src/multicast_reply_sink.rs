@@ -218,9 +218,13 @@ pub fn asks_for_declarations(event: &crate::driver_loop::IterationEvent<'_, '_>)
     use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::network_message::NetworkMessage;
     match event {
-        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
-            .iter()
-            .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
+            crate::driver_loop::owned_records(messages).is_some_and(|messages| {
+                messages.iter().any(
+                    |message| matches!(message, NetworkMessage::Interest(interest) if interest.c()),
+                )
+            })
+        }
         // An interest lent where its frame lies, by a build that lends its group's records.
         IterationEvent::InPlace(record) => record.interest().is_some_and(|interest| interest.c()),
         _ => false,
@@ -290,7 +294,7 @@ impl GroupKeyexprAnswers {
         use crate::network_message::NetworkMessage;
         match event {
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                for message in messages.iter() {
+                for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                     if let NetworkMessage::Interest(interest) = message {
                         self.asked_owned(interest);
                     }

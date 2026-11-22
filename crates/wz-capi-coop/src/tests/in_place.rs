@@ -63,3 +63,19 @@ fn a_reply_read_in_place_answers_its_get() {
         vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())]
     );
 }
+
+/// The engine's tables are handed an owned record only where its receive projects one: the build
+/// that lends only (`rx-lent-only`), with no counter that reads owned messages, hands them none,
+/// so their readers of owned messages are left out of its text; any other build hands them the
+/// batch it was given.
+#[test]
+fn the_tables_take_owned_records_only_where_the_engine_projects_them() {
+    use wz_session_core::driver_loop::{owned_records, OWNED_RECORDS};
+    let lends_only = cfg!(feature = "rx-lent-only") && !cfg!(feature = "transport-stats");
+    assert_eq!(OWNED_RECORDS, !lends_only);
+    assert_eq!(
+        owned_records(&[]).is_some(),
+        !lends_only,
+        "an empty batch is read only where owned records are"
+    );
+}

@@ -1512,7 +1512,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages_unclaimed(peer, messages, peer_keyexpr_table, claimed);
+                }
             }
             // A Declare the in-place receive path lends where its frame lies,
             // judged by the same three rules as the owned one: a GET's claim, the

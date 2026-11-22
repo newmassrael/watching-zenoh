@@ -1328,12 +1328,14 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
-                self.dispatch_messages_with_local(
-                    peer,
-                    messages,
-                    peer_keyexpr_table,
-                    local_matching,
-                );
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    self.dispatch_messages_with_local(
+                        peer,
+                        messages,
+                        peer_keyexpr_table,
+                        local_matching,
+                    );
+                }
             }
             // A Declare the in-place receive path lends where its frame lies.
             #[cfg(feature = "rx-lent-control")]

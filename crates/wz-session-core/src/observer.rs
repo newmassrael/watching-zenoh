@@ -750,7 +750,7 @@ impl ApplicationLayerObserver {
             ..
         }) = event
         {
-            for message in messages {
+            for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                 if let crate::network_message::NetworkMessage::Interest(interest) = message {
                     Self::stage_queryable_interest(
                         &self.queryables,
