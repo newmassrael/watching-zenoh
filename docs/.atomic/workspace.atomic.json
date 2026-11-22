@@ -6908,6 +6908,28 @@
         "D9 size: no_std 1.45x and std 2.38x with the link flags on both arms; D10: Windows TCP batched throughput 1.40x and TCP round trip 1.44x behind; D12: MCU heap 4.4-5.2x of pico's.",
         "Tests that hang under rx-lent-only with tx-lend-only (46 fail on the base too) need their own round."
       ]
+    },
+    "Round 4611": {
+      "decision_summary": "Run 45051019628 (graded f4d3943298, Round 4609) was read job by job before any fix was written. Four of its eight red jobs, C1ao, C1y, C1z and C1ba, stop on one compile error: `drive_session_dyn` and `drive_session_dyn_send` in `crates/wz-runtime-tokio/src/session_glue.rs` take `crate::session_open::InboundLink`, and `session_open` is compiled only with `transport-link-tcp` and `transport-unicast`, while `session_glue` is compiled with `transport-unicast` alone; a build of `transport-unicast` without the TCP link (the C1ao clippy leg `--no-default-features --features transport-unicast`, and the feature sets of C1y, C1z and C1ba) fails with E0433. The two functions are gated on `transport-link-tcp` now, the gate their parameter's module already has; every caller (`accept_loop`, gated on `routing-accept`, which implies `transport-link-tcp`, and `wz-capi-core`'s drive) is compiled only where the link is. C1co's Layer S cooperative leg ended `gets_between_open_sessions_are_counted_for_their_allocations` past its 60 s run bound: pinned to one core on a build host the run took 1034 s, each `z_get` 0.75 to 36 s, and a gdb stack dump showed both sessions' read tasks in `StreamDriver::service` waiting for an app link's input with the session held, the caller waiting for the session; the same cause was repaid by `932d721a6` and `c3844faff` in the integration that landed before this round (the run takes 0.80 s there with them), so this round adds nothing to it. C1cs (`capic-router-node` 672 over) was repaid by `c23fb8d7b` in that integration. The C1cc oracle-side failure and the budget margins of C1bnl shard 1/4 and C1cs are acknowledged unpaid in `docs/hosted-red-acks.md`.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: `drive_session_dyn` and `drive_session_dyn_send` are `#[cfg(feature = \"transport-link-tcp\")]`, with a doc line naming the module their link lives in.",
+        "docs/reason-review-pins.md: session-close-ingress / session_glue.rs to the new blob; the reason's two claims about that file (`check_out_of_band` at the head of every iteration, the park on `out_of_band_signalled` in both arms) re-read and hold.",
+        "docs/hosted-red-acks.md: row red-f4d3-session-open-gate for run 45051019628, each of its eight red jobs attributed."
+      ],
+      "verification_bullets": [
+        "On the tree of this round through bx: `cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast -- -D warnings` exit 0 (the C1ao leg that failed on hosted), and `cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl -- -D warnings` exit 0.",
+        "C1co attribution: on a build host, `taskset -c 0` on the cooperative Gets traffic run of `wz-capi-pico/tests/allocation_faults.rs`: 1034 s at f4d3943298, 0.80 s at 3621c9471 (the landed app-link owner wait); the tokio engine under the same pinning 0.72 s, the control.",
+        "reason_review_pin_gate.py --check OK; the pre-push hook's round-fed gates 169 of 170 on the change at f4d3943298 before the pin row moved, the one failure being that pin."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "C1bnl shard 1/4 budget margin (99 percent of 1800 s, three runs running): the nondefault test legs are dealt to shards by position in the table; deal them by measured cost, as census_shard_plan.py does for C1cn (R4576).",
+        "C1cs job margin (92 percent of 1200 s).",
+        "C1cc `the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc`: oracle-side, the C1cc lane session's."
+      ]
     }
   },
   "inventory_entries": {
