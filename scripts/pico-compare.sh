@@ -67,7 +67,11 @@
 #
 # Environment: PICO_CMP_PING_CPUS / PICO_CMP_PONG_CPUS / PICO_CMP_PUB_CPUS / PICO_CMP_SUB_CPUS (defaults
 # 6,7 / 8,9 / 6,7 / 10,11), PICO_CMP_WZ_ENV (extra `VAR=value` words put in front of every wz process,
-# for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built).
+# for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built), PICO_CMP_ENGINE
+# (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
+# host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
+# `tids`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
+# builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each.
 # `parity` pins the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS and the
 # server side to PICO_CMP_SERVER_CPUS (defaults 4-7 and 8-11: two physical cores a side on the 22-thread
 # hybrid bench host, because zenoh-c and zenoh run several threads a process and one SMT pair would bind
@@ -99,13 +103,53 @@ wz_lib="$WZ_ARTIFACTS/crates/target/release"
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
+# The engine the wz library is built on: one answer for every build of it below (`wz_config.py --bench-engine`,
+# which reads the package's profile unless PICO_CMP_ENGINE names one), whose cargo words come from the same tool
+# (`--bench-cargo-args`), so no mode names an engine of its own. A build leaves the engine in a stamp beside what it
+# built; a run with PICO_CMP_NO_BUILD=1 reads the stamp and refuses a PICO_CMP_ENGINE that names another.
+wz_engine=""
+resolve_wz_engine() {
+    if [ -z "${PICO_CMP_ENGINE:-}" ]; then
+        bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
+            || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
+    fi
+    wz_engine="$(python3 -I scripts/lib/wz_config.py --bench-engine ${PICO_CMP_ENGINE:+"$PICO_CMP_ENGINE"})" \
+        || { echo "pico-compare: NOT-MEASURED, the engine of the wz library did not resolve"; exit 2; }
+}
+
+# wz_cargo_args <features>: the cargo words of the wz library on $wz_engine with <features> (a comma list, empty for
+# none) over its default capabilities.
+wz_cargo_args() {
+    python3 -I scripts/lib/wz_config.py --bench-cargo-args "$wz_engine" ${1:+"$1"}
+}
+
+# stamped_engine <engine>: the engine a build of the library found recorded, held against PICO_CMP_ENGINE.
+stamped_engine() {
+    wz_engine="${1:-unknown}"
+    if [ -n "${PICO_CMP_ENGINE:-}" ] && [ "$PICO_CMP_ENGINE" != "$wz_engine" ]; then
+        echo "pico-compare: PICO_CMP_ENGINE=$PICO_CMP_ENGINE, and the library PICO_CMP_NO_BUILD=1 finds is built on the $wz_engine engine" >&2
+        exit 2
+    fi
+}
+
 if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ] \
     && [ "${1:-}" != batch ]; then
+    resolve_wz_engine
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
-    (cd crates && cargo build --release -p wz-capi-pico) >"$out/build-wz.log" 2>&1 \
+    wz_args="$(wz_cargo_args "")" \
+        || { echo "pico-compare: NOT-MEASURED, no cargo words for the $wz_engine engine"; exit 2; }
+    rm -f "$out/wz-engine"
+    # shellcheck disable=SC2086 # the cargo words are words on purpose
+    (cd crates && cargo build --release -p wz-capi-pico $wz_args) >"$out/build-wz.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the wz library did not build (see $out/build-wz.log)"; exit 2; }
+    echo "$wz_engine" >"$out/wz-engine"
 fi
+case "${1:-}" in
+    rtt | thr | nodrop | profile | tids)
+        [ -n "$wz_engine" ] || stamped_engine "$(cat "$out/wz-engine" 2>/dev/null)"
+        ;;
+esac
 
 include=(
     -I"$WZ_ARTIFACTS/target/zenoh-pico-build/zenohpico/include"
@@ -236,7 +280,7 @@ PY
 
 rtt() {
     local reps="${1:-3}" variant rep port dir
-    echo "round trip, 8 B, 20000 round trips; ping on $ping_cpus, pong on $pong_cpus; wz env: ${wz_env:-none}"
+    echo "round trip, 8 B, 20000 round trips; ping on $ping_cpus, pong on $pong_cpus; wz env: ${wz_env:-none}; wz engine: $wz_engine"
     for variant in P W; do
         for rep in $(seq 1 "$reps"); do
             port=$((20000 + RANDOM % 20000))
@@ -284,7 +328,7 @@ thr() {
     local reps="${1:-2}" size rep
     shift
     local sizes="${*:-8 64 1024 8192}"
-    echo "delivered msg/s counted by the subscriber; publisher on $pub_cpus, subscriber on $sub_cpus; wz env: ${wz_env:-none}"
+    echo "delivered msg/s counted by the subscriber; publisher on $pub_cpus, subscriber on $sub_cpus; wz env: ${wz_env:-none}; wz engine: $wz_engine"
     for size in $sizes; do
         for rep in $(seq 1 "$reps"); do
             one_thr TX P W "$size" "$rep"
@@ -304,6 +348,7 @@ nodrop() {
     local reps="${1:-3}" sizes="${2:-8,64,1024}"
     local batch=()
     [ "${PICO_CMP_BATCH:-0}" = 1 ] && batch=(--batch)
+    echo "wz engine: $wz_engine"
     python3 -I "$root/scripts/host-bench/nodrop.py" --bin-dir "$out/bin" --reps "$reps" --sizes "$sizes" \
         --pub-cpus "$pub_cpus" --sub-cpus "$sub_cpus" --wz-env "$wz_env" "${batch[@]}"
 }
@@ -313,7 +358,7 @@ nodrop() {
 # from it: what it says is how many calls of each kind one put costs (the sent count is the divisor).
 profile() {
     local size="${1:-1024}" rate="${2:-50000}" variant port dir
-    echo "system calls of the publisher, $size B at $rate msg/s for 3 s; publisher on $pub_cpus, subscriber on $sub_cpus"
+    echo "system calls of the publisher, $size B at $rate msg/s for 3 s; publisher on $pub_cpus, subscriber on $sub_cpus; wz engine: $wz_engine"
     for variant in P W; do
         port=$((20000 + RANDOM % 20000))
         dir="$(mktemp -d)"
@@ -338,7 +383,7 @@ profile() {
 # hand work to each other. The first thread listed is the one that runs `main`.
 tids() {
     local size="${1:-1024}" rate="${2:-5000}" variant port dir
-    echo "calls per thread of the publisher, $size B at $rate msg/s for 2 s"
+    echo "calls per thread of the publisher, $size B at $rate msg/s for 2 s; wz engine: $wz_engine"
     for variant in P W; do
         port=$((20000 + RANDOM % 20000))
         dir="$(mktemp -d)"
@@ -552,9 +597,9 @@ parity() {
 # ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
 #
 # One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
-# zenoh-pico built as the same build as wz-capi-pico's default features (the capability cost gate's
-# reference, which perf_matrix.py reference builds or finds), perf_probe_W against wz-capi-pico's default
-# build and perf_probe_Wapp against the default build with the `app-transport` capability, the one arm that
+# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine resolved above (the
+# capability cost gate's reference, which perf_matrix.py reference builds or finds), perf_probe_W against that
+# wz-capi-pico build and perf_probe_Wapp against it with the `app-transport` capability, the one arm that
 # carries the program transport cell. Each arm's library is copied beside it (lib-<arm>), so a later build of
 # the same crate does not change what a run measured. PICO_CMP_NO_BUILD=1 runs the programs already there.
 
@@ -612,23 +657,29 @@ perf_external_arm() {
 # (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
 # program. Against the vendored header a program allocates the option structs of another arm.
 perf_wz_arm() {
-    local dir="$1" arm="$2" features="$3" report inc
-    local feature_args=()
-    if [ -n "$features" ]; then
-        feature_args=(--features "wz-capi-pico/${features//,/,wz-capi-pico/}")
-    fi
+    local dir="$1" arm="$2" features="$3" report inc args
+    args="$(wz_cargo_args "$features")" \
+        || perf_fail "arm $arm has no build on the $wz_engine engine (wz_config.py --bench-cargo-args $wz_engine '$features')"
     report="$dir/build-wz-$arm.json"
+    # shellcheck disable=SC2086 # the cargo words are words on purpose
     (cd crates && cargo build --release --message-format=json-render-diagnostics -p zenoh-pico-sys \
-        -p wz-capi-pico "${feature_args[@]}") >"$report" 2>"$dir/build-wz-$arm.log" \
+        -p wz-capi-pico $args) >"$report" 2>"$dir/build-wz-$arm.log" \
         || perf_fail "wz-capi-pico for arm $arm did not build (see $dir/build-wz-$arm.log)"
     inc="$(python3 -I "$root/scripts/host-bench/perf_matrix.py" pico-sys-include "$report")" \
         || perf_fail "the build of arm $arm named no single pico header arm"
     rm -rf "$dir/include-$arm" "$dir/lib-$arm"
     mkdir -p "$dir/include-$arm" "$dir/lib-$arm"
     cp -R "$inc"/. "$dir/include-$arm"/ || perf_fail "the pico headers of arm $arm did not copy"
-    python3 -I scripts/lib/wz_config.py --pico-config-h "$features" >"$dir/include-$arm/zenoh-pico/config.h" \
-        || perf_fail "the config.h of arm $arm did not render (wz_config.py --pico-config-h '$features')"
+    python3 -I scripts/lib/wz_config.py --bench-config-h "$wz_engine" ${features:+"$features"} \
+        >"$dir/include-$arm/zenoh-pico/config.h" \
+        || perf_fail "the config.h of arm $arm did not render (wz_config.py --bench-config-h $wz_engine '$features')"
     cp "$wz_lib/libwz_capi_pico.so" "$dir/lib-$arm/" || perf_fail "the library of arm $arm did not copy"
+}
+
+# recorded_engine <reference.json>: the engine arm W was built on, as the record of its build states it.
+recorded_engine() {
+    python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("wz_engine", "unknown"))' \
+        "$1" 2>/dev/null || echo unknown
 }
 
 # perf_probe_build <dir> <arm> <library name> [compiler words...]
@@ -655,7 +706,9 @@ perf_matrix() {
         mkdir -p "$dir/bin"
         bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
             || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
-        python3 -I "$root/scripts/host-bench/perf_matrix.py" reference --out "$dir" >"$dir/build-reference.log" 2>&1 \
+        resolve_wz_engine
+        python3 -I "$root/scripts/host-bench/perf_matrix.py" reference --out "$dir" --engine "$wz_engine" \
+            >"$dir/build-reference.log" 2>&1 \
             || perf_fail "the zenoh-pico reference did not build (see $dir/build-reference.log)"
         cat "$dir/build-reference.log"
         perf_wz_arm "$dir" W ""
@@ -664,7 +717,10 @@ perf_matrix() {
         perf_probe_build "$dir" W wz_capi_pico
         perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_PROGRAM_TRANSPORT -I"$root/crates/wz-capi-core/include"
         perf_external_arm "$dir"
+    else
+        stamped_engine "$(recorded_engine "$dir/reference.json")"
     fi
+    echo "pico-compare: arm W on the $(recorded_engine "$dir/reference.json") engine"
     if [ -f "$dir/external.json" ]; then
         external_args=(--external-record "$dir/external.json")
     fi
@@ -713,8 +769,9 @@ batch_control() {
         mkdir -p "$dir/bin"
         bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
             || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
-        python3 -I "$root/scripts/host-bench/batch_control.py" reference --out "$dir" --sizes "$sizes" \
-            >"$dir/build-reference.log" 2>&1 \
+        resolve_wz_engine
+        python3 -I "$root/scripts/host-bench/batch_control.py" reference --out "$dir" --engine "$wz_engine" \
+            --sizes "$sizes" >"$dir/build-reference.log" 2>&1 \
             || perf_fail "the zenoh-pico builds did not finish (see $dir/build-reference.log)"
         cat "$dir/build-reference.log"
         perf_wz_arm "$dir" W config-document
@@ -722,6 +779,8 @@ batch_control() {
             batch_probe_build "$dir" "P$size" zenohpico
         done
         batch_probe_build "$dir" W wz_capi_pico -DBATCH_PROBE_DOCUMENT -I"$root/crates/wz-capi-core/include"
+    else
+        stamped_engine "$(recorded_engine "$dir/reference.json")"
     fi
     run="$out/batch-runs/host-$(date -u +%Y%m%dT%H%M%S)"
     python3 -I "$root/scripts/host-bench/batch_control.py" run --bin-dir "$dir/bin" --lib-dir "$dir" --run "$run" \

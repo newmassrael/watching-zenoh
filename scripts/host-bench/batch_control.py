@@ -10,8 +10,9 @@ pico ABI takes it from the `wz/limits` of its configuration document (`PICO_UNIC
 opens. This runs one program (`batch_probe.c`) both ways and reads the batches off the wire through a relay
 of its own, the same way for both:
 
-    batch_control.py reference --out DIR [--sizes 512,2048,8192]
-        zenoh-pico built as the same build as wz-capi-pico with `config-document`, once per size with
+    batch_control.py reference --out DIR --engine ENGINE [--sizes 512,2048,8192]
+        zenoh-pico built as the same build as wz-capi-pico with `config-document` on ENGINE (tokio or coop,
+        what `wz_config.py --bench-engine` resolved, `wz_config.bench_features`), once per size with
         BATCH_UNICAST_SIZE set to it (`capability_cost_gate.pico_reference_tree`, its switches from
         `wz_config.pico_reference`): each library copied to DIR/lib-P<size>, its headers to
         DIR/include-P<size>, and DIR/reference.json, which names each build
@@ -287,14 +288,19 @@ def parse_sizes(text: str) -> list[int]:
     return sizes
 
 
-def cmd_reference(out: pathlib.Path, sizes: list[int]) -> int:
-    """zenoh-pico built as the same build as wz-capi-pico with the document door, once per size."""
+def cmd_reference(out: pathlib.Path, sizes: list[int], engine: str) -> int:
+    """zenoh-pico built as the same build as wz-capi-pico with the document door on `engine`, once per
+    size."""
     # The gate's builder and resolver, imported here and not at the top: the selftest needs neither.
     import capability_cost_gate as cost
     import wz_config
 
     table = wz_config.manifest_features(cost.CRATES / "wz-capi-pico" / "Cargo.toml")
-    features = wz_config.pico_build_features("tokio", list(WZ_FEATURES), table)
+    try:
+        features = wz_config.bench_features(engine, list(WZ_FEATURES), table)
+    except wz_config.PresetError as error:
+        print(f"batch-control: NOT-MEASURED, {error}", flush=True)
+        return 2
     asked = wz_config.pico_reference(wz_config.load_decl(), features)
     builds = []
     pin = toolchain = ""
@@ -324,7 +330,7 @@ def cmd_reference(out: pathlib.Path, sizes: list[int]) -> int:
         builds.append({"size": size, "tree": str(work),
                        "refused": list(cost.refused_switches(switches, header))})
     record = {"pin": pin, "toolchain": toolchain, "switches": asked, "wz_features": sorted(features),
-              "builds": builds}
+              "wz_engine": engine, "builds": builds}
     (out / "reference.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"batch-control: zenoh-pico {pin[:12]} built {len(builds)} times, once per size "
           f"({', '.join(map(str, sizes))}; {toolchain})", flush=True)
@@ -370,8 +376,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         cells.append(run_cell(bin_dir / f"batch_probe_P{size}", "P", size, args.count, run))
         cells.append(run_cell(bin_dir / "batch_probe_W", "W", size, args.count, run))
     libraries = libraries_of(pathlib.Path(args.lib_dir), sizes)
-    doc = {"schema": SCHEMA, "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    # The engine arm W was built on, as its build's record states it: a reading says which one it is of.
+    try:
+        engine = json.loads((pathlib.Path(args.lib_dir) / "reference.json").read_text(encoding="utf-8")).get(
+            "wz_engine", "unknown")
+    except (OSError, ValueError):
+        engine = "unknown"
+    doc = {"schema": SCHEMA, "finished": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "engine": engine,
            "one_message_at_most": ONE_MESSAGE_AT_MOST, "cells": cells, "libraries": libraries}
+    print(f"batch-control: arm W on the {engine} engine", flush=True)
     (run / "batch.json").write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     lines = report_lines(cells, libraries)
     (run / "report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -453,6 +466,7 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 2 and argv[1] == "reference":
         parser = argparse.ArgumentParser(prog="batch_control.py reference")
         parser.add_argument("--out", required=True)
+        parser.add_argument("--engine", required=True, choices=("tokio", "coop"))
         parser.add_argument("--sizes", default=",".join(map(str, DEFAULT_SIZES)))
         args = parser.parse_args(argv[2:])
         try:
@@ -462,7 +476,7 @@ def main(argv: list[str]) -> int:
             return 2
         out = pathlib.Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        return cmd_reference(out, sizes)
+        return cmd_reference(out, sizes, args.engine)
     if len(argv) >= 2 and argv[1] == "run":
         parser = argparse.ArgumentParser(prog="batch_control.py run")
         parser.add_argument("--bin-dir", required=True)
