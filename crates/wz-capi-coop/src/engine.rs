@@ -1692,6 +1692,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         })
     }
 
+    /// Write on its group what the answers to a query that came in under `generation` put on the
+    /// group's stage, on this thread, as a put on the group is written by the thread that puts it.
+    /// Nothing is done for a query that came in on a link.
+    #[cfg(all(feature = "queryable", feature = "group"))]
+    fn write_answers(&self, generation: u64) {
+        if let Some(group) = self
+            .groups
+            .iter()
+            .find(|group| group.answers_as(generation))
+        {
+            group.write_staged();
+        }
+    }
+
     /// Begin face `face`'s dial of `endpoint`, which the network answers later
     /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
@@ -4102,7 +4116,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
     /// of one hold on its Final, sending the Final when it was owed and this was the last hold.
-    /// Nothing is sent on a link that is no longer the session's.
+    /// Nothing is sent on a link that is no longer the session's. On a group, what was sent is
+    /// written by this call, on the calling thread.
     #[cfg(feature = "queryable")]
     fn answer(
         &self,
@@ -4144,6 +4159,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 route.send_response_final(rid, qos);
             }
         }
+        // A group's sink only stages: a kept query answered from the program's own thread would
+        // otherwise leave when the read task's wait ends, up to the group's tick a leg.
+        #[cfg(feature = "group")]
+        core.0.write_answers(generation);
     }
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
