@@ -1092,48 +1092,44 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
     }
 
     /// The Declare, as it is decoded, its keyexpr, extensions and inner body
-    /// ranges of the frame (`rx-lent-control`). `None` when the record is of another
-    /// kind.
-    #[cfg(all(feature = "rx-lent-control", feature = "codec-declare"))]
+    /// ranges of the frame. `None` when the record is of another kind.
     ///
-    /// Always `None` in a build that reads no control record off the wire (`rx-control`).
+    /// Always `None` in a build that does not lend its control records
+    /// (`rx-lent-control`), where a Declare arrives as an owned message of
+    /// `Poll(FramePayload)`, or reads none off the wire (`rx-control`). Present in every
+    /// build with the codec, so a consumer reads both forms whatever the build lends.
+    #[cfg(feature = "codec-declare")]
     pub fn declare(&self) -> Option<&'a wz_codecs::lent::Declare<'f>> {
-        match self.record {
-            #[cfg(feature = "rx-control")]
-            LentRecord::Declare(declare) => Some(declare),
-            #[allow(unreachable_patterns)]
-            _ => None,
+        #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+        if let LentRecord::Declare(declare) = self.record {
+            return Some(declare);
         }
+        None
     }
 
-    /// The ResponseFinal, as it is decoded (`rx-lent-control`). `None` when the
-    /// record is of another kind.
-    #[cfg(all(
-        feature = "rx-lent-control",
-        feature = "codec-frame",
-        feature = "codec-response-final"
-    ))]
+    /// The ResponseFinal, as it is decoded. `None` when the record is of another
+    /// kind, and always in a build that does not lend its control records
+    /// (`rx-lent-control`) or reads no Response off the wire (`rx-response`).
+    #[cfg(all(feature = "codec-frame", feature = "codec-response-final"))]
     pub fn response_final(&self) -> Option<&'a wz_codecs::lent::ResponseFinal<'f>> {
-        match self.record {
-            #[cfg(feature = "rx-response")]
-            LentRecord::ResponseFinal(response_final) => Some(response_final),
-            #[allow(unreachable_patterns)]
-            _ => None,
+        #[cfg(all(feature = "rx-lent-control", feature = "rx-response"))]
+        if let LentRecord::ResponseFinal(response_final) = self.record {
+            return Some(response_final);
         }
+        None
     }
 
     /// The Interest, as it is decoded, its keyexpr and extensions ranges of the
-    /// frame (`rx-lent-control`). `None` when the record is of another kind.
-    #[cfg(all(feature = "rx-lent-control", feature = "codec-frame"))]
-    ///
-    /// Always `None` in a build that reads no control record off the wire (`rx-control`).
+    /// frame. `None` when the record is of another kind, and always in a build that
+    /// does not lend its control records (`rx-lent-control`) or reads none off the
+    /// wire (`rx-control`).
+    #[cfg(feature = "codec-frame")]
     pub fn interest(&self) -> Option<&'a wz_codecs::lent::Interest<'f>> {
-        match self.record {
-            #[cfg(feature = "rx-control")]
-            LentRecord::Interest(interest) => Some(interest),
-            #[allow(unreachable_patterns)]
-            _ => None,
+        #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+        if let LentRecord::Interest(interest) = self.record {
+            return Some(interest);
         }
+        None
     }
 }
 
