@@ -3028,8 +3028,9 @@ mod read_task_start_codes {
 
     /// Each answer of a start of the read task is the code zenoh-pico's start answers: a start
     /// made from the task's own thread `_Z_ERR_INVALID`, and a system that gave no thread
-    /// `_Z_ERR_SYSTEM_GENERIC` (-80, `vendor/zenoh-pico/include/zenoh-pico/utils/result.h`), which is
-    /// what `pthread_create`'s refusal becomes there.
+    /// `_Z_ERR_SYSTEM_GENERIC`
+    /// (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @ `_Z_ERR_SYSTEM_GENERIC = -80,`),
+    /// which is what `pthread_create`'s refusal becomes there.
     #[test]
     fn each_answer_of_a_start_is_picos_code() {
         assert_eq!(read_task_start_code(Ok(())), Z_OK);
