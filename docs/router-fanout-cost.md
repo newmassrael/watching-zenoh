@@ -64,9 +64,9 @@ Once per subscriber, before this round's change (`deliver_to_client_subscribers`
   mark read with `SeqCst` (`crates/wz-runtime-tokio/src/router_forward/egress.rs:340`).
 - The session measured the message by walking it (`push_capacity_hint`,
   `crates/wz-session-core/src/frame_encode.rs:374`), read its QoS, took its conduit's lock
-  (`crates/wz-session-core/src/session_actions.rs:11289`), and encoded it by walking it again
+  (`crates/wz-session-core/src/session_actions.rs:11288`), and encoded it by walking it again
   (`push_body`, `crates/wz-session-core/src/frame_encode.rs:345`).
-- The session told the link a frame was staged (`crates/wz-session-core/src/session_actions.rs:11323`,
+- The session told the link a frame was staged (`crates/wz-session-core/src/session_actions.rs:11322`,
   `wake_for_flush` at `crates/wz-runtime-tokio/src/writer_queue.rs:2036`). On a TCP link a sender may
   write the frame itself (`crates/wz-runtime-tokio/src/link_pipeline.rs:837`): `flush_inline`
   (`crates/wz-runtime-tokio/src/writer_queue.rs:2075`) writes on the sender's thread when at most
@@ -115,7 +115,7 @@ taken in this round. Each row says how to confirm it.
 | 2 | The carrier was copied, boxed, measured and encoded for every subscriber: 3 of the 5 allocations and about 382 of the 444 bytes a subscriber added, two walks of the message | `crates/wz-runtime-tokio/tests/router_hot_path_cost.rs:263`; the steps of section 2 | a stack `Push` and a reference count | second; all of the per-subscriber allocation a forward makes but the frame | encode once, share the bytes: **done in this round** for a Put the credit stage sends (section 5) |
 | 3 | Locks and atomics per subscriber: the egress chain's read lock, the held queue's mutex, the chain mark (`SeqCst`), the conduit's mutex, the staged counter and the flush flag | section 2 | the stage's one mutex and one notify | small to moderate; each is uncontended, and cache lines move between the routing thread and the writers | read the egress chain once per fan-out; read the held queue's emptiness from an atomic beside it; `Acquire` where no total order is read |
 | 4 | Per Put, not per subscriber: the tables taken per message rather than per frame, the key resolved to an owned `String`, the carrier deep-copied, the memo read by hashing key text | section 2; 5 of the 10 allocations of a forward to one subscriber | one read lock, a mapping-id lookup, a cached `Arc` route | most of the 1-subscriber and 8 B gap (3.3 and 3.2 times), little of the 16-subscriber one | take the tables once per frame; key the client memo by the inbound face's mapping id; forward a literal Put's received bytes when nothing in it changes |
-| 5 | A frame buffer allocated per frame on a path that lends no slot (the immediate path, `crates/wz-session-core/src/session_actions.rs:11060` for the staged one) | the fifth per-subscriber allocation of the record | batches reused through a refill ring | small; zero where the link lends slots (`transport-tx-lend`) | a pool of batch buffers per link, which the lending links already have: confirm the router's links take that path under fan-out |
+| 5 | A frame buffer allocated per frame on a path that lends no slot (the immediate path, `crates/wz-session-core/src/session_actions.rs:11059` for the staged one) | the fifth per-subscriber allocation of the record | batches reused through a refill ring | small; zero where the link lends slots (`transport-tx-lend`) | a pool of batch buffers per link, which the lending links already have: confirm the router's links take that path under fan-out |
 | 6 | Every delivered Put names its key as text, re-literalized for the client leaf | `client_carrier` (section 2) | the direction's key expression, chosen per face | small; at an 8 B payload the key text is a large part of the message, so fewer messages fit a batch | confirm by a capture of both arms what upstream sends to a client subscriber; if it is an id, declare the key to the face once and send by id |
 
 Not found: no per-Put copy of the tables (the version is shared, `docs/router-table-snapshots.md`),
@@ -125,9 +125,9 @@ no per-Put route computation (the memo is hit), and no per-face task spawned per
 
 Row 2. A fan-out to the client faces makes one carrier (`SharedCarrier`,
 `crates/wz-runtime-tokio/src/router_forward/held_route.rs:104`) and encodes it at most once, on the
-first face that is sent its bytes (`EncodedPush`, `crates/wz-session-core/src/session_actions.rs:3231`).
+first face that is sent its bytes (`EncodedPush`, `crates/wz-session-core/src/session_actions.rs:3230`).
 Each such face's session frames those bytes under its own sequence number
-(`try_send_encoded_push_qos`, `crates/wz-session-core/src/session_actions.rs:12536`), through the
+(`try_send_encoded_push_qos`, `crates/wz-session-core/src/session_actions.rs:12535`), through the
 same dispatch, congestion decision and batching as before. The message is made of the carrier only
 when the face must hold it, send it as a chain with a wait, or map shared memory for it.
 
