@@ -6699,6 +6699,31 @@
         "Re-measure the D13 router cells on a machine no other run shares; the first try was refused by the pinned CPU interference check.",
         "An aliased Put still copies its carrier; re-encode only its key (row 6)."
       ]
+    },
+    "Round 4601": {
+      "decision_summary": "Round 4590's carry on the face loop, decided by measurement. (1) The face loop's state machine was held by value by everything that awaited it: `face_drive_loop` awaited `face_drive_loop_core(..)` in place, so every entry (`accept_loop*`, `peer_loop*`) and every test future that held one carried the loop's whole size. The wrapper now boxes the core once (`Box::pin`), one allocation for a node's lifetime, and every caller holds a pointer: the largest accept_loop test debug frame went 458,752 to 347,288 bytes, and the rest of it is the initiators' session-open and drive futures the tests hold beside the loop, a different seam. Release text on one machine, both trees built there: -240 to +840 bytes over the seven C ABI cases that link the loop, 0 elsewhere; capic-default's budget moves by its 840. (2) Splitting `face_drive_loop_core` into a state struct and step methods was built (debug poll frame 172,032 to 19,832 bytes) and is NOT landed: on one machine it added 93,904 bytes of release text to pico-peer, 92,924 to pico-default, 99,692 to capic-peer and 49,984 to capic-default-lean. The pieces sum to the old body within 3.6 KB; the rest is inlining moved elsewhere (`drive_session_until_terminal_with_extra_deadline` newly out of line, +14 KB, `Dialer::open_with` +6.6 KB, the reassembly dispatch +10 KB). A debug frame bought with release text on the library whose size is a registered debt is a trade the owner decides; the commit is kept on branch rc4f-frames. (3) The routing_spans test's remaining window: tracing-core 0.1.36 computes a callsite's interest without a lock while the process has at most one live dispatcher (`Rebuilder::JustOne`), so a registration another test began before this recorder existed can store \"never\" after any rebuild; no step inside the process orders against it, so the recording runs in a re-executed child process that runs this test alone (the pattern of `uring.rs`'s reclaim witness). (4) A red that main carried since its fan-out commit: `a_fan_out_to_many_clients_encodes_its_carrier_once` asserted one shared encode in every build, but with `pubsub-ts-stack` `sends_shared` is false by design (each destination's routing is recorded on its own message); the test is held to builds without it and a twin holds the timestamp-stack build to its own rule (no shared encode, every subscriber its copy with the payload).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: `face_drive_loop` boxes the core's future once.",
+        "crates/wz-runtime-tokio/src/router_forward/routing_spans.rs: the recording runs in a re-executed child process.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the shared fan-out test is `not(pubsub-ts-stack)`; `a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own` added.",
+        "scripts/lib/capability_cost_gate.py: capic-default 11,495,640 to 11,496,480.",
+        "docs/reason-review-pins.md: session-close-ingress / accept_loop.rs to the new blob; both cited anchors (`pub enum ConnectReconcile`, `AddNodePassive {`) re-read and hold."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio on this machine through bx: lib default 775 passed; lib --all-features 2654 passed, 11 ignored (2653 and 1 failed before the fan-out test fix, the failure deterministic alone); routing_spans leg (routing-router-hat, tracing-instrument, tracing-spans) 1 passed, the child's own \"1 passed\" asserted; --test it 288 passed; clippy -D warnings all targets, default and --all-features; cargo fmt --check.",
+        "Debug frames, objdump prologue of the --all-features lib test binary: peer_loop_holds_a_dialed_and_an_accepted_face_at_once 458,752 to 347,288; face_drive_loop_core 172,032 to 174,072 (the split, measured at 19,832, is not landed).",
+        "C1cs, capability_cost_gate.py --measure on one machine, base main 85330b9e0 against this branch: pico-peer -240, pico-default -240, capic-scout 0, capic-peer +88, capic-router-node +596, capic-default +840, capic-default-lean +748, every other case 0 (full run of the split: the figures in the decision).",
+        "The pre-push hook's round-fed gates 170 of 170; reason_review_pin_gate OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The face loop split (branch rc4f-frames, commit c9dbe6a6f): owner to decide the debug-frame / release-text trade, or a split that keeps the release text (the growth is inlining moved, not the pieces).",
+        "Test debug frames left by the initiators' futures: session_open's dial_locator (80,824), open/drive futures held by value in the accept_loop tests (idle initiators 132,712); FaceLoop-independent.",
+        "From Round 4596: the MAPS_PROBE settle of the shared-memory differential, and recording upstream 1.10.2's blocking z_obtain_shm_provider defect."
+      ]
     }
   },
   "inventory_entries": {
