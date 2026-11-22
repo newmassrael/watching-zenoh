@@ -20,8 +20,8 @@
 //! that ends where the bump area starts is given back to it. So no two free blocks lie side by
 //! side, and a program that declares and undeclares keys of a few lengths reuses the same bytes. A
 //! key that no free block and not the bump area holds is refused ([`KeysExhausted`]) and counted,
-//! and nothing is taken: the declaration that asked for it is refused as one that finds its table
-//! full is.
+//! and nothing is taken: the declaration of the session's that asked for it is refused as one that
+//! finds its table full is, and one a peer sent is dropped and counted with its table's refusals.
 //!
 //! # Sharing
 //!

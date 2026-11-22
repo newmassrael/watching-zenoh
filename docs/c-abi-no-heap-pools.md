@@ -542,7 +542,7 @@ heap's own header of each block, not a measurement.
 |------|------|------:|------|
 | the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
 | the engine (`Arc::new_cyclic`), with the lane's event records (`DELIVERY_LANE_EVENTS` of them, inline) and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB | U4 (the records), U1 |
-| the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases hold a key of `MAX_KEYEXPR_BYTES` at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES` | open | about 16 KB of key rows at the build's defaults, about 1 KB under `arm_w.conf` | U5 |
+| the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
 | the session's handle (`Slot::take`, a `Box` without the pools) and its drive (`Box<dyn SessionDrive>`) | open | some hundreds | U9, U10 |
 | the config (`ConfigState`, a `BTreeMap<u8, String>` of the mode and the locator) | before the open, dropped by it | about 200, alive while the arena is reserved | U14 |
@@ -627,9 +627,9 @@ little longer (`arm_w.conf` keeps 4,608) lets one pass hand on the small samples
 ### 9.2 The heap each cell is expected to peak at
 
 Estimates for a 32-bit core from the rows of section 9, a row of the engine's record about 52
-bytes (its key's place in the key arena, 12 bytes, where the key of 256 bytes and its length were
-inline before section 9.4) and a row of an application table
-or a face's tables about 280; not a measurement. `arm_w.conf` states every limit the preset
+bytes and every other keyed row its key's place in the key arena, 12 bytes, where a key of
+`MAX_KEYEXPR_BYTES` and its length were inline before section 9.4 (260 bytes at 256, 68 at the 64
+`arm_w.conf` states); not a measurement. `arm_w.conf` states every limit the preset
 sets, so for the speed image as committed the preset changes nothing: its own limits are smaller
 still. The preset is what an image of the pico C ABI that states no limit gets.
 
@@ -638,24 +638,30 @@ still. The preset is what an image of the pico C ABI that states no limit gets.
 | a receive buffer and one transmit slot of the batch (two slots before section 9.4) | 4,096 | 4,096 | 4,096 |
 | the delivery lane | 65,536 | 4,380 | 4,608 |
 | two reassembly chains of the largest rejoined message | 8,192 | 8,192 | 8,192 |
-| the application's tables (48, 10 and 4 rows) | about 13,800 | about 2,900 | about 400 |
-| the pending gets | about 4,600 | about 600 | about 200 |
-| the face's peer tables (its interests, declares, replies, finals) | about 23,900 | about 8,200 | about 700 |
+| the application's tables (48, 10 and 4 rows), each row its key's place | about 1,900 | about 420 | about 180 |
+| the pending gets, each row its key's place | about 630 | about 100 | about 140 |
+| the face's peer tables (its interests, declares, replies, finals), an interest's row its key's place | about 19,900 | about 4,200 | about 600 |
 | the engine's record of declarations (224, 34 and 16 rows), each row holding its key's place (about 52 bytes a row) | about 11,700 | about 1,800 | about 900 |
-| the key arena those rows keep their keys in (`KEY_ARENA_BYTES`: 59,136, 2,048 and the 512 `arm_w.conf` states, and its state) | about 59,200 | about 2,100 | about 550 |
-| **the arena** | **about 190,900** | **about 32,200** | **about 19,600** |
+| the key arena every keyed row keeps its key in (`KEY_ARENA_BYTES`: 97,152, 4,096 and the 1,024 `arm_w.conf` states, and its state) | about 97,200 | about 4,150 | about 1,060 |
+| **the arena** | **about 209,100** | **about 27,300** | **about 19,800** |
 
 Outside the arena the open takes the registry's rows of what the peer declares and its aliases,
-the engine with its lane's event records, the kernel objects and the handle (section 9's rows), and
-each declaration a few hundred bytes: about 22,000 to 30,000 bytes at the defaults (the measured
-peak less the arena), unchanged by the preset, which lowers no limit of the peer's, and about 6,000
-under `arm_w.conf`, whose peer tables hold four rows of 64-byte keys.
+inline at their build capacities and each the id and place of a key (24 bytes), the engine with its
+lane's event records, the kernel objects and the handle (section 9's rows), and each declaration a
+few hundred bytes: about 6,000 to 14,000 bytes at the defaults (the measured peak less the arena,
+less the 15,900 bytes of key text the registry's 64 rows held inline), unchanged by the preset,
+which lowers no limit of the peer's, and about 5,100 under `arm_w.conf`, whose peer tables hold
+four rows of each.
 
 | cell (threads, sizes) | zenoh-pico, measured | arm W, build's defaults, measured | arm W, pico preset alone | arm W, `arm_w.conf` |
 |------------------------|---------------------:|----------------------------------:|-------------------------:|----------------------:|
-| st, 8 and 64 bytes | 8,360 to 9,960 | 218,768 to 219,464 | about 55,000 to 63,000 | about 25,600 to 27,600 |
-| st, 1,024 bytes | 8,360 to 9,960 | 218,768 to 219,464 | the same, and a copied payload of about 1,100 in the rtt cell | about 26,600 to 28,600 |
+| st, 8 and 64 bytes | 8,360 to 9,960 | 218,768 to 219,464 | about 34,000 to 42,000 | about 24,900 to 26,900 |
+| st, 1,024 bytes | 8,360 to 9,960 | 218,768 to 219,464 | the same, and a copied payload of about 1,100 in the rtt cell | about 25,900 to 27,900 |
 | mt, every size | 8,360 to 9,960 | 218,768 to 219,464 | st's, and about 250 for the read task's thread (its stack is the static pool `arm_w_mt.conf` places) | st's, and about 250 |
+
+The arm W cells measured 42,800 to 43,500 bytes once the engine's record kept its keys in the key
+arena (QEMU, `mps2-an385`), about 16,000 over the `arm_w.conf` column of the table before
+the application's and the peers' rows followed: what that is, is section 9.5's first question.
 
 ### 9.3 What the reservation still holds that zenoh-pico's heap does not
 
@@ -687,8 +693,8 @@ The rest, and what each form of section 9 would take:
   the chain of one reliability while the other's is open, which zenoh-pico rejoins. The difference
   left is only when: zenoh-pico's are taken when a fragment comes, the arena's at the open (decision
   E3); the two stage any two chains of the link, where zenoh-pico's are one of each reliability.
-- **Key text in every row, about 22,000 bytes at the preset: taken for the engine's record
-  (section 9.4), kept for the session core's tables; what follows is the cost as it stood.** The lent
+- **Key text in every row, about 22,000 bytes at the preset: taken (section 9.4); what follows is
+  the cost as it stood.** The lent
   policy holds a key inline in the row that owns it (`Lent`'s text is `heapless::String` of
   `MAX_KEYEXPR_BYTES`), so every row that keeps a key pays 260 bytes whatever the key's length. At
   the preset that is the engine's 34 rows, the application's 10, a face's 22 and the registry's 32
@@ -698,8 +704,8 @@ The rest, and what each form of section 9 would take:
   need a limit of its own for the total (none is declared), an allocator of spans that frees and
   compacts under the session's lock, and each keyed row of the engine
   (`crates/wz-capi-coop/src/engine.rs`) and of the session core's registries to hold a span of it
-  instead of a string. It is the largest item left after the preset, and a decision for the record
-  of `docs/c-abi-engine-and-memory.md`.
+  instead of a string. Section 9.4 took it, the engine's record first and then the session core's
+  tables through the storage policy.
 
 ### 9.4 The key arena and the one transmit slot
 
@@ -720,15 +726,36 @@ before an id is taken or anything is sent, and the C program reads `Z_ERR_SYSTEM
 no room for. The arena's state is cells reached under the session's
 one lock, as the rest of the engine's state is.
 
-The limit's default holds every row of the record at the build's defaults (224) with a key of
-`MAX_KEYEXPR_BYTES` in a block of 264 bytes, 59,136, so a build that states nothing refuses no
-key it took before. The pico preset is 2,048: each of the record's 34 rows at the preset's other
-values with a key of up to 52 bytes, about twice the longest key of zenoh-pico's examples
-(`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `char *keyexpr = "demo/example/zenoh-pico-pub";`).
-`arm_w.conf` states 512 for its 16 rows of keys of nine bytes. The session core's own tables (the
-application's, a face's peer tables and the registry's rows of what the peer declares) still hold
-their key inline: they are generic over the storage policy, and moving them onto the arena is the
-same change made through the policy, a key space the arena lends each table beside its rows.
+**The session core's tables, through the storage policy.** The tables of
+`crates/wz-session-core` are generic over the storage policy, and the policy now names the key a
+row keeps and where the table makes it (`Storage::Key` and `Storage::Keys` in
+`crates/wz-session-core/src/bounded.rs`): on the growable policy a `String` made by nothing, on
+the static one a buffer of `MAX_KEYEXPR_BYTES` inline in the row, both unchanged, and on the lent
+one a `KeyRef` made in the session's key arena, which each table is handed with its rows
+(`LentKeys`). So every keyed row the C library lends keeps its key's place: the application's
+subscribers, queryables, tokens and liveliness subscribers, each face's pending gets (the key a
+get is asked under, none for one that accepts any key), each face's peer interests, and, inline
+at their build capacities in the registry, each face's rows of the aliases, subscribers,
+queryables and tokens its peer declares (`PeerTables::lend_rows` hands them the key space). A
+registration of the program's whose key finds no room is refused as a full table refuses it
+(`RegisterError::TableFull`), and the engine refuses the declaration before anything is sent. A
+key a peer sends that finds no room is dropped and counted with its table's refusals
+(`IdMap::count_refused`), and the arena counts it too (`KeyCounts::refused`); an interest whose
+key finds none is answered by its `Final` alone. zenoh-pico answers a remote declaration its heap
+cannot hold by dropping it. A face past those the open planned for is handed no key arena, and
+keeps none of what its peer declares.
+
+The limit's default holds, with a key of `MAX_KEYEXPR_BYTES` in a block of 264 bytes, every
+keyed row the build's defaults lend for one face: the record's 224, the application's 48, the
+face's 16 pending gets and the 80 of what its peer declares and asks, 97,152 bytes, so a build that
+states nothing refuses no key it took before. The pico preset is 4,096: the record's 34 rows, the
+application's 10 and the face's 2 pending gets at the preset's other values with a key of up to 52
+bytes, about twice the longest key of zenoh-pico's examples
+(`vendor/zenoh-pico/examples/unix/c11/z_pub.c` @ `char *keyexpr = "demo/example/zenoh-pico-pub";`),
+2,760 bytes, and 22 such keys of what the peers declare. `arm_w.conf` states 1,024: its 21 rows
+with keys of nine bytes, 420 bytes, and 30 keys of that length that the router declares. A local
+declaration's key is held twice, by the engine's record and by the application's table, each in a
+block of its own.
 
 **One transmit slot (`LINK_TX_SLOTS`, `crates/wz-capi-coop/src/arena.rs`).** A link is lent one
 slot of the batch, as zenoh-pico keeps one write buffer. The batch a session holds open is sent
@@ -746,11 +773,27 @@ waiting (`tx_slot_acquire`); one the stream frees nothing for is refused and cou
 that negotiates more than one conduit (`transport-qos`, which the C library does not select) would
 hold a batch open on each, and one slot would refuse the second; it is not a build of this ABI.
 
-**What each cell is expected to peak at.** With both, section 9.2's estimates: the pico preset's
-arena about 32,200 bytes and its cells about 55,000 to 63,000, `arm_w.conf`'s arena about 19,600
-and its cells about 25,600 to 28,600, against zenoh-pico's 8,360 to 9,960. At the build's defaults
-the arena is about 1,900 bytes larger than before (the key arena's headers and the rows' places
-outweigh the second slot), which no host measures as a peak. What is left above zenoh-pico's peak
-at `arm_w.conf` is the reservation of the worst case (decision E3: two reassembly buffers, 8,192,
-and the lane, 4,608), the session core's inline keys (section 9.3) and the objects of the open
-outside the arena (section 9, about 6,000).
+**What each cell is expected to peak at.** With all of it, section 9.2's estimates: the pico
+preset's arena about 27,300 bytes and its cells about 34,000 to 42,000 (about 21,000 less than with
+the session core's keys inline, 15,900 of it the registry's rows of what the peer declares),
+`arm_w.conf`'s arena about 19,800 and its cells about 24,900 to 27,900 (about 700 less: its keys
+were already 64 bytes and its peer tables four rows), against zenoh-pico's 8,360 to 9,960. At the
+build's defaults the arena is about 18,000 bytes larger and the registry about 15,900 smaller,
+which no host measures as a peak. What is left above zenoh-pico's peak is section 9.5.
+
+### 9.5 What each cell's heap still holds, against zenoh-pico's
+
+The arm W cells as `arm_w.conf` builds them, from the plan's rows (`ArenaPlan::rows` in
+`crates/wz-capi-coop/src/arena.rs`) and section 9's sites, for a 32-bit core; estimates, not a
+measurement. zenoh-pico's put cell peaked at 8,360 bytes: its receive and transmit buffers and its
+session's lists.
+
+| what | bytes | zenoh-pico | the next structural cut |
+|------|------:|------------|--------------------------|
+| what the measurement holds beyond the estimate | about 16,000 | none | find it first: it is the size of the read task's stack (`CONFIG_WZ_OS_THREAD_STACK_SIZE`, 16,384), which `k_thread_stack_alloc` takes from the heap unless the image places a static pool as `arm_w_mt.conf` does; if the measured cells start the task under `arm_w.conf`, the pool or a stack sized to the task is the cut |
+| two reassembly buffers of the largest rejoined message | 8,192 | none until a fragment arrives, then one per reliability (section 9.3) | lend a chain's buffer when its first fragment arrives, from a pool the links share, instead of reserving two per link at the open: a change of decision E3 for the reassembly rows, and the cells, whose messages are one batch, would hold none |
+| the delivery lane | 4,608 | none: a sample is handed to its callback from the receive buffer | a single-threaded session that delivers in the call that reads, after the step and before the next read, with no lane (section 9) |
+| a receive buffer and one transmit slot of the batch | 4,096 | the same, a read and a write buffer | none: this is zenoh-pico's own floor |
+| the objects of the open outside the arena: the engine and its planes, the kernel objects, the handle, the registry's face tables | about 5,100 | its session and transport structs | the registry's face tables (their rows of what the peer declares, inline at the build's capacities, about 400) lent from the arena as the other tables are (section 4.5); the kernel objects one per lock the engine keeps, not one per entity |
+| the tables lent from the arena: the record, the application's, the gets, a face's peer tables, and the key arena | about 2,900 | lists of what is declared, allocated per entity | the key held twice by a local declaration (the record's and the application's table's) shared as one block, by handing the record's `KeyRef` to the registration, about 100 here and 600 at the pico preset |
+| each declaration and each message | some hundreds, freed by the put | the same order | the places the owned objects of section 9 still allocate (U6, U7, U9) |

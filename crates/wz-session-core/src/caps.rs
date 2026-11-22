@@ -107,10 +107,11 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
 /// rather than silently truncated.
 pub const MAX_KEYEXPR_BYTES: usize = generated::MAX_KEYEXPR_BYTES;
 
-/// The bytes of key text the rows of a session's own declarations hold at once, in the one key
-/// arena they share ([`crate::key_arena`]): each key a block of its header and its bytes. A key
-/// that finds no room is refused as one that finds its table full is. Must be at least `1` and
-/// within what a key arena addresses.
+/// The bytes of key text the keyed rows of a session's tables of the lent policy hold at once, in
+/// the one key arena they share ([`crate::key_arena`]): each key a block of its header and its
+/// bytes. A key of the session's own that finds no room is refused as one that finds its table
+/// full is; one a peer sends is dropped and counted. Must be at least `1` and within what a key
+/// arena addresses.
 pub const KEY_ARENA_BYTES: usize = generated::KEY_ARENA_BYTES;
 
 const _: () = assert!(
