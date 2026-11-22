@@ -2244,16 +2244,19 @@ on. A sample past this is refused and counted. It must be at least 1.
 zenoh = "none"
 reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
+# `both` as PICO_UNICAST_BATCH_BYTES is: the cooperative engine lends the lane's bytes from the
+# session's arena when it opens, under the build's value.
 [[limit]]
 id = "DELIVERY_LANE_BYTES"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_BYTES"
 kind = "parameter"
 range = [1, 4294967295]
+on_heap = "quota"
 default = 65536
-storage = "quota"
+storage = "both"
 scope = "entity"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -3814,16 +3817,21 @@ reason = "No key of upstream's configuration states it: the declaration-sync-pac
 # pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
 # what pico's does; a pico built with other numbers is matched by stating them here.
 
+# `both`: the cooperative engine lends each link's receive buffer and transmit slots of this many
+# bytes from the session's arena when it opens, under the build's value (`binding_fixed = "open"`),
+# so a stated value past the build's is refused by name in such a build; the heap engine sizes them
+# from the session's value (`on_heap = "quota"`), anywhere in the range.
 [[limit]]
 id = "PICO_UNICAST_BATCH_BYTES"
 kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
 kind = "parameter"
 range = [1, 65535]
+on_heap = "quota"
 default = 2048
-storage = "quota"
+storage = "both"
 scope = "link"
 binding_heap = "open"
-binding_fixed = "none"
+binding_fixed = "open"
 read = "snapshot"
 wire = "negotiated"
 help = '''
@@ -3835,7 +3843,9 @@ delivery lane: DELIVERY_LANE_BYTES holds the larger of this and
 PICO_FRAG_MAX_BYTES, with MAX_KEYEXPR_BYTES, 16 bytes of a timestamp's clock id
 and 4 bytes for each of the larger of MAX_SUBSCRIPTIONS and
 MAX_LIVELINESS_SUBSCRIPTIONS, as the cooperative engine's build asserts; a build
-that raises this raises DELIVERY_LANE_BYTES with it.
+that raises this raises DELIVERY_LANE_BYTES with it. A build whose engine lends
+each link's buffers from the session's memory when it opens holds a stated value
+to the build's own: a session may lower it, never raise it.
 '''
 
 [limit.upstream]

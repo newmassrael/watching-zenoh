@@ -109,7 +109,11 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-t
 # cooperative forms read and send only what the session lends (the lent-only selectors of
 # `wz-capi-coop`, `rx-lent-only` and `tx-lend-only`), so the C library has no heap-backed form
 # beside the no-heap one, and `wz-runtime-tokio` refuses to be built beside those selectors. The
-# selection reads features, not a config key, because what an engine does not have is not linked.
+# session core is told its engine lends the bytes of the parameters bound at the open from the
+# session's arena (`wz-session-core/limits-lent-at-open`), so a document stating a batch or a lane
+# past the build's is refused by name at the door rather than by the arena when the session opens.
+# The selection reads features, not a config key, because what an engine does not have is not
+# linked.
 #
 # Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
 # (`wz-runtime-posix`: Linux, Android, QNX Neutrino, and Winsock on Windows), so each selects `std`.
@@ -128,6 +132,7 @@ engine-coop = [
     "wz-capi-coop/rx-lent-only",
     "wz-capi-coop/tx-lend-only",
     "wz-session-core/initial-sn-compact",
+    "wz-session-core/limits-lent-at-open",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
 # own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
@@ -144,6 +149,7 @@ os-zephyr = [
     "wz-capi-coop/rx-lent-only",
     "wz-capi-coop/tx-lend-only",
     "wz-session-core/no_std",
+    "wz-session-core/limits-lent-at-open",
 ]
 # `os-posix`: the library on a host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
@@ -165,6 +171,7 @@ os-posix = [
     "wz-capi-coop/tx-lend-only",
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
+    "wz-session-core/limits-lent-at-open",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",

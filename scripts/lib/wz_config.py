@@ -2521,12 +2521,18 @@ def is_runtime_limit(lim: dict) -> bool:
 def limit_capacity_rust(lim: dict) -> str:
     """`CAPACITY` of a limit's `LimitSpec`: the storage the build sized by it. A limit that is
     `both` sizes the fixed profile's storage, and the heap's too where `on_heap` is `capacity`; a
-    limit that sizes nothing (`quota`) has none in any build."""
+    limit that sizes nothing (`quota`) has none in any build. A parameter that is `both` and bound
+    at the open (`binding_fixed = "open"`) sizes the bytes a session's arena lends it under the
+    build's value, which an engine that lends from an arena does whatever the policy of the session
+    core's own tables, so its capacity is `lent_capacity`: no table of that engine refuses past a
+    parameter by its storage, and only the domain keeps a document from stating more."""
     value = f"caps::{lim['id']}"
     if lim["storage"] == "quota":
         return "None"
     if lim["on_heap"] == "capacity":
         return f"Some({value})"
+    if lim["kind"] == "parameter" and lim["binding_fixed"] == "open":
+        return f"lent_capacity({value})"
     return f"fixed_capacity({value})"
 
 
@@ -2735,6 +2741,21 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         "    }",
         "}",
     ]
+    if any(limit_capacity_rust(lim).startswith("lent_capacity(") for lim in lims):
+        out += [
+            "",
+            "/// The capacity of a parameter whose bytes a session's arena lends when it opens, under the",
+            "/// build's value: `value` where the build's tables are fixed in size or its engine lends from",
+            "/// an arena (`limits-lent-at-open`), so a stage after the build only lowers it; none where the",
+            "/// heap sizes the bytes from the session's own value.",
+            "const fn lent_capacity(value: usize) -> Option<usize> {",
+            "    if crate::bounded::ENFORCES_CAPACITY || crate::limit_binding::LIMITS_LENT_AT_OPEN {",
+            "        Some(value)",
+            "    } else {",
+            "        None",
+            "    }",
+            "}",
+        ]
     for lim in lims:
         out += [""] + limit_spec_rust(lim)
     out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds")
@@ -6016,6 +6037,15 @@ def cmd_selftest() -> int:
            "    type Value = usize;" in psnap
            and "LimitDomain::of_parameter(1, 8, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY)"
            in psnap)
+    lent_parameter = (parameter.replace('on_heap = "capacity"', 'on_heap = "quota"')
+                      .replace('binding_fixed = "build"', 'binding_fixed = "open"'))
+    expect("a parameter lent at the open validates",
+           validate_decl(read_decl_toml(lent_parameter)) == [])
+    lsnap = emit_rust_limit_snapshots(decl_of(read_decl_toml(lent_parameter)))
+    expect("a parameter lent at the open is sized where the build lends from an arena, and only it",
+           "const CAPACITY: Option<usize> = lent_capacity(caps::MAX_A);" in lsnap
+           and "const fn lent_capacity(value: usize) -> Option<usize> {" in lsnap
+           and "lent_capacity" not in psnap and "lent_capacity" not in bsnap)
     shipped = load_decl()
     ranges = {lim["kconfig"]: lim["range"] for lim in shipped["limits"] if lim["kind"] == "parameter"}
     outside = [(v["case"], k, x) for v in statement_vectors(shipped) for k, x in v["env"].items()

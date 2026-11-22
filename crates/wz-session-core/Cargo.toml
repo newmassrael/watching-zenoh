@@ -380,6 +380,14 @@ rx-lent-control = []
 # `wz-runtime-tokio` asserts at build time that it is off (`driver_loop::RX_LENT_ONLY`). A build
 # that selects every feature at once still compiles: the three are counted refusals there.
 rx-lent-only = []
+# The engine this build links lends the bytes of each parameter bound at the open
+# (`binding_fixed = "open"` in deploy/wz-config.toml) from a session's arena under the build's
+# value, whatever the policy of this crate's own tables: the domain of such a parameter stops at the
+# build's value (`limit_binding::LIMITS_LENT_AT_OPEN`), so a document stating more is refused by
+# name before any open instead of by the open's arena. A SELECTOR, named by the final build of a C
+# library on the cooperative engine (`wz-capi-pico`'s `engine-coop`, `os-posix`, `os-zephyr`)
+# as `rx-lent-only` is, so a heap engine's sessions keep the whole range the declaration states.
+limits-lent-at-open = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]

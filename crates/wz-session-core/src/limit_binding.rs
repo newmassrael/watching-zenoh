@@ -559,6 +559,13 @@ pub(crate) fn write_outside(
     }
 }
 
+/// Whether the engine this build links lends the bytes of every parameter bound at the open
+/// (`binding_fixed = "open"`) from a session's arena under the build's value, whatever the policy of
+/// this crate's own tables (`limits-lent-at-open`). Where it does, the [`LimitSpec::CAPACITY`] of
+/// such a parameter is the build's value, so its domain stops there and a stage after the build only
+/// lowers it: a document that states more is refused by name, not by the open's arena.
+pub const LIMITS_LENT_AT_OPEN: bool = cfg!(feature = "limits-lent-at-open");
+
 /// Whether a limit's domain keeps only the build's value: what `WZ_LIMIT_DOMAINS` states (`full`
 /// keeps every value the build allows, `defaults` only its own), else whether the target has no
 /// operating system. A value that is neither word is a compile error, not a default.

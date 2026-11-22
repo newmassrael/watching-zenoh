@@ -2642,4 +2642,39 @@ mod tests {
             );
         }
     }
+
+    /// A parameter whose bytes a session's arena lends at the open (a link's batch, the delivery
+    /// lane) has the build's value as its capacity where the build's tables are fixed or its engine
+    /// lends from an arena, so the domain stops there and a value past it is refused by the
+    /// capacity's name; elsewhere the declared range is the domain.
+    #[test]
+    fn a_parameter_lent_at_the_open_stops_at_the_builds_value_where_it_is_lent() {
+        let lent = crate::bounded::ENFORCES_CAPACITY || crate::limit_binding::LIMITS_LENT_AT_OPEN;
+        let batch = caps::PICO_UNICAST_BATCH_BYTES;
+        assert_eq!(PicoUnicastBatchBytes::CAPACITY, lent.then_some(batch));
+        assert_eq!(
+            DeliveryLaneBytes::CAPACITY,
+            lent.then_some(caps::DELIVERY_LANE_BYTES)
+        );
+        let (_, most) = PicoUnicastBatchBytes::DOMAIN
+            .integers()
+            .expect("a batch is a number");
+        if PicoUnicastBatchBytes::DOMAIN.is_singleton() {
+            assert_eq!(most, batch);
+            return;
+        }
+        let range = binding_range(caps::binding::PICO_UNICAST_BATCH_BYTES);
+        assert_eq!(most, if lent { batch.min(range) } else { range });
+        if lent && batch < range {
+            let refused = SessionLimits::defaults()
+                .select_pico_unicast_batch_bytes(batch + 1)
+                .unwrap_err();
+            assert_eq!(refused.why, Outside::OverCapacity { capacity: batch });
+        }
+    }
+
+    /// The most a parameter's declared range admits.
+    fn binding_range(binding: crate::policy_binding::LimitBinding) -> usize {
+        binding.range.expect("a parameter states its range").1
+    }
 }
