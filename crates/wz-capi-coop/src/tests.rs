@@ -1000,6 +1000,59 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     );
 }
 
+/// Under the pico profile a droppable publish that finds the session held by a read step waits for
+/// the step, blocked, and is sent once the step lets go: the holder holds no send, so the publish
+/// is no congestion drop, and it does not spin on the session while it waits. The CONTROL is the
+/// time it took: no less than the step held the session.
+#[test]
+fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
+    use wz_session_core::qos::CongestionControl;
+    use wz_session_core::session_init_params::HeldDrop;
+    let router = Router::start(CatchAll::Held);
+    assert_eq!(
+        config(&router).tx_queue.held_drop,
+        HeldDrop::DropAtOnce,
+        "the pico profile"
+    );
+    let engine = open(&router);
+    let spins = engine.takes.spins.load(Ordering::SeqCst);
+    let (holds, held) = channel();
+    let step = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            engine.holding_as_a_step(|| {
+                holds.send(()).expect("the test waits for the hold");
+                std::thread::sleep(Duration::from_millis(200));
+            });
+        })
+    };
+    held.recv().expect("the step holds the session");
+    let started = Instant::now();
+    let sent = engine.publish_on_wire_all(
+        "demo/behind",
+        &WireKey::literal(),
+        b"behind",
+        &PublishOptions::put()
+            .with_locality(Locality::Remote)
+            .with_congestion_control(CongestionControl::Drop),
+    );
+    let took = started.elapsed();
+    step.join().expect("the step");
+    assert!(sent.is_ok(), "the publish was sent: {sent:?}");
+    assert_eq!(
+        engine.takes.spins.load(Ordering::SeqCst),
+        spins,
+        "no turn spun on the held session"
+    );
+    assert!(
+        took >= Duration::from_millis(150),
+        "CONTROL: it waited for the step, {took:?}"
+    );
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/behind"))
+    });
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that
