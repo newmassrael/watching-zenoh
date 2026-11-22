@@ -798,9 +798,13 @@ fn the_samples_of_a_lent_datagram_are_handed_on_by_one_hold() {
     );
 }
 
+/// One record a delivery took: whether it was a lent batch, and each sample's subscribers and
+/// first payload byte.
+type TakenRecord = (bool, Vec<(Vec<SubId>, u8)>);
+
 /// What one delivery of `lane` takes, in order, each given back as it is read: whether it is a
 /// batch, and the subscribers and the first payload byte of each of its samples.
-fn delivered(lane: &crate::lane::SharedLane) -> Vec<(bool, Vec<(Vec<SubId>, u8)>)> {
+fn delivered(lane: &crate::lane::SharedLane) -> Vec<TakenRecord> {
     let first = |payload: &[u8]| payload.first().copied().unwrap_or(0);
     let delivery = lane.deliver().expect("no other delivery");
     let mut seen = Vec::new();
