@@ -1756,7 +1756,10 @@ where
             move || Some(after_dispatch())
         },
     };
-    drive_core(
+    // The loop's state is made once, on the heap: a session's drive runs for the session's life,
+    // and held by value it made every future that awaits it (an initiator beside its peer in a
+    // test, a demo's task) carry the loop's whole state, frame by frame. One allocation a session.
+    Box::pin(drive_core(
         driver,
         actions,
         engine,
@@ -1765,7 +1768,7 @@ where
         timeouts,
         extra.revised,
         &mut hooks,
-    )
+    ))
     .await
 }
 
