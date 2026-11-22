@@ -340,7 +340,9 @@ where
 /// the owned message's `encode(sink)`, shared by the
 /// immediate-path `encode_frame_with_*` reference wrapper and the
 /// batching-path direct-into-buffer append in `SessionLinkActions`
-/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice).
+/// (`Fn`, not `FnOnce` — the batch-overflow retry encodes twice), and by a
+/// router's leaf encoding (`encoded_push::LeafPush::encode`), so that a router
+/// links one Push writer.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 pub(crate) fn push_body(
     push: &PushOwned,
@@ -362,15 +364,11 @@ pub(crate) fn push_body(
 /// Exact matters, because the lend path asks a link for a slot of this size (`send_lent`) and a slot
 /// too small is a refused send.
 ///
-/// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`) and the
-/// multicast group send (`multicast_tx_push`, behind `session-multicast`). Inside this crate alone only
-/// the second is reached: the unicast methods are `pub` entry points that the runtime crates call, and a
-/// build of this crate with the Push codec and `alloc` and none of `session-multicast` has no caller of
-/// its own (measured, with `codec-request`, `codec-response`, `declare-subscriber` and `liveliness-token`
-/// added one at a time: dead in each). The allowance is for that build and is not a decision that the
-/// function is optional.
+/// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`), the
+/// multicast group send (`multicast_tx_push`, behind `session-multicast`) and a router's leaf
+/// encoding (`encoded_push::LeafPush::encode`), which frames the Push it receives with this send's
+/// own writer.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
-#[cfg_attr(not(feature = "session-multicast"), allow(dead_code))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
     wz_codecs::push::PushWire::measure(push).len()
 }

@@ -4,7 +4,6 @@
 //! The answering end of a query: the router asks, the session's queryable answers outside the
 //! session's lock, and the Final follows the replies.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -108,54 +107,71 @@ fn a_kept_query_holds_its_final_until_it_is_dropped() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
-/// The session holds the Finals of at most `MAX_PENDING_FINALS` queries for their callbacks: a
-/// query that finds every row taken is answered with its Final at once, its callback never run,
-/// and counted, while the kept query's Final still waits for it. The CONTROL is the first query,
-/// kept with its Final held.
+/// Held to two Finals, a session that keeps two queries refuses the third: its callback never
+/// runs, it is counted, and no Final answers it, as zenoh-pico refuses a query it cannot build
+/// (it returns before any callback and sends no Final). A kept query let go frees its row, and the
+/// next query is held again. The CONTROL is the two kept queries, whose Finals both reach the
+/// router.
 #[test]
-fn a_query_no_hold_row_takes_is_answered_with_its_final_at_once() {
+fn a_query_past_the_finals_held_is_refused_without_a_final() {
     let Some(limits) =
-        super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)).is_ok())
+        super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(2)).is_ok())
     else {
         return;
     };
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
-    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::new(Mutex::new(None));
-    let called = Arc::new(AtomicUsize::new(0));
-    let (slot, count) = (kept.clone(), called.clone());
-    declare(&engine, "demo/h/**", move |holder, query, _out| {
-        count.fetch_add(1, Ordering::SeqCst);
-        *slot.lock().unwrap() = Some(holder.hold_query(query));
+    let kept: Arc<Mutex<Vec<Box<dyn HeldQuery>>>> = Arc::default();
+    let slot = kept.clone();
+    declare(&engine, "demo/f/**", move |holder, query, _out| {
+        slot.lock().unwrap().push(holder.hold_query(query));
     });
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) >= 1
     });
-    router.send(Command::Query(9, "demo/h/a"));
-    until(&engine, "the callback to keep the first query", || {
-        kept.lock().unwrap().is_some()
+    let held = || kept.lock().unwrap().len();
+    router.send(Command::Query(1, "demo/f/a"));
+    router.send(Command::Query(2, "demo/f/b"));
+    until(&engine, "the callbacks to keep two queries", || held() == 2);
+    router.send(Command::Query(3, "demo/f/c"));
+    until(&engine, "the third query to be refused", || {
+        engine.queries_refused() >= 1
     });
+    let quiet = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(held(), 2, "the third query's callback never runs");
+    assert_eq!(
+        engine.queries_refused(),
+        1,
+        "the third query is counted once"
+    );
     assert!(
         router.seen(|s| s.answers.is_empty()),
-        "CONTROL: the kept query's Final waits for it"
+        "nothing answers a refused query, and the kept ones wait"
     );
 
-    router.send(Command::Query(10, "demo/h/b"));
-    until(&engine, "the second query's Final", || {
+    drop(kept.lock().unwrap().remove(0));
+    until(&engine, "the first kept query's final", || {
         router.seen(|s| s.answers.len()) >= 1
     });
-    assert_eq!(router.seen(|s| s.answers.clone()), vec!["final"]);
-    assert_eq!(
-        called.load(Ordering::SeqCst),
-        1,
-        "the second query's callback never ran"
-    );
-    assert_eq!(engine.queries_unheld(), 1);
-
-    let held = kept.lock().unwrap().take();
-    drop(held);
-    until(&engine, "the kept query's Final", || {
-        router.seen(|s| s.answers.len()) >= 2
+    router.send(Command::Query(4, "demo/f/d"));
+    until(&engine, "the freed row to hold the next query", || {
+        held() == 2
     });
-    assert_eq!(router.seen(|s| s.answers.clone()), vec!["final", "final"]);
+
+    kept.lock().unwrap().clear();
+    until(&engine, "the kept queries' finals", || {
+        router.seen(|s| s.answers.len()) >= 3
+    });
+    let quiet = std::time::Instant::now() + Duration::from_millis(400);
+    while std::time::Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["final", "final", "final"],
+        "three Finals for the three queries held, none for the refused one"
+    );
 }

@@ -25,9 +25,8 @@
 //! the asking thread is inside of has the query copied, to be handed when that callback returns.
 //!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
-//! arrives when every row is taken is not handed to a callback: nothing holds its Final, so the
-//! dispatch sends it at once, and the query is counted. The asker hears the end of an answer with
-//! no reply rather than nothing.
+//! arrives when every row is taken is refused and counted: it is not handed to a callback, and
+//! nothing answers it, not even a Final, as zenoh-pico refuses a query it cannot build.
 //!
 //! ## A query belongs to its link
 //!
@@ -141,11 +140,28 @@ struct FinalHold {
 
 /// The Finals held open, by the link generation and request id they answer: one row for each
 /// query a callback is still to answer or a C program keeps, at most `rows` of them, the value of
-/// `MAX_PENDING_FINALS` the session's open resolved under the build's. The table is the plane's
-/// own and fixed in size, as the plane is shared with what answers outside the session's lock.
+/// `MAX_PENDING_FINALS` the session's open resolved under the build's (the deploy `limits` key
+/// `pending_finals`), as the Finals a dispatch owes are held to. A request that would need a row
+/// the table has no room for is REFUSED before its callback runs: it is not copied out, nothing
+/// answers it and no Final is sent for it, as zenoh-pico refuses a query it cannot build
+/// (`vendor/zenoh-pico/src/session/queryable.c` @ `z_result_t _z_trigger_queryables(`, which
+/// returns before any callback and sends no Final) and as the session's own stage refuses a
+/// request it cannot owe a Final for (`wz_session_core::caps::MAX_PENDING_FINALS`). The table is
+/// the plane's own and fixed in size, as the plane is shared with what answers outside the
+/// session's lock.
 pub(super) struct FinalHolds {
     holds: BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, Static>,
     rows: usize,
+    /// The requests refused for want of a row in the dispatch now running, whose Final that
+    /// dispatch owes and must not send. A request that reached a queryable owes its Final in the
+    /// same dispatch, so [`Self::owe`] takes each out before the dispatch ends; a dispatch owes no
+    /// more Finals than the build's `MAX_PENDING_FINALS`, which bounds this list as it does the
+    /// rows.
+    refused: BoundedVec<
+        (u64, wz_session_core::wire_id::RequestId),
+        { caps::MAX_PENDING_FINALS },
+        Static,
+    >,
 }
 
 impl FinalHolds {
@@ -154,11 +170,12 @@ impl FinalHolds {
         Self {
             holds: BoundedVec::new_static(),
             rows,
+            refused: BoundedVec::new_static(),
         }
     }
 
-    /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing, when no
-    /// hold of that query is open and every row is taken.
+    /// One hold more on the Final of `rid` on link `generation`: `false`, holding nothing and
+    /// noting nothing, when no hold of that query is open and every row is taken.
     pub(super) fn take(
         &mut self,
         generation: u64,
@@ -184,14 +201,45 @@ impl FinalHolds {
                 .is_ok()
     }
 
+    /// A query of the dispatch now running reaches a queryable: one hold more on its Final, or
+    /// `false` when the request was refused already or no row is left for it, which refuses it
+    /// for the rest of the dispatch so its Final is never sent ([`Self::owe`]).
+    pub(super) fn admit(
+        &mut self,
+        generation: u64,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> bool {
+        // A request refused once stays refused for the rest of its dispatch, so a second
+        // queryable it matches does not answer what the first could not.
+        if self.refused.contains(&(generation, rid)) {
+            return false;
+        }
+        if self.take(generation, rid) {
+            return true;
+        }
+        // The list cannot be full while every refusal it holds is owed by the running dispatch;
+        // were it, the request would still run no callback, and its Final would go out at once.
+        let _ = self.refused.push((generation, rid));
+        false
+    }
+
     /// The dispatch owes the Final of `rid`: `true` when nothing holds it, so it goes out now,
-    /// `false` when it waits for the last hold.
+    /// `false` when it waits for the last hold or the request was refused, whose Final is never
+    /// sent.
     pub(super) fn owe(
         &mut self,
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
         qos: QosLevel,
     ) -> bool {
+        if let Some(at) = self
+            .refused
+            .iter()
+            .position(|&refused| refused == (generation, rid))
+        {
+            self.refused.remove(at);
+            return false;
+        }
         match self
             .holds
             .iter_mut()
@@ -380,8 +428,9 @@ pub(super) struct QueryPlane {
     /// The queries waiting for their callbacks, in the order they arrived: the queryable they
     /// matched, the query, and the generation of its link.
     pub(super) queries: Mutex<VecDeque<(QblId, OwnedQuery, u64)>>,
-    /// The queries that found no row to hold their Final and were answered with it at once.
-    unheld: AtomicU64,
+    /// The arrivals refused for want of a row to hold their Final: one for each queryable a
+    /// refused query reached, none of whose callbacks ran.
+    refused: AtomicU64,
     /// The queryables the session's own get matched while it was asked, in the order the
     /// registry met them: the get hands them its own view once the session's lock is let go, so
     /// nothing of the query is copied (`local-queryable`).
@@ -403,19 +452,19 @@ impl QueryPlane {
             asking: AtomicBool::new(false),
             holds: Mutex::new(FinalHolds::holding(rows)),
             queries: Mutex::new(VecDeque::new()),
-            unheld: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
         }
     }
 
-    /// What the observer's queryable `id` does with a query: copy it out and hold its Final. A
-    /// query no row can hold is not handed to a callback: nothing holds its Final, so the dispatch
-    /// that owes it sends it at once and the asker is not left without an end. It is counted.
+    /// What the observer's queryable `id` does with a query: copy it out and hold its Final, or,
+    /// with no row left for its Final, refuse it ([`FinalHolds::admit`]): no callback runs for it,
+    /// nothing answers it and it is counted.
     pub(super) fn arrive(&self, id: QblId, view: &dyn QueryView) {
         let generation = self.arriving_on();
-        if !lock(&self.holds).take(generation, view.rid()) {
-            self.unheld.fetch_add(1, Ordering::Relaxed);
+        if !lock(&self.holds).admit(generation, view.rid()) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
             return;
         }
         // The session's own get is handed to the queryables it matched by the get itself, from its
@@ -538,10 +587,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
-    /// How many queries found no row to hold their Final and were answered with it at once.
+    /// How many arrivals at a queryable were refused for want of a row to hold their Final.
     #[cfg(test)]
-    pub(crate) fn queries_unheld(&self) -> u64 {
-        self.plane.unheld.load(Ordering::Relaxed)
+    pub(crate) fn queries_refused(&self) -> u64 {
+        self.plane.refused.load(Ordering::Relaxed)
     }
 }
 
@@ -625,5 +674,62 @@ mod tests {
         assert!(refused, "every row taken: refused");
         assert!(still_full, "the refusal gave back no row it never took");
         assert!(next, "the row the first let go of takes the next");
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod refusal_tests {
+    //! A request no row can hold is refused at each queryable of its dispatch, with its Final.
+    use super::*;
+
+    /// With its one row taken, the table refuses a second request, which stays refused for the
+    /// rest of its dispatch though a row comes free, and whose Final the dispatch does not send;
+    /// that Final spends the refusal, so the request is weighed afresh after. The CONTROL is the
+    /// first request, held, whose Final waits for its hold.
+    #[test]
+    fn a_request_no_row_holds_is_refused_with_its_final() {
+        let mut holds = FinalHolds::holding(1);
+        assert!(
+            holds.admit(1, 7),
+            "CONTROL: the one row holds the first request"
+        );
+        assert!(!holds.admit(1, 8), "every row taken: refused");
+        assert!(
+            !holds.owe(1, 7, QosLevel::DEFAULT),
+            "CONTROL: the held request's Final waits for its hold"
+        );
+        assert!(
+            holds.release(1, 7).is_some(),
+            "CONTROL: the last hold let go sends the Final owed"
+        );
+        assert!(
+            !holds.admit(1, 8),
+            "refused for the rest of its dispatch, though a row is free"
+        );
+        assert!(
+            !holds.owe(1, 8, QosLevel::DEFAULT),
+            "the refused request's Final is not sent"
+        );
+        assert!(
+            holds.admit(1, 8),
+            "the refusal spent, the free row holds it"
+        );
+        assert!(
+            holds.release(1, 8).is_none(),
+            "nothing owed yet for the request held afresh"
+        );
+    }
+
+    /// A hold taken outside a dispatch (a get of the session's own) and refused notes no
+    /// refusal: the Final of that request id is not withheld from the dispatch that owes it.
+    #[test]
+    fn a_refused_take_withholds_no_final() {
+        let mut holds = FinalHolds::holding(1);
+        assert!(holds.take(0, 1), "CONTROL: the one row is taken");
+        assert!(!holds.take(0, 2), "every row taken: refused");
+        assert!(
+            holds.owe(0, 2, QosLevel::DEFAULT),
+            "a refused take noted nothing, so the Final goes out"
+        );
     }
 }

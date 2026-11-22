@@ -575,15 +575,20 @@ mod tests {
         assert_eq!(delta(c"pending query keys and callbacks"), 24);
         assert_eq!(delta(c"subscribers"), 0);
         assert_eq!(delta(c"pending queries"), 0);
+        // Each changed row moves the total by its own count of entries: the quota on a growable
+        // table, the capacity its storage is laid out for on a fixed one, which is not the quota.
+        let entries = |part: &CStr| row(&none, part).count.expect("bounded");
         // A pending liveliness get holds a reply sink too, in a build with the plane.
         let gets = if cfg!(feature = "liveliness-get") {
-            3 * 24
+            entries(c"pending liveliness get callbacks") * 24
         } else {
             0
         };
         assert_eq!(
             some.total().expect("bounded") - none.total().expect("bounded"),
-            3 * 40 + 3 * 24 + gets
+            entries(c"subscriber keys and callbacks") * 40
+                + entries(c"pending query keys and callbacks") * 24
+                + gets
         );
     }
 

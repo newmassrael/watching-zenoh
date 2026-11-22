@@ -2775,6 +2775,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_room = 2usize
             .saturating_add(config.listen.len())
             .saturating_add(config.groups.len());
+        let limits = resolve_limits(&config);
         let mut core = Core {
             local,
             runtime,
@@ -2783,10 +2784,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
-                replay: Replay::with_pacing(ReplayPacing::of_snapshot(
-                    &policy,
-                    &resolve_limits(&config),
-                )),
+                replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
             }],
             rooms: Arc::new(LinkRooms::default()),
             next_face: 1,
