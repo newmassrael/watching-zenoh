@@ -445,10 +445,12 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
         && caps::MAX_PEER_KEYEXPR_ALIASES > 0
         && caps::MAX_REMOTE_DECLS > 0
     {
-        assert!(
-            SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
-                < SubscriberTable::<BoxedSink, Static>::ROW_BYTES
-        );
+        const {
+            assert!(
+                SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+                    < SubscriberTable::<BoxedSink, Static>::ROW_BYTES
+            );
+        }
         assert!(
             core::mem::size_of::<PeerAliases<Lent>>() < core::mem::size_of::<PeerAliases<Static>>()
         );
