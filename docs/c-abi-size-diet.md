@@ -49,7 +49,7 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 | T3 | open and dial refusals formatted into a `String` | both | -1.5K to -3K | landed here |
 | T4 | `Locator` text through `core::fmt` and `SocketAddr`'s `Display` | both | -3K to -5K | landed before round 2 (see T4) |
 | T5 | `expect` / panic locations on reachable paths | both | -1K to -2K | candidate |
-| T6 | 1,590 relative relocations (`.rela.dyn`) | both | about -36K no_std | owner decision |
+| T6 | relative relocations (`.rela.dyn`) packed (DT_RELR) | both | std -52.5K, no_std -37.7K | landed as a named Linux link choice |
 | T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | about -30K | owner decision |
 | T8 | owned records in a build that lends every one | both | -0.3K to -3K | record buffer landed in round 2; outcome list candidate |
 | T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | domain check landed here |
@@ -115,16 +115,75 @@ the right form is a code path that cannot panic (a `match` that returns, or an i
 that cannot be out of range), not a cheaper panic. Gating `Debug` derives behind
 `debug_assertions` gains nothing: an impl nothing calls is not linked.
 
-### T6: relative relocations (owner decision)
+### T6: relative relocations (landed as a named Linux link choice, owner decision 2026-11-23)
 
 The no_std form carries 1,590 `R_X86_64_RELATIVE` entries, 24 bytes each: vtables and function
 pointers (486 into `.text`), string slices (254), panic locations, and GOT entries for calls into
-the prebuilt `core` (418). Linking with `-z pack-relative-relocs` (DT_RELR) packs them into a
-bitmap of about 1K. That would be a rustflag in `.cargo/capi-nostd.toml`. It requires a loader
-that knows DT_RELR (glibc 2.36 or later, Android API 28 or later) and a linker that writes it
-(GNU ld 2.38, lld 15, mold). On an older loader the library fails to load with a
-`GLIBC_ABI_DT_RELR` version error. That is a statement about which hosts the library
-supports, so it is the owner's.
+the prebuilt `core` (418). The std form carries 2,215. Linking with `-z pack-relative-relocs`
+(DT_RELR) writes them as a bitmap in `.relr.dyn`.
+
+**What was done** (`build(capi-pico): Pack the Linux C ABI library's relative relocations`).
+`crates/.cargo/capi-packed-relocs.toml` gives `-C link-arg=-Wl,-z,pack-relative-relocs` to a
+build for `cfg(all(target_os = "linux", target_env = "gnu"))` and to nothing else, named with
+`--config` and the host's target (`--target`), so the build scripts, which run on the build
+host, are linked as before. The two forms of the Linux library:
+
+| form | build | loader | linker |
+|------|-------|--------|--------|
+| packed | `--config .cargo/capi-packed-relocs.toml --target x86_64-unknown-linux-gnu` (after `.cargo/capi-nostd.toml` for the no_std form) | glibc 2.36 or later; an older one refuses the library by the version need `GLIBC_ABI_DT_RELR` | GNU ld 2.38, lld 15 or later |
+| compatible | the same build without that file | any the library's other symbol versions allow | any |
+
+The size cases `pico-client-coop` and `pico-client-coop-nostd` name the file
+(`Case.cargo_configs` in `scripts/lib/capability_cost_gate.py`). No Linux release package of
+the pico library exists to carry the choice: `release.yml` attaches the Windows packages only
+(`pico_windows_package.py`, PE, where the choice does not arise), and the Linux entry of the
+target-build contract (`wz_package.py`, platform `linux-x86_64-glibc`) builds with plain
+`--release`, the compatible form. A Linux package that ships the packed form names it as such
+beside the compatible one, and its manifest's glibc floor reads 2.36 for it: `elf_facts.glibc_floor`
+counts `GLIBC_ABI_DT_RELR` as glibc 2.36 (`fix(scripts): Read a DT_RELR version need as glibc
+2.36`). Windows (PE) and the MCU images (static) have no such relocations.
+
+**Refused by name, not dropped.** An older GNU ld ignores `-z pack-relative-relocs` with a
+warning, and a linker that wrote DT_RELR without the version need would leave a library that an
+older loader runs unrelocated. So the gate holds every library linked with the flag, and its
+reference, to a dynamic section with DT_RELR and a version need on `GLIBC_ABI_DT_RELR`
+(`link_findings`); either missing fails the run in `--measure` too, and no ceiling reading is
+taken from the pair.
+
+**Fairness.** The reference is zenoh-pico "as the same build", so it is linked with the same
+linker arguments as its case (`reference_args`: `-DCMAKE_SHARED_LINKER_FLAGS`, part of the
+reference's cache key). Both sides move; the cut is nonetheless wz's, because the read reference
+has 58 relative relocations (its calls go through 888 PLT slots, which DT_RELR does not touch).
+The gate prints the linker of each library from its `.comment`. Read on 2026-11-23: the wz
+libraries are linked by the toolchain's own lld (`Linker: LLD 22.1.6`, the default linker of
+`x86_64-unknown-linux-gnu` on the pinned toolchain) and the reference by the C compiler's, GNU ld
+(2.42 on the coordinating host; hosted C1cs runs on ubuntu-22.04, GNU ld 2.38 and glibc 2.35,
+which builds and reads the packed form but could not load it). The coordinating host's own cargo
+configuration links its host target with mold (`-fuse-ld=mold`, mold 2.30.0). cargo joins that
+table with a file named by `--config`, so the gate's no_std case, built that way, was linked by
+mold on that host (the no_std library read here names mold 2.30.0, the std one lld), while the
+flags of the environment, which every other case was built with, replace it. The gate now reads
+a case's configuration files itself and passes their flags in the environment
+(`fix(gate): Build configured size cases apart from the caller's config`), so every case is
+linked by the toolchain's linker unless the caller exports another. The two arms are still linked
+by different linkers (lld against GNU ld), as they were before this change; linking both with one
+is a separate choice for the owner.
+
+**What the gate's number moves by.** The gate reads Berkeley `size` text, which counts every
+allocated read-only section: `.rela.dyn`, `.relr.dyn`, `.eh_frame` and `.eh_frame_hdr` are in
+it (`.data.rel.ro` and the GOT are writable, so they are data). From the relocation offsets of
+the read libraries, packed with the standard encoding (an address word, then 63-entry bitmaps):
+
+| library | relative relocations | `.rela.dyn` removed | `.relr.dyn` | text moves by |
+|---------|---------------------:|--------------------:|------------:|--------------:|
+| std (`pico-client-coop`) | 2,215 | 53,160 | 632 | about -52,500 |
+| no_std (`pico-client-coop-nostd`) | 1,590 | 38,160 | 440 | about -37,700 |
+| zenoh-pico reference | 58 | 1,392 | 32 | about -1,360 |
+
+The version need adds about 34 bytes to each. Ratios against the committed ceiling readings:
+no_std 565,295 / 403,086 = 1.4025 to about 527,600 / 401,760 = 1.313; std 1,030,646 / 403,086
+= 2.5569 to about 978,150 / 401,760 = 2.435. These are estimates from the read libraries; the
+no_std one was linked by mold, and lld may place a few relocations differently.
 
 ### T7: unwind tables of the prebuilt standard crates (owner decision)
 

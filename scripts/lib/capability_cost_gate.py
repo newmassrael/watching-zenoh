@@ -133,6 +133,7 @@ from fractions import Fraction
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
 import build_normalization  # noqa: E402  (the one rule that keeps paths and time out of bytes)
+import elf_facts  # noqa: E402  (the one reader of an ELF's version needs)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
 from kit_compare import verdict_size  # noqa: E402  (decision D1's size verdict, one copy)
 
@@ -159,6 +160,17 @@ PICO_BASE = ",".join(
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
+# The Linux C ABI library with its relative relocations packed (DT_RELR,
+# `crates/.cargo/capi-packed-relocs.toml`, docs/c-abi-size-diet.md T6): a glibc 2.36 loader. The
+# linker argument is the file's; a case whose configuration gives it is held to a library that has
+# DT_RELR and asks for the C library version that refuses an older loader by name
+# (`link_findings`), and its zenoh-pico reference is linked with it too (`reference_args`).
+PACKED_RELOCS_CONFIG = ".cargo/capi-packed-relocs.toml"
+PACKED_RELOCS_LINK = "-Wl,-z,pack-relative-relocs"
+# The version need a linker writes beside DT_RELR when the library asks libc.so.6 for any GLIBC_2
+# version: a C library older than 2.36 has no such version and refuses to load the library, where
+# without it the old loader would ignore DT_RELR and run the library with its pointers unrelocated.
+RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -693,8 +705,13 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
-         exports=444,
-         note="444 exports with the config doors of the open's policies "
+         exports=444, cargo_configs=(PACKED_RELOCS_CONFIG,),
+         note="Linked for a glibc 2.36 loader with its relative relocations packed "
+              "(`capi-packed-relocs.toml`, DT_RELR), and so is its zenoh-pico reference; "
+              "the form without that file is the one for an older loader, 2,215 relative "
+              "relocations (53,160 bytes of `.rela.dyn`) larger in the std form read on "
+              "2026-11-22, where the packed table reads 632. "
+              "444 exports with the config doors of the open's policies "
               "(`wz_ext_config_policy`, `wz_ext_config_profile`, in every build); "
               "442 with the conformance digest's door (`wz_ext_conformance_digest`, "
               "decision C15, in every build), 441 before. "
@@ -760,8 +777,11 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         exports=445, profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
-         note="pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
+         exports=445, profile="capi-nostd", cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG),
+         note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
+              "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
+              "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. "
+              "pico-client-coop's capabilities and its 444 C exports, and `rust_eh_personality`: "
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
               "defines it, as an abort that nothing reaches (`src/os/no_std_host.rs`), and a "
@@ -1509,6 +1529,12 @@ class Measured:
     leaked: tuple[str, ...] = ()
     # The linker that wrote the library, as its `.comment` names it (`linker_of`).
     linker: str = ""
+    # The linker arguments the case's configuration files gave the library (`link_args`).
+    link_args: tuple[str, ...] = ()
+    # Whether the dynamic section has DT_RELR, and whether the library asks the C library for
+    # `RELR_VERSION_NEED`.
+    relr: bool = False
+    relr_need: bool = False
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1831,6 +1857,35 @@ def with_rustflags(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
     return env
 
 
+def link_args(flags: list[str]) -> list[str]:
+    """The linker arguments among rustc flags: `-C link-arg=X` and `-Clink-arg=X`."""
+    out: list[str] = []
+    for i, flag in enumerate(flags):
+        if flag.startswith("-Clink-arg="):
+            out.append(flag[len("-Clink-arg="):])
+        elif flag == "-C" and i + 1 < len(flags) and flags[i + 1].startswith("link-arg="):
+            out.append(flags[i + 1][len("link-arg="):])
+    return out
+
+
+def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
+    """What is wrong with how a library was linked, against the linker arguments it was linked
+    with; empty when it was linked as asked."""
+    if PACKED_RELOCS_LINK not in lib.link_args:
+        return []
+    if not lib.relr:
+        return [f"{subject}: linked with `{PACKED_RELOCS_LINK}` and has no DT_RELR: the "
+                f"linker ({lib.linker}) did not pack its relative relocations, so its text is the "
+                f"unpacked form's. GNU ld from 2.38 and lld from 15 pack them; an older GNU ld "
+                f"ignores the option with a warning."]
+    if not lib.relr_need:
+        return [f"{subject}: has DT_RELR and does not ask for `{RELR_VERSION_NEED}`, so a C "
+                f"library older than 2.36 loads it, ignores the packed table and runs it with its "
+                f"pointers unrelocated. The linker ({lib.linker}) writes that need when the "
+                f"library asks libc.so.6 for a GLIBC_2 version."]
+    return []
+
+
 def linker_of(lib: pathlib.Path) -> str:
     """The linker that wrote `lib`, as its `.comment` names it. lld and mold write their name
     there and GNU ld writes none, so a library that names no linker was linked by GNU ld or by
@@ -1853,9 +1908,12 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
+    linked: list[str] = []
     if case.cargo_configs:
         triple = host_triple()
-        env = with_rustflags(env, case_config_flags(case, triple, target_cfg(triple)))
+        flags = case_config_flags(case, triple, target_cfg(triple))
+        env = with_rustflags(env, flags)
+        linked = link_args(flags)
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
     if case.features is not None:
@@ -1886,7 +1944,9 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
                     leaked=tuple(build_normalization.leaked(data, prefixes)),
                     undefined=tuple(line.split()[-1] for line in undefined if line.split()),
-                    needed=needed, linker=linker_of(lib))
+                    needed=needed, linker=linker_of(lib), link_args=tuple(linked),
+                    relr=any("(RELR)" in line for line in dynamic_section),
+                    relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data))
 
 
 @dataclass(frozen=True)
@@ -1901,6 +1961,11 @@ class Reference:
     leaked: tuple[str, ...] = ()
     # The linker that wrote the reference, as its `.comment` names it (`linker_of`).
     linker: str = ""
+    # The linker arguments it was linked with (its case's, `reference_args`), and what
+    # `Measured` holds of DT_RELR.
+    link_args: tuple[str, ...] = ()
+    relr: bool = False
+    relr_need: bool = False
 
 
 def case_features(case: Case) -> set[str]:
@@ -1942,8 +2007,18 @@ def reference_key(pin: str, toolchain: str, flags: list[str], env: Mapping[str, 
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
-def pico_reference_tree(asked: dict[str, int],
-                        env: Mapping[str, str]) -> tuple[pathlib.Path, str, str]:
+def reference_args(asked: dict[str, int], link: tuple[str, ...] = ()) -> list[str]:
+    """The CMake arguments of zenoh-pico built with `asked` set: each switch, and the linker
+    arguments its wz case was linked with (`Measured.link_args`), which the reference's link takes
+    too, so a choice of the link (packed relocations) moves both sides of the ratio alike."""
+    args = [f"-D{s}={v}" for s, v in sorted(asked.items())]
+    if link:
+        args.append(f"-DCMAKE_SHARED_LINKER_FLAGS={' '.join(link)}")
+    return args
+
+
+def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
+                        link: tuple[str, ...] = ()) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
     writes a header into its source tree, which must not dirty the submodule), in `env` (the
     gate's, `build_env`), unless that build is there already. Returns its directory (`src` the
@@ -1953,7 +2028,7 @@ def pico_reference_tree(asked: dict[str, int],
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
                          text=True, check=True).stdout.strip()
     toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
-    flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
+    flags = reference_args(asked, link)
     work = PICO_BUILDS / reference_key(pin, toolchain, flags, env)
     lib = work / "build" / "lib" / "libzenohpico.so"
     if not lib.exists():
@@ -1970,17 +2045,24 @@ def pico_reference_tree(asked: dict[str, int],
 
 
 def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
-                         prefixes: build_normalization.Prefixes) -> Reference:
-    """zenoh-pico built with `asked` set under `env` ([`pico_reference_tree`]), measured, and
-    searched for the build path prefixes `env` maps."""
-    work, pin, toolchain = pico_reference_tree(asked, env)
+                         prefixes: build_normalization.Prefixes,
+                         link: tuple[str, ...] = ()) -> Reference:
+    """zenoh-pico built with `asked` set and linked with `link` under `env`
+    ([`pico_reference_tree`]), measured, and searched for the build path prefixes `env` maps."""
+    work, pin, toolchain = pico_reference_tree(asked, env, link)
     lib = work / "build" / "lib" / "libzenohpico.so"
+    dynamic_section = subprocess.run(
+        ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    data = lib.read_bytes()
     header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
                      toolchain=toolchain, refused=tuple(refused_switches(asked, header)),
-                     leaked=tuple(build_normalization.leaked(lib.read_bytes(), prefixes)),
-                     linker=linker_of(lib))
+                     leaked=tuple(build_normalization.leaked(data, prefixes)),
+                     linker=linker_of(lib), link_args=link,
+                     relr=any("(RELR)" in line for line in dynamic_section),
+                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data))
 
 
 def report_reference(case: Case, got: Measured, env: Mapping[str, str],
@@ -1994,14 +2076,16 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
               f"provisioned only where the oracle is installed)")
         return None, []
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
-    ref = pico_reference_build(asked, env, prefixes)
+    ref = pico_reference_build(asked, env, prefixes, got.link_args)
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
-    print(f"  capability-cost: {case.id}: wz linked by {got.linker}, zenoh-pico by {ref.linker}")
+    print(f"  capability-cost: {case.id}: wz linked by {got.linker}, zenoh-pico by {ref.linker}, "
+          f"both with the linker arguments {list(got.link_args)}")
     if ref.refused:
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
-    return ref, purity_findings(f"{case.id} (its zenoh-pico reference)", ref.leaked)
+    subject = f"{case.id} (its zenoh-pico reference)"
+    return ref, purity_findings(subject, ref.leaked) + link_findings(subject, ref)
 
 
 # ── the pico ceiling of the host libraries (docs/upstream-parity.md D9) ────────────────────────
@@ -2061,9 +2145,11 @@ def ceiling_reading(wz_text: int, pico_text: int, pin: str, toolchain: str, date
 
 def case_reading(got: Measured, ref: Reference | None, date: str) -> dict | None:
     """The reading a case is held to its row by, or None when it has none: no reference, or a
-    library on either side that holds a build path, whose text is no figure (its purity finding
-    fails the run instead)."""
+    library on either side that holds a build path or was not linked as asked, whose text is no
+    figure (its purity or link finding fails the run instead)."""
     if ref is None or got.leaked or ref.leaked:
+        return None
+    if link_findings("", got) or link_findings("", ref):
         return None
     return ceiling_reading(got.text, ref.text, ref.pin, ref.toolchain, date)
 
@@ -2248,7 +2334,8 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         ref, ref_findings = report_reference(case, got, env, prefixes)
         # In either mode: a figure read from a library that holds a path is no figure, so it is
         # neither graded against a ceiling row nor printed as one.
-        for finding in purity_findings(case.id, got.leaked) + ref_findings:
+        own = purity_findings(case.id, got.leaked) + link_findings(case.id, got)
+        for finding in own + ref_findings:
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
         reading = case_reading(got, ref, today)
@@ -2407,6 +2494,42 @@ def cmd_selftest() -> int:
            == "Linker: LLD 22.1.6"
            and comment_linker("  [     0]  mold 2.30.0 (compatible with GNU ld)\n") == "mold 2.30.0"
            and comment_linker("  [     0]  GCC: (Ubuntu 13.3.0) 13.3.0\n").startswith("no linker"))
+    # Packed relocations: the file's flag is the one the gate holds a library and its reference
+    # to, on the Linux GNU target only, and a library linked with it must have DT_RELR and the
+    # version need that makes an older loader refuse it.
+    packed = (CRATES / PACKED_RELOCS_CONFIG).read_text(encoding="utf-8")
+    expect("the packed-relocations file links a Linux GNU library with the flag, and no other",
+           config_rustflags(packed, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", f"link-arg={PACKED_RELOCS_LINK}"]
+           and config_rustflags(packed, "x86_64-unknown-linux-musl", linux_musl) == []
+           and config_rustflags(packed, "x86_64-pc-windows-msvc", windows_msvc) == [])
+    expect("the linker arguments among rustc flags are read in both spellings",
+           link_args(["-C", "force-unwind-tables=no", "-C", "link-arg=-Wl,-z,x",
+                      "-Clink-arg=-Wl,-y", "--cfg", "link-arg=z", "-C"]) == ["-Wl,-z,x", "-Wl,-y"])
+    by_case = {c.id: c for c in CASES}
+    expect("the two Linux C ABI size cases of the pico client are linked packed",
+           PACKED_RELOCS_CONFIG in by_case["pico-client-coop"].cargo_configs
+           and by_case["pico-client-coop-nostd"].cargo_configs[:2]
+           == (NOSTD_CONFIG, PACKED_RELOCS_CONFIG))
+    asked_relr = Measured(900, [], 3, link_args=(PACKED_RELOCS_LINK,), relr=True, relr_need=True)
+    expect("a library linked packed with DT_RELR and the version need is linked as asked",
+           link_findings("t", asked_relr) == [])
+    expect("one with no DT_RELR is a finding that names the linker",
+           len(found := link_findings("t", Measured(900, [], 3, linker="GNU ld 2.37",
+                                                    link_args=(PACKED_RELOCS_LINK,))))
+           == 1 and "no DT_RELR" in found[0] and "GNU ld 2.37" in found[0])
+    expect("one with DT_RELR and no version need is a finding",
+           len(found := link_findings("t", Measured(900, [], 3, link_args=(PACKED_RELOCS_LINK,),
+                                                    relr=True))) == 1
+           and RELR_VERSION_NEED in found[0])
+    expect("a library not asked to pack is not held to DT_RELR",
+           link_findings("t", Measured(900, [], 3)) == [])
+    expect("a reference is linked with its case's linker arguments, and keyed by them",
+           reference_args({"Z_A": 1}) == ["-DZ_A=1"]
+           and reference_args({"Z_A": 1}, (PACKED_RELOCS_LINK, "-Wl,-x"))
+           == ["-DZ_A=1", f"-DCMAKE_SHARED_LINKER_FLAGS={PACKED_RELOCS_LINK} -Wl,-x"]
+           and reference_key("pin", "cc", reference_args({"Z_A": 1}), {})
+           != reference_key("pin", "cc", reference_args({"Z_A": 1}, (PACKED_RELOCS_LINK,)), {}))
     expect("an unpinned export count is not graded",
            grade(Case("t", "p", "l", "", 1000), Measured(900, [], 99)) == [])
     # The control that keeps ABSENCE honest: every pattern a case forbids is required by some
@@ -2589,6 +2712,18 @@ def cmd_selftest() -> int:
            and case_reading(clean_got, None, "2026-11-20") is None
            and case_reading(held_got, clean_ref, "2026-11-20") is None
            and case_reading(clean_got, held_ref, "2026-11-20") is None)
+    unpacked_got = Measured(text=2_520_000, symbols=[], exports=0,
+                            link_args=(PACKED_RELOCS_LINK,))
+    unpacked_ref = Reference(text=1_000_000, pin="e1ab223a28aa", toolchain="cc 1", refused=(),
+                             link_args=(PACKED_RELOCS_LINK,), relr=True)
+    packed_got = Measured(text=2_520_000, symbols=[], exports=0,
+                          link_args=(PACKED_RELOCS_LINK,), relr=True, relr_need=True)
+    packed_ref = Reference(text=1_000_000, pin="e1ab223a28aa", toolchain="cc 1", refused=(),
+                           link_args=(PACKED_RELOCS_LINK,), relr=True, relr_need=True)
+    expect("a case is read against its reference only when both are linked as asked",
+           case_reading(packed_got, packed_ref, "2026-11-20") == set_from
+           and case_reading(unpacked_got, packed_ref, "2026-11-20") is None
+           and case_reading(packed_got, unpacked_ref, "2026-11-20") is None)
     # The table's shape, static: the population, the two row forms and their readings.
     good = {"schema": HOST_CEILING_SCHEMA, "cases": {"a": ratchet, "b": locked, "c": unfilled}}
     expect("a table with one well-formed row per case passes",

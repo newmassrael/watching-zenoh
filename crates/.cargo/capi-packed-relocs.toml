@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The Linux C ABI library with its relative relocations packed (DT_RELR): a named choice of the
+# build, for a C library whose loader reads DT_RELR (glibc 2.36 or later). Named on the command
+# line with the host's own target, from `crates/`, alone or after the configuration of the form
+# without `std`:
+#
+#   cargo build -p wz-capi-pico --no-default-features --features engine-coop,link-udp --release \
+#       --config .cargo/capi-packed-relocs.toml --target x86_64-unknown-linux-gnu
+#   cargo build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+#       --profile capi-nostd --config .cargo/capi-nostd.toml \
+#       --config .cargo/capi-packed-relocs.toml --target x86_64-unknown-linux-gnu
+#
+# The same build without this file is the compatible form, for an older loader. Every pointer the
+# library holds to itself (a vtable, a string slice, a panic location, a GOT entry) is a
+# relocation the loader applies, 24 bytes each in `.rela.dyn`; packed, a run of them is one word
+# of a bitmap (`.relr.dyn`). A loader without DT_RELR would ignore the packed table and run the
+# library unrelocated, so the linker also makes the library ask libc.so.6 for
+# `GLIBC_ABI_DT_RELR`, and an older C library refuses to load it by that name. The linker must
+# write DT_RELR (GNU ld 2.38, lld 15 or later); an older GNU ld ignores the option with only a
+# warning, which is why the size gate holds a library built with this file to having DT_RELR and
+# that version need (`scripts/lib/capability_cost_gate.py`, `link_findings`). With `--target` the
+# flag reaches the library and not the build scripts, which run on the build host whatever its
+# loader. Windows (PE) and the MCU images (static) have no such relocations; the table is for the
+# GNU C library on Linux only, and a build for any other target reads nothing here.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,-z,pack-relative-relocs"]
