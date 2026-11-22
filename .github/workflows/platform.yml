@@ -118,7 +118,7 @@ on:
       # The pico library without `std` (`os-windows`): its host's locks, threads and clocks, and
       # the configuration its profile is built with.
       - "crates/wz-host-sync/**"
-      - "crates/.cargo/**"
+      - "crates/.cargo/capi-nostd.toml"
       - "rust-toolchain.toml"
   workflow_dispatch:
     inputs:
