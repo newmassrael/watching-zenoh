@@ -8,6 +8,16 @@ menu "wz limits"
 
 comment "Each limit sizes a table of every session of the image; a build states its own."
 
+config WZ_LIMITS_ZENOH_PICO
+	bool "The limits zenoh-pico bounds by no constant, at what its own build holds"
+	help
+	  Each limit zenoh-pico bounds by no constant of its own (its entity tables, the
+	  gets and replies a session holds, the delivery lane) defaults to the value of
+	  the pico preset instead of the one that sizes a host's session: what zenoh-pico's
+	  own examples and its API tests hold at once. zenoh-pico's defconfig turns it on;
+	  an image of the pico C ABI turns it on to be sized as zenoh-pico is. A limit the
+	  image states is its own either way.
+
 config WZ_LIMIT_MAX_KEYEXPR_BYTES
 	int "MAX_KEYEXPR_BYTES"
 	default 256
@@ -18,6 +28,7 @@ config WZ_LIMIT_MAX_KEYEXPR_BYTES
 
 config WZ_LIMIT_MAX_SUBSCRIPTIONS
 	int "MAX_SUBSCRIPTIONS"
+	default 3 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The subscribers a session holds at once. Declaring one more is refused
@@ -92,6 +103,7 @@ config WZ_LIMIT_DELIVERY_LANE_CALLBACKS
 
 config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
+	default 4 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The queryables a session holds at once. Declaring one more is refused
@@ -99,6 +111,7 @@ config WZ_LIMIT_MAX_QUERYABLES
 
 config WZ_LIMIT_MAX_PENDING_QUERIES
 	int "MAX_PENDING_QUERIES"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The queries (gets) a session has waiting for their replies at once.
@@ -126,6 +139,7 @@ config WZ_LIMIT_MAX_DECL_OBSERVERS
 
 config WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS
 	int "MAX_LIVELINESS_SUBSCRIPTIONS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The liveliness subscribers a session holds at once. Declaring one more
@@ -133,6 +147,7 @@ config WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS
 
 config WZ_LIMIT_MAX_LOCAL_TOKENS
 	int "MAX_LOCAL_TOKENS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The liveliness tokens a session itself declares and holds at once.
@@ -140,6 +155,7 @@ config WZ_LIMIT_MAX_LOCAL_TOKENS
 
 config WZ_LIMIT_MAX_PUBLISHERS
 	int "MAX_PUBLISHERS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The publishers a session holds at once, each with the write filter that
@@ -148,6 +164,7 @@ config WZ_LIMIT_MAX_PUBLISHERS
 
 config WZ_LIMIT_MAX_QUERIERS
 	int "MAX_QUERIERS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The queriers a session holds at once, each with the write filter that
@@ -156,6 +173,7 @@ config WZ_LIMIT_MAX_QUERIERS
 
 config WZ_LIMIT_MAX_MATCHING_LISTENERS
 	int "MAX_MATCHING_LISTENERS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The matching listeners a session holds at once, over all its publishers
@@ -163,6 +181,7 @@ config WZ_LIMIT_MAX_MATCHING_LISTENERS
 
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
+	default 14 if WZ_LIMITS_ZENOH_PICO
 	default 80
 	help
 	  The key expressions a session declares to its peers at once, each held by
@@ -215,6 +234,7 @@ config WZ_LIMIT_HELD_PAYLOADS
 
 config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 	int "MAX_PENDING_LIVELINESS_GETS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The liveliness gets (snapshots of the tokens alive) a session has waiting
@@ -223,6 +243,7 @@ config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 
 config WZ_LIMIT_MAX_PENDING_DECLARES
 	int "MAX_PENDING_DECLARES"
+	default 4 if WZ_LIMITS_ZENOH_PICO
 	default 32
 	help
 	  The declarations a session can have ready to send in answer to its peers'
@@ -265,6 +286,7 @@ config WZ_LIMIT_MAX_REMOTE_DECLS
 
 config WZ_LIMIT_MAX_PENDING_REPLIES
 	int "MAX_PENDING_REPLIES"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The replies a session's queryables may have ready to send between two
@@ -273,6 +295,7 @@ config WZ_LIMIT_MAX_PENDING_REPLIES
 
 config WZ_LIMIT_MAX_PENDING_FINALS
 	int "MAX_PENDING_FINALS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The queries a session may owe the end of an answer between two sends. A

@@ -101,6 +101,14 @@
 # counterpart is a comparison, not a second way to set the limit: a document sets a limit only under
 # `wz/limits`, and an upstream key keeps its own meaning.
 #
+# `[limit.pico_preset]` is for a limit zenoh-pico bounds by no constant of its own, which wz sizes
+# memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
+# session, and `reason` says what of zenoh-pico's own build it holds, its examples and its API tests
+# (decision Q3 of docs/c-abi-engine-and-memory.md). It only lowers the default, and a limit a
+# zenoh-pico value switch anchors to has none, as its default is pico's own constant. The generated
+# Kconfig makes each preset the limit's default under one switch, which zenoh-pico's defconfig turns
+# on; a build that does not turn it on keeps the defaults.
+#
 # ## Where a value is bound
 #
 # Every policy and every limit states where its value is held, when it is decided and what a peer
@@ -2146,6 +2154,10 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
 
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico keeps its subscribers in a list on the heap with no count of its own; the most its API tests hold on one session at once is three (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_declare_subscriber(z_session_loan(&s2), &sub2, z_view_keyexpr_loan(&k_pub),`), and each of its examples holds one."
+
 [[limit]]
 id = "MATCH_MEMO_SLOTS"
 kconfig = "WZ_LIMIT_MATCH_MEMO_SLOTS"
@@ -2318,6 +2330,10 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queryables: HashMap<Id, Arc<QueryableState>>,`"]
 
+[limit.pico_preset]
+value = 4
+reason = "zenoh-pico bounds its queryables by no count; the most its API tests hold on one session at once is four, a queryable on a key no get names and three more, in one test of its matching listeners (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `void test_matching_listener_querier(bool complete, bool background) {`), and each of its examples holds one."
+
 [[limit]]
 id = "MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_MAX_PENDING_QUERIES"
@@ -2340,6 +2356,10 @@ Issuing one more is refused while the table is full.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds the queries it waits on in a map that grows with each get."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queries: HashMap<RequestId, QueryState>,`"]
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico keeps its pending gets in a list with no count; its examples wait for one get at a time, and its cancellation API test holds a get of the session and one of a querier pending at once."
 
 [[limit]]
 id = "LINK_NOTED_REQUESTS"
@@ -2414,6 +2434,10 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds its liveliness subscribers in a map that grows with each declaration."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) liveliness_subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
 
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its liveliness subscribers by no count; its examples and its API tests hold one at a time on a session."
+
 [[limit]]
 id = "MAX_LOCAL_TOKENS"
 kconfig = "WZ_LIMIT_MAX_LOCAL_TOKENS"
@@ -2438,6 +2462,10 @@ Declaring one more is refused while the table is full.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the liveliness tokens a session declares."
 
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its liveliness tokens by no count; the most its API tests hold on one session at once is two (`vendor/zenoh-pico/tests/z_api_liveliness_test.c` @ `z_owned_liveliness_token_t t1, t2;`), and each of its examples holds one."
+
 [[limit]]
 id = "MAX_PUBLISHERS"
 kconfig = "WZ_LIMIT_MAX_PUBLISHERS"
@@ -2460,6 +2488,10 @@ refused while the table is full.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico has no constant for them; the default is MAX_SUBSCRIPTIONS's, the other side of the same traffic."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its publishers by no count; its examples and its API tests hold one at a time on a session, and the pico API program of the MCU speed matrix (deploy/zephyr-mcu-speed) holds two, the one it measures and the one that stops its peer."
 
 [[limit]]
 id = "MAX_QUERIERS"
@@ -2484,6 +2516,10 @@ while the table is full.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default is MAX_QUERYABLES's, the other side of the same traffic."
 
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its queriers by no count; its examples hold one, and its queryable API test declares a second querier on the session that holds the first."
+
 [[limit]]
 id = "MAX_MATCHING_LISTENERS"
 kconfig = "WZ_LIMIT_MAX_MATCHING_LISTENERS"
@@ -2505,6 +2541,10 @@ and queriers. Declaring one more is refused while the table is full.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default lets each publisher of the default MAX_PUBLISHERS hold one."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its matching listeners by no count; its examples and its matching API test hold one at a time, on the publisher or querier under test."
 
 [[limit]]
 id = "MAX_DECLARED_KEYEXPRS"
@@ -2528,6 +2568,10 @@ one more distinct key is refused while the table is full.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (16 subscribers, 16 queryables, 8 tokens, 8 liveliness subscribers, 16 publishers, 16 queriers)."
+
+[limit.pico_preset]
+value = 14
+reason = "zenoh-pico bounds its declared keys by no count; as the default is, the preset is one key for each entity the other values of the preset admit (3 subscribers, 4 queryables, 2 tokens, 1 liveliness subscriber, 2 publishers, 2 queriers)."
 
 [[limit]]
 id = "HELD_SESSIONS"
@@ -2662,6 +2706,10 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds it: a zenoh session holds its liveliness gets in a map that grows with each one."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) liveliness_queries: HashMap<InterestId, LivelinessQueryState>,`"]
 
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its pending liveliness gets by no count; its example and its API tests wait for one at a time."
+
 [[limit]]
 id = "MAX_PENDING_DECLARES"
 kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
@@ -2687,6 +2735,10 @@ counted, never sent in part.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it."
+
+[limit.pico_preset]
+value = 4
+reason = "zenoh-pico answers an interest from the heap with no count; the answer to a match-all interest is a declaration for each subscriber and a final, so the preset is one more than its 3 subscribers, as the build requires of this limit over MAX_SUBSCRIPTIONS and MAX_LOCAL_TOKENS."
 
 [[limit]]
 id = "MAX_INBOUND_SUB_INTERESTS"
@@ -2812,6 +2864,10 @@ told.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: wz holds the replies of its queryables between two sends in a table of its own."
 
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to."
+
 [[limit]]
 id = "MAX_PENDING_FINALS"
 kconfig = "WZ_LIMIT_MAX_PENDING_FINALS"
@@ -2837,6 +2893,10 @@ waiting until its own timeout.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds it: wz holds the ends of answers it owes between two sends in a table of its own."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico counts no held query; its examples answer each query in or right after its callback, and its queryable API test holds two queries at once."
 
 [[limit]]
 id = "MAX_REPLY_PAYLOAD_BYTES"
