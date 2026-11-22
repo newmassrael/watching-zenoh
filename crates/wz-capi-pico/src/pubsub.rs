@@ -1717,6 +1717,43 @@ fn put_options() -> PublishOptions {
     opts
 }
 
+#[cfg(test)]
+mod put_options_tests {
+    use super::{
+        publisher_put_options, z_publisher_put_options_default, z_publisher_put_options_t,
+        z_timestamp_t,
+    };
+
+    /// A publisher's put whose options carry nothing has no options built for it, NULL ones and
+    /// default ones alike, and is sent from what its publisher was declared with; one whose
+    /// options carry a timestamp has them built, the timestamp in them.
+    #[test]
+    fn put_options_that_carry_nothing_fold_to_none() {
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            assert!(publisher_put_options(core::ptr::null()).is_none());
+            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+            z_publisher_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            assert!(
+                publisher_put_options(&options).is_none(),
+                "default options carry nothing"
+            );
+            let mut stamp = z_timestamp_t {
+                valid: true,
+                id: crate::zid::z_id_t {
+                    id: [7; crate::zid::Z_ID_SIZE],
+                },
+                time: 42,
+            };
+            options.timestamp = &mut stamp;
+            let carried = publisher_put_options(&options).expect("a timestamp is carried");
+            assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+        }
+    }
+}
+
 // --- z_put -----------------------------------------------------------------
 
 /// pico `z_put_options_t` (`api/types.h:386-400`), mirrored field for field so
@@ -3048,34 +3085,5 @@ mod tests {
             core::mem::offset_of!(SampleMarshal, pico_payload),
             core::mem::size_of::<PicoDeclaredKeyexpr>()
         );
-    }
-
-    /// A publisher's put whose options carry nothing has no options built for it, NULL ones and
-    /// default ones alike, and is sent from what its publisher was declared with; one whose
-    /// options carry a timestamp has them built, the timestamp in them.
-    #[test]
-    fn put_options_that_carry_nothing_fold_to_none() {
-        // SAFETY: each pointer handed over is null or points at a live value of its type, which
-        // outlives the call.
-        unsafe {
-            assert!(publisher_put_options(core::ptr::null()).is_none());
-            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
-            z_publisher_put_options_default(options.as_mut_ptr());
-            let mut options = options.assume_init();
-            assert!(
-                publisher_put_options(&options).is_none(),
-                "default options carry nothing"
-            );
-            let mut stamp = z_timestamp_t {
-                valid: true,
-                id: crate::zid::z_id_t {
-                    id: [7; crate::zid::Z_ID_SIZE],
-                },
-                time: 42,
-            };
-            options.timestamp = &mut stamp;
-            let carried = publisher_put_options(&options).expect("a timestamp is carried");
-            assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
-        }
     }
 }
