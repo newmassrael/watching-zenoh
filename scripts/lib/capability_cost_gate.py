@@ -1195,9 +1195,19 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +30,148 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,420 on
     # one machine.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_432_100,
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_439_804,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 6,407,956 hosted, +20,566 on one machine.
+         # 2026-11-22, later -- a fan-out to the client faces encodes its carrier once and frames
+         # those bytes on every face (`docs/router-fanout-cost.md`): 6,425,764 at main `087427170`
+         # -> 6,433,468 on hkl002 (+7,704). By symbol: `EncodedPush::of` +3,898 (the Push encoder
+         # inlined into it), `deliver_to_client_subscribers` +1,638, the `ExtEntryWire` and
+         # `TimestampWire` `write_source` instances +573 and +400, `credited_send` +547,
+         # `SharedCarrier`'s drop +173, the `OnceCell` init +116, `egress_through` -556 and
+         # -700, `LiteralPush`'s drop -114. Chosen: a forward to sixteen subscribers allocates 22
+         # times and 893 B, where it allocated 85 times and 7,262 B
+         # (`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs`); the budget moves by that
+         # growth and keeps its headroom.
          # What the declaration says the capability implies (`deploy/wz-config.toml`): the peer
          # role and the scouting and UDP link under it, and the multicast transport.
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, UDP, MULTICAST),
@@ -1312,7 +1322,10 @@ CASES: tuple[Case, ...] = (
     # 11,398,161 at `cd240d4b4` and +32,660 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +21,424 on
     # one machine.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_488_100,
+    # 2026-11-22 -- the fan-out's shared carrier, as `capic-router-node`'s note of this day takes
+    # apart: 11,483,973 at main `087427170` -> 11,491,513 on hkl002 (+7,540). Chosen for the
+    # same reason; the budget moves by that growth and keeps its headroom.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_495_640,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
