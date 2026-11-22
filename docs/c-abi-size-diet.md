@@ -47,15 +47,15 @@ the open and dial paths and in the doors (section 2, T2 and T3), and `Locator`'s
 | T1 | lent record walk generic over its consumer | both | std -8K to -14K, no_std -5K to -6K | landed here; with T2 and T3, std read -20,312 |
 | T2 | `z_keyexpr_concat` / `z_keyexpr_join` through `format!` | both | -0.3K direct | landed here |
 | T3 | open and dial refusals formatted into a `String` | both | -1.5K to -3K | landed here |
-| T4 | `Locator` text through `core::fmt` and `SocketAddr`'s `Display` | both | -3K to -5K | candidate |
+| T4 | `Locator` text through `core::fmt` and `SocketAddr`'s `Display` | both | -3K to -5K | landed before round 2 (see T4) |
 | T5 | `expect` / panic locations on reachable paths | both | -1K to -2K | candidate |
 | T6 | 1,590 relative relocations (`.rela.dyn`) | both | about -36K no_std | owner decision |
 | T7 | unwind tables of the prebuilt `core` / `alloc` | no_std | about -30K | owner decision |
-| T8 | generic copies thin LTO keeps in two crates | std | -10K to -20K | candidate |
+| T8 | owned records in a build that lends every one | both | -0.3K to -3K | record buffer landed in round 2; outcome list candidate |
 | T9 | per-limit generic selectors (`limit_binding`, `policy_binding`) | both | -3K to -4K | domain check landed here |
 | T10 | observer planes kept out of line for the stack | both | at most -0.5K | not worth a change alone |
-| T11 | the Put encoder compiled twice (count, then write) | both | about -1.4K | candidate |
-| T12 | the remote queryable plane in a build without `query` | both | -3K to -5K | candidate |
+| T11 | the owned encoders compiled twice (count, then write) | both | -2.5K to -5K no_std | landed in round 2 |
+| T12 | the remote queryable plane in a build without `query` | both | -3K to -5K | landed in round 2 |
 
 ### T1: one walk for every consumer (landed, `refactor(session-core): Walk lent records through one dispatch body`)
 
@@ -88,15 +88,22 @@ endpoint and a `Refusal` reason) now. The text survives as `Display` and is form
 program that prints it. With T2, no `format!` is left on the client's paths, so `format_inner`
 and the `String` writer should leave the no_std form. `core::fmt::write` stays for T4.
 
-### T4: locator text without the formatter (candidate)
+### T4: locator text without the formatter (landed before round 2)
 
-`wz_runtime_coop::session_drive::Locator`'s `Display` is `write!(f, "{}/{}", scheme, at)`, and
-`Locator::text` (1,334 in the read no_std form) writes it into a fixed buffer. That links
-`core::fmt::write`, `SocketAddr`'s `Display` (`core::net`, about 3K) and
-`Formatter::pad_integral`. A writer of its own (dotted IPv4, the port, and RFC 5952 IPv6 with the
-longest zero run folded and `[..]` around it) would take all three out. It needs tests against
-`SocketAddr`'s own text for the IPv6 edge cases (a v4-mapped address, a scope id) before it can
-replace it.
+The base of round 2 already writes it without `core::fmt`: `Locator::text`
+(`crates/wz-runtime-coop/src/session_drive.rs`) pushes the scheme and the end through
+`TextOut::push_socket_addr` and `TextOut::push_ip` (`crates/wz-session-core/src/text_out.rs`):
+dotted IPv4, RFC 5952 IPv6 (lowercase groups, the first longest run of two or more zero groups
+folded to `::`, a single zero group kept, an IPv4-mapped address as `::ffff:a.b.c.d`), `[..]`
+around an IPv6 end and `%scope` inside it. The tests hold it to `Display`'s own text:
+`text_out::tests::an_address_is_written_as_the_formatter_writes_it` (no run, one group alone, a run
+at either end, two runs of which the first or the longer wins, the unspecified, loopback,
+IPv4-compatible and IPv4-mapped forms, a scope of `u32::MAX`) and the locator test of
+`udp_link.rs`, which compares `Locator::text` with `format!("{locator}")`. `Locator`'s `Display` is
+left for the program-supplied transport (`app-transport`) and the listener's local text
+(`listen`), neither of which the no_std case builds, and a read of `wz-runtime-posix`,
+`wz-host-sync` and `wz-capi-port` finds no other formatting on the client's paths (the
+`multicast.rs` `Display` is `group-host`'s, `scouting.rs` is `scout`'s).
 
 ### T5: panic sites (candidate)
 
@@ -127,15 +134,25 @@ keep theirs (about 29K plus 3.8K of header). Nothing unwinds (`panic = "abort"`,
 discards `.eh_frame` or a toolchain that builds `core` (`-Z build-std`, nightly), and a
 debugger then has no unwind tables for those frames. zenoh-pico itself carries 72K of them.
 
-### T8: copies thin LTO keeps (candidate)
+### T8: owned records in a build that lends every one (record buffer landed in round 2)
 
-The release profile is thin LTO. A generic instantiated from two crates is compiled in each, and
-the linker keeps both. Read in the std form: 21,120 bytes of byte-identical second copies, 15,683
-of them wz or SCE code. T1 removes the decoder family (8,850). The rest is mostly drop glue of
-owned forms (`DeclareVariantIn<Heap>`, `InboundFrame`, `NetworkMessage`, `PushVariantIn<Heap>`)
-and an `ExtEntryWire` writer. Two cures: fat LTO for the C ABI profiles (the no_std form already
-has it, and it read 4,830 of such copies), or making the owned-form users non-generic as T1
-did.
+Re-scoped from the std form's thin-LTO copies (fat LTO for the C ABI profiles remains the cure for
+those, 15,683 bytes read in the std form): in the no_std case the receive lends every record
+(`rx-lent-control`, no `transport-stats`, no `routing-namespace`), so no record is ever decoded into
+an owned `NetworkMessage`, yet the walk's one-record buffer was a `Vec<NetworkMessage>` that every
+record cleared, which links the drop of every owned message kind for a list that is always empty.
+Landed (`refactor(session-core): Hold no owned record where every one is lent`): `RecordBuf` is the
+marker of no size there, as it already was without an allocator. Estimate -0.3K alone; the drop
+glue itself stays while anything else drops an owned message.
+
+What still links it: `DriverLoopOutcome::FramePayload { messages: Vec<NetworkMessage>, .. }`. In
+the lend-only build the walk reports an empty frame as a `FramePayload` with an empty list and the
+tables read every batch through `driver_loop::owned_records`, which answers `None` there, but any
+outcome dropped where its variant is not known (`dispatch_parked_in_place`, the handshake
+outcomes) drops through the variant's `Vec<NetworkMessage>`. The cure is the record buffer's: a
+list of no size in that build. Candidate, not done: some twenty readers of `messages` across
+`wz-session-core`, `wz-session-mcu`, `wz-runtime-coop` and the tokio runtime would each need the
+same gate. Estimate -1K to -3K (the owned kinds' drop glue).
 
 ### T9: per-limit selectors (domain check landed, `refactor(session-core): Check a limit's domain in one function`)
 
@@ -158,26 +175,41 @@ flush +564) and the fan lost 9,673: net about +214. What the inliner had shared 
 and `record.declare()`. The two remote declaration planes could share one out-of-line call that
 reads the declare once; the gain is at most a few hundred bytes, so the split stays.
 
-### T11: the Put encoded by two sinks (candidate)
+### T11: the owned encoders compiled twice (landed in round 2)
 
-`push_build::build_msg_put_with_meta` reaches `MsgPutWire::write_source` over `CountSink`
-(1,375) to size the message and over `TxSink` (1,951) to write it. One pass that writes, then
-reads the length it wrote, keeps one instance. The generated encoder is SCE's, so the change is
-on the wz side, at the call.
+Every owned send sized its slot with the codec's `measure` (`PushWire::measure`,
+`DeclareWire::measure`, `InterestWire::measure`, ...: the generated field walk over `CountSink`) and
+then wrote it with the same walk over `TxSink<dyn TxBuf>`, two instances of each message's whole
+encoder (the Put body, the key, the extension entries, every declaration body). Landed
+(`refactor(session-core): Count a lent send with the encoder it writes`): in the lend-only build
+(`tx-lend-only`) the length is the body writer the dispatch then runs, run once into
+`tx_buf::CountTxBuf`, a buffer that keeps no byte (`tx_buf::encoded_len`), so each encoder is
+compiled once. It covers `frame_encode::push_capacity_hint` and the Declare, Oam, Request,
+Response, ResponseFinal and Interest dispatches of `session_actions`. The heap profile keeps
+`measure`, which costs no indirect call per field on the AP's paths. The plain Put was already
+written once (`lent_push::plain_put_len`), and the lent Response counts by its direct writer's
+layout. Estimate -2.5K to -5K in the no_std case (Push, Declare and Interest walks; Request and
+Response join with `query` and `queryable`). The `CountSink` count of a lent `Request`
+(`send_get_parts`) is left: it is one walk of the borrowed writer, which the build has no second
+instance of.
 
-### T12: the remote queryable plane without `query` (candidate)
+### T12: the remote queryable plane without `query` (landed in round 2)
 
-`wz-capi-coop` names `wz-session-core/declare-queryable` in every build, so a client without
-`query` still links the remote queryable table, its dispatch (2,736) and its matching listener
-seeding. In the cooperative engine its readers are the querier's matching status (`query`) and
-the declaration watch. If that watch is the only reader without `query`, the feature can follow
-`query` and the watch's queryable arm the same gate. Not done here: the watch is an ABI door,
-and what it answers in a build without `query` is a behaviour to decide first.
+Landed (`refactor(capi-coop): Link the peers' queryables only with a query plane`):
+`wz-session-core/declare-queryable` moved from `wz-capi-coop`'s base list to its `query` and
+`queryable` features. A client with neither links no `RemoteQueryableTable`, no dispatch of a
+peer's queryable declarations and no queriers' matching listener. What such a build answers, by
+name: a matching listener and a write filter on the queryables plane are refused before an
+Interest is asked (`engine::counts`: a listener as id 0, a filter as none; the ABI asks neither
+without `query`), and a declaration watch of queryables is refused with `PlaneNotBuilt`, as one of
+tokens is without `liveliness` (`decl_watch::hears`): the build has nothing to tell it from.
+`slot_observer::OtherPeers::answers` has a default (`false`), so a build where another crate
+unified `declare-queryable` in still compiles the engine's `OtherPeers`. Estimate -3K to -5K.
 
 ## 3. Features the shipped profile enables that the ABI does not reach
 
-Resolved with `cargo tree -e features` for `os-posix,link-udp`: `wz-session-core` gets
-`declare-queryable` (T12), `declare-interest` and `session-matching` (read by the publisher's
+Resolved with `cargo tree -e features` for `os-posix,link-udp`: `wz-session-core` got
+`declare-queryable` (T12, now with `query` or `queryable` only), `declare-interest` and `session-matching` (read by the publisher's
 matching status, reachable), and `pubsub-*` (each read by a field of
 `z_put_options_t`, reachable). `hashbrown` with `foldhash` is linked (a `HashMap<u16, String>`'s
 `reserve_rehash` read 1,424 in the no_std form), which a no-heap form replaces anyway.
@@ -199,3 +231,49 @@ python3 scripts/lib/footprint_attribution.py --old <before.so> --new <after.so> 
 
 and `nm -S --size-sort -C` of the std form for duplicate names (T8): two entries with one
 demangled name are two copies.
+
+For round 2's three changes, the same with `--scope 'CountSink|CountTxBuf|encoded_len'` (T11: the
+`CountSink` instances of `PushWire`, `DeclareWire` and `InterestWire` gone),
+`--scope 'RemoteQueryable|watch_queriers'` (T12) and `--scope 'drop_in_place<.*NetworkMessage'` (T8).
+
+## 5. Round 2: where the no_std form's code goes, and what pico's build does not carry
+
+**Attribution (read and estimated).** The read of section 1, by crate: `wz_session_core` 167K,
+`wz_capi_coop` 59K, the exported `z_*` functions about 40K and `wz_capi_pico`'s own 17K,
+`wz_codecs` 36K, `core` 34K, `alloc` 25K, `wz_runtime_coop` 20K, `sce_rust_runtime` 13K. Within
+`wz_session_core`, from the code paths the case links (`wz-capi-coop`'s base list, `host-sys`,
+`rx-lent-only`, `tx-lend-only`, `initial-sn-compact`, `limits-lent-at-open`, and `wz-session-mcu`'s
+`dial`, `transport-keepalive`, `reassembly`), the estimate is: the send side of `session_actions`
+(dispatch, batching, fragmentation, lending, the owned builders it is handed) 45K to 60K; the
+receive walk and the lent readers (`drive`, `driver_loop`, `network_message`, `lent_*`) 25K to
+35K; the application tables and their planes (`observer`, `slot_observer`, `declare/*`, matching)
+25K to 35K; policy and limit resolution (`policy_document`, `policy`, `limits`, the bindings and
+the generated tables) 10K to 18K; the generated session machine and its binding 10K to 15K;
+key expressions, reassembly, the lease and the rest the remainder. These are estimates: section 4's
+`nm -S` of a build, grouped by the path prefix of each symbol, turns them into a reading.
+
+**The wz features the case carries that pico's same build does not.** For each: whether an export
+the pico ABI must have reaches it, what was done, and the estimate (from the code; none measured).
+
+| # | feature (where) | reached from a required export | verdict | estimate |
+|---|-----------------|--------------------------------|---------|---------:|
+| 1 | policy and limit resolution (`policy_document`, `policy`, `limits`, `policy_binding`, `limit_binding`) | only through `wz_ext_config_policy` / `wz_ext_config_profile`, which `z_open` composes (`config_policy::PolicyStatements::compose_into`); with neither door called it is the build defaults | lighter form: a capability for the two doors, off in the pico client profiles, and an open that takes the build defaults with no resolver. Owner decision: the doors are documented as in every build and the gate pins 445 exports | -6K to -12K |
+| 2 | the session's arena and its lent rows (`wz-capi-coop/arena.rs`, `bounded::Lent`, `Quota::lent_under`) | `z_open` | kept: it is the no-heap form decision D9 asks for (pico mallocs per object); the MCU heap work owns it | (6K to 10K, kept) |
+| 3 | the generated session machine (`sce_rust_runtime`, `session_fsm_unicast` and its binding) | every open | kept: the machine is the SCXML source's; pico's handshake is hand-written | (10K to 15K, kept) |
+| 4 | the owned Put and Delete with options (`push_build::build_push_*_with_meta`, `PushOwned` and its drop) | `z_put` / `z_publisher_put` with an encoding, attachment or timestamp, every delete | lighter form: a borrowed writer for a Put or Del with its body extensions (`lent_push::write_plain_put` extended), each field held to the owned builder's bytes as `the_direct_writer_is_the_codecs_bytes` holds the plain one. Not done: a writer and its equality tests per field | -4K to -8K |
+| 5 | owned declarations and interests in the heap lend-only build (`declare_build`, `interest_build`, `DeclareOwned`, `InterestOwned`) | `z_declare_subscriber`, `z_declare_keyexpr`, matching, interests | lighter form: the borrowed writers the no-allocator build already sends with (`lent_control`, `LentDeclaration`) used in `tx-lend-only` too; T11 already compiles the owned encoder once | -3K to -6K |
+| 6 | the delivery lane (`wz-capi-coop/lane.rs`) | every delivery | kept: callbacks run after the session's lock (decision D8) | (3K to 5K, kept) |
+| 7 | the droppable publish handed off (`HandedLeg`, `hand_off`, `send_handed`) | a put that finds the session held | kept: what D8 owes a droppable put; pico waits on its own lock | (1.5K to 3K, kept) |
+| 8 | the faces table for more than one link (`FaceRows`, `Others`, `max_faces`) | the dial face; others come from `listen`, `group` and `attach_face` | lighter form: a one-face registry where no second face can come. Not touched: the registry is another worker's in this round | -2K to -4K |
+| 9 | the remote queryable plane | none without `query` / `queryable` | cut (T12) | -3K to -5K |
+| 10 | source info on put and delete (`pubsub-source-info` in `wz-capi-coop`'s base list) | none without `unstable-api`: the option field reads as null and `z_sample_source_info` is not exported | cut candidate: move the feature to `wz-capi-pico`'s `unstable-api`, gate the four `with_source_info` calls of `pubsub.rs` and the lane test that names it. Not done: three crates and the lane record's field | -1K to -2K |
+| 11 | owned records reported where every one is lent (`FramePayload.messages`) | none in the lend-only build (`owned_records` answers `None`) | record buffer cut (T8); the outcome list is a candidate (T8) | -1K to -3K |
+| 12 | the owned encoders counted by a second instance | owned sends | cut (T11) | -2.5K to -5K |
+| 13 | the outbound key mappings in a `hashbrown` map with `foldhash` | `z_declare_keyexpr` | lighter form: a table of the build's `MAX_DECLARED_KEYEXPRS` rows; the no-heap work replaces it anyway | -1.5K to -3K |
+| 14 | typed refusals and their counters (`OpenError`, `EndpointRefusal`, `SendWireError`, `tx_refusals`, `InPlaceFallbacks`) | the doors map each to a code | kept: the codes a program reads; the words are formatted only by a program that prints them (T3) | (1K to 2K, kept) |
+| 15 | wz doors in every build (`wz_ext_conformance_digest`, the key-wire-form doors of `key_ids`) | none of pico's | owner decision with item 1: the same pin of the export count | -0.3K to -1K |
+
+Items 1, 4, 5, 8, 10 and 13 together are the bulk of what a reading can name: -17K to -35K. Against
+the measured 542,460 and pico's 403,086 (the 1.0x goal needs -139K), code volume of this kind is
+not the whole answer: T6 and T7 (-66K, owner decisions) and the session-core send side are the
+other two places to look.
