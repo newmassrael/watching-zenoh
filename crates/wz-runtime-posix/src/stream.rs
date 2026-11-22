@@ -286,6 +286,27 @@ impl Drop for PosixTcpListener {
     }
 }
 
+/// The iovecs of `parts`, empty ones left out, and how many there are; more than `MAX_PARTS` is
+/// refused as `EMSGSIZE`.
+fn iovecs(parts: &[&[u8]]) -> Result<([libc::iovec; MAX_PARTS], usize), PosixNetError> {
+    let mut vecs = [libc::iovec {
+        iov_base: core::ptr::null_mut(),
+        iov_len: 0,
+    }; MAX_PARTS];
+    let mut count = 0;
+    for part in parts.iter().filter(|part| !part.is_empty()) {
+        if count == MAX_PARTS {
+            return Err(PosixNetError::Write(libc::EMSGSIZE));
+        }
+        vecs[count] = libc::iovec {
+            iov_base: part.as_ptr().cast_mut().cast(),
+            iov_len: part.len(),
+        };
+        count += 1;
+    }
+    Ok((vecs, count))
+}
+
 impl StreamSocket for PosixTcpSocket {
     type Error = PosixNetError;
 
@@ -299,21 +320,7 @@ impl StreamSocket for PosixTcpSocket {
 
     fn send_parts(&self, parts: &[&[u8]]) -> Result<(), PosixNetError> {
         // The parts not yet written, as iovecs; a short write moves the front forward.
-        let mut vecs = [libc::iovec {
-            iov_base: core::ptr::null_mut(),
-            iov_len: 0,
-        }; MAX_PARTS];
-        let mut count = 0;
-        for part in parts.iter().filter(|part| !part.is_empty()) {
-            if count == MAX_PARTS {
-                return Err(PosixNetError::Write(libc::EMSGSIZE));
-            }
-            vecs[count] = libc::iovec {
-                iov_base: part.as_ptr().cast_mut().cast(),
-                iov_len: part.len(),
-            };
-            count += 1;
-        }
+        let (mut vecs, count) = iovecs(parts)?;
         let mut first = 0;
         while first < count {
             // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
@@ -343,6 +350,35 @@ impl StreamSocket for PosixTcpSocket {
             }
         }
         Ok(())
+    }
+
+    // One `sendmsg` that does not wait (`MSG_DONTWAIT`): the stack takes what its buffer has room
+    // for now, and a buffer with none is `EAGAIN`, read as nothing taken. The socket itself stays
+    // blocking, so `send_parts` waits for what this leaves, as it waits for any write.
+    fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, PosixNetError>> {
+        let (mut vecs, count) = match iovecs(parts) {
+            Ok(built) => built,
+            Err(refused) => return Some(Err(refused)),
+        };
+        loop {
+            // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
+            let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+            msg.msg_iov = vecs[..count].as_mut_ptr();
+            // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
+            msg.msg_iovlen = count as _;
+            // SAFETY: every iovec names a live slice of `parts` for its length. MSG_NOSIGNAL as
+            // in `send_parts`.
+            let sent =
+                unsafe { libc::sendmsg(self.fd, &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+            if sent >= 0 {
+                return Some(Ok(sent as usize));
+            }
+            match errno() {
+                libc::EINTR => continue,
+                libc::EAGAIN => return Some(Ok(0)),
+                other => return Some(Err(PosixNetError::Write(other))),
+            }
+        }
     }
 
     // A connect under way reports room once it ends, made or refused, and `SO_ERROR` says which.
@@ -531,6 +567,37 @@ mod tests {
             near.wait_writable(1_000),
             "read down, the stream takes bytes again"
         );
+    }
+
+    /// A write that does not wait takes what the stream has room for and says how much: all of a
+    /// write to a stream with room, in order, and nothing once the peer has stopped reading and
+    /// the stacks hold all they will, which it answers at once where a write that waits would wait
+    /// for the peer.
+    #[test]
+    fn a_write_that_does_not_wait_takes_what_the_stream_has_room_for() {
+        let (near, mut far) = pair();
+        assert_eq!(
+            near.send_parts_now(&[&b"he"[..], &b"llo"[..]]),
+            Some(Ok(5)),
+            "a stream with room takes it all"
+        );
+        let mut got = [0u8; 5];
+        far.read_exact(&mut got).expect("the far end reads");
+        assert_eq!(&got, b"hello");
+        let chunk = [0x5au8; 1024];
+        let mut written = 0usize;
+        loop {
+            match near.send_parts_now(&[&chunk]) {
+                Some(Ok(0)) => break,
+                Some(Ok(n)) => written += n,
+                other => panic!("a write to a sound stream: {other:?}"),
+            }
+            assert!(
+                written < 256 << 20,
+                "the stream took {written} bytes and never filled"
+            );
+        }
+        assert!(written > 0, "the stream took bytes before it filled");
     }
 
     wz_runtime_coop::with_heap_link_seams! {

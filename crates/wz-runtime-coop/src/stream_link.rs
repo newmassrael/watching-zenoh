@@ -98,6 +98,19 @@ pub trait StreamSocket: Sized {
         true
     }
 
+    /// Write what the stack takes of `parts` now, in order, without waiting: `Some(Ok(n))` for the
+    /// `n` bytes it took (`0` when it would take none, and fewer than all when it took some), the
+    /// failure, or `None` from a stream that cannot write without waiting (the default).
+    ///
+    /// A stream that can is not asked for room before every frame ([`Self::wait_writable`]): the
+    /// write is tried first, as a non-blocking write is, and the stream is asked only after a write
+    /// it did not take whole, until one goes through whole again. What a write leaves is then
+    /// written with [`Self::send_parts`], since a frame begun on a stream must end on it.
+    fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, Self::Error>> {
+        let _ = parts;
+        None
+    }
+
     /// Read what is queued into `buf` without blocking: `Ok(Some(n))` for `n` bytes, `Ok(Some(0))`
     /// when the peer has closed the stream, `Ok(None)` when nothing is queued.
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error>;
@@ -292,6 +305,27 @@ enum Front {
     TooLong,
 }
 
+/// The parts of a write after its first `taken` bytes, into `rest`, and how many there are: what
+/// a write the stream took only part of still owes.
+fn after<'p, const N: usize>(
+    parts: &[&'p [u8]; N],
+    taken: usize,
+    rest: &mut [&'p [u8]; N],
+) -> usize {
+    let mut skip = taken;
+    let mut count = 0;
+    for &part in parts {
+        if skip >= part.len() {
+            skip -= part.len();
+            continue;
+        }
+        rest[count] = &part[skip..];
+        skip = 0;
+        count += 1;
+    }
+    count
+}
+
 /// Read the front of `held`, the bytes a buffer of `capacity` bytes holds.
 fn front(held: &[u8], capacity: usize) -> Front {
     let Some(prefix) = held.get(..STREAM_BATCH_LENGTH_BYTES) else {
@@ -335,6 +369,11 @@ pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
     /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
     /// not.
     owner_waits: bool,
+    /// Whether the stream took the last write whole without waiting
+    /// ([`StreamSocket::send_parts_now`]): the next frame is then not preceded by a question of
+    /// its room, the write itself being the question. `false` before the first write and for a
+    /// stream that cannot write without waiting, which is asked every time.
+    room_known: Cell<bool>,
 }
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
@@ -367,6 +406,7 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             lost: Cell::new(None),
             error: Cell::new(None),
             owner_waits: false,
+            room_known: Cell::new(false),
         }
     }
 
@@ -452,13 +492,34 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
 
     /// Write `parts` to the stream as the outcome the session counts: a write to a link that is
     /// gone, or one the stack refuses (which ends the link), is REPORTED, not swallowed.
-    fn send(&self, parts: &[&[u8]]) -> LinkSendOutcome {
+    ///
+    /// The write is tried without waiting first, where the stream can
+    /// ([`StreamSocket::send_parts_now`]): taken whole, it says the stream had room, and the next
+    /// frame asks nothing; taken in part or not at all, the next frame asks the stream for room
+    /// again, and the rest of this one is written by waiting, as every write is on a stream that
+    /// cannot try.
+    fn send<const N: usize>(&self, parts: &[&[u8]; N]) -> LinkSendOutcome {
         if self.lost.get().is_some() {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         }
-        match self.socket.send_parts(parts) {
+        let written = match self.socket.send_parts_now(parts) {
+            None => self.socket.send_parts(parts),
+            Some(Ok(taken)) if taken >= parts.iter().map(|part| part.len()).sum::<usize>() => {
+                self.room_known.set(true);
+                Ok(())
+            }
+            Some(Ok(taken)) => {
+                self.room_known.set(false);
+                let mut rest = [&[][..]; N];
+                let count = after(parts, taken, &mut rest);
+                self.socket.send_parts(&rest[..count])
+            }
+            Some(Err(e)) => Err(e),
+        };
+        match written {
             Ok(()) => LinkSendOutcome::Sent,
             Err(e) => {
+                self.room_known.set(false);
                 self.error.set(Some(e));
                 self.end(LostCause::OsError);
                 LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
@@ -474,7 +535,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         let Ok(len) = u16::try_from(bytes.len()) else {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         };
-        self.send(&[&len.to_le_bytes(), bytes])
+        self.send(&[&len.to_le_bytes()[..], bytes])
     }
 
     // The room is the stream's: the session asks before it builds a frame, and a stream that
@@ -484,8 +545,10 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     // blocking one closes the session, which is the session's decision and not the link's. A
     // stream that took more within the wait is counted as having answered at once: the stream
     // tells no time. A link that has ended answers room, so the send that follows reports the end.
+    // A stream that took the last write whole without waiting is not asked: the next write is
+    // tried first, and one it does not take whole makes the frame after it ask again (`send`).
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
-        if self.lost.get().is_some() {
+        if self.lost.get().is_some() || self.room_known.get() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
         let wait_us = wait.wait_us();
@@ -611,8 +674,9 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     }
 
     // Whoever waits for input, room is the socket's alone: the driver queues nothing of its own
-    // ahead of it (`wait_for_room` asks the socket too), so a wait on the socket from outside
-    // answers what the session's own wait would.
+    // ahead of it (`wait_for_room` asks the socket too, unless the last write already said the
+    // stream had room), so a wait on the socket from outside answers what the session's own wait
+    // would.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         self.socket.writability()
@@ -662,6 +726,11 @@ mod tests {
         full: Cell<bool>,
         /// Each wait for the stream to take bytes, in microseconds.
         room_waits: RefCell<Vec<u64>>,
+        /// The stream writes without waiting (`send_parts_now`); a pipe that does not is asked for
+        /// room before every frame.
+        tries: Cell<bool>,
+        /// How many bytes a write that does not wait takes; `None` takes them all.
+        takes: Cell<Option<usize>>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -685,6 +754,22 @@ mod tests {
         fn send_parts(&self, parts: &[&[u8]]) -> Result<(), Broken> {
             self.writes.borrow_mut().push(parts.concat());
             Ok(())
+        }
+
+        fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, Broken>> {
+            if !self.tries.get() {
+                return None;
+            }
+            let all = parts.concat();
+            let taken = if self.full.get() {
+                0
+            } else {
+                self.takes.get().map_or(all.len(), |n| n.min(all.len()))
+            };
+            if taken > 0 {
+                self.writes.borrow_mut().push(all[..taken].to_vec());
+            }
+            Some(Ok(taken))
         }
 
         fn wait_readable(&self, _timeout_ms: c_int) {
@@ -1123,6 +1208,98 @@ mod tests {
             link.socket.room_waits.borrow().len(),
             3,
             "an ended link waits for nothing"
+        );
+    }
+
+    /// A stream that writes without waiting is asked for room before the first frame only, while it
+    /// takes each write whole: the write is the question, as a non-blocking write is. CONTROL: a
+    /// stream that cannot write without waiting is asked before every frame.
+    #[test]
+    fn a_stream_that_takes_each_write_whole_is_asked_for_room_once() {
+        let frames = |link: &Link| {
+            for _ in 0..3 {
+                assert_eq!(
+                    link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+                    RoomAnswer::at_once(LinkRoom::Free)
+                );
+                assert_eq!(
+                    link.send_blocking(b"frame", Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+            }
+        };
+        let control = link();
+        frames(&control);
+        assert_eq!(
+            control.socket.room_waits.borrow().len(),
+            3,
+            "CONTROL: asked before every frame"
+        );
+
+        let link = link();
+        link.socket.tries.set(true);
+        frames(&link);
+        assert_eq!(
+            link.socket.room_waits.borrow().len(),
+            1,
+            "asked before the first frame only"
+        );
+        assert_eq!(
+            *link.socket.writes.borrow(),
+            [batch(b"frame"), batch(b"frame"), batch(b"frame")]
+        );
+    }
+
+    /// A write the stream takes only in part ends by waiting, so the frame leaves whole and in
+    /// order, and the frame after it asks the stream for room again, which answers by the wait; a
+    /// write taken whole again makes the question unneeded again.
+    #[test]
+    fn a_write_taken_in_part_ends_by_waiting_and_the_next_frame_asks_for_room() {
+        let link = link();
+        link.socket.tries.set(true);
+        assert_eq!(
+            link.send_blocking(b"first", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        link.socket.takes.set(Some(3));
+        assert_eq!(
+            link.send_blocking(b"second", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            link.socket.writes.borrow().concat(),
+            [batch(b"first"), batch(b"second")].concat(),
+            "both frames went out whole and in order"
+        );
+        assert_eq!(
+            link.socket.writes.borrow().len(),
+            3,
+            "the second in two writes: what was taken at once, and the rest"
+        );
+        assert!(link.socket.room_waits.borrow().is_empty());
+        link.socket.full.set(true);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer {
+                room: LinkRoom::Congested,
+                waited_us: 1_000
+            },
+            "the stream is asked again, and has no room"
+        );
+        link.socket.full.set(false);
+        link.socket.takes.set(None);
+        assert_eq!(
+            link.send_blocking(b"third", Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free)
+        );
+        assert_eq!(
+            *link.socket.room_waits.borrow(),
+            [1_000],
+            "a write taken whole again: not asked"
         );
     }
 
