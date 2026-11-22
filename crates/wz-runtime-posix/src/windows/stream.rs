@@ -14,7 +14,11 @@
 //! which Winsock has no per-call flag for. The write that waits ([`StreamSocket::send_parts`])
 //! waits in `WSAPoll` for room and writes on, so it returns once Winsock has taken every byte (a
 //! length and its batch go out in one `WSASend`), as the POSIX half's does; a read is one `recv`
-//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`]. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
+//! that does not wait, the loop's wait being the poll of [`StreamSocket::wait_readable`]. The
+//! owner is given no read that waits in itself (`StreamSocket::reader`, which the POSIX half
+//! gives): the blocking mode is the socket's and not one call's, so a `recv` that waited would
+//! make the write tried first wait as well, and the owner waits in `WSAPoll` before the step's
+//! read instead. `TCP_NODELAY` is set, as zenoh and zenoh-pico set it on every
 //! TCP link (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
 //! `IPPROTO_TCP, TCP_NODELAY`).
 
@@ -918,6 +922,17 @@ mod tests {
                 !wait.wait_writable(1_000),
                 "the wait handed out sees the stream full as the socket does"
             );
+        }
+
+        /// The owner of a Windows stream waits on its readiness and is given no read that waits in
+        /// itself: the socket does not block, for the write that is tried first. CONTROL: the
+        /// readiness it waits on is given.
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        #[test]
+        fn a_windows_stream_gives_its_owner_no_read_that_waits_in_itself() {
+            let (near, _far) = pair();
+            assert!(near.reader().is_none());
+            assert!(near.readiness().is_some(), "CONTROL: the wait on its readiness");
         }
     }
 }
