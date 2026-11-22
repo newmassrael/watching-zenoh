@@ -15,3 +15,5 @@ CONFIG_WZ_CAP_ADVANCED=n
 CONFIG_WZ_CAP_GOSSIP=n
 CONFIG_WZ_CAP_UNSTABLE_API=n
 CONFIG_WZ_CAP_CONNECTIVITY=n
+# The limits zenoh-pico bounds by no constant, at what its own build holds.
+CONFIG_WZ_LIMITS_ZENOH_PICO=y

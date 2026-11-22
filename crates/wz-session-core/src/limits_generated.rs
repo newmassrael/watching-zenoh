@@ -69,6 +69,28 @@ const _: LimitDomain = MaxKeyexprBytes::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxKeyexprBytesHeld = Limited<MaxKeyexprBytes, { MaxKeyexprBytes::HELD }>;
 
+/// `KEY_ARENA_BYTES`: How many bytes of key text the rows of a session's own declarations
+/// hold at once, in one arena each row keeps its key in: each key takes 8 bytes and its
+/// length, rounded up to 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyArenaBytes;
+
+impl LimitSpec for KeyArenaBytes {
+    type Value = usize;
+    const LIMIT: &'static str = "KEY_ARENA_BYTES";
+    const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = lent_capacity(caps::KEY_ARENA_BYTES);
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 4294967291, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::KEY_ARENA_BYTES;
+}
+
+const _: LimitDomain = KeyArenaBytes::DOMAIN;
+
+/// How `KEY_ARENA_BYTES` is held: in no byte when its domain is one value.
+pub type KeyArenaBytesHeld = Limited<KeyArenaBytes, { KeyArenaBytes::HELD }>;
+
 /// `MAX_SUBSCRIPTIONS`: The subscribers a session holds at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaxSubscriptions;
@@ -1424,6 +1446,8 @@ pub type PicoKeepalivesPerLeaseHeld =
 pub struct SessionLimits {
     /// `MAX_KEYEXPR_BYTES`.
     max_keyexpr_bytes: MaxKeyexprBytesHeld,
+    /// `KEY_ARENA_BYTES`.
+    key_arena_bytes: KeyArenaBytesHeld,
     /// `MAX_SUBSCRIPTIONS`.
     max_subscriptions: MaxSubscriptionsHeld,
     /// `MATCH_MEMO_SLOTS`.
@@ -1535,6 +1559,7 @@ impl SessionLimits {
     pub const fn from_build() -> Self {
         Self {
             max_keyexpr_bytes: Limited::build_default(),
+            key_arena_bytes: Limited::build_default(),
             max_subscriptions: Limited::build_default(),
             match_memo_slots: Limited::build_default(),
             delivery_lane_events: Limited::build_default(),
@@ -1614,6 +1639,23 @@ impl SessionLimits {
     /// Selects `MAX_KEYEXPR_BYTES`, when the build's domain holds `value`.
     pub fn select_max_keyexpr_bytes(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_keyexpr_bytes = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `KEY_ARENA_BYTES` as this snapshot holds it.
+    pub const fn key_arena_bytes(&self) -> usize {
+        self.key_arena_bytes.get()
+    }
+
+    /// `KEY_ARENA_BYTES` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn key_arena_bytes_held(&self) -> KeyArenaBytesHeld {
+        self.key_arena_bytes
+    }
+
+    /// Selects `KEY_ARENA_BYTES`, when the build's domain holds `value`.
+    pub fn select_key_arena_bytes(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.key_arena_bytes = Limited::select(value)?;
         Ok(())
     }
 
@@ -2601,6 +2643,16 @@ impl LimitField<SessionLimits> for MaxKeyexprBytes {
     }
 }
 
+impl LimitField<SessionLimits> for KeyArenaBytes {
+    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_key_arena_bytes(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> usize {
+        snapshot.key_arena_bytes()
+    }
+}
+
 impl LimitField<SessionLimits> for MaxSubscriptions {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_max_subscriptions(value)
@@ -3122,12 +3174,13 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 53;
+pub const SESSION_LIMIT_COUNT: usize = 54;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
 pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxKeyexprBytes>(),
+    LimitEntry::of::<KeyArenaBytes>(),
     LimitEntry::of::<MaxSubscriptions>(),
     LimitEntry::of::<MatchMemoSlots>(),
     LimitEntry::of::<DeliveryLaneEvents>(),

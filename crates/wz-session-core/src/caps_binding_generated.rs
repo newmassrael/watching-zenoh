@@ -22,6 +22,18 @@ pub const MAX_KEYEXPR_BYTES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::KEY_ARENA_BYTES`] is bound.
+pub const KEY_ARENA_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967291)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_SUBSCRIPTIONS`] is bound.
 pub const MAX_SUBSCRIPTIONS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

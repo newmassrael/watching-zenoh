@@ -982,8 +982,20 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     // The session encodes a batch straight into the driver's own storage behind the room its
     // length takes, and the length is written there at the send: length and batch are one write
     // from the slot, and no buffer is allocated for either.
+    //
+    // A frame the stream has not taken whole keeps its slot until it is written. A link lent one
+    // slot, as zenoh-pico keeps one write buffer, finds it held by the batch it has just sent
+    // whenever a message follows it (a Close after the drain of the open batch); so a link with no
+    // slot free writes what it owes first, as far as the stream takes it without waiting, and lends
+    // the slot that frees. One the stream frees none for is refused, as before.
     fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
-        self.tx.acquire(STREAM_BATCH_LENGTH_BYTES)
+        if let Some(grant) = self.tx.acquire(STREAM_BATCH_LENGTH_BYTES) {
+            return Some(grant);
+        }
+        if self.owes() && self.write_owed() {
+            return self.tx.acquire(STREAM_BATCH_LENGTH_BYTES);
+        }
+        None
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
@@ -1987,6 +1999,54 @@ mod tests {
             link.tx_slot_acquire(16, Priority::DEFAULT).is_some(),
             "written, the slot is back"
         );
+    }
+
+    /// A link whose every slot is out, one of them held by a frame the stream took only part of,
+    /// writes what it owes when it is asked for a slot and lends the one that frees, with no step
+    /// between: one slot serves the frame after a batch the stream has not finished. While the
+    /// stream takes nothing, nothing is freed and the ask is refused.
+    #[test]
+    fn a_slot_asked_while_a_frame_is_owed_is_lent_once_the_stream_takes_it() {
+        let link = link();
+        link.socket.tries.set(true);
+        let grant = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a free slot");
+        let (base, _) = link.tx_slot_storage(grant.slot);
+        // SAFETY: the slot was just granted to this test, 32 bytes long, and five bytes past its
+        // headroom are inside it.
+        unsafe { core::ptr::copy_nonoverlapping(b"owed!".as_ptr(), base.add(grant.headroom), 5) };
+        link.socket.takes.set(Some(3));
+        assert_eq!(
+            link.tx_slot_send(
+                grant.slot,
+                grant.headroom,
+                5,
+                Reliability::Reliable,
+                Priority::DEFAULT
+            ),
+            LinkSendOutcome::Sent
+        );
+        let other = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the other slot is free");
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_none(),
+            "the stream takes nothing, so the owed frame keeps its slot"
+        );
+        link.socket.takes.set(None);
+        let freed = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the owed frame is written and its slot lent");
+        assert_eq!(freed.slot, grant.slot);
+        assert_eq!(link.socket.writes.borrow().concat(), batch(b"owed!"));
+        assert_eq!(
+            link.socket.waited_writes.get(),
+            0,
+            "written without waiting"
+        );
+        link.tx_slot_abort(other.slot);
+        link.tx_slot_abort(freed.slot);
     }
 
     /// A session of this engine over the stream link, and what a droppable and a blocking message

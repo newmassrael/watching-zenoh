@@ -421,6 +421,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_images(data)
     out += validate_policy_images(data)
     out += validate_switches(data)
+    out += validate_limit_presets(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
     for pol in data.get("policy", []):
         symbols += policy_symbols(pol)
@@ -1387,7 +1388,8 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
-              "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream"}
+              "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream",
+              "pico_preset"}
 # Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
 # snapshot their creator hands them, or still from the build's value. A statement of a limit read
 # from the build would be taken and never read, so a reader of a document refuses it by name.
@@ -1400,11 +1402,65 @@ LIMIT_READ_BUILD = "build"
 # `[[upstream_switch]]` row anchors to the limit (`limit_rows`), so it is not stated a second time.
 LIMIT_UPSTREAM_KEYS = {"zenoh", "cite", "reason"}
 LIMIT_UPSTREAM_NONE = "none"
+# A limit zenoh-pico bounds by no constant of its own, which wz sizes memory by (an entity table,
+# the delivery lane), states in `[limit.pico_preset]` the value the pico preset holds instead:
+# `value`, under the default, and `reason`, what of pico's own build it holds (decision Q3 of
+# docs/c-abi-engine-and-memory.md). One switch of the generated Kconfig makes every such value the
+# limit's default, and zenoh-pico's defconfig turns it on, so a build of the pico preset holds them
+# and every other build keeps the defaults.
+LIMIT_PRESET_KEYS = {"value", "reason"}
+LIMIT_PRESET_SWITCH = "WZ_LIMITS_ZENOH_PICO"
+LIMIT_PRESET_ORIGINAL = "zenoh-pico"
 # A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
 UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
 # zenoh's example configuration, a byte copy of the pinned upstream's: every key it writes out,
 # which is every key a limit may name.
 UPSTREAM_DEFAULT_CONFIG = ROOT / "crates" / "wz-zenoh" / "DEFAULT_CONFIG.json5"
+
+
+def limit_presets(limits: list[dict]) -> dict[str, int]:
+    """Each limit that states a pico preset (`[limit.pico_preset]`), to the preset's value, in the
+    order the limits are declared."""
+    return {lim["id"]: lim["pico_preset"]["value"] for lim in limits
+            if isinstance(lim.get("pico_preset"), dict)}
+
+
+def validate_limit_presets(data: dict) -> list[str]:
+    """A limit's pico preset lowers it to what zenoh-pico's own build holds of something pico bounds
+    by no constant: a positive integer the limit admits, under its default, with the reason. A limit
+    a zenoh-pico value switch anchors to has none: its default is pico's own constant."""
+    anchored = {str(s["anchor"])[len(LIMIT_ANCHOR):] for s in data.get("upstream_switch", [])
+                if s.get("original") == "zenoh-pico" and s.get("class") == "maps"
+                and str(s.get("anchor", "")).startswith(LIMIT_ANCHOR)}
+    out: list[str] = []
+    for lim in data["limit"]:
+        if "pico_preset" not in lim:
+            continue
+        lid = lim.get("id", "?")
+        where = f"limit `{lid}`"
+        preset = lim["pico_preset"]
+        if not isinstance(preset, dict):
+            out.append(f"{where}: `pico_preset` is a table of `value` and `reason`")
+            continue
+        for key in sorted(set(preset) - LIMIT_PRESET_KEYS):
+            out.append(f"{where}: `pico_preset.{key}` is not a key a pico preset has")
+        value = preset.get("value")
+        default = lim.get("default")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            out.append(f"{where}: `pico_preset.value` is not a positive integer")
+        elif isinstance(default, int) and value >= default:
+            out.append(f"{where}: its pico preset {value} is not under its default {default}; a "
+                       f"preset only lowers what the default sizes")
+        elif lim.get("kind") == "parameter" and isinstance(lim.get("range"), list) \
+                and not lim["range"][0] <= value <= lim["range"][-1]:
+            out.append(f"{where}: its pico preset {value} is outside its `range` {lim['range']}")
+        reason = preset.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            out.append(f"{where}: its pico preset states no reason")
+        if lid in anchored:
+            out.append(f"{where}: a zenoh-pico value switch anchors to it, so its default is "
+                       f"pico's own constant and it has no preset")
+    return out
 
 
 def stated_one_of(out: list[str], where: str, row: dict, key: str,
@@ -2465,6 +2521,20 @@ def emit_kconfig_limits(decl: dict) -> str:
         'comment "Each limit sizes a table of every session of the image; a build states its own."',
         "",
     ]
+    presets = limit_presets(decl["limits"])
+    if presets:
+        out += [
+            f"config {LIMIT_PRESET_SWITCH}",
+            '\tbool "The limits zenoh-pico bounds by no constant, at what its own build holds"',
+            "\thelp",
+            "\t  Each limit zenoh-pico bounds by no constant of its own (its entity tables, the",
+            "\t  gets and replies a session holds, the delivery lane) defaults to the value of",
+            "\t  the pico preset instead of the one that sizes a host's session: what zenoh-pico's",
+            "\t  own examples and its API tests hold at once. zenoh-pico's defconfig turns it on;",
+            "\t  an image of the pico C ABI turns it on to be sized as zenoh-pico is. A limit the",
+            "\t  image states is its own either way.",
+            "",
+        ]
     for lim in decl["limits"]:
         out.append(f"config {lim['kconfig']}")
         out.append(f'\tint "{lim["id"]}"')
@@ -2473,6 +2543,9 @@ def emit_kconfig_limits(decl: dict) -> str:
             out.append(f"\trange {lim['range'][0]} {lim['range'][1]}")
         elif "most" in lim:
             out.append(f"\trange 0 {lim['most']}")
+        if lim["id"] in presets:
+            # Kconfig takes the first default whose condition holds.
+            out.append(f"\tdefault {presets[lim['id']]} if {LIMIT_PRESET_SWITCH}")
         out.append(f"\tdefault {lim['default']}")
         out.append("\thelp")
         for line in lim["help"].strip().splitlines():
@@ -3883,6 +3956,11 @@ def emit_defconfig(decl: dict, original: str) -> str:
     for cid in decl["order"]:
         if cid in values and values[cid] != default_on(decl["caps"][cid], KCONFIG_ABI):
             out.append(f"CONFIG_{decl['caps'][cid]['kconfig']}={'y' if values[cid] else 'n'}")
+    if original == LIMIT_PRESET_ORIGINAL and limit_presets(decl.get("limits", [])):
+        out += [
+            f"# The limits {original} bounds by no constant, at what its own build holds.",
+            f"CONFIG_{LIMIT_PRESET_SWITCH}=y",
+        ]
     return "\n".join(out) + "\n"
 
 
@@ -4586,6 +4664,10 @@ def original_differences(decl: dict, original: str, kconf) -> list[str]:
     for option in original_choices(decl, original):
         if kconf.syms[option["kconfig"]].tri_value != 2:
             out.append(f"{option['kconfig']} is not the choice taken, and it is {original}'s")
+    if original == LIMIT_PRESET_ORIGINAL and limit_presets(decl.get("limits", [])) \
+            and kconf.syms[LIMIT_PRESET_SWITCH].tri_value != 2:
+        out.append(f"{LIMIT_PRESET_SWITCH} is off, and {original}'s own build holds the limits it "
+                   f"bounds by no constant at their pico preset")
     # C2: an original's own build departs from itself nowhere, so no policy is on in it.
     for pol in decl["policies"]:
         value = resolved_policy(kconf, pol)
@@ -5458,6 +5540,34 @@ def cmd_selftest() -> int:
     expect("a limit's value reads its environment, then its default",
            'pub(super) const MAX_A: usize = limit(option_env!("WZ_LIMIT_MAX_A"), 4);'
            in emit_rust_limits(sdecl))
+    expect("a declaration with no pico preset has no preset switch",
+           LIMIT_PRESET_SWITCH not in emit_kconfig_limits(sdecl))
+    preset_limit = {**sample["limit"][0], "pico_preset": {"value": 2, "reason": "two at once"}}
+    preset_kconfig = emit_kconfig_limits({"limits": [preset_limit]})
+    expect("a pico preset is the limit's first default, under the switch it declares",
+           f"config {LIMIT_PRESET_SWITCH}\n\tbool " in preset_kconfig
+           and f"\tdefault 2 if {LIMIT_PRESET_SWITCH}\n\tdefault 4\n" in preset_kconfig)
+    expect("zenoh-pico's defconfig turns the preset switch on, and no other original's does",
+           f"\nCONFIG_{LIMIT_PRESET_SWITCH}=y\n"
+           in emit_defconfig({**decl_of(sample), "limits": [preset_limit]}, "zenoh-pico")
+           and LIMIT_PRESET_SWITCH
+           not in emit_defconfig({**decl_of(sample), "limits": [preset_limit]}, "zenoh"))
+
+    def preset_problems(preset: object) -> list[str]:
+        return validate_limit_presets(
+            {"limit": [{**sample["limit"][0], "pico_preset": preset}], "upstream_switch": []})
+
+    expect("a pico preset under the default with a reason is held",
+           preset_problems({"value": 2, "reason": "two at once"}) == [])
+    expect("a pico preset not under the default is refused",
+           any("not under its default" in p for p in preset_problems({"value": 4, "reason": "r"})))
+    expect("a pico preset without a reason is refused",
+           any("no reason" in p for p in preset_problems({"value": 2})))
+    expect("a pico preset of a limit a pico value switch anchors to is refused",
+           any("anchors to it" in p for p in validate_limit_presets({
+               "limit": [{**sample["limit"][0], "pico_preset": {"value": 2, "reason": "r"}}],
+               "upstream_switch": [{"original": "zenoh-pico", "class": "maps",
+                                    "anchor": f"{LIMIT_ANCHOR}{sample['limit'][0]['id']}"}]})))
     long_name = "MAX_" + "X" * 80
     expect("a value line past rustfmt's width breaks after `=` as rustfmt does",
            rust_const(long_name, "limit(1)") == [f"pub(super) const {long_name}: usize =", "    limit(1);"])

@@ -107,6 +107,17 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
 /// rather than silently truncated.
 pub const MAX_KEYEXPR_BYTES: usize = generated::MAX_KEYEXPR_BYTES;
 
+/// The bytes of key text the rows of a session's own declarations hold at once, in the one key
+/// arena they share ([`crate::key_arena`]): each key a block of its header and its bytes. A key
+/// that finds no room is refused as one that finds its table full is. Must be at least `1` and
+/// within what a key arena addresses.
+pub const KEY_ARENA_BYTES: usize = generated::KEY_ARENA_BYTES;
+
+const _: () = assert!(
+    KEY_ARENA_BYTES >= 1 && KEY_ARENA_BYTES <= crate::key_arena::MAX_KEY_ARENA_BYTES,
+    "KEY_ARENA_BYTES must be at least 1 and within what a key arena addresses"
+);
+
 /// Maximum number of concurrently-registered local subscriptions in a
 /// [`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
 /// subscriber table on the no-alloc backing; a `register` past this is

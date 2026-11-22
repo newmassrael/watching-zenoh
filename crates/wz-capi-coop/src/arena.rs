@@ -43,7 +43,10 @@
 //!   the limits of the application's tables, the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
-//!   Interests those filters and listeners hold open, at most one for each of them.
+//!   Interests those filters and listeners hold open, at most one for each of them;
+//! - the key arena every row of that record keeps its key in (`KEY_ARENA_BYTES`, under the
+//!   build's), one area of blocks a key takes as long as it is held
+//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -79,6 +82,7 @@ use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
+use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerRows, PeerTables};
@@ -120,11 +124,18 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 23;
+pub const ARENA_ROWS: usize = 24;
 
-/// The slots each link is lent to encode its frames into: a batching session holds a batch open in
-/// one slot while it encodes the next message, which does not join it, into another.
-pub const LINK_TX_SLOTS: usize = 2;
+/// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
+/// (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `static z_result_t _z_transport_tx_send_t_msg_inner(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,`).
+/// The batch a session holds open is sent before a message that does not join it takes the slot:
+/// a transport message drains the open batch first (`send_close_with_reason`, `send_keep_alive`),
+/// and a frame of the other reliability closes it. A stream link keeps the slot of a frame it has
+/// not written whole until it has, so the next frame asks for room within its message's wait,
+/// which writes it (`wait_for_room`), and a message that asks for a slot meanwhile writes it first
+/// (`StreamDriver::tx_slot_acquire` in `wz-runtime-coop`).
+pub const LINK_TX_SLOTS: usize = 1;
 
 /// A row of a plan that has none yet.
 const NO_ROW: ArenaRow = ArenaRow {
@@ -251,6 +262,8 @@ pub struct ArenaPlan {
     gets: GetTables,
     peers: FacePeers,
     held_queries: usize,
+    /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
+    key_bytes: usize,
 }
 
 impl ArenaPlan {
@@ -282,6 +295,10 @@ impl ArenaPlan {
             gets: GetTables::default(),
             peers: FacePeers::default(),
             held_queries: 0,
+            key_bytes: lent::<{ caps::KEY_ARENA_BYTES }>(
+                "KEY_ARENA_BYTES",
+                Quota::at_most(limits.key_arena_bytes()),
+            )?,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -479,12 +496,25 @@ impl ArenaPlan {
             rows.interests().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::INTEREST,
         );
+        // The keys of those rows, in one area that a key takes a block of as long as it is held
+        // (`SessionArena::lend_keys`), not a row of each.
+        self.put(
+            "key arena",
+            "KEY_ARENA_BYTES",
+            1,
+            KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
+        );
         Ok(())
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities
+    }
+
+    /// The bytes of blocks of the key arena those rows keep their keys in (`KEY_ARENA_BYTES`).
+    pub fn key_bytes(&self) -> usize {
+        self.key_bytes
     }
 
     /// The tables of pending gets the arena lends, and the rows of each.
@@ -800,6 +830,15 @@ impl SessionArena {
     ) -> Result<LentByteCells, ArenaRefused> {
         self.arena
             .lend_byte_cells(plan.reassembly_bytes, plan.reassembly_chains)
+            .map_err(ArenaRefused::Lend)
+    }
+
+    /// Lend the key arena `plan` lays out: the area the rows of the session's own declarations
+    /// keep their keys in, for the session's life. Refused only by an arena reserved by another
+    /// plan.
+    pub(crate) fn lend_keys(&mut self, plan: &ArenaPlan) -> Result<KeySpace, ArenaRefused> {
+        self.arena
+            .lend_keys(plan.key_bytes)
             .map_err(ArenaRefused::Lend)
     }
 

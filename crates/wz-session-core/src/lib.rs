@@ -154,6 +154,11 @@ pub mod namespace;
 /// the seam the 25 currently alloc-gated modules migrate onto.
 pub mod bounded;
 
+/// The key arena of a session: one span of its arena that the rows of its tables keep their keys
+/// in, each row a [`key_arena::KeyRef`] of a few words rather than a buffer of the longest key.
+/// Unconditional, like [`bounded`].
+pub mod key_arena;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.

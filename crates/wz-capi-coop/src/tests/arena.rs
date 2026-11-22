@@ -18,8 +18,8 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
-use wz_session_core::limit_binding::{Quota, UnlentRows};
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limit_binding::{LimitValue, Quota, UnlentRows};
+use wz_session_core::limits::{SessionLimits, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
@@ -377,6 +377,50 @@ fn the_plan_lays_out_the_delivery_lane_the_limits_state() {
     }
 }
 
+/// The key arena is the `KEY_ARENA_BYTES` the session's limits state, one area with its state: a
+/// lowered value lowers it, and one over the build's refuses the plan, naming the limit and both
+/// values.
+#[test]
+fn the_plan_lays_out_the_key_arena_the_limits_state() {
+    use wz_session_core::key_arena::KeySpace;
+
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        built.key_bytes(),
+        SessionLimits::defaults().key_arena_bytes()
+    );
+    assert_eq!(row(&built, "key arena").count, 1);
+    assert_eq!(
+        Some(row(&built, "key arena").entry_bytes),
+        KeySpace::span_bytes(built.key_bytes())
+    );
+    let mut lowered = SessionLimits::defaults();
+    if lowered.select_key_arena_bytes(512).is_ok() {
+        let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+        assert_eq!(plan.key_bytes(), 512);
+        assert_eq!(
+            Some(row(&plan, "key arena").entry_bytes),
+            KeySpace::span_bytes(512)
+        );
+        assert!(plan.reserved_bytes() < built.reserved_bytes());
+    }
+    let over = caps::KEY_ARENA_BYTES + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised.select_key_arena_bytes(over).is_ok() {
+        assert_eq!(
+            ArenaPlan::of(&client_config(), &raised),
+            Err(ArenaRefused::Limit {
+                limit: "KEY_ARENA_BYTES",
+                why: UnlentRows::OverCeiling {
+                    value: over,
+                    ceiling: caps::KEY_ARENA_BYTES,
+                },
+            })
+        );
+    }
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.
@@ -702,6 +746,46 @@ fn a_put_is_encoded_into_a_slot_the_arena_lent() {
     );
 }
 
+/// A link is lent one transmit slot: a run of puts leaves frame after frame from it, each frame
+/// sent before the next takes the slot, none built on the heap and none refused for want of a
+/// slot, and every put reaches the router.
+#[test]
+fn one_slot_a_link_carries_a_run_of_puts() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    until(&engine, "the link to be up", || engine.faces_up() == 1);
+    let before = engine.lend_counts().expect("the link is up");
+    for n in 0..16u8 {
+        engine
+            .publish_on_wire_all(
+                "demo/one-slot",
+                &WireKey::literal(),
+                &[n],
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+    }
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| {
+            s.samples
+                .iter()
+                .filter(|(k, _)| k == "demo/one-slot")
+                .count()
+                == 16
+        })
+    });
+    let (batch, whole) = engine.lend_counts().expect("the link is up");
+    assert!(
+        batch.slot_frames + whole.slot_frames > before.0.slot_frames + before.1.slot_frames,
+        "the puts left from the slot: {batch:?} {whole:?}"
+    );
+    assert_eq!(
+        (batch.heap_no_slot, batch.heap_short_slot, whole.heap_frames),
+        (0, 0, 0),
+        "no frame was built on the heap for want of a second slot: {batch:?} {whole:?}"
+    );
+}
+
 /// A session whose arena holds one link dials again, after its link is lost, over the buffers the
 /// lost link held: the lost link lets them go before the next is opened.
 #[test]
@@ -744,4 +828,168 @@ fn a_face_past_max_faces_is_not_attached() {
         Err(OpenError::Unreachable(_))
     ));
     assert_eq!(engine.faces_up(), 1);
+}
+
+/// The pico preset of the limits zenoh-pico bounds by no constant, as the generated Kconfig states
+/// it: each limit's id and the default it takes under the switch zenoh-pico's defconfig turns on.
+fn pico_preset() -> Vec<(&'static str, usize)> {
+    const KCONFIG: &str = include_str!("../../../../deploy/Kconfig.limits");
+    let mut presets = Vec::new();
+    let mut limit = None;
+    for line in KCONFIG.lines() {
+        if let Some(id) = line.strip_prefix("config WZ_LIMIT_") {
+            limit = Some(id);
+        } else if let Some(value) = line
+            .trim()
+            .strip_prefix("default ")
+            .and_then(|rest| rest.strip_suffix(" if WZ_LIMITS_ZENOH_PICO"))
+        {
+            let id = limit.expect("a default follows the limit it is of");
+            presets.push((id, value.parse().expect("a preset is a number")));
+        }
+    }
+    presets
+}
+
+/// The build's limits with the pico preset selected over them, or `None` in a build whose domain
+/// keeps a limit to its own value, which has no other.
+fn pico_preset_limits() -> Option<SessionLimits> {
+    let mut limits = SessionLimits::defaults();
+    for (id, value) in pico_preset() {
+        let entry = SESSION_LIMITS
+            .iter()
+            .find(|entry| entry.id() == id)
+            .expect("a preset names a limit of the session");
+        entry
+            .select(&mut limits, LimitValue::Integer(value))
+            .expect("the session reads the limit from its snapshot")
+            .ok()?;
+    }
+    Some(limits)
+}
+
+/// The value the pico preset gives `id`, if it gives one.
+fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
+    presets
+        .iter()
+        .find(|(limit, _)| *limit == id)
+        .map(|(_, value)| *value)
+}
+
+/// A session at the pico preset's limits lends each table the preset sizes as many rows as the
+/// preset states, the tables that share a limit's rows as many as their limits add up to, and an
+/// arena that is the sum of its rows' spans and smaller than the build's.
+#[test]
+fn the_pico_presets_arena_lends_the_presets_rows() {
+    let presets = pico_preset();
+    for id in [
+        "MAX_SUBSCRIPTIONS",
+        "MAX_PUBLISHERS",
+        "MAX_QUERIERS",
+        "MAX_MATCHING_LISTENERS",
+        "MAX_DECLARED_KEYEXPRS",
+        "MAX_PENDING_QUERIES",
+        "MAX_PENDING_DECLARES",
+    ] {
+        assert!(
+            preset_of(&presets, id).is_some(),
+            "the generated Kconfig states the pico preset of {id}"
+        );
+    }
+    let Some(limits) = pico_preset_limits() else {
+        // A build that keeps each limit to its own value has no preset to lower it to.
+        return;
+    };
+    let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
+    let mut held = 0;
+    for row in plan.rows() {
+        // The lane's row is one buffer of the limit's bytes, and the key arena's one area of
+        // them, not a row of each.
+        if row.basis == "DELIVERY_LANE_BYTES" || row.basis == "KEY_ARENA_BYTES" {
+            continue;
+        }
+        if let Some(value) = preset_of(&presets, row.basis) {
+            assert_eq!(row.count, value, "{} at the pico preset", row.part);
+            held += 1;
+        }
+    }
+    assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
+    let entities = plan.entities();
+    assert_eq!(
+        entities.filters(),
+        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS"))
+    );
+    assert_eq!(
+        entities.interests(),
+        Some(preset("MAX_PUBLISHERS") + preset("MAX_QUERIERS") + preset("MAX_MATCHING_LISTENERS"))
+    );
+    assert_eq!(plan.gets().rows.queries, preset("MAX_PENDING_QUERIES"));
+    assert_eq!(
+        plan.peers().rows.pending_declares,
+        preset("MAX_PENDING_DECLARES")
+    );
+    assert_eq!(plan.key_bytes(), preset("KEY_ARENA_BYTES"));
+    let reserved = plan.reserved_bytes().expect("within the address space");
+    assert_eq!(
+        Some(reserved),
+        plan.rows()
+            .iter()
+            .try_fold(0usize, |sum, row| sum.checked_add(row.span()?)),
+        "the arena is the sum of its rows' spans"
+    );
+    assert!(
+        Some(reserved) < built.reserved_bytes(),
+        "the preset's arena is under the build's"
+    );
+}
+
+/// A pico preset holds the build's relations between its limits: the staging of a peer's interest
+/// answers holds every subscriber and every local token the preset admits, and a final.
+#[test]
+fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
+    let presets = pico_preset();
+    let declares = preset_of(&presets, "MAX_PENDING_DECLARES").expect("the preset states it");
+    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
+    let tokens = preset_of(&presets, "MAX_LOCAL_TOKENS").expect("the preset states it");
+    assert!(declares > subscribers && declares > tokens);
+}
+
+/// The pico preset's delivery lane is the least lane the build accepts at the preset's other
+/// values: one record of the larger of the batch and the largest message the session rejoins, with
+/// the most a sample adds to it, so a read always finds room for the record it takes next.
+#[test]
+fn the_pico_presets_lane_holds_one_record() {
+    let presets = pico_preset();
+    let lane = preset_of(&presets, "DELIVERY_LANE_BYTES").expect("the preset states the lane");
+    let Some(limits) = pico_preset_limits() else {
+        // A build that keeps each limit to its own value has no preset to lower it to.
+        return;
+    };
+    let frag = limits
+        .pico_frag_max_bytes()
+        .lent_under(Quota::at_most(caps::PICO_FRAG_MAX_BYTES))
+        .expect("the preset's rejoined message is under the build's");
+    let key = limits
+        .max_keyexpr_bytes()
+        .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
+        .expect("the preset's key is under the build's");
+    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
+    let liveliness =
+        preset_of(&presets, "MAX_LIVELINESS_SUBSCRIPTIONS").expect("the preset states it");
+    let most = if cfg!(feature = "liveliness") {
+        subscribers.max(liveliness)
+    } else {
+        subscribers
+    };
+    assert_eq!(
+        lane,
+        crate::lane::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
+        "the preset's lane is one record's room"
+    );
+    let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
+    assert_eq!(row(&plan, "delivery lane").entry_bytes, lane);
+    assert!(lane < SessionLimits::defaults().delivery_lane_bytes());
 }
