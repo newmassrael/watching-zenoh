@@ -345,7 +345,7 @@ impl StreamSocket for WindowsTcpSocket {
             let mut sent: u32 = 0;
             // SAFETY: every buffer names a live slice of `parts` for its length, and the count
             // passed is the number of them from `first`. No overlapped structure: the call takes
-            // what Winsock has room for now, the socket being non-blocking.
+            // what Winsock has room for at that moment, the socket being non-blocking.
             let rc = unsafe {
                 ws::WSASend(
                     self.socket,
@@ -382,8 +382,8 @@ impl StreamSocket for WindowsTcpSocket {
         Ok(())
     }
 
-    // One `WSASend` on the non-blocking socket: Winsock takes what it has room for now, and
-    // `WSAEWOULDBLOCK` is nothing taken.
+    // One `WSASend` on the non-blocking socket: Winsock takes what it has room for at that
+    // moment, and `WSAEWOULDBLOCK` is nothing taken.
     fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, WindowsNetError>> {
         let (bufs, count) = match wsabufs(parts) {
             Ok(built) => built,

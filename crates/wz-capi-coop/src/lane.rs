@@ -1077,7 +1077,7 @@ impl SampleLane {
         });
     }
 
-    /// Whether the lane has the room the links ask for now: `true` before a link asked.
+    /// Whether the lane has the room the links ask for at present: `true` before a link asked.
     fn takes_a_link_read(&self) -> bool {
         self.link_room.map_or(true, |room| self.takes_a_read(room))
     }

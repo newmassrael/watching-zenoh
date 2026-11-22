@@ -391,9 +391,9 @@ pub enum Refusal {
     NoAnswerInTime,
     /// The link was lost and the session dials no endpoint again.
     LinkLost,
-    /// The endpoint is one to listen on, and listening is not built.
+    /// The endpoint is one to listen on, and this build does not listen.
     ListeningNotBuilt,
-    /// The endpoint is a group to join, and joining a group is not built.
+    /// The endpoint is a group to join, and this build joins no group.
     GroupsNotBuilt,
     /// The group was joined and its link did not open.
     GroupLinkDidNotOpen,
@@ -5353,7 +5353,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                             .app
                             .remote_queryables
                             .undeclare_matching_listener(entry.watch),
-                        // No listener of the plane is held where it is not built (`counts`).
+                        // A build that leaves the plane out holds no listener of it (`counts`).
                         #[cfg(not(any(feature = "query", feature = "queryable")))]
                         FilterPlane::Queryables { .. } => false,
                     };

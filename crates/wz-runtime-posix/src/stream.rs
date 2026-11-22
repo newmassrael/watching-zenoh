@@ -354,8 +354,8 @@ impl StreamSocket for PosixTcpSocket {
     }
 
     // One `sendmsg` that does not wait (`MSG_DONTWAIT`): the stack takes what its buffer has room
-    // for now, and a buffer with none is `EAGAIN`, read as nothing taken. The socket itself stays
-    // blocking, so `send_parts` waits for what this leaves, as it waits for any write.
+    // for at that moment, and a buffer with none is `EAGAIN`, read as nothing taken. The socket
+    // itself stays blocking, so `send_parts` waits for what this leaves, as it waits for any write.
     fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, PosixNetError>> {
         let (mut vecs, count) = match iovecs(parts) {
             Ok(built) => built,
