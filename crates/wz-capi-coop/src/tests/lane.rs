@@ -706,6 +706,75 @@ fn the_samples_lying_in_a_lent_datagram_are_handed_where_they_lie() {
     assert!(!lane.lends_a_datagram(), "and holds nothing back");
 }
 
+/// A link that lends one datagram where it lies, as UDP and a stream do.
+struct Lends(Vec<u8>);
+
+impl wz_runtime_coop::session_drive::SessionDatagramLink for Lends {
+    fn service(&self) {}
+
+    fn try_recv(&self) -> Option<wz_session_core::link::RxFrame> {
+        None
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        f(&self.0);
+        true
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+}
+
+/// The samples of a datagram a link's gate lends the step are offered with no hold of the lane
+/// each, and handed on together by the one hold the gate takes when the walk ends: three samples,
+/// one hold, where a hold a sample took three. The room the gate asks before each record is left
+/// after each all the same. The CONTROL is a sample offered with no datagram lent, which takes a
+/// hold of its own.
+#[test]
+fn the_samples_of_a_lent_datagram_are_handed_on_by_one_hold() {
+    use crate::lane::{LaneGate, SharedLane};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let Some(lane) = lane(256, 8) else {
+        return;
+    };
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane));
+    let datagram = vec![1u8, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3];
+    // SAFETY (every offer, hold and the gate here): this thread is the lane's one writer, as a
+    // session's step is under its lock.
+    let gate = unsafe { LaneGate::new(Lends(datagram), lane.clone(), room(32)) };
+    let holds = lane.holds();
+    let walked = gate.recv_with(&mut |datagram| {
+        for (subscriber, payload) in (1..).zip(datagram.chunks(4)) {
+            unsafe { lane.offer_sample(subscriber, &borrowed(payload)) };
+            assert!(gate.takes_input(), "the room is left after each record");
+        }
+    });
+    assert!(walked, "the link lent its datagram");
+    assert_eq!(
+        lane.holds() - holds,
+        1,
+        "one hold for the datagram's three samples"
+    );
+    assert_eq!(
+        (lane.handed_on(), lane.lent_count()),
+        (2, 2),
+        "the two sealed samples handed on together, lying where they lie"
+    );
+    assert!(lane.lends_a_datagram(), "the one held open lies there too");
+    unsafe { lane.held() }.seal_all();
+    assert_eq!((lane.handed_on(), lane.lent_count()), (3, 3));
+
+    let holds = lane.holds();
+    unsafe { lane.offer_sample(4, &best_effort(8)) };
+    assert_eq!(
+        lane.holds() - holds,
+        1,
+        "CONTROL: a sample offered with no datagram lent takes a hold of its own"
+    );
+}
+
 /// A sample offered for several subscribers is written once and handed to each of them, in the
 /// order it was offered to them: it takes the room of one copy and the ids, and one event slot.
 #[test]

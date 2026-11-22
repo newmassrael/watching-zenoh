@@ -5060,9 +5060,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             &keyexpr,
             allowed_origin,
             // SAFETY: the registry hands its sinks a sample under the session's lock.
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                unsafe { lane.held() }.offer_sample(id, sample)
-            }),
+            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.

@@ -1305,6 +1305,9 @@ pub(crate) struct SharedLane {
     /// How many samples were handed on lying in their datagram, which the tests count.
     #[cfg(all(test, feature = "std"))]
     lent_count: AtomicUsize,
+    /// How many holds of the lane were taken ([`Self::held`]), which the tests count.
+    #[cfg(all(test, feature = "std"))]
+    holds: AtomicUsize,
 }
 
 // SAFETY: the lane is reached by the holder of the session's lock alone (`Self::held`), the
@@ -1353,6 +1356,8 @@ impl SharedLane {
             lying_open: AtomicBool::new(false),
             #[cfg(all(test, feature = "std"))]
             lent_count: AtomicUsize::new(0),
+            #[cfg(all(test, feature = "std"))]
+            holds: AtomicUsize::new(0),
         }
     }
 
@@ -1423,6 +1428,8 @@ impl SharedLane {
             ptr::write(addr_of_mut!((*at).lying_open), AtomicBool::new(false));
             #[cfg(all(test, feature = "std"))]
             ptr::write(addr_of_mut!((*at).lent_count), AtomicUsize::new(0));
+            #[cfg(all(test, feature = "std"))]
+            ptr::write(addr_of_mut!((*at).holds), AtomicUsize::new(0));
         }
     }
 
@@ -1451,6 +1458,8 @@ impl SharedLane {
             lying_open: _,
             #[cfg(all(test, feature = "std"))]
                 lent_count: _,
+            #[cfg(all(test, feature = "std"))]
+                holds: _,
         } = shared;
     }
 
@@ -1489,11 +1498,47 @@ impl SharedLane {
     /// The caller holds the session's lock, under which every hold of the lane is made, and holds
     /// no other [`LaneHeld`] of it.
     pub(crate) unsafe fn held(&self) -> LaneHeld<'_> {
+        #[cfg(all(test, feature = "std"))]
+        self.holds.fetch_add(1, Ordering::SeqCst);
         let mut held = LaneHeld { shared: self };
         #[cfg(debug_assertions)]
         held.offering_gated(self.gated.load(Ordering::Acquire));
         held.take_back();
         held
+    }
+
+    /// Queue `sample` for the callback of `subscriber` ([`LaneHeld::offer_sample`]). While a link
+    /// lends the step a datagram, its records are offered with no hold of the lane each: what a
+    /// hold does as it is taken and let go (taking back what the deliveries gave back, handing on
+    /// what was published, the hold its samples put on the links) is done once, by the hold the
+    /// link's gate takes when the datagram's walk ends (`LaneGate::recv_with`), and after each
+    /// record only the room the gate asks before the next one is left in its word. Any other
+    /// sample takes a hold of its own.
+    ///
+    /// # Safety
+    /// As [`Self::held`]'s.
+    pub(crate) unsafe fn offer_sample(&self, subscriber: SubId, sample: &dyn SampleView) {
+        // SAFETY: the caller's contract: written under the session's lock, which is held.
+        if unsafe { (*self.lending.get()).is_none() } {
+            // SAFETY: the caller's contract.
+            unsafe { self.held() }.offer_sample(subscriber, sample);
+            return;
+        }
+        // SAFETY: the caller holds the session's lock and no hold of the lane, so this borrow is
+        // the lane's one, and it ends with this call.
+        let lane = unsafe { &mut *self.lane.get() };
+        #[cfg(debug_assertions)]
+        lane.offering_gated(self.gated.load(Ordering::Acquire));
+        offer_into(self, lane, subscriber, sample);
+        self.reads
+            .store(lane.takes_a_link_read(), Ordering::Release);
+    }
+
+    /// How many holds of the lane were taken since it was made, which the tests of the cost of
+    /// one sample count.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn holds(&self) -> usize {
+        self.holds.load(Ordering::SeqCst)
     }
 
     /// The deliveries' side of the lane, or `None` while another delivery holds it, which hands out
@@ -1593,18 +1638,7 @@ impl LaneHeld<'_> {
     /// arrive among whatever else the lane holds, so one step hands on all of a batch.
     pub(crate) fn offer_sample(&mut self, subscriber: SubId, sample: &dyn SampleView) {
         let shared = self.shared;
-        // SAFETY: written under the session's lock, under which this hold is.
-        let lending = unsafe { *shared.lending.get() };
-        match lending {
-            // A delivery running now may be the one this sample's own step runs inside of (a
-            // callback that steps its session), which hands the sample on only once that callback
-            // returns: a sample lying in the datagram would hold the link back until then, and the
-            // callback may be waiting for what the link brings next. It is written whole instead.
-            Some(datagram) if !shared.delivering.load(Ordering::SeqCst) => {
-                self.offer_lying(subscriber, sample, datagram)
-            }
-            _ => self.offer(subscriber, sample),
-        }
+        offer_into(shared, self, subscriber, sample);
     }
 
     /// Publish what this hold leaves open: the sample the lane holds open for more subscribers.
@@ -1614,11 +1648,35 @@ impl LaneHeld<'_> {
     }
 }
 
+/// Queue `sample` for `subscriber` in `lane`, `shared`'s, as [`LaneHeld::offer_sample`] says.
+fn offer_into(
+    shared: &SharedLane,
+    lane: &mut SampleLane,
+    subscriber: SubId,
+    sample: &dyn SampleView,
+) {
+    // SAFETY: written under the session's lock, under which the lane is reached.
+    let lending = unsafe { *shared.lending.get() };
+    match lending {
+        // A delivery running now may be the one this sample's own step runs inside of (a callback
+        // that steps its session), which hands the sample on only once that callback returns: a
+        // sample lying in the datagram would hold the link back until then, and the callback may be
+        // waiting for what the link brings next. It is written whole instead.
+        Some(datagram) if !shared.delivering.load(Ordering::SeqCst) => {
+            lane.offer_lying(subscriber, sample, datagram)
+        }
+        _ => lane.offer(subscriber, sample),
+    }
+}
+
 impl Drop for LaneHeld<'_> {
     fn drop(&mut self) {
         let shared = self.shared;
         // SAFETY: as `take_back`, for the producer of `handed`.
         let mut on = unsafe { shared.handed.producer() };
+        // The counts are stored once, after every sample this hold hands on: a hold at the end of
+        // a datagram's walk hands on all of its samples together.
+        let (mut handed, mut lying) = (0usize, 0usize);
         while let Some((slot, offset)) = self.published.front() {
             // Read before the push: from then on the slot's record is the delivery's.
             let lies = self.record(usize::from(slot)).is_some_and(Event::lies);
@@ -1631,16 +1689,28 @@ impl Drop for LaneHeld<'_> {
                 break;
             }
             self.published.pop();
-            let handed = shared.handed_count.load(Ordering::Relaxed).wrapping_add(1);
-            shared.handed_count.store(handed, Ordering::SeqCst);
-            // Counted after the push: a delivery that gives it back first leaves the counts apart
-            // for that while, which holds the links back, and never lets them read early.
+            handed += 1;
             if lies {
-                let lying = shared.lying_handed.load(Ordering::Relaxed).wrapping_add(1);
-                shared.lying_handed.store(lying, Ordering::SeqCst);
-                #[cfg(all(test, feature = "std"))]
-                shared.lent_count.fetch_add(1, Ordering::SeqCst);
+                lying += 1;
             }
+        }
+        if handed > 0 {
+            let total = shared
+                .handed_count
+                .load(Ordering::Relaxed)
+                .wrapping_add(handed);
+            shared.handed_count.store(total, Ordering::SeqCst);
+        }
+        // Counted after the push: a delivery that gives one back first leaves the counts apart for
+        // that while, which holds the links back, and never lets them read early.
+        if lying > 0 {
+            let total = shared
+                .lying_handed
+                .load(Ordering::Relaxed)
+                .wrapping_add(lying);
+            shared.lying_handed.store(total, Ordering::SeqCst);
+            #[cfg(all(test, feature = "std"))]
+            shared.lent_count.fetch_add(lying, Ordering::SeqCst);
         }
         // A sample not handed on yet that lies in its datagram holds the links back all the same:
         // the one held open, and any the queue did not take.
@@ -2199,6 +2269,10 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
             f(datagram);
             // SAFETY: as above.
             unsafe { self.lane.set_lending(None) };
+            // The datagram's samples were offered with no hold each (`SharedLane::offer_sample`):
+            // this one hands them on together, and holds the links back for those that lie here.
+            // SAFETY: as above, with no other hold of the lane taken.
+            drop(unsafe { self.lane.held() });
         })
     }
 
