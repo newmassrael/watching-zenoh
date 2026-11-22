@@ -199,7 +199,7 @@ mod keepalive_emitter {
             "the exit from Established stops the keepalive worker"
         );
         assert!(
-            *actions.link.transport_available.lock().unwrap(),
+            actions.link.transport_available.is_open(),
             "Closing still holds the link, so the transport gate does not stop the emit"
         );
         assert_eq!(

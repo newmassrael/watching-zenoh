@@ -175,6 +175,10 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         self.lower.socket.wait_writable(timeout_us)
     }
 
+    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+        self.lower.socket.wait_writable_timed(timeout_us)
+    }
+
     // The same room, waited on from another thread: the stream's own wait, handed out.
     wz_runtime_coop::with_heap_link_seams! {
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

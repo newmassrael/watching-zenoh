@@ -39,9 +39,8 @@ use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream};
 
-use wz_runtime_core::Runtime;
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
-use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_and_open_session_with_multilink, initiate_and_open_session,
@@ -332,7 +331,7 @@ async fn two_links_aggregate_and_survive_link_death() {
     // exact post-`release_link`+`del_link` state a real socket death produces (the
     // accept-loop `Step::Driven` response) — then abort its drive.
     a1_task.abort();
-    TokioRuntime::with_mutex_mut(&a_primary.link.transport_available, |g| *g = false);
+    a_primary.link.transport_available.close();
     let remaining = a_primary.del_link(&a_primary.link);
     assert_eq!(
         remaining, 1,

@@ -468,8 +468,8 @@ mod tests {
             "the 2nd link joins the shared core"
         );
 
-        TokioRuntime::with_mutex_mut(&primary.link.transport_available, |g| *g = true);
-        TokioRuntime::with_mutex_mut(&secondary.link.transport_available, |g| *g = true);
+        primary.link.transport_available.open();
+        secondary.link.transport_available.open();
 
         assert!(
             primary.set_qos_offer(true),
@@ -792,8 +792,8 @@ mod tests {
             join_link(&primary, &secondary, 2),
             JoinOutcome::Joined(_)
         ));
-        TokioRuntime::with_mutex_mut(&primary.link.transport_available, |g| *g = true);
-        TokioRuntime::with_mutex_mut(&secondary.link.transport_available, |g| *g = true);
+        primary.link.transport_available.open();
+        secondary.link.transport_available.open();
         assert!(primary.set_qos_offer(true));
         primary.negotiate_qos_against_peer(true);
         primary.set_link_priority_range(Some(LinkPriorityRange::new(

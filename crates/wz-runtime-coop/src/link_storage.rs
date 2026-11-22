@@ -335,6 +335,57 @@ impl<T: TxStore> TxLender<T> {
         self.take_prefixed(slot, start, len, &[])
     }
 
+    /// Write `prefix` into the headroom just in front of the frame `start .. start + len` of
+    /// `slot`, and answer where the bytes to write are, prefix included, as a range of the slot;
+    /// the slot stays out of the pool, held by the link until it has written them
+    /// ([`Self::held`] reads them, [`Self::release`] ends the hold). `None` when the frame is
+    /// not inside the slot or the headroom is shorter than `prefix`, the slot still out.
+    pub fn frame_prefixed(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        prefix: &[u8],
+    ) -> Option<(usize, usize)> {
+        let (base, capacity) = self.storage(slot);
+        let from = start.checked_sub(prefix.len())?;
+        let end = start.checked_add(len).filter(|&end| end <= capacity)?;
+        // SAFETY: `base` is the first byte of a slot of the store, `capacity` bytes long, and
+        // `from .. start` is within it. The session handed the slot over, so nothing else writes
+        // it, and the prefix goes into the headroom, which the session left untouched.
+        unsafe { core::ptr::copy_nonoverlapping(prefix.as_ptr(), base.add(from), prefix.len()) };
+        Some((from, end))
+    }
+
+    /// A free slot held by the link from here, its first `len` bytes written by `fill`: where a
+    /// link keeps what it owes its stream of a frame the session handed it as bytes. `None` when
+    /// no slot is free or `len` passes a slot.
+    pub fn hold_filled(&self, len: usize, fill: impl FnOnce(&mut [u8])) -> Option<TxSlot> {
+        if len > self.store.slot_len() {
+            return None;
+        }
+        let grant = self.acquire(0)?;
+        let (base, _) = self.storage(grant.slot);
+        // SAFETY: `base` is the first byte of a slot of `slot_len` bytes, at least `len`, which
+        // was just granted, to the link and nobody else.
+        fill(unsafe { core::slice::from_raw_parts_mut(base, len) });
+        Some(grant.slot)
+    }
+
+    /// The bytes `from .. end` of `slot`, cut to the slot.
+    ///
+    /// # Safety
+    ///
+    /// The slot is held by the link ([`Self::frame_prefixed`], [`Self::hold_filled`]) and not
+    /// with the session: nothing writes it while the bytes are borrowed.
+    pub unsafe fn held(&self, slot: TxSlot, from: usize, end: usize) -> &[u8] {
+        let (base, capacity) = self.storage(slot);
+        let end = end.min(capacity);
+        let from = from.min(end);
+        // SAFETY: `from .. end` is within the slot, and the caller holds it (see above).
+        unsafe { core::slice::from_raw_parts(base.add(from), end - from) }
+    }
+
     /// [`Self::take`], with `prefix` written into the headroom just in front of the frame, and the
     /// bytes returned starting at it: a stream link's length in front of its batch, so prefix and
     /// batch leave in one write. `None` too when the headroom is shorter than `prefix`.

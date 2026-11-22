@@ -6830,10 +6830,7 @@ mod reconnect_tx_tests {
         // replays only after `drive_open_loop`; `record_established_at`
         // re-opens the gate) — direct-stamp idiom shared with
         // `reset_for_reopen_clears_handshake_scoped_state_only`.
-        {
-            use wz_runtime_core::Runtime;
-            TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
-        }
+        actions.link.transport_available.open();
         let replayed = actions
             .replay_declarations()
             .expect("replay over validated cache entries cannot reject");
@@ -6881,9 +6878,8 @@ mod reconnect_tx_tests {
     /// The session after a link loss and a re-handshake: the gate is open, nothing of the old peer
     /// is held, and the declarations are in the cache and owed to the new peer.
     fn reopened(actions: &super::SessionLinkActions) {
-        use wz_runtime_core::Runtime;
         actions.reset_for_reopen();
-        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = true);
+        actions.link.transport_available.open();
     }
 
     /// With the policy off nothing is paced, and a paced replay that sends everything in one turn
@@ -7309,20 +7305,19 @@ mod reconnect_tx_tests {
     /// on: the entries that went out are not sent again.
     #[test]
     fn a_refused_turn_resumes_at_the_entry_it_failed_on_and_not_at_the_beginning() {
-        use wz_runtime_core::Runtime;
         let (actions, driver) = crate::test_fixtures::recording_actions();
         let original = paced_fixture_declarations(&actions, &driver, 2);
         reopened(&actions);
         actions.begin_paced_replay();
         assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
         // The link goes down again before the second entry.
-        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = false);
+        actions.link.transport_available.close();
         assert!(
             actions.replay_turn(2).is_err(),
             "the send is refused and the turn says so"
         );
         assert!(actions.paced_replay_running(), "the replay is still owed");
-        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = true);
+        actions.link.transport_available.open();
         let turn = actions.replay_turn(10).expect("the rest");
         assert_eq!(
             (turn.emitted, turn.finished),
@@ -7432,7 +7427,7 @@ mod reconnect_tx_tests {
         // probe send happens post-re-handshake in production, so re-open
         // the F2 transport gate first (Established re-entry does this via
         // `record_established_at`).
-        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
+        actions.link.transport_available.open();
         let pre_reset_first_frame = driver.frame_bytes(0);
         actions
             .send_push_literal("home/x", b"p", true)
@@ -7517,8 +7512,6 @@ mod reconnect_tx_tests {
     #[cfg(all(feature = "transport-multilink", feature = "session-reconnect"))]
     #[test]
     fn reset_for_reopen_preserves_shared_sn_while_a_link_is_live() {
-        use wz_runtime_core::Runtime;
-
         let mask = wz_session_core::sn::mask_from_res(0x02);
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 42;
@@ -7527,7 +7520,7 @@ mod reconnect_tx_tests {
         // Register the bundle's own link into the aggregation set and mark it
         // live -> a surviving aggregate member (`live_link_count() == 1`).
         actions.register_first_link(actions.link.clone());
-        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |g| *g = true);
+        actions.link.transport_available.open();
         assert_eq!(actions.live_link_count(), 1);
 
         // Advance the shared outbound SN mid-stream: 42, 43, 44 -> counter 45.

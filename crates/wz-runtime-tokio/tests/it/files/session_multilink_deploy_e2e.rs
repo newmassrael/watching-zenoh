@@ -42,11 +42,10 @@ use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-use wz_runtime_core::Runtime;
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceForwarder, FaceId, FaceSources};
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
 use wz_runtime_tokio::retry_period::RetryPolicy;
-use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionLinkActions};
 use wz_runtime_tokio::session_open::{
     initiate_and_open_session_with_multilink, BoundListener, DialedLink, OpenedSession,
@@ -383,7 +382,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         // dropping A's references to its LinkState closes the socket, so B's loop
         // sees the link die and del_links it (failover): B survives on link 2.
         a1_task.abort();
-        TokioRuntime::with_mutex_mut(&a1_actions.link.transport_available, |g| *g = false);
+        a1_actions.link.transport_available.close();
         a1_actions.del_link(&a1_actions.link);
         drop(a1_actions);
         assert!(

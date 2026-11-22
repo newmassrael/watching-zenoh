@@ -68,8 +68,8 @@ use wz_runtime_coop::reassembly_rx::{lent_reassembly_in, LentChains, LENT_CHAINS
 use wz_runtime_coop::session_drive::LinkListener;
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::{
-    spawn_session_with_router, wait_any, LinkReadiness, LinkWritability, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    spawn_session_with_router, wait_any, AndRoom, LinkReadiness, LinkWritability, OpenedLink,
+    PendingDial, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::byte_cells::LentByteCells;
@@ -2853,7 +2853,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         // What the read waits on: the readiness of every link that holds no input already, and of
         // every port that gives one. A link that holds input is stepped at once, and one that
-        // waits in its own loop has nothing to wait on here.
+        // waits in its own loop has nothing to wait on here. A link that owes its stack the rest
+        // of a frame is waited on for room as well, and the step its room wakes writes the rest;
+        // one that owes nothing is waited on for input alone, so its room wakes nobody.
         let mut holds = false;
         let mut waits = core::mem::take(&mut self.waits);
         // Something the read cannot wait on that must still be looked at: a link that waits in its
@@ -2866,7 +2868,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     if wire.link.holds_input() {
                         holds = true;
                     } else if let Some(ready) = &wire.readiness {
-                        waits.push(ready.clone());
+                        waits.push(if wire.link.owes_write() {
+                            AndRoom::of(ready.clone())
+                        } else {
+                            ready.clone()
+                        });
                     } else {
                         own_loop = true;
                     }

@@ -1093,6 +1093,11 @@ pub mod multicast_peer_arrived;
 #[cfg(feature = "storage-profile")]
 pub mod inbound;
 
+/// The flags a data send reads before any lock: a link's [`send_gate::SendGate`] and a
+/// session's [`send_gate::Latch`] for a close ordered for congestion. Unconditional, no_std and
+/// no_alloc: two `AtomicBool`s, which every target the crate builds for loads and stores.
+pub mod send_gate;
+
 /// The outbound frame buffer seam (ARCHITECTURE section 9.1): [`tx_buf::TxBuf`]
 /// is what an outbound encoder writes to, `Vec<u8>` is its heap form, and
 /// [`tx_buf::SliceTxBuf`] is the fixed form a pool slot's storage is. No

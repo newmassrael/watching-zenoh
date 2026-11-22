@@ -14,10 +14,14 @@
 //!
 //! The lease holds a raw pointer, which makes it neither `Send` nor `Sync`:
 //! it lives for one synchronous encode-and-send under the conduit's lock and
-//! is never stored. A frame that stays open across calls (a batch, which the
-//! session fills one message per call) is put down as a [`HeldSlot`], which is
-//! the slot's name and lengths without the pointer or the borrow, and picked up
-//! again with [`TxLease::resume`] on the driver that lent it.
+//! is never stored. A frame that stays open across calls is put down as a
+//! [`HeldSlot`], which is the slot's name and lengths without the pointer or the
+//! borrow, and picked up again with [`TxLease::resume`] on the driver that lent
+//! it, which asks the driver where the slot is. A holder that keeps the open
+//! frame under a lock of its own and knows from a record of its own that the
+//! slot is still lent (the session's batch, filled one message per call) puts it
+//! down as an [`OpenSlot`] instead, which keeps where the slot's memory is and is
+//! picked up again with [`TxLease::pick_up`] without a question to the driver.
 //!
 //! The targets are spelled out in full: this page's text is merged with the
 //! outer doc on `pub mod tx_lease;` and the merged text resolves its relative
@@ -28,6 +32,8 @@
 //! [`TxLease::send`]: crate::tx_lease::TxLease::send
 //! [`TxLease::resume`]: crate::tx_lease::TxLease::resume
 //! [`HeldSlot`]: crate::tx_lease::HeldSlot
+//! [`OpenSlot`]: crate::tx_lease::OpenSlot
+//! [`TxLease::pick_up`]: crate::tx_lease::TxLease::pick_up
 //! [`BoxedLinkDriver::tx_slot_acquire`]: crate::link::BoxedLinkDriver::tx_slot_acquire
 //! [`BoxedLinkDriver::tx_slot_abort`]: crate::link::BoxedLinkDriver::tx_slot_abort
 
@@ -101,6 +107,61 @@ impl HeldSlot {
     }
 }
 
+/// A lent slot with a frame open in it, put down between two calls by a holder that guards it
+/// with a lock: a [`HeldSlot`] that also keeps where the slot's memory is.
+///
+/// A batch is filled one message per call, and each call picked its frame up again with
+/// [`TxLease::resume`], which asks the driver where the slot's memory is. That memory does not
+/// move while the slot is lent ([`BoxedLinkDriver::tx_slot_storage`]: valid from the grant to the
+/// slot's send or abort), so a holder that knows the slot is still lent can keep the answer: it
+/// picks the frame up with [`TxLease::pick_up`] and asks nothing. Knowing it is the holder's
+/// part, which is why `pick_up` is `unsafe`.
+///
+/// The slot is still LENT while this value exists, as a held slot's is: it must end in
+/// [`TxLease::pick_up`] on the driver that lent it, or in [`Self::abort`] on that driver, or be
+/// let go by a holder that knows the slot was already given back (the link that lent it went,
+/// and gave back what it lent as it went).
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an open slot is still lent: pick it up or abort it on the driver that lent it"]
+pub struct OpenSlot {
+    slot: TxSlot,
+    /// First byte of the slot (the headroom's first byte).
+    base: *mut u8,
+    /// The slot's whole length, headroom included.
+    total: usize,
+    headroom: usize,
+    len: usize,
+}
+
+// SAFETY: `base` names memory the link lent to the session alone, from the grant until the slot
+// is sent or aborted (`BoxedLinkDriver::tx_slot_storage`), and an `OpenSlot` is the only handle
+// to it while it exists: it is made by consuming the lease ([`TxLease::keep_open`]) and ends by
+// being consumed. Moving it to another thread moves the only access with it; nothing is shared,
+// so it is `Send` and not `Sync`.
+unsafe impl Send for OpenSlot {}
+
+impl OpenSlot {
+    /// The slot's name, as the driver that lent it knows it.
+    pub fn slot(&self) -> TxSlot {
+        self.slot
+    }
+
+    /// Frame bytes the slot holds after its headroom.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Nothing written: no frame is open in the slot.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Give the slot back unsent, on `driver`, which must be the driver that lent it.
+    pub fn abort<D: BoxedLinkDriver + ?Sized>(self, driver: &D) {
+        driver.tx_slot_abort(self.slot);
+    }
+}
+
 impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
     /// Ask `driver` to lend a slot for a frame of up to `want` bytes.
     ///
@@ -161,6 +222,41 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
             slot: self.slot,
             headroom: self.headroom,
             len: self.len,
+        }
+    }
+
+    /// Put the lease down without settling it, keeping where the slot's memory is: the slot
+    /// stays lent and keeps its frame, and [`Self::pick_up`] takes it up again without asking the
+    /// driver anything.
+    pub fn keep_open(mut self) -> OpenSlot {
+        self.sent = true;
+        OpenSlot {
+            slot: self.slot,
+            base: self.base,
+            total: self.total,
+            headroom: self.headroom,
+            len: self.len,
+        }
+    }
+
+    /// Pick an [`OpenSlot`] up again on `driver`, with its frame as it was put down, asking the
+    /// driver nothing.
+    ///
+    /// # Safety
+    ///
+    /// `driver` is the driver that lent the slot, and the slot has been neither sent nor aborted
+    /// since it was lent: its memory is then still where `open` says and still the session's
+    /// alone. A holder knows it by a record of its own that every send or abort of the slot
+    /// clears first.
+    pub unsafe fn pick_up(driver: &'a D, open: OpenSlot) -> Self {
+        Self {
+            driver,
+            slot: open.slot,
+            base: open.base,
+            total: open.total,
+            headroom: open.headroom,
+            len: open.len,
+            sent: false,
         }
     }
 
@@ -544,6 +640,78 @@ mod tests {
             "the slot the driver no longer describes was given back, once"
         );
         assert!(link.sent.borrow().is_empty(), "the open frame was not sent");
+    }
+
+    /// A frame kept open between calls is picked up again with its bytes and grows after them,
+    /// and no pick-up asks the driver where the slot is: the one question is the grant's. The
+    /// control is the held form, which asks again at every resume.
+    #[test]
+    fn an_open_slot_is_picked_up_again_without_asking_the_driver() {
+        let link = LendingLink::new();
+        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
+        lease.append(&[1]).unwrap();
+        let mut open = lease.keep_open();
+        assert_eq!((open.len(), open.is_empty()), (1, false));
+        for byte in 2..=5u8 {
+            // SAFETY: `link` lent the slot and nothing has sent or aborted it.
+            let mut lease = unsafe { TxLease::pick_up(&link, open) };
+            lease.append_byte(byte).unwrap();
+            open = lease.keep_open();
+        }
+        assert_eq!(
+            link.storage_queries.load(Ordering::Relaxed),
+            1,
+            "four pick-ups asked the driver nothing"
+        );
+        assert_eq!(
+            *link.aborts.borrow(),
+            0,
+            "keeping a slot open gives nothing back"
+        );
+        assert_eq!(link.free(), SLOTS - 1, "and the slot stays lent");
+        // SAFETY: as above.
+        let lease = unsafe { TxLease::pick_up(&link, open) };
+        assert_eq!(lease.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            *link.sent.borrow(),
+            alloc::vec![(HEADROOM, alloc::vec![1, 2, 3, 4, 5])]
+        );
+        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 0));
+
+        // CONTROL: the held form asks at every resume.
+        let link = LendingLink::new();
+        let mut held = TxLease::acquire(&link, 8, Priority::DEFAULT)
+            .unwrap()
+            .hold();
+        for _ in 0..4 {
+            held = TxLease::resume(&link, held).unwrap().hold();
+        }
+        assert_eq!(link.storage_queries.load(Ordering::Relaxed), 5);
+        held.abort(&link);
+    }
+
+    /// An open slot given up is aborted on its driver exactly once, and a lease picked up from
+    /// one and dropped unsent gives the slot back as any lease does.
+    #[test]
+    fn an_open_slot_aborted_or_dropped_after_its_pick_up_returns_to_the_pool() {
+        let link = LendingLink::new();
+        let open = TxLease::acquire(&link, 8, Priority::DEFAULT)
+            .unwrap()
+            .keep_open();
+        open.abort(&link);
+        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 1));
+
+        let open = TxLease::acquire(&link, 8, Priority::DEFAULT)
+            .unwrap()
+            .keep_open();
+        // SAFETY: `link` lent the slot and nothing has sent or aborted it.
+        drop(unsafe { TxLease::pick_up(&link, open) });
+        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 2));
+        assert!(link.sent.borrow().is_empty());
     }
 
     /// A driver that does not override the slot methods lends nothing, which is

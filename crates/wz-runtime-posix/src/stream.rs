@@ -26,6 +26,7 @@ wz_runtime_coop::with_heap_link_seams! {
     use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 }
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
+use wz_runtime_coop::ClockSource;
 
 use crate::net::{
     errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag, set_nonblocking,
@@ -286,6 +287,27 @@ impl Drop for PosixTcpListener {
     }
 }
 
+/// The iovecs of `parts`, empty ones left out, and how many there are; more than `MAX_PARTS` is
+/// refused as `EMSGSIZE`.
+fn iovecs(parts: &[&[u8]]) -> Result<([libc::iovec; MAX_PARTS], usize), PosixNetError> {
+    let mut vecs = [libc::iovec {
+        iov_base: core::ptr::null_mut(),
+        iov_len: 0,
+    }; MAX_PARTS];
+    let mut count = 0;
+    for part in parts.iter().filter(|part| !part.is_empty()) {
+        if count == MAX_PARTS {
+            return Err(PosixNetError::Write(libc::EMSGSIZE));
+        }
+        vecs[count] = libc::iovec {
+            iov_base: part.as_ptr().cast_mut().cast(),
+            iov_len: part.len(),
+        };
+        count += 1;
+    }
+    Ok((vecs, count))
+}
+
 impl StreamSocket for PosixTcpSocket {
     type Error = PosixNetError;
 
@@ -299,21 +321,7 @@ impl StreamSocket for PosixTcpSocket {
 
     fn send_parts(&self, parts: &[&[u8]]) -> Result<(), PosixNetError> {
         // The parts not yet written, as iovecs; a short write moves the front forward.
-        let mut vecs = [libc::iovec {
-            iov_base: core::ptr::null_mut(),
-            iov_len: 0,
-        }; MAX_PARTS];
-        let mut count = 0;
-        for part in parts.iter().filter(|part| !part.is_empty()) {
-            if count == MAX_PARTS {
-                return Err(PosixNetError::Write(libc::EMSGSIZE));
-            }
-            vecs[count] = libc::iovec {
-                iov_base: part.as_ptr().cast_mut().cast(),
-                iov_len: part.len(),
-            };
-            count += 1;
-        }
+        let (mut vecs, count) = iovecs(parts)?;
         let mut first = 0;
         while first < count {
             // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
@@ -345,6 +353,35 @@ impl StreamSocket for PosixTcpSocket {
         Ok(())
     }
 
+    // One `sendmsg` that does not wait (`MSG_DONTWAIT`): the stack takes what its buffer has room
+    // for now, and a buffer with none is `EAGAIN`, read as nothing taken. The socket itself stays
+    // blocking, so `send_parts` waits for what this leaves, as it waits for any write.
+    fn send_parts_now(&self, parts: &[&[u8]]) -> Option<Result<usize, PosixNetError>> {
+        let (mut vecs, count) = match iovecs(parts) {
+            Ok(built) => built,
+            Err(refused) => return Some(Err(refused)),
+        };
+        loop {
+            // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
+            let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+            msg.msg_iov = vecs[..count].as_mut_ptr();
+            // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
+            msg.msg_iovlen = count as _;
+            // SAFETY: every iovec names a live slice of `parts` for its length. MSG_NOSIGNAL as
+            // in `send_parts`.
+            let sent =
+                unsafe { libc::sendmsg(self.fd, &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+            if sent >= 0 {
+                return Some(Ok(sent as usize));
+            }
+            match errno() {
+                libc::EINTR => continue,
+                libc::EAGAIN => return Some(Ok(0)),
+                other => return Some(Err(PosixNetError::Write(other))),
+            }
+        }
+    }
+
     // A connect under way reports room once it ends, made or refused, and `SO_ERROR` says which.
     fn connected(&mut self) -> Result<bool, PosixNetError> {
         if !poll_writable(self.fd, 0) {
@@ -373,6 +410,13 @@ impl StreamSocket for PosixTcpSocket {
 
     fn wait_writable(&self, timeout_us: u64) -> bool {
         poll_writable(self.fd, timeout_us)
+    }
+
+    // Timed on the host's monotonic clock, as the session's timers are.
+    fn wait_writable_timed(&self, timeout_us: u64) -> (bool, u64) {
+        let started = crate::PosixClock.now_us();
+        let room = poll_writable(self.fd, timeout_us);
+        (room, crate::PosixClock.now_us().saturating_sub(started))
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, PosixNetError> {
@@ -533,7 +577,126 @@ mod tests {
         );
     }
 
+    /// A write that does not wait takes what the stream has room for and says how much: all of a
+    /// write to a stream with room, in order, and nothing once the peer has stopped reading and
+    /// the stacks hold all they will, which it answers at once where a write that waits would wait
+    /// for the peer.
+    #[test]
+    fn a_write_that_does_not_wait_takes_what_the_stream_has_room_for() {
+        let (near, mut far) = pair();
+        assert_eq!(
+            near.send_parts_now(&[&b"he"[..], &b"llo"[..]]),
+            Some(Ok(5)),
+            "a stream with room takes it all"
+        );
+        let mut got = [0u8; 5];
+        far.read_exact(&mut got).expect("the far end reads");
+        assert_eq!(&got, b"hello");
+        let chunk = [0x5au8; 1024];
+        let mut written = 0usize;
+        loop {
+            match near.send_parts_now(&[&chunk]) {
+                Some(Ok(0)) => break,
+                Some(Ok(n)) => written += n,
+                other => panic!("a write to a sound stream: {other:?}"),
+            }
+            assert!(
+                written < 256 << 20,
+                "the stream took {written} bytes and never filled"
+            );
+        }
+        assert!(written > 0, "the stream took bytes before it filled");
+    }
+
+    /// A timed wait for room measures its time on the host's clock: room on an empty stream is
+    /// found well inside the wait, and a stream the peer does not read is waited on for about the
+    /// whole of it.
+    #[test]
+    fn a_timed_wait_for_room_reports_the_time_it_took() {
+        let (near, _far) = pair();
+        let (room, took_us) = near.wait_writable_timed(2_000_000);
+        assert!(room, "an empty stream takes bytes");
+        assert!(took_us < 1_000_000, "found at once, not after {took_us} us");
+        let chunk = [0x5au8; 1024];
+        while let Some(Ok(taken)) = near.send_parts_now(&[&chunk]) {
+            if taken == 0 {
+                break;
+            }
+        }
+        let (room, took_us) = near.wait_writable_timed(50_000);
+        assert!(!room, "a stream whose peer reads nothing has no room");
+        assert!(took_us >= 40_000, "the wait took its time: {took_us} us");
+    }
+
     wz_runtime_coop::with_heap_link_seams! {
+        /// A link that took only part of a frame is woken by its stream's room alone: its owner's
+        /// wait, made for room as well while the link owes the stream (`AndRoom`), ends once the far
+        /// end reads, with no input and no send, and the one step it wakes writes the rest, every
+        /// frame arriving whole and in order. CONTROL: the owner's wait for input alone, while
+        /// nothing is owed and the stream has room, sleeps its whole time.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_link_that_owes_the_stream_is_woken_by_room_and_writes_the_rest() {
+            use std::sync::Arc;
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::link_storage::HeapTx;
+            use wz_runtime_coop::session_drive::{
+                wait_any, AndRoom, LinkReadiness, SessionDatagramLink,
+            };
+            use wz_runtime_coop::stream_link::StreamDriver;
+            use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome};
+            use wz_session_core::reliability::Reliability;
+
+            let (near, mut far) = pair();
+            let link =
+                StreamDriver::with_buffers(near, 4096, HeapTx::new(2, 2048)).waited_by_owner();
+            let ready: Arc<dyn LinkReadiness> =
+                Arc::from(link.readiness().expect("the owner's wait"));
+
+            assert!(!link.owes_write(), "CONTROL: nothing is owed");
+            let started = Instant::now();
+            wait_any(&[Arc::clone(&ready)], 200);
+            assert!(
+                started.elapsed() >= Duration::from_millis(150),
+                "CONTROL: a wait for input alone is not woken by room"
+            );
+
+            let frame = [0x5au8; 1000];
+            let mut frames = 0usize;
+            while !link.owes_write() {
+                assert_eq!(
+                    link.send_blocking(&frame, Reliability::Reliable),
+                    LinkSendOutcome::Sent
+                );
+                frames += 1;
+                assert!(frames < 1 << 16, "the stream never filled");
+            }
+            let total = frames * (2 + frame.len());
+            let reader = std::thread::spawn(move || {
+                let mut got = std::vec![0u8; total];
+                far.read_exact(&mut got).expect("every frame arrives");
+                got
+            });
+            let mut wakes = 0;
+            while link.owes_write() {
+                let started = Instant::now();
+                wait_any(&[AndRoom::of(Arc::clone(&ready))], 10_000);
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the stream's room ended the wait"
+                );
+                wakes += 1;
+                link.service();
+                assert!(wakes < 100, "the rest was never written");
+            }
+            assert_eq!(wakes, 1, "one wake, and its step wrote the rest");
+            let got = reader.join().expect("the reader");
+            for (i, written) in got.chunks(2 + frame.len()).enumerate() {
+                assert_eq!(&written[..2], &1000u16.to_le_bytes(), "frame {i}'s length");
+                assert!(written[2..].iter().all(|&b| b == 0x5a), "frame {i}'s bytes");
+            }
+        }
+
         /// The wait for room handed to another thread answers as the socket's own wait does: it
         /// has room while the stream takes bytes, and none once the peer has stopped reading.
         #[cfg(feature = "alloc")]
