@@ -6,3 +6,9 @@ commit = "fcc75a2615d6863564390bcb12ad66769fe71560"
 base = "85330b9e014d469f1d48b8e55133dca218e73575"
 machine = "mf977c53d872e"
 at = 1795340485
+
+[return]
+reason = "conflict"
+detail = "scripts/lib/capability_cost_gate.py"
+report = "m6a944ec3ba29:0000000132-f15a44561db9/attempt-2.log"
+at = 1795340511
