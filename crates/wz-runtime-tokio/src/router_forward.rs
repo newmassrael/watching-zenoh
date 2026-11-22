@@ -21545,7 +21545,9 @@ mod tests {
     /// subscribers, makes no copy of its carrier: the one encoding every subscriber is sent is
     /// written from the received Put under the literal key, and is the message a copy re-keyed to
     /// the literal would have been. Turned red by a fan-out that copies an aliased Put to re-key
-    /// it, encodes it again for a face, or sends a face the alias it cannot resolve.
+    /// it, encodes it again for a face, or sends a face the alias it cannot resolve. A build with
+    /// `pubsub-ts-stack` shares no fan-out, and its twin below holds it.
+    #[cfg(not(feature = "pubsub-ts-stack"))]
     #[test]
     fn an_aliased_fan_out_to_sixteen_clients_makes_no_copy_of_its_carrier() {
         const SUBSCRIBERS: usize = 16;
@@ -21612,6 +21614,70 @@ mod tests {
                 .any(|window| window == b"demo/fan"),
             "the message names the literal key"
         );
+    }
+
+    /// With `pubsub-ts-stack` an aliased Put is not shared either: it is re-keyed to its literal
+    /// once, and each client subscriber is sent a message of its own made from that Put, which
+    /// carries the literal and the payload. Turned red by a timestamp-stack build that sends a face
+    /// the alias it cannot resolve, shares one encoding among faces whose messages must differ, or
+    /// loses a subscriber's copy.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn an_aliased_fan_out_with_a_timestamp_stack_is_sent_to_each_face_re_keyed() {
+        const SUBSCRIBERS: usize = 16;
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", SUBSCRIBERS);
+        forward_one(
+            &fwd,
+            publisher,
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(5, "demo/fan").expect("kexpr"),
+            )),
+        );
+        for sink in &sinks {
+            sink.reset();
+        }
+        let meta = wz_session_core::metadata::PushMetadata {
+            qos: Some(
+                wz_session_core::sample::QosLevel::DEFAULT
+                    .with_congestion(wz_session_core::qos::CongestionControl::Block),
+            ),
+            ..wz_session_core::metadata::PushMetadata::default()
+        };
+        let aliased =
+            wz_session_core::push_build::build_push_aliased_with_meta(5, None, FAN_PAYLOAD, &meta)
+                .expect("aliased push");
+        let (copies, encodes) = (fwd.client_carrier_copies(), fwd.client_carrier_encodes());
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(aliased)));
+        assert_eq!(
+            fwd.client_carrier_copies() - copies,
+            1,
+            "one copy, the Put re-keyed to its literal"
+        );
+        assert_eq!(
+            fwd.client_carrier_encodes(),
+            encodes,
+            "no shared carrier is encoded"
+        );
+        for sink in &sinks {
+            assert_eq!(
+                sink.frame_count(),
+                1,
+                "every subscriber is sent the Put once"
+            );
+            let message = frame_messages(&sink.frame_bytes(0));
+            assert!(
+                message
+                    .windows(FAN_PAYLOAD.len())
+                    .any(|window| window == FAN_PAYLOAD),
+                "each message carries the Put's payload"
+            );
+            assert!(
+                message
+                    .windows(b"demo/fan".len())
+                    .any(|window| window == b"demo/fan"),
+                "each message names the literal key, not the alias"
+            );
+        }
     }
 
     /// A Put that names its face's alias with no suffix is routed by the leg the face keeps for the
