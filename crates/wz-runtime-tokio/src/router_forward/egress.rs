@@ -666,7 +666,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         dest: FaceId,
         face: SendFace<'_>,
-        carrier: &LiteralPush,
+        carrier: &LiteralPush<'_>,
         encoded: &EncodedPush,
         reliable: bool,
         express: bool,

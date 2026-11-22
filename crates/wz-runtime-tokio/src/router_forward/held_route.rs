@@ -69,15 +69,33 @@ fn literal_key(push: &PushOwned) -> Option<&str> {
 }
 
 /// A Push whose key expression is a literal, so that sending it to a face needs none of the face's
-/// aliases. Made only by [`LiteralPush::new`], which refuses any other Push.
+/// aliases. Made only by [`LiteralPush::new`] and [`LiteralPush::lent`], which refuse any other
+/// Push. A lent one is the message the router received, which is copied only when a face is to
+/// be sent a message of its own.
 #[derive(Clone)]
-pub(super) struct LiteralPush(PushOwned);
+pub(super) struct LiteralPush<'a>(Cow<'a, PushOwned>);
 
-impl LiteralPush {
+impl LiteralPush<'static> {
     /// `push` as a literal Push, or `None` when its key expression names an alias or no key. The
     /// caller has no use for a Push refused, so it is dropped rather than handed back.
     pub(super) fn new(push: PushOwned) -> Option<Self> {
-        literal_key(&push).is_some().then_some(Self(push))
+        literal_key(&push)
+            .is_some()
+            .then_some(Self(Cow::Owned(push)))
+    }
+}
+
+impl<'a> LiteralPush<'a> {
+    /// `push` itself as a literal Push, lent and not copied, or `None` as [`Self::new`] refuses.
+    pub(super) fn lent(push: &'a PushOwned) -> Option<Self> {
+        literal_key(push)
+            .is_some()
+            .then_some(Self(Cow::Borrowed(push)))
+    }
+
+    /// Whether this is a message the router holds as it was handed it, and not a copy.
+    pub(super) fn is_lent(&self) -> bool {
+        matches!(self.0, Cow::Borrowed(_))
     }
 
     /// The key the Push names.
@@ -86,9 +104,9 @@ impl LiteralPush {
         literal_key(&self.0).expect("a literal Push names its key (LiteralPush::new)")
     }
 
-    /// The message to send.
+    /// The message to send: the Push itself when this holds it, a copy when it is lent.
     pub(super) fn into_message(self) -> NetworkMessage {
-        NetworkMessage::Push(Box::new(self.0))
+        NetworkMessage::Push(Box::new(self.0.into_owned()))
     }
 
     /// The Push itself, to be read.
@@ -101,14 +119,14 @@ impl LiteralPush {
 /// however many faces the fan-out reaches. Every face the carrier can be sent to as those bytes is
 /// sent them; a face is handed a copy of the message only when it must hold it, send it another
 /// way, or have it read by an interceptor.
-pub(super) struct SharedCarrier {
-    push: LiteralPush,
+pub(super) struct SharedCarrier<'a> {
+    push: LiteralPush<'a>,
     encoded: OnceCell<EncodedPush>,
 }
 
-impl SharedCarrier {
+impl<'a> SharedCarrier<'a> {
     /// The fan-out of `push`, encoded by the first face that is sent the bytes.
-    pub(super) fn new(push: LiteralPush) -> Self {
+    pub(super) fn new(push: LiteralPush<'a>) -> Self {
         Self {
             push,
             encoded: OnceCell::new(),
@@ -116,7 +134,7 @@ impl SharedCarrier {
     }
 
     /// The carrier, for a face that is sent a message of its own.
-    pub(super) fn push(&self) -> &LiteralPush {
+    pub(super) fn push(&self) -> &LiteralPush<'a> {
         &self.push
     }
 
@@ -124,7 +142,7 @@ impl SharedCarrier {
     pub(super) fn encoded(&self, on_encode: impl FnOnce()) -> &EncodedPush {
         self.encoded.get_or_init(|| {
             on_encode();
-            EncodedPush::of(&self.push.0)
+            EncodedPush::of(self.push.as_push())
         })
     }
 }
@@ -205,6 +223,25 @@ mod tests {
         assert_eq!(context.full_keyexpr(&literal).as_deref(), Some("demo/a"));
         assert_eq!(context.full_keyexpr(&aliased), None);
         assert_eq!(context.subject(), Some(peer));
+    }
+
+    /// A literal Push is lent as it is, and is copied only into the message a face is sent; a Push
+    /// that names an alias is not lent. Turned red by a lent carrier that is a copy, or one made of
+    /// a Push whose key needs an alias table.
+    #[test]
+    fn a_literal_push_is_lent_and_copied_only_into_a_message() {
+        let literal = build_push_literal("demo/a", b"x").expect("build literal push");
+        let lent = LiteralPush::lent(&literal).expect("a literal Push is lent");
+        assert!(lent.is_lent());
+        assert!(std::ptr::eq(lent.as_push(), &literal), "the Push itself");
+        let NetworkMessage::Push(sent) = lent.clone().into_message() else {
+            panic!("a lent Push is sent as a Push");
+        };
+        assert_eq!(EncodedPush::of(&sent), EncodedPush::of(&literal));
+        let owned = LiteralPush::new(literal.clone()).expect("a literal Push is taken");
+        assert!(!owned.is_lent());
+        let aliased = build_push_aliased(5, None, b"x").expect("build aliased push");
+        assert!(LiteralPush::lent(&aliased).is_none());
     }
 
     /// The carrier is encoded on the first ask and on no other, and what every ask is handed is

@@ -385,7 +385,9 @@ use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::push_build::reliteralize_push;
-use wz_session_core::push_routing_context::{read_push_source, set_push_source};
+use wz_session_core::push_routing_context::{
+    push_names_a_source, read_push_source, set_push_source,
+};
 use wz_session_core::qos::Priority;
 use wz_session_core::query::QueryResponder;
 use wz_session_core::wireexpr_resolve::{
@@ -1978,7 +1980,15 @@ impl RouterFaceState {
 /// and its routing source reset to 0, since a client is a leaf and refuses a Push that names a
 /// source (`deliver_to_client_subscribers`). A literal by its type, so that it can be sent
 /// through a route that holds its faces; `None` drops the Put for every client.
-fn client_carrier(push: &PushOwned, keyexpr: &str) -> Option<LiteralPush> {
+///
+/// A literal that names no source is that carrier as it came, and is lent rather than copied, as
+/// upstream hands each face the Put it routes with a reference to its payload
+/// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `payload: msg.payload.clone(),`). Any other
+/// Put is copied once for the fan-out, re-keyed and its source reset.
+fn client_carrier<'a>(push: &'a PushOwned, keyexpr: &str) -> Option<LiteralPush<'a>> {
+    if let Some(lent) = LiteralPush::lent(push).filter(|_| !push_names_a_source(push)) {
+        return Some(lent);
+    }
     let mut carrier = reliteralize_push(push, keyexpr).ok()?;
     stamped(
         set_push_source(&mut carrier, 0),
@@ -3377,6 +3387,10 @@ pub struct RouterForwarder {
     /// Count of the client carriers encoded to shared bytes: one for each fan-out that sent at
     /// least one face the bytes, however many faces it sent them to.
     client_carrier_encodes: Counter,
+    /// Count of the client carriers made by copying the Put routed: one for each fan-out of a Put
+    /// that had to be re-keyed or have its source reset, none for a literal that names no source,
+    /// which is lent as it came ([`client_carrier`]).
+    client_carrier_copies: Counter,
     /// Count of the reads of the tables the frames of the faces took for their reading messages:
     /// one for each run of them ([`TABLE_READS_PER_GUARD`]), where a read for each message counts
     /// one a message.
@@ -4540,6 +4554,7 @@ router_entry_points! { on_tables:
     fn fan_out_face_visits(&self) -> usize;
     fn held_route_closed_skips(&self) -> usize;
     fn client_carrier_encodes(&self) -> usize;
+    fn client_carrier_copies(&self) -> usize;
     fn frame_table_reads(&self) -> usize;
     #[cfg(feature = "router-multicast-faces")]
     fn mcast_ingress_federated(&self) -> usize;
@@ -5315,6 +5330,7 @@ impl RouterForwarder {
             interceptor_dropped: Counter::new(),
             held_route_closed_skips: Counter::new(),
             client_carrier_encodes: Counter::new(),
+            client_carrier_copies: Counter::new(),
             frame_table_reads: Counter::new(),
             recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
@@ -5915,6 +5931,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// carrier encoded for each face would count one a face.
     pub fn client_carrier_encodes(&self) -> usize {
         self.client_carrier_encodes.get()
+    }
+
+    /// The client carriers made by copying the Put routed (see the field).
+    pub fn client_carrier_copies(&self) -> usize {
+        self.client_carrier_copies.get()
     }
 
     /// The reads of the tables the faces' frames took for their reading messages (see the field).
@@ -6671,7 +6692,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         priority: Priority,
         express: bool,
-        mut build: impl FnMut(FaceId) -> Option<&'c SharedCarrier>,
+        mut build: impl FnMut(FaceId) -> Option<&'c SharedCarrier<'c>>,
     ) -> usize {
         let mut sent = 0;
         for face in targets {
@@ -6758,7 +6779,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn egress_held(
         &self,
         face: &HeldFace,
-        carrier: LiteralPush,
+        carrier: LiteralPush<'_>,
         reliable: bool,
         express: bool,
         priority: Priority,
@@ -6790,7 +6811,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn egress_held_shared(
         &self,
         face: &HeldFace,
-        carrier: &SharedCarrier,
+        carrier: &SharedCarrier<'_>,
         reliable: bool,
         express: bool,
         priority: Priority,
@@ -9683,8 +9704,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // mandatory ext_nodeid id 0x03). Faithful to zenoh pubsub.rs (a client-sub
         // data-route direction node-id is NodeId::default()=0). The DATA-plane twin of
         // the R311y179 forward_request_to_client_queryables source-reset fix.
-        let carry = || client_carrier(stamp.for_egress()?, keyexpr).map(SharedCarrier::new);
-        let mut carrier: Option<SharedCarrier> = None;
+        let carry = || {
+            let carrier = client_carrier(stamp.for_egress()?, keyexpr)?;
+            if !carrier.is_lent() {
+                self.client_carrier_copies.bump();
+            }
+            Some(SharedCarrier::new(carrier))
+        };
+        let mut carrier: Option<SharedCarrier<'_>> = None;
         // R311y225 — preserve the received band on the CLIENT-face egress (the y224
         // residual): route through `fan_out_tier_qos` on the frame's `priority`, so a
         // QoS-negotiated client observes the same band the mesh legs carry (zenoh
@@ -20957,10 +20984,10 @@ mod tests {
     }
 
     /// The carrier of a Put of `keyexpr`, as the client leg sends it.
-    fn literal_put(keyexpr: &str) -> LiteralPush {
+    fn literal_put(keyexpr: &str) -> LiteralPush<'static> {
         let push =
             wz_session_core::push_build::build_push_literal(keyexpr, b"x").expect("build push");
-        client_carrier(&push, keyexpr).expect("a literal carrier")
+        LiteralPush::new(push).expect("a literal carrier")
     }
 
     /// The targeted fan-out asks only the targets of its tier, skips one of another tier without
@@ -21114,18 +21141,33 @@ mod tests {
     }
 
     /// The client leg's carrier is a literal whatever the Put it is made from named: an aliased
-    /// Put's carrier names the key the router resolved, and a literal Put's its own. Turned red by
-    /// a client leg that hands the held egress a carrier it did not re-key.
+    /// Put's carrier names the key the router resolved, and a literal Put's its own. A literal that
+    /// names no source is lent as it came; an aliased Put, and a literal that names a source, are
+    /// copied, the second with its source reset. Turned red by a client leg that hands the held
+    /// egress a carrier it did not re-key, copies a Put that needs no change, or lends one that
+    /// names a source.
     #[test]
     fn the_client_leg_carries_a_literal_whatever_the_put_named() {
         let aliased =
             wz_session_core::push_build::build_push_aliased(5, None, b"x").expect("aliased push");
         let carrier = client_carrier(&aliased, "demo/resolved").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/resolved");
+        assert!(!carrier.is_lent(), "an aliased Put is re-keyed in a copy");
         let literal = wz_session_core::push_build::build_push_literal("demo/own", b"x")
             .expect("literal push");
         let carrier = client_carrier(&literal, "demo/own").expect("a carrier");
         assert_eq!(carrier.keyexpr(), "demo/own");
+        assert!(carrier.is_lent(), "a literal that names no source is lent");
+        let mut sourced = literal.clone();
+        set_push_source(&mut sourced, 7).expect("a source");
+        let carrier = client_carrier(&sourced, "demo/own").expect("a carrier");
+        assert!(!carrier.is_lent(), "a Put that names a source is copied");
+        assert_eq!(
+            read_push_source(carrier.as_push()),
+            0,
+            "with its source reset"
+        );
+        assert!(!push_names_a_source(carrier.as_push()));
     }
 
     /// A Put's key is lent from the message for a literal and from the face's aliases for an alias
@@ -21337,6 +21379,43 @@ mod tests {
                 2,
                 "the droppable and the best-effort Put each reach every subscriber"
             );
+        }
+    }
+
+    /// A literal Put from a client is fanned out to its subscribers as it came, with no copy made
+    /// for the fan-out, whether it may be dropped or not; a Put that names an alias is copied once,
+    /// re-keyed, for all of its subscribers. Every subscriber is sent each Put. Turned red by a
+    /// fan-out that copies a Put which needs no change, or that copies once for each face.
+    #[test]
+    fn a_literal_put_is_fanned_out_without_a_copy_and_an_aliased_one_with_one() {
+        let (fwd, sinks, publisher) = clients_subscribed_to("demo/fan", 3);
+        let copies = fwd.client_carrier_copies();
+        forward_one(&fwd, publisher, blocking_put_of("demo/fan"));
+        let droppable = wz_session_core::push_build::build_push_literal("demo/fan", FAN_PAYLOAD)
+            .expect("build push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(droppable)));
+        assert_eq!(
+            fwd.client_carrier_copies(),
+            copies,
+            "a literal Put is lent to its fan-out"
+        );
+        forward_one(
+            &fwd,
+            publisher,
+            NetworkMessage::Declare(Box::new(
+                wz_session_core::declare_build::build_declare_kexpr(5, "demo/fan").expect("kexpr"),
+            )),
+        );
+        let aliased = wz_session_core::push_build::build_push_aliased(5, None, FAN_PAYLOAD)
+            .expect("aliased push");
+        forward_one(&fwd, publisher, NetworkMessage::Push(Box::new(aliased)));
+        assert_eq!(
+            fwd.client_carrier_copies() - copies,
+            1,
+            "one copy for the aliased Put's three subscribers"
+        );
+        for sink in &sinks {
+            assert_eq!(sink.frame_count(), 3, "every subscriber is sent every Put");
         }
     }
 

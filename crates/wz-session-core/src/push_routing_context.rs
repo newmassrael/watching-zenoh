@@ -32,6 +32,7 @@ use sce_forge_runtime::codec::CodecError;
 
 use crate::wire::PushOwned;
 
+use crate::ext_header::ext_eid;
 use crate::ext_nodeid::{self, EXT_ENC_Z64};
 use crate::held_list::edit_chain;
 
@@ -55,6 +56,16 @@ pub fn set_push_source(push: &mut PushOwned, node_id: u16) -> Result<(), CodecEr
     })?;
     ext_nodeid::sync_header_z(&mut push.header, present);
     Ok(())
+}
+
+/// Whether a Push's chain holds an `ext_nodeid` entry, of any value: what [`set_push_source`]
+/// with `0` takes out. A Push that holds none leaves that call as it came, so a forwarder that
+/// resets the source of such a Push can send it without making a copy to reset.
+pub fn push_names_a_source(push: &PushOwned) -> bool {
+    let nodeid = ext_eid(ext_nodeid::NODEID_EXT_HEADER);
+    push.extensions
+        .as_deref()
+        .is_some_and(|chain| chain.iter().any(|entry| ext_eid(entry.header) == nodeid))
 }
 
 /// The wz-proprietary mesh-internal HOP-LIMIT extension id — `0x0a`, a FREE id
@@ -134,6 +145,31 @@ mod tests {
         let p = push();
         assert!(p.extensions.is_none(), "builder emits no Push-level exts");
         assert_eq!(read_push_source(&p), 0);
+    }
+
+    /// A Push names a source when its chain holds an `ext_nodeid`, one of value zero among them,
+    /// which `set_push_source(_, 0)` takes out; another extension alone is none. Turned red by a
+    /// test that reads the value, which is zero for an absent entry and a present one alike.
+    #[test]
+    fn a_push_names_a_source_when_its_chain_holds_a_nodeid_of_any_value() {
+        let mut p = push();
+        assert!(!push_names_a_source(&p), "no chain");
+        set_push_hoplimit(&mut p, 3).unwrap();
+        assert!(!push_names_a_source(&p), "another extension alone");
+        set_push_source(&mut p, 7).unwrap();
+        assert!(push_names_a_source(&p), "a source");
+        let mut zero = push();
+        edit_chain(&mut zero.extensions, |chain| {
+            ext_nodeid::set_z64_ext(chain, ext_nodeid::NODEID_EXT_HEADER, Some(0))
+        })
+        .unwrap();
+        assert_eq!(read_push_source(&zero), 0, "reads as the default");
+        assert!(push_names_a_source(&zero), "and is an entry all the same");
+        set_push_source(&mut zero, 0).unwrap();
+        assert!(
+            !push_names_a_source(&zero),
+            "which a reset to zero takes out"
+        );
     }
 
     #[test]
