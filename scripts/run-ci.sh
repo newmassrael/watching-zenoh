@@ -14451,9 +14451,11 @@ layer_c1m_session_lwip() {
     # is at least what it holds): 5 = what that command PRINTED. Beside it, the
     # same file on the selectors the
     # slot is built from but without it, which is the instrument's control: there
-    # the creation, handshake, KeepAlive and Close windows must cost the heap
-    # something, and a Put and idle turns nothing on either profile (the matcher
-    # reads the key as text since 2026-11-19), 1 = what that PRINTED.
+    # the creation and handshake windows must cost the heap something, and a Put,
+    # idle turns, a KeepAlive and a Close nothing on either profile (the matcher
+    # reads the key as text since 2026-11-19, and the lend-only send and in-place
+    # receive carry a KeepAlive and a Close with no copy since 2026-11-22), 1 =
+    # what that PRINTED.
     wz_test_args wz-session-lwip session_slot_allocations
     _runci_guarded_test "C1m session slot alloc" 5 \
         cargo test -p wz-session-lwip \

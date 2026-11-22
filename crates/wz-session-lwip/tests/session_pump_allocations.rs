@@ -37,7 +37,11 @@
 //! delivered where it lies, and the subscriber matcher reads the key and the
 //! pattern as text (the SCE documents of `keyexpr_match`); until 2026-11-19 the
 //! heap profile paid one allocation per Put there, the chunk list the matcher
-//! split the key into.
+//! split the key into. A KeepAlive and a Close make and host nothing either: every
+//! build of this file sends them in a buffer the link lends and reads them where the
+//! link holds them, so on the heap profile they are printed and not part of the
+//! control (`session_slot_allocations` holds the session's part of both free on
+//! every profile).
 //!
 //! The count is ATTRIBUTED to the measurement's own thread, as `tx_allocations`
 //! and `session_slot_allocations` do, and every lwIP test holds the harness's lock
@@ -612,6 +616,20 @@ impl Costs {
         }
     }
 
+    /// A window that must cost the heap nothing on the slot profile and is only
+    /// printed on the heap profile, where nothing requires it to spend: a KeepAlive
+    /// and a Close, which no build of this file copies off the link.
+    fn check_slot(&mut self, what: &str, allocations: usize) {
+        println!("{what}: {allocations} allocation(s)");
+        #[cfg(feature = "session-slot")]
+        if allocations != 0 {
+            self.wrong.push(format!(
+                "{what}: {allocations} allocation(s); a pump and a runtime on static \
+                 storage cost the heap nothing"
+            ));
+        }
+    }
+
     /// A window that costs the heap nothing on EVERY profile: an idle pass, a
     /// refusal, and a Put, which the matcher reads as text.
     fn check_free(&mut self, what: &str, allocations: usize) {
@@ -794,7 +812,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         acceptor_actions.send_keep_alive();
         pass(&local);
     });
-    costs.check("a KeepAlive each way", n);
+    costs.check_slot("a KeepAlive each way", n);
     let ((), n) = m.count("idle passes", || {
         for _ in 0..8 {
             pass(&local);
@@ -869,7 +887,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
             }
         }
     });
-    costs.check("a Close, and the acceptor's task ending on it", n);
+    costs.check_slot("a Close, and the acceptor's task ending on it", n);
     assert!(
         acceptor_task.is_finished(),
         "the acceptor's session ended on the Close it read"

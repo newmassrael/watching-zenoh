@@ -37,7 +37,11 @@
 //! the heap nothing on EVERY profile: it is delivered where it lies, and the
 //! subscriber matcher reads the key and the pattern as text (the SCE documents of
 //! `keyexpr_match`); until 2026-11-19 the heap profile paid one allocation per
-//! Put there, the chunk list the matcher split the key into.
+//! Put there, the chunk list the matcher split the key into. So do a KeepAlive and
+//! a Close: every build of this file has the lend-only send and the in-place
+//! receive, which encodes each into a buffer the link lends and decodes each where
+//! the link holds it. Until 2026-11-22 the heap profile copied either off the
+//! link, and both were control windows; the control is now creation and handshake.
 //!
 //! The count is ATTRIBUTED to the measurement's own thread, as `tx_allocations`
 //! does: a measurement owns a tally, its thread works for it, and an allocation
@@ -488,10 +492,10 @@ struct Costs {
 impl Costs {
     /// A window that must cost the heap nothing on the slot profile and
     /// something on the heap profile (the control: the profile of every shipped
-    /// image holds a session in boxes, vectors and reference counts, and copies a
-    /// handshake, KeepAlive or Close off the link, so a zero there means the
-    /// instrument cannot see them, and a zero on the slot profile would mean
-    /// nothing).
+    /// image holds a session in boxes, vectors and reference counts, and reads a
+    /// handshake's zid, cookie and extension chains into vectors, so a zero there
+    /// means the instrument cannot see them, and a zero on the slot profile would
+    /// mean nothing).
     fn check(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
         #[cfg(feature = "session-slot")]
@@ -512,7 +516,8 @@ impl Costs {
     }
 
     /// A window that costs the heap nothing on EVERY profile: an idle turn, which
-    /// no step has had to change, and a Put, which the matcher reads as text.
+    /// no step has had to change, a Put, which the matcher reads as text, and a
+    /// KeepAlive or a Close, which are sent in a lent buffer and read where they lie.
     fn check_free(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
         if allocations != 0 {
@@ -653,7 +658,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
         acceptor.actions.send_keep_alive();
         initiator.step();
     });
-    costs.check("a KeepAlive each way", n);
+    costs.check_free("a KeepAlive each way", n);
     let ((), n) = m.count("idle turns", || {
         for _ in 0..8 {
             initiator.step();
@@ -676,7 +681,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
         }
         ended
     });
-    costs.check("a Close and its reading", n);
+    costs.check_free("a Close and its reading", n);
     assert!(
         ended.is_some(),
         "the acceptor's session ended on the Close it read"
