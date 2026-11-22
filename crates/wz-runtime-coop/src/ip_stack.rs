@@ -616,9 +616,13 @@ where
         // The port told this source apart from the others, so the link's remote end is known from
         // the start, as a dialled link's is; the session over it still runs as the acceptor.
         let peer = share.peer();
-        let driver = Rc::new(IpDriver::UdpListened(self.shape.datagram(
-            UdpDriver::initiator_with_buffers(share, peer, self.shape.datagram_rx, self.shape.tx()),
-        )));
+        // As the `tcp/` listener's: the source is off the port before the buffers are claimed, so
+        // one the session's tables have none left for is let go of, not left waiting.
+        let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
+        let driver = Rc::new(IpDriver::UdpListened(
+            self.shape
+                .datagram(UdpDriver::initiator_in(share, peer, rx, tx)),
+        ));
         Ok(Some(OpenedLink {
             sink: driver.clone(),
             pump: driver,
@@ -2025,6 +2029,56 @@ mod tests {
             let read = read_all(&a);
             assert_eq!(read.len(), crate::udp_link::PORT_PEER_BACKLOG);
             assert_eq!(read[0], SYN.to_vec());
+        }
+
+        /// A listener whose session lent the stack its tables claims each link's buffers there: a
+        /// source past the tables' one link is let go of with the tables exhausted, and the next
+        /// `InitSyn` of that source opens a link once the first link's buffers are back.
+        #[test]
+        fn a_listened_link_claims_its_buffers_from_the_sessions_tables() {
+            use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+            #[derive(Clone, Copy)]
+            #[repr(C, align(16))]
+            struct Block([u8; ARENA_ALIGN]);
+
+            let (rx_len, slot_len) = (66, 34);
+            let bytes = Arena::byte_cells_bytes(rx_len, 1)
+                .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
+                .expect("within the address space");
+            let region: &'static mut [Block] =
+                vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+            // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+            // leaked, so nothing else uses it and it outlives every link that claims from it.
+            let mut arena =
+                unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+            let tables = LinkTables::new(
+                arena.lend_byte_cells(rx_len, 1).expect("the receive table"),
+                arena
+                    .lend_byte_cells(2 * slot_len, 1)
+                    .expect("the outbound table"),
+                slot_len,
+            );
+            let (mut listener, queued, _sent) = listener();
+            listener.shape.lent = Some(tables);
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_A));
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_B));
+            let a = listener
+                .accept()
+                .expect("a readable port")
+                .expect("A's link");
+            assert_eq!(a.pump.link_rx_capacity(), rx_len, "the tables' buffer");
+            assert_eq!(tables.in_use(), 1);
+            assert!(matches!(listener.accept(), Err(LinkOpenError::Exhausted)));
+            drop(a);
+            assert_eq!(tables.in_use(), 0);
+            queued.borrow_mut().push_back((SYN.to_vec(), PEER_B));
+            let b = listener
+                .accept()
+                .expect("a readable port")
+                .expect("B's link once the buffers are back");
+            assert_eq!(b.pump.link_rx_capacity(), rx_len);
+            assert_eq!(tables.in_use(), 1);
         }
 
         /// A stack listens on `udp/` where its datagram socket binds, at the port the socket chose,
