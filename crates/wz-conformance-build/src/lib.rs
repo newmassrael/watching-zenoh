@@ -413,6 +413,17 @@ mod tests {
             coop.digest(),
             "the form is not the statement's: the same capabilities on the same engine and host"
         );
+        let no_std_windows = of_build("pico", |id| id == "os-windows", |_| None);
+        assert_eq!(
+            (no_std_windows.engine, no_std_windows.platform),
+            ("coop", "host"),
+            "a Windows library without `std` runs the cooperative engine"
+        );
+        assert_eq!(
+            no_std_windows.digest(),
+            coop.digest(),
+            "the form is not the statement's: the same capabilities on the same engine and host"
+        );
         let zephyr = of_build("pico", |id| id == "os-zephyr", |_| None);
         assert_eq!((zephyr.engine, zephyr.platform), ("coop", "zephyr"));
         assert_ne!(

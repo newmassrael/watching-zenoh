@@ -115,6 +115,10 @@ on:
       - "vendor/sce"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
+      # The pico library without `std` (`os-windows`): its host's locks, threads and clocks, and
+      # the configuration its profile is built with.
+      - "crates/wz-host-sync/**"
+      - "crates/.cargo/**"
       - "rust-toolchain.toml"
   workflow_dispatch:
     inputs:
@@ -979,6 +983,24 @@ jobs:
           (cd crates && cargo test -p wz-runtime-posix --lib) && host=PASS
           verdict "the host's unit tests (wz-runtime-posix):" "$host"
           [ "$host" = PASS ] || overall=FAIL
+          # The library without `std` stands on these: the host's lock, condition variable, parker,
+          # threads and clocks (`wz-host-sync`: pthreads, or Win32 on Windows), and its global
+          # allocator (`src/os/no_std_host.rs`: the C library's heap, or the process heap on
+          # Windows), whose tests are compiled in every test build of the library. A filter that
+          # runs no test is not a pass, so the allocator's count is read from the harness's line.
+          sync=FAIL
+          (cd crates && cargo test -p wz-host-sync --lib) && sync=PASS
+          verdict "the host's locks, threads and clocks without std (wz-host-sync):" "$sync"
+          [ "$sync" = PASS ] || overall=FAIL
+          heap=FAIL
+          heap_log="$(mktemp)"
+          if (cd crates && cargo test -p wz-capi-pico --lib os::no_std_host::) > "$heap_log" 2>&1 \
+              && grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$heap_log"; then
+            heap=PASS
+          fi
+          cat "$heap_log"
+          verdict "the global allocator of the library without std (os::no_std_host):" "$heap"
+          [ "$heap" = PASS ] || overall=FAIL
           for features in engine-coop engine-coop,app-transport; do
             built=FAIL
             (cd crates && cargo build -p wz-capi-pico --no-default-features --features "$features") && built=PASS
@@ -996,6 +1018,20 @@ jobs:
           WZ_PICO_ENGINE: coop
           WZ_PICO_PROGRAM_ROLES: listen dial
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the cooperative engine" peer,query,queryable
+
+      # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-posix` on
+      # Linux, `os-windows` on Windows, the `capi-nostd` profile for the host's own target), in a
+      # target directory of its own, so it replaces no library of the steps above.
+      - name: a single-threaded pico C program on the library without std (observed)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 30
+        continue-on-error: true
+        shell: bash
+        env:
+          WZ_PICO_ENGINE: coop
+          WZ_PICO_FORM: nostd
+          WZ_PICO_PROGRAM_ROLES: listen dial
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the library without std" peer,query,queryable
 
   # The C examples of the pico C ABI (crates/wz-capi-pico/examples/c/), on Linux and on
   # Windows: the policy profile a session opens under, the build's and one a configuration
@@ -1230,18 +1266,34 @@ jobs:
   # as an observation, as every new program of this workflow does; a red here now fails the run:
   # a package no longer builds, or a program compiled against it no longer holds its checks.
   #
+  # The rows `nostd` are the same package with its DLL built without `std` (`os-windows` over the
+  # system's own calls, docs/c-abi-engine-and-memory.md P4), in the one form: the same examples
+  # and check program compiled against it and run, and the sizes of the size gate's client in both
+  # forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`), which only a
+  # Windows host can read. Observed, not yet gated, as each new row starts: `continue-on-error`
+  # until two consecutive hosted runs read them green.
+  #
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
-    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
+    continue-on-error: ${{ matrix.stdlib == 'nostd' }}
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, x86]
         form: [single, split]
+        stdlib: [std]
+        include:
+          - arch: x64
+            form: single
+            stdlib: nostd
+          - arch: x86
+            form: single
+            stdlib: nostd
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -1256,11 +1308,12 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
+          stdlib: ${{ matrix.stdlib }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}-${{ matrix.stdlib }}
           path: |
             ${{ steps.package.outputs.directory }}/*.zip
             ${{ steps.package.outputs.directory }}/*.zip.sha256

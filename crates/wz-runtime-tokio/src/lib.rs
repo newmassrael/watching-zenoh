@@ -58,8 +58,8 @@ const _: () = assert!(
     !wz_session_core::tx_buf::TX_LEND_ONLY,
     "wz-runtime-tokio needs the heap fallback for a send the link lends no slot for; \
      `wz-session-core/tx-lend-only` (the MCU lend-only profile, and the cooperative C \
-     library's: wz-capi-pico's `engine-coop`, `os-posix`, `os-zephyr`) was unified into an AP \
-     build; a C library names one engine"
+     library's: wz-capi-pico's `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) was \
+     unified into an AP build; a C library names one engine"
 );
 
 // And the receive side's twin. A record the AP reads where its frame lies and the lent form cannot
@@ -70,8 +70,8 @@ const _: () = assert!(
     !wz_session_core::driver_loop::RX_LENT_ONLY,
     "wz-runtime-tokio delivers through the owned projection what the lent form cannot carry; \
      `wz-session-core/rx-lent-only` (the lent-only receive of the cooperative C library: \
-     wz-capi-pico's `engine-coop`, `os-posix`, `os-zephyr`) was unified into an AP build; a C \
-     library names one engine"
+     wz-capi-pico's `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) was unified into an \
+     AP build; a C library names one engine"
 );
 
 // And for the session itself (fixed-memory step S5). A `session-slot` build holds a

@@ -62,9 +62,10 @@
 //! platform exports hand to the system is the host layer of this build (`os`). A capability whose
 //! module still names the host's library selects `std` in the manifest.
 //!
-//! A host library is built without `std` too (`os-posix`): the MCU build over the host's own
-//! calls, the port's `os` and the runtime's locks made of them, and the C library's heap and
-//! `abort` in place of `std`'s allocator and panic (`docs/c-abi-engine-and-memory.md`, E4).
+//! A host library is built without `std` too (`os-posix` on a POSIX host, `os-windows` on
+//! Windows): the MCU build over the host's own calls, the port's `os` and the runtime's locks made
+//! of them, and the host's heap and `abort` in place of `std`'s allocator and panic
+//! (`docs/c-abi-engine-and-memory.md`, E4).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 // pico's C type names are snake_case (`z_owned_session_t`,
@@ -103,12 +104,14 @@ mod prelude {
     feature = "engine-tokio",
     feature = "engine-coop",
     feature = "os-posix",
+    feature = "os-windows",
     feature = "os-zephyr"
 )))]
 compile_error!(
     "wz-capi-pico: a build needs an engine to run its sessions: `engine-tokio` for the session \
-     on its own thread and runtime, `engine-coop` for the one the program steps, `os-posix` for \
-     that one in a host library without `std`, `os-zephyr` for that one in a Zephyr image"
+     on its own thread and runtime, `engine-coop` for the one the program steps, `os-posix` and \
+     `os-windows` for that one in a POSIX or a Windows host library without `std`, `os-zephyr` \
+     for that one in a Zephyr image"
 );
 
 // A library has one engine (`docs/c-abi-engine-and-memory.md`, E1 and E3). The cooperative forms
@@ -118,99 +121,149 @@ compile_error!(
 // on its own, so the program is told which feature to drop rather than which engine it pulled in.
 #[cfg(all(
     feature = "gossip",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `gossip` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "raweth-transport",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `raweth-transport` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "rx-busy-poll",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `rx-busy-poll` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "serial-drive-own-thread",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `serial-drive-own-thread` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "transport-link-quic",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `transport-link-quic` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "transport-link-serial",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `transport-link-serial` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "transport-link-tls",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `transport-link-tls` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 // The unixpipe link is built on a Unix host alone, so elsewhere the feature names nothing to refuse.
 #[cfg(all(
     feature = "transport-link-unixpipe",
     unix,
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `transport-link-unixpipe` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "transport-link-ws",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr")
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    )
 ))]
 compile_error!(
     "wz-capi-pico: `transport-link-ws` runs only on the tokio engine, \
-     and this build names a cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): \
-     drop it from the cooperative library, or build the tokio engine's without the cooperative \
-     feature"
+     and this build names a cooperative one (`engine-coop`, `os-posix`, `os-windows` or \
+     `os-zephyr`): drop it from the cooperative library, or build the tokio engine's without the \
+     cooperative feature"
 );
 #[cfg(all(
     feature = "engine-tokio",
-    any(feature = "engine-coop", feature = "os-posix", feature = "os-zephyr"),
+    any(
+        feature = "engine-coop",
+        feature = "os-posix",
+        feature = "os-windows",
+        feature = "os-zephyr"
+    ),
     not(any(
         feature = "gossip",
         feature = "raweth-transport",
@@ -225,9 +278,9 @@ compile_error!(
 ))]
 compile_error!(
     "wz-capi-pico: a library has one engine, and this build names `engine-tokio` beside a \
-     cooperative one (`engine-coop`, `os-posix` or `os-zephyr`): build the cooperative library \
-     with `--no-default-features` and its features, or the tokio engine's without the \
-     cooperative feature (`tls-mbedtls` names `engine-coop`)"
+     cooperative one (`engine-coop`, `os-posix`, `os-windows` or `os-zephyr`): build the \
+     cooperative library with `--no-default-features` and its features, or the tokio engine's \
+     without the cooperative feature (`tls-mbedtls` names `engine-coop`)"
 );
 
 // `os-zephyr` is the image's engine and host, and an image has no standard library: a capability
@@ -246,33 +299,71 @@ compile_error!(
      (see Cargo.toml)"
 );
 
-// `os-posix` is a host library without `std`: a capability that still selects `std` is refused
-// beside it by name, as beside `os-zephyr`, rather than built into a library that has `std` after
-// all. A build that names a host engine as well keeps `std` (features add, and the host wins).
+// `os-posix` and `os-windows` are a host library without `std`: a capability that still selects
+// `std` is refused beside either by name, as beside `os-zephyr`, rather than built into a library
+// that has `std` after all. A build that names a host engine as well keeps `std` (features add,
+// and the host wins).
 #[cfg(all(
-    feature = "os-posix",
+    any(feature = "os-posix", feature = "os-windows"),
     feature = "std",
     not(any(feature = "engine-tokio", feature = "engine-coop"))
 ))]
 compile_error!(
-    "wz-capi-pico: `os-posix` builds without `std`, and a feature of this build selects it; \
-     the capabilities a host library without `std` carries are those whose features do not \
-     select `std` (see Cargo.toml)"
+    "wz-capi-pico: `os-posix` and `os-windows` build without `std`, and a feature of this build \
+     selects it; the capabilities a host library without `std` carries are those whose features \
+     do not select `std` (see Cargo.toml)"
 );
 
-// A library is for one system: `os-posix` a host's, `os-zephyr` a Zephyr image's.
-#[cfg(all(feature = "os-posix", feature = "os-zephyr", not(feature = "std")))]
+// A library is for one system: `os-posix` a POSIX host's, `os-windows` a Windows host's,
+// `os-zephyr` a Zephyr image's.
+#[cfg(all(
+    not(feature = "std"),
+    any(
+        all(feature = "os-posix", feature = "os-windows"),
+        all(feature = "os-posix", feature = "os-zephyr"),
+        all(feature = "os-windows", feature = "os-zephyr")
+    )
+))]
 compile_error!(
-    "wz-capi-pico: `os-posix` and `os-zephyr` each name the system the library is for; a build \
-     names one"
+    "wz-capi-pico: `os-posix`, `os-windows` and `os-zephyr` each name the system the library is \
+     for; a build names one"
+);
+
+// And the system it names is the one it is built for. Asked only of a build that names one system,
+// so a build that names two is told that first. `os-windows` is for the MSVC targets, whose C
+// runtime the library links (`src/os/no_std_host.rs`); a GNU target's runtime and unwinder are
+// others, which no build has linked.
+#[cfg(all(
+    feature = "os-posix",
+    not(feature = "std"),
+    not(feature = "os-windows"),
+    not(feature = "os-zephyr"),
+    windows
+))]
+compile_error!(
+    "wz-capi-pico: `os-posix` is the library without `std` for a POSIX host; Windows builds it \
+     with `os-windows`"
+);
+#[cfg(all(
+    feature = "os-windows",
+    not(feature = "std"),
+    not(feature = "os-posix"),
+    not(feature = "os-zephyr"),
+    not(all(windows, target_env = "msvc"))
+))]
+compile_error!(
+    "wz-capi-pico: `os-windows` is the library without `std` for Windows, built for an MSVC target \
+     (`x86_64-pc-windows-msvc` or `i686-pc-windows-msvc`); a POSIX host builds it with `os-posix`"
 );
 
 // The doors of the additional features hold their state behind a host's lock, and supervision
 // polls on a host's thread: `std`'s, or `wz-host-sync`'s in a host library without `std`
-// (`os-posix`). A build with neither has no lock for them, and is refused here by name.
+// (`os-posix`, `os-windows`). A build with neither has no lock for them, and is refused here by
+// name.
 #[cfg(all(
     not(feature = "std"),
     not(feature = "os-posix"),
+    not(feature = "os-windows"),
     any(
         feature = "e2e-sender",
         feature = "e2e-receiver",
@@ -284,15 +375,20 @@ compile_error!(
 ))]
 compile_error!(
     "wz-capi-pico: the doors of the additional features need a host's lock and threads: `std`, or \
-     `os-posix` for a host library without it"
+     `os-posix` or `os-windows` for a host library without it"
 );
 
 // The advanced publisher and subscriber lock their cache and state and stamp from the wall clock:
-// a host's, with `std` or beside `os-posix`. An image has neither.
-#[cfg(all(feature = "advanced", not(feature = "std"), not(feature = "os-posix")))]
+// a host's, with `std` or beside `os-posix` or `os-windows`. An image has neither.
+#[cfg(all(
+    feature = "advanced",
+    not(feature = "std"),
+    not(feature = "os-posix"),
+    not(feature = "os-windows")
+))]
 compile_error!(
-    "wz-capi-pico: `advanced` needs a host's lock and wall clock: `std`, or `os-posix` for a host \
-     library without it"
+    "wz-capi-pico: `advanced` needs a host's lock and wall clock: `std`, or `os-posix` or \
+     `os-windows` for a host library without it"
 );
 
 // `scout` asks each interface of a host by a socket of its own, and `multicast-transport` joins a
@@ -305,7 +401,8 @@ compile_error!(
     not(any(
         feature = "engine-tokio",
         feature = "engine-coop",
-        feature = "os-posix"
+        feature = "os-posix",
+        feature = "os-windows"
     ))
 ))]
 compile_error!(

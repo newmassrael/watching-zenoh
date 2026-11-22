@@ -44,7 +44,7 @@ description = "zenoh-pico-compatible C ABI (cdylib) wrapping the wz AP tokio Ses
 # engine, and with it every capability only that engine runs.
 [package.metadata.wz-docs]
 feature-sets = [
-    { name = "tokio", except = ["engine-coop", "os-posix", "os-zephyr"] },
+    { name = "tokio", except = ["engine-coop", "os-posix", "os-windows", "os-zephyr"] },
     { name = "coop", except = ["engine-tokio"] },
 ]
 
@@ -104,8 +104,9 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-t
 # publisher, the subscriber, key expressions, write filters, batching) over the host's sockets.
 #
 # A library has one engine (`docs/c-abi-engine-and-memory.md`, E1 and E3): a build that names
-# `engine-tokio`, or a capability only the tokio engine runs, beside `engine-coop`, `os-posix` or
-# `os-zephyr` is refused by name (`src/lib.rs`), and so is a build that names neither. The
+# `engine-tokio`, or a capability only the tokio engine runs, beside `engine-coop`, `os-posix`,
+# `os-windows` or `os-zephyr` is refused by name (`src/lib.rs`), and so is a build that names
+# neither. The
 # cooperative forms read and send only what the session lends (the lent-only selectors of
 # `wz-capi-coop`, `rx-lent-only` and `tx-lend-only`), so the C library has no heap-backed form
 # beside the no-heap one, and `wz-runtime-tokio` refuses to be built beside those selectors. The
@@ -118,8 +119,8 @@ std = ["wz-capi-port/std", "wz-capi-coop?/std", "wz-ext-pubsub?/std", "wz-node-t
 # Both are a host's: `engine-coop` is the cooperative engine over the host's sockets
 # (`wz-runtime-posix`: Linux, Android, QNX Neutrino, and Winsock on Windows), so each selects `std`.
 #
-# The cooperative engine on a host (`engine-coop`, `os-posix`) announces a session's initial
-# sequence number by the session core's compact function of the two zids
+# The cooperative engine on a host (`engine-coop`, `os-posix`, `os-windows`) announces a session's
+# initial sequence number by the session core's compact function of the two zids
 # (`wz-session-core/initial-sn-compact`) in place of zenoh's SHAKE128 of them: zenoh-pico draws
 # that origin from its random source, so zenoh's derivation is no part of this ABI's contract, and
 # without it the Keccak permutation is not linked. The origin keeps what a derivation is for (one
@@ -151,18 +152,47 @@ os-zephyr = [
     "wz-session-core/no_std",
     "wz-session-core/limits-lent-at-open",
 ]
-# `os-posix`: the library on a host without `std`, the MCU build plus an OS layer
+# `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
 # sockets, clock and random source as `engine-coop` runs it (`wz-runtime-posix`: Linux, Android,
-# QNX Neutrino, and Winsock on Windows), the host layer of `src/os/unix.rs` or `src/os/windows.rs`
-# under the platform exports, the port's `os` and the runtime's critical sections made of the
-# host's own calls (`wz-capi-coop`'s `host-sys`), and what a library without `std` links in its
-# place (`src/os/no_std_host.rs`): the C library's heap as the global allocator, which is the one
+# QNX Neutrino), the host layer of `src/os/unix.rs` under the platform exports, the port's `os`
+# and the runtime's critical sections made of the host's own calls (`wz-capi-coop`'s `host-sys`
+# over `wz-host-sync`'s pthreads), and what a library without `std` links in its place
+# (`src/os/no_std_host.rs`): the C library's heap as the global allocator, which is the one
 # `z_malloc` hands a program, and a panic that aborts the process. A library without `std` does
 # not unwind, so it is built with the `capi-nostd` profile, and for the host's own target with the
 # configuration beside it (`.cargo/capi-nostd.toml`). As beside `os-zephyr`, a capability that
 # selects `std` is refused (`src/lib.rs`), and a build that also names a host engine keeps `std`.
+# Windows has its own form, `os-windows`, and a Windows build of this one is refused by name.
 os-posix = [
+    "dep:wz-capi-coop",
+    "dep:wz-host-sync",
+    "dep:wz-runtime-posix",
+    "wz-capi-coop/host-sys",
+    "wz-capi-coop/rx-lent-only",
+    "wz-capi-coop/tx-lend-only",
+    "wz-capi-port/os-sys",
+    "wz-session-core/initial-sn-compact",
+    "wz-session-core/limits-lent-at-open",
+    # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
+    "wz-ext-pubsub?/host-sync",
+    "wz-node-time?/host-sync",
+]
+# `os-windows`: the same library on Windows without `std`, for the MSVC targets
+# (`x86_64-pc-windows-msvc`, `i686-pc-windows-msvc`). The cooperative engine over the system's own
+# calls (`wz-runtime-posix`'s Windows module: Winsock sockets waited on with `WSAPoll`, the
+# performance counter, the system's preferred random number generator, the precise system time),
+# the host layer of `src/os/windows.rs` under the platform exports, the port's `os` and the
+# runtime's critical sections made of the slim reader/writer lock, the condition variable and the
+# threads of Win32 (`wz-capi-coop`'s `host-sys` over `wz-host-sync`), and what a library without
+# `std` links in its place (`src/os/no_std_host.rs`): the process heap (`HeapAlloc`) as the
+# global allocator, the C runtime the platform exports forward to, and a panic that aborts the
+# process. Built as `os-posix` is, with the `capi-nostd` profile and its configuration for the
+# target named with `--target`. The list is `os-posix`'s: the two forms differ by the host each
+# names, which the sources read from the target. A build for any other target is refused by name,
+# and so is a build that names `os-posix` or `os-zephyr` beside it or a capability that selects
+# `std`, as beside `os-posix` (`src/lib.rs`).
+os-windows = [
     "dep:wz-capi-coop",
     "dep:wz-host-sync",
     "dep:wz-runtime-posix",
@@ -287,8 +317,8 @@ liveliness-get = [
 # on the runtime's advanced features, the cooperative engine's `ticker` is the periodic job the
 # heartbeat and the sweeps are, and a build without either carries none.
 #
-# It selects no `std`: beside `os-posix` the cache's and the subscriber's locks and the node
-# clock's wall clock are the host's own calls (`wz-host-sync`). An image has neither, and a build
+# It selects no `std`: beside `os-posix` or `os-windows` the cache's and the subscriber's locks
+# and the node clock's wall clock are the host's own calls (`wz-host-sync`). An image has neither, and a build
 # with neither is refused by name (`src/lib.rs`).
 advanced = [
     "liveliness",
@@ -408,8 +438,8 @@ e2e-supervision = [
 # zenoh-c ABI's default and off in this one's (`default_off_abis` in the declaration): wz's own,
 # which zenoh-pico has not, and part of the unstable surface. The frame writer is `wz-app-frame`'s.
 # Each sender is held under the host's lock, `std`'s or, in a host library without `std`,
-# `wz-host-sync`'s (`os-posix`), so it selects no `std`; it touches no session, so it selects
-# neither engine and forwards weakly.
+# `wz-host-sync`'s (`os-posix`, `os-windows`), so it selects no `std`; it touches no session, so
+# it selects neither engine and forwards weakly.
 e2e-sender = [
     "unstable-api",
     "dep:wz-app-frame",
@@ -739,8 +769,9 @@ wz-capi-coop = { path = "../wz-capi-coop", default-features = false, optional = 
 # the one both engines take it from.
 wz-tls-pem = { path = "../wz-tls-pem", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
-# The host's lock, condition variable, threads and monotonic clock without `std` (`os-posix`): what
-# the doors of the additional features hold and wait on there, in place of `std::sync`.
+# The host's lock, condition variable, threads and monotonic clock without `std` (`os-posix`,
+# `os-windows`): what the doors of the additional features hold and wait on there, in place of
+# `std::sync`.
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 # The cooperative engine's host in a Zephyr image (`os-zephyr`): Zephyr's datagram and stream
 # sockets as the session's links on the heap profile, the kernel's tick as its clock, and the
@@ -897,11 +928,14 @@ libc = "0.2"
 # same Win32 functions: libc carries none of them. Already in this workspace's graph
 # (the async runtime reaches it), so this adds no new third-party crate; each feature
 # below is one namespace the file calls into, and nothing else is enabled.
+# `System_Memory` is the process heap the library's own memory comes from in a build
+# without `std` (`os-windows`, `src/os/no_std_host.rs`).
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

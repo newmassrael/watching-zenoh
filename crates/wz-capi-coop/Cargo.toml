@@ -124,10 +124,10 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # supplies both (docs/upstream-parity.md section 5a).
 default = ["std"]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
-# The host without `std` (the pico C ABI's `os-posix`): the port's `os` and the runtime's
-# critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host library
-# built without `std` runs the read task and holds the locks as one with `std` does, and links no
-# `critical-section` implementation, which it would export beside its C ABI.
+# The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
+# runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
+# library built without `std` runs the read task and holds the locks as one with `std` does, and
+# links no `critical-section` implementation, which it would export beside its C ABI.
 host-sys = ["wz-capi-port/os-sys", "wz-runtime-coop/host-lock-sys"]
 # Periodic jobs on the session (`SessionEngine::start_ticker`): a job run from the call that steps
 # the session once its time has come, which the advanced publisher's heartbeat is. A build that

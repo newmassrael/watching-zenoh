@@ -6,6 +6,8 @@
 width of Windows: x64 and x86.
 
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
+                            [--stdlib std|nostd]
+    pico_windows_package.py --measure [--arch x64|x86]
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
     pico_windows_package.py --release DIR TAG
@@ -29,6 +31,21 @@ the doors' sources over the core's C ABI, importing from the core's DLL), each w
 library and symbols, from the profile's one feature list (docs/capi-pico-additional-library.md). A
 program links every library of its package; the split package's name says `split` and its manifest
 `form` and `libraries`.
+
+`--stdlib` names the standard library the DLL is built with, `std` when it names none: `std`, the
+host's, the form a release ships; or `nostd`, the MCU build over the system's own calls in its place
+(`os-windows` for `engine-coop`, no `std`: docs/c-abi-engine-and-memory.md, E4 and phase P4),
+built with the `capi-nostd` profile and configuration and, for the debug build, the dev profile with
+`panic = "abort"`. It is a form of the cooperative engine and of the one library: a profile on the
+tokio engine, a capability that still selects `std` and the split form are refused by name. Its
+name and its manifest's `stdlib` say `nostd`. Each DLL's sizes are printed as it is packaged.
+
+`--measure` builds the size gate's client (`scripts/lib/capability_cost_gate.py`, cases
+`pico-client-coop` and `pico-client-coop-nostd`: the same features, profile and configuration) for
+each width `--arch` names, both when it names none, with and without `std`, and prints each DLL's
+sizes, read from its own section table as `size` reads a library on Linux, and the ratio of the
+two. That gate reads ELF libraries on Linux; a Windows DLL is measured only on Windows, so its
+cases are printed here and gate nothing yet.
 
 `--verify` re-hashes a package (a directory, or a zip it extracts first) against its manifest: a
 file that differs, one the manifest names that is missing, and one it does not name are each a
@@ -116,16 +133,46 @@ FORMS = {
     "single": (LIBRARY,),
     "split": (LIBRARY, EXT_LIBRARY),
 }
+# The standard library a package's DLL is built with (`--stdlib`): `std`, the host's, or `nostd`,
+# the cooperative engine over the system's own calls in its place (`NOSTD_FEATURE` named where
+# the profile names `engine-coop`). A release carries the forms of `RELEASE_STDLIBS` until the
+# owner switches it.
+STDLIBS = ("std", "nostd")
+RELEASE_STDLIBS = ("std",)
+NOSTD_FEATURE = "os-windows"
+# How a library without `std` is built (crates/Cargo.toml, crates/.cargo/capi-nostd.toml): the
+# release build with the `capi-nostd` profile (abort, fat LTO) and its configuration, and the debug
+# build with the dev profile told to abort, since nothing without `std` unwinds.
+NOSTD_PROFILE = "capi-nostd"
+NOSTD_CONFIG = ".cargo/capi-nostd.toml"
+NOSTD_BUILDS = (("release", ["--profile", NOSTD_PROFILE, "--config", NOSTD_CONFIG]),
+                ("debug", ["--config", NOSTD_CONFIG]))
+NOSTD_DEBUG_ENV = {"CARGO_PROFILE_DEV_PANIC": "abort"}
+# The size gate's client on Windows (`--measure`): (case, features, cargo's profile arguments), the
+# features and profile of `capability_cost_gate.py`'s `pico-client-coop` and
+# `pico-client-coop-nostd`, the second's form for Windows.
+SIZE_CASES = (
+    ("pico-client-coop-windows", "engine-coop,link-udp", ["--release"]),
+    ("pico-client-coop-nostd-windows", f"{NOSTD_FEATURE},link-udp",
+     ["--profile", NOSTD_PROFILE, "--config", NOSTD_CONFIG]),
+)
+# A PE section's characteristics (the image format's section flags): stored nowhere in the file,
+# written at run time, and dropped once the image is loaded.
+SCN_CNT_UNINITIALIZED_DATA = 0x00000080
+SCN_MEM_DISCARDABLE = 0x02000000
+SCN_MEM_WRITE = 0x80000000
 PROFILE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 FORMAT = "wz-pico-windows-package"
-FORMAT_VERSION = 2
+# 3: `stdlib` joined the manifest (`--stdlib`); a version-2 manifest cannot say which a DLL is.
+FORMAT_VERSION = 3
 MANIFEST = "manifest.json"
 STATEMENT = "build-statement.json"
 
 # The two builds a package carries: (directory in the package, cargo's profile arguments).
 BUILDS = (("release", ["--release"]), ("debug", []))
 # Full debug information in both builds: the symbols are in the PDB beside the DLL, not in it.
-DEBUG_INFO_ENV = {"CARGO_PROFILE_DEV_DEBUG": "full", "CARGO_PROFILE_RELEASE_DEBUG": "full"}
+DEBUG_INFO_ENV = {"CARGO_PROFILE_DEV_DEBUG": "full", "CARGO_PROFILE_RELEASE_DEBUG": "full",
+                  "CARGO_PROFILE_CAPI_NOSTD_DEBUG": "full"}
 # Given to the link of the DLL alone (`cargo rustc`), so no dependency is rebuilt for them.
 LINK_ARGS = ["-C", "link-arg=/Brepro", "-C", "link-arg=/PDBALTPATH:%_PDB%"]
 # The variables a build reads its limits and policies from; the profile states them, nobody else.
@@ -188,10 +235,13 @@ def parse_env_lines(lines: list[str]) -> dict[str, str]:
     return out
 
 
-def package_name(version: str, profile: str, arch: str, commit: str, form: str = "single") -> str:
-    """The package's name: the one library's carries no form, the split one's says `split`."""
+def package_name(version: str, profile: str, arch: str, commit: str, form: str = "single",
+                 stdlib: str = "std") -> str:
+    """The package's name: the one library's carries no form, the split one's says `split`; the
+    library with `std` carries no word for it, the one without says `nostd`."""
     shape = "" if form == "single" else f"-{form}"
-    return f"{CRATE}-{version}-{profile}-windows-{arch}{shape}-{commit[:10]}"
+    bare = "" if stdlib == "std" else f"-{stdlib}"
+    return f"{CRATE}-{version}-{profile}-windows-{arch}{shape}{bare}-{commit[:10]}"
 
 
 def form_of(manifest: dict) -> str:
@@ -200,6 +250,36 @@ def form_of(manifest: dict) -> str:
     if form not in FORMS:
         raise Refusal(f"`{form}` is the form of no package ({', '.join(FORMS)})")
     return form
+
+
+def stdlib_of(manifest: dict) -> str:
+    """The standard library a package's manifest states its DLL is built with; any other word, or
+    none, is refused."""
+    stdlib = manifest.get("stdlib")
+    if stdlib not in STDLIBS:
+        raise Refusal(f"`{stdlib}` is the standard library of no package ({', '.join(STDLIBS)})")
+    return stdlib
+
+
+def nostd_features(features: list[str], table: dict[str, list[str]]) -> list[str]:
+    """The feature list of the library without `std` for a profile's list on the cooperative
+    engine: `NOSTD_FEATURE` in the place of `engine-coop`, `std` left out, the rest as it is.
+    `table` is the crate's feature table, read for what each feature turns on. A list on the tokio
+    engine has no such form, and a feature that still turns `std` on would build the library with
+    it after all, which the crate refuses (`src/lib.rs`): both are refused here by name, before a
+    build."""
+    if "engine-coop" not in features:
+        raise Refusal("the library without `std` is a form of the cooperative engine, and the "
+                      "profile's list names no `engine-coop`")
+    out = [NOSTD_FEATURE] + [f for f in features if f not in ("engine-coop", "std")]
+    try:
+        with_std = [f for f in out if "std" in wz_config.enabled_features(table, [f])]
+    except KeyError as err:
+        raise Refusal(f"the feature list names what the crate does not have: {err}") from err
+    if with_std:
+        raise Refusal(f"{', '.join(with_std)} turn(s) `std` on, so no library without it carries "
+                      "this profile")
+    return out
 
 
 def ext_features(features: list[str], declared: set[str]) -> list[str]:
@@ -519,6 +599,10 @@ def release_notes(template: str, facts: dict) -> str:
         f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)",
         f"- Conformance digest: `{statement['digest']}` (what `wz_ext_conformance_digest()` answers)",
         f"- Engine: {statement['engine']}",
+        "- Rust standard library: " + ("linked (`std`)" if facts.get("stdlib", "std") == "std" else
+                                       "not linked: `core` and `alloc` over the system's own calls "
+                                       f"(`{NOSTD_FEATURE}`), the process heap as its allocator, a "
+                                       "panic ends the process"),
         f"- Capabilities ({len(on)}): " + ", ".join(f"`{c}`" for c in on),
         "- Limits off their default: " + ("; ".join(limits) if limits else "none"),
         "- Policies off upstream's: " + ("; ".join(policies) if policies else "none"),
@@ -526,6 +610,53 @@ def release_notes(template: str, facts: dict) -> str:
         "",
     ]
     return "\n".join(out)
+
+
+def pe_sections(image: bytes) -> list[tuple[str, int, int]]:
+    """(name, size in memory, characteristics) of every section of a PE image, read from its own
+    section table; bytes that are no PE image are refused."""
+    if len(image) < 0x40 or image[:2] != b"MZ":
+        raise Refusal("not a PE image: no MZ header")
+    pe = int.from_bytes(image[0x3C:0x40], "little")
+    if image[pe:pe + 4] != b"PE\0\0":
+        raise Refusal("not a PE image: no PE signature where the MZ header points")
+    coff = pe + 4
+    count = int.from_bytes(image[coff + 2:coff + 4], "little")
+    optional = int.from_bytes(image[coff + 16:coff + 18], "little")
+    table = coff + 20 + optional
+    out: list[tuple[str, int, int]] = []
+    for i in range(count):
+        row = image[table + 40 * i:table + 40 * (i + 1)]
+        if len(row) < 40:
+            raise Refusal("not a PE image: its section table runs past the file")
+        name = row[:8].rstrip(b"\0").decode("ascii", "replace")
+        out.append((name, int.from_bytes(row[8:12], "little"), int.from_bytes(row[36:40], "little")))
+    return out
+
+
+def pe_sizes(image: bytes) -> dict[str, int]:
+    """A PE image's bytes in memory as `size` counts a library's on Linux, which the size gate
+    reads: `text` every section loaded read-only (code, constants, the import and export tables,
+    the unwind data), `data` every one written to, `bss` what is reserved and not stored. A section
+    dropped once the image is loaded (`.reloc`) is none of them."""
+    sizes = {"text": 0, "data": 0, "bss": 0}
+    for _, size, flags in pe_sections(image):
+        if flags & SCN_MEM_DISCARDABLE:
+            continue
+        if flags & SCN_CNT_UNINITIALIZED_DATA:
+            sizes["bss"] += size
+        elif flags & SCN_MEM_WRITE:
+            sizes["data"] += size
+        else:
+            sizes["text"] += size
+    return sizes
+
+
+def size_line(image: bytes) -> str:
+    """The sizes of a PE image as one line: the three totals, then every section."""
+    sizes = pe_sizes(image)
+    sections = " ".join(f"{name}={size}" for name, size, _ in pe_sections(image))
+    return f"text={sizes['text']} data={sizes['data']} bss={sizes['bss']} ({sections})"
 
 
 # ---------------------------------------------------------------------------
@@ -580,26 +711,48 @@ def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
     return header
 
 
-def build_selection(options: list[str]) -> tuple[list[str], list[str]]:
-    """The widths and forms `--build`'s options name (`--arch A`, `--form F`, each at most once):
-    every width and every form for an option not given. A word that is no option, an option given
-    twice or without its value, and a value no package is made for are refused."""
+def build_selection(options: list[str]) -> tuple[list[str], list[str], str]:
+    """The widths, forms and standard library `--build`'s options name (`--arch A`, `--form F`,
+    `--stdlib S`, each at most once): every width and every form for an option not given, and
+    `std`. The library without `std` is made in the one form, which is then every form for an
+    option not given. A word that is no option, an option given twice or without its value, a value
+    no package is made for and the split form without `std` are refused."""
     chosen: dict[str, str] = {}
     rest = list(options)
     while rest:
         option = rest.pop(0)
-        if option not in ("--arch", "--form") or option in chosen or not rest:
-            raise Refusal(f"`{option}` is not an option of --build here (--arch A, --form F, each once)")
+        if option not in ("--arch", "--form", "--stdlib") or option in chosen or not rest:
+            raise Refusal(f"`{option}` is not an option of --build here (--arch A, --form F, --stdlib S, "
+                          "each once)")
         chosen[option] = rest.pop(0)
+    stdlib = chosen.get("--stdlib", "std")
+    if stdlib not in STDLIBS:
+        raise Refusal(f"`{stdlib}` is not a standard library a package is built with ({', '.join(STDLIBS)})")
     arches = [chosen["--arch"]] if "--arch" in chosen else list(ARCHES)
-    forms = [chosen["--form"]] if "--form" in chosen else list(FORMS)
+    every_form = list(FORMS) if stdlib == "std" else ["single"]
+    forms = [chosen["--form"]] if "--form" in chosen else every_form
     for arch in arches:
         if arch not in ARCHES:
             raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
     for form in forms:
         if form not in FORMS:
             raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
-    return arches, forms
+        if form not in every_form:
+            raise Refusal(f"the {form} form is built with `std`: its additional library ({EXT_CRATE}) "
+                          "has no form without it")
+    return arches, forms, stdlib
+
+
+def measure_selection(options: list[str]) -> list[str]:
+    """The widths `--measure`'s options name (`--arch A`, at most once): every width when it is
+    not given. Anything else is refused, as `build_selection` refuses it."""
+    if not options:
+        return list(ARCHES)
+    if len(options) != 2 or options[0] != "--arch":
+        raise Refusal(f"`{' '.join(options)}` is not an option of --measure (--arch A, once)")
+    if options[1] not in ARCHES:
+        raise Refusal(f"`{options[1]}` is not a width a package is made for ({', '.join(ARCHES)})")
+    return [options[1]]
 
 
 def git(*args: str) -> str:
@@ -647,9 +800,9 @@ def copy_texts(stage: pathlib.Path, rows: list[dict]) -> None:
             copy(row["dir"] / text, stage / text_dir(row) / text)
 
 
-def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> None:
+def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> pathlib.Path:
     """Copy the DLL of `library` cargo's `report` names, its symbols and its import library into
-    the `where` build of the package."""
+    the `where` build of the package, and say where the DLL was."""
     files = artifact_files(report, library)
     dll = pick(files, ".dll")
     if dll is None:
@@ -661,9 +814,10 @@ def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> 
     copy(dll, stage / where / "bin" / f"{library}.dll")
     copy(pdb, stage / where / "bin" / f"{library}.pdb")
     copy(implib, stage / where / "lib" / f"{library}.lib")
+    return dll
 
 
-def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path:
+def build(out: pathlib.Path, profile: str, arch: str, form: str, stdlib: str = "std") -> pathlib.Path:
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
@@ -671,6 +825,11 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
         raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
     if form not in FORMS:
         raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
+    if stdlib not in STDLIBS:
+        raise Refusal(f"`{stdlib}` is not a standard library a package is built with ({', '.join(STDLIBS)})")
+    if stdlib == "nostd" and form != "single":
+        raise Refusal(f"the {form} form is built with `std`: its additional library ({EXT_CRATE}) has no "
+                      "form without it")
     target = ARCHES[arch][0]
     stated = stated_in_environment(dict(os.environ))
     if stated:
@@ -679,6 +838,8 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     decl = wz_config.load_decl()
     plan = resolve_profile(decl, profile)
     features = plan["features"]
+    if stdlib == "nostd":
+        features = nostd_features(features, wz_config.manifest_features(wz_config.MANIFESTS["pico"]))
     header = arm_header(decl, features, plan["env"])
     env = {**os.environ, **plan["env"], **DEBUG_INFO_ENV}
 
@@ -693,7 +854,7 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     if form == "split" and ext is None:
         raise Refusal(f"{EXT_CRATE} is no package of the crates workspace, and the split form is built with it")
     commit = git("rev-parse", "HEAD")
-    name = package_name(crate["version"], profile, arch, commit, form)
+    name = package_name(crate["version"], profile, arch, commit, form, stdlib)
     stage = out / name
     if stage.exists():
         shutil.rmtree(stage)
@@ -716,23 +877,41 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     # The split form's core is the same crate built with another cfg, so it is built in a target
     # directory of its own and the one library's build is not overwritten by it.
     split_dir = pathlib.Path(metadata["target_directory"]) / "pico-split"
-    for where, cargo_profile in BUILDS:
+    # The library without `std` is built with other profiles over every crate it links (abort, and
+    # in the debug build a dev profile told so), so it has a target directory of its own too, and
+    # the builds of the other form keep theirs.
+    nostd_dir = pathlib.Path(metadata["target_directory"]) / "pico-nostd"
+
+    def packaged(report: str, library: str, where: str) -> None:
+        """The library into the package, and the sizes of the release build's DLL printed."""
+        dll = copy_library(report, library, where, stage)
+        if where == "release":
+            say(f"pico-package-size on Windows {arch}: {name}: {library}.dll {size_line(dll.read_bytes())}")
+
+    for where, cargo_profile in (BUILDS if stdlib == "std" else NOSTD_BUILDS):
+        if stdlib == "nostd":
+            build_env = {**env, **NOSTD_DEBUG_ENV} if where == "debug" else env
+            report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args,
+                          *cargo_profile, "--target-dir", str(nostd_dir),
+                          "--message-format=json-render-diagnostics", "--", *LINK_ARGS], CRATES, build_env)
+            packaged(report, LIBRARY, where)
+            continue
         if form == "single":
             report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args,
                           *cargo_profile, "--message-format=json-render-diagnostics", "--", *LINK_ARGS],
                          CRATES, env)
-            copy_library(report, LIBRARY, where, stage)
+            packaged(report, LIBRARY, where)
             continue
         report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, *feature_args, *cargo_profile,
                       "--target-dir", str(split_dir), "--message-format=json-render-diagnostics", "--",
                       *LINK_ARGS, "--cfg", APART_CFG], CRATES, env)
-        copy_library(report, LIBRARY, where, stage)
+        packaged(report, LIBRARY, where)
         # The additional library's imports name the core's DLL themselves (`raw-dylib`), so its link
         # needs no import library of the core.
         report = run(["cargo", "rustc", "-p", EXT_CRATE, "--lib", "--target", target, *ext_args, *cargo_profile,
                       "--target-dir", str(split_dir), "--message-format=json-render-diagnostics", "--",
                       *LINK_ARGS], CRATES, env)
-        copy_library(report, EXT_LIBRARY, where, stage)
+        packaged(report, EXT_LIBRARY, where)
 
     for rel, src in FIXED_FILES:
         copy(src, stage / rel)
@@ -768,7 +947,7 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     tree_clean = git("status", "--porcelain", "--untracked-files=no") == ""
     facts = {"name": name, "version": crate["version"], "commit": commit, "tree_clean": tree_clean,
              "rustc": rust["release"], "target": target, "profile": profile, "features": features,
-             "statement": plan["statement"], "form": form}
+             "statement": plan["statement"], "form": form, "stdlib": stdlib}
     template = (PACKAGE_DOCS / "RELEASE-NOTES.md").read_text(encoding="utf-8")
     (stage / "RELEASE-NOTES.md").write_text(release_notes(template, facts), encoding="utf-8", newline="\n")
 
@@ -780,6 +959,7 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
         "profile": profile,
         "target": target,
         "form": form,
+        "stdlib": stdlib,
         "libraries": list(FORMS[form]),
         "built_from": {"commit": commit, "tree_clean": tree_clean},
         "toolchain": {"rustc": rust["release"]},
@@ -796,6 +976,34 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     (out / f"{name}.zip.sha256").write_text(f"{digest}  {archive.name}\n", encoding="ascii", newline="\n")
     print(f"pico-package: {archive.name} sha256 {digest}, {len(manifest['files'])} files")
     return archive
+
+
+def measure(arch: str) -> list[tuple[str, dict[str, int]]]:
+    """Build the size gate's client for `arch` in each form (`SIZE_CASES`) and print each DLL's
+    sizes and the ratio of the form without `std` to the one with it; the sizes, by case."""
+    if sys.platform != "win32":
+        raise Refusal("the client is measured on a Windows host: its DLL is the MSVC toolchain's")
+    stated = stated_in_environment(dict(os.environ))
+    if stated:
+        raise Refusal(f"the environment states {', '.join(stated)}; the size gate's cases are built with "
+                      "the build's defaults, so unset them")
+    target = ARCHES[arch][0]
+    rows: list[tuple[str, dict[str, int]]] = []
+    for case, features, cargo_profile in SIZE_CASES:
+        report = run(["cargo", "rustc", "-p", CRATE, "--lib", "--target", target, "--no-default-features",
+                      "--features", features, *cargo_profile, "--message-format=json-render-diagnostics"],
+                     CRATES)
+        dll = pick(artifact_files(report, LIBRARY), ".dll")
+        if dll is None:
+            raise Refusal(f"cargo reported no single DLL of {LIBRARY} for {case}")
+        image = dll.read_bytes()
+        rows.append((case, pe_sizes(image)))
+        say(f"pico-size on Windows {arch}: {case} ({features}): {size_line(image)}")
+    (std_case, std_sizes), (nostd_case, nostd_sizes) = rows
+    if std_sizes["text"]:
+        say(f"pico-size on Windows {arch}: {nostd_case} text is {nostd_sizes['text'] / std_sizes['text']:.4f} "
+            f"of {std_case}'s ({nostd_sizes['text'] - std_sizes['text']:+d} bytes)")
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -945,8 +1153,13 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
         try:
             arch = arch_of_target(str(manifest.get("target", "")))
             form = form_of(manifest)
+            stdlib = stdlib_of(manifest)
         except Refusal as err:
             findings.append(f"{archive.name}: {err}")
+            continue
+        if stdlib not in RELEASE_STDLIBS:
+            findings.append(f"{archive.name}: built {stdlib}, a form no release carries yet "
+                            f"({', '.join(RELEASE_STDLIBS)})")
             continue
         version = str(manifest.get("version", ""))
         profile = str(manifest.get("profile", ""))
@@ -957,7 +1170,7 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
             findings.append(f"{archive.name}: built from commit {built.get('commit')}, the release is of {commit}")
         if built.get("tree_clean") is not True:
             findings.append(f"{archive.name}: built from a tree with changes not committed")
-        name = package_name(version, profile, arch, commit, form)
+        name = package_name(version, profile, arch, commit, form, stdlib)
         if archive.name != f"{name}.zip" or manifest.get("name") != name:
             findings.append(f"{archive.name}: its manifest makes it {name}.zip")
         if (arch, form) in seen:
@@ -1225,6 +1438,14 @@ def selftest() -> int:
            "L = 4 (default 2)" in notes and "M = 1" not in notes and "p = on (upstream off)" in notes)
     expect("a tree with changes says so", "with changes not committed" in notes)
     expect("a build that states no form is the one library", "- Form: one library, `wz_capi_pico.dll`" in notes)
+    expect("a build that states no standard library links `std`", "- Rust standard library: linked (`std`)" in notes)
+    nostd_notes = release_notes("# Notes\n", {
+        "name": "n", "version": "0.1.0", "commit": "c" * 40, "tree_clean": True, "rustc": "rustc 1.0.0",
+        "target": "x86_64-pc-windows-msvc", "profile": "host-peer-ext", "features": ["os-windows"],
+        "statement": statement, "stdlib": "nostd"})
+    expect("the notes of the library without `std` say so and name its form",
+           "- Rust standard library: not linked: `core` and `alloc` over the system's own calls (`os-windows`)"
+           in nostd_notes)
     split_notes = release_notes("# Notes\n", {
         "name": "n", "version": "0.1.0", "commit": "c" * 40, "tree_clean": True, "rustc": "rustc 1.0.0",
         "target": "x86_64-pc-windows-msvc", "profile": "host-peer-ext", "features": ["std"],
@@ -1248,16 +1469,84 @@ def selftest() -> int:
            ext_features(["std", "engine-tokio", "replay-cache", "unstable-api", "e2e-sender"],
                         {"e2e-sender", "replay-cache", "std", "unstable-api"})
            == ["std", "replay-cache", "unstable-api", "e2e-sender"])
-    expect("no option builds every width in every form",
-           build_selection([]) == (list(ARCHES), list(FORMS)))
+    expect("no option builds every width in every form, with `std`",
+           build_selection([]) == (list(ARCHES), list(FORMS), "std"))
     expect("an option narrows its axis only",
-           build_selection(["--form", "split"]) == (list(ARCHES), ["split"])
-           and build_selection(["--form", "single", "--arch", "x86"]) == (["x86"], ["single"]))
+           build_selection(["--form", "split"]) == (list(ARCHES), ["split"], "std")
+           and build_selection(["--form", "single", "--arch", "x86"]) == (["x86"], ["single"], "std"))
+    expect("the library without `std` is built in the one form, every width when none is named",
+           build_selection(["--stdlib", "nostd"]) == (list(ARCHES), ["single"], "nostd")
+           and build_selection(["--stdlib", "nostd", "--arch", "x64", "--form", "single"])
+           == (["x64"], ["single"], "nostd"))
     for options in (["--form"], ["--form", "split", "--form", "single"], ["--arch", "arm64"],
-                    ["--form", "double"], ["--target", "x"]):
+                    ["--form", "double"], ["--target", "x"], ["--stdlib", "alloc"],
+                    ["--stdlib", "nostd", "--form", "split"], ["--stdlib", "std", "--stdlib", "nostd"]):
         try:
             build_selection(options)
             expect(f"--build {' '.join(options)} is refused", False)
+        except Refusal:
+            pass
+    expect("no option measures every width, and --arch one",
+           measure_selection([]) == list(ARCHES) and measure_selection(["--arch", "x86"]) == ["x86"])
+    for options in (["--arch"], ["--arch", "arm64"], ["--form", "single"], ["--arch", "x64", "--arch", "x86"]):
+        try:
+            measure_selection(options)
+            expect(f"--measure {' '.join(options)} is refused", False)
+        except Refusal:
+            pass
+    expect("the size gate's client is measured in both forms, the one without `std` second",
+           [case for case, _, _ in SIZE_CASES] == ["pico-client-coop-windows", "pico-client-coop-nostd-windows"]
+           and SIZE_CASES[1][1] == "os-windows,link-udp" and NOSTD_PROFILE in SIZE_CASES[1][2])
+
+    table = {"std": [], "engine-coop": ["std", "dep:x"], "engine-tokio": ["std"], "os-windows": ["dep:x"],
+             "link-udp": ["x?/link-udp"], "peer": ["link-udp"], "clock-source": ["std"],
+             "timed": ["clock-source"]}
+    expect("the list without `std` names os-windows for engine-coop, keeps the rest in order, drops std",
+           nostd_features(["engine-coop", "std", "peer", "link-udp"], table) == ["os-windows", "peer", "link-udp"])
+    for features, word in ((["engine-tokio", "std", "peer"], "engine-coop"),
+                           (["engine-coop", "std", "timed"], "timed"),
+                           (["engine-coop", "absent"], "absent")):
+        try:
+            nostd_features(features, table)
+            expect(f"a list of {features} is refused", False)
+        except Refusal as err:
+            expect(f"the refusal of {features} names {word} ({err})", word in str(err))
+    expect("the package without `std` says so in its name, after its form",
+           package_name("0.1.0", "p", "x64", "0123456789abc", "single", "nostd")
+           == "wz-capi-pico-0.1.0-p-windows-x64-nostd-0123456789")
+    expect("a manifest's standard library is read", stdlib_of({"stdlib": "nostd"}) == "nostd")
+    for manifest in ({}, {"stdlib": "alloc"}):
+        try:
+            stdlib_of(manifest)
+            expect(f"a manifest of standard library {manifest.get('stdlib')} is refused", False)
+        except Refusal:
+            pass
+
+    def pe_image(rows: list[tuple[bytes, int, int]], optional: int = 0) -> bytes:
+        """A PE image of the section rows (name, size in memory, characteristics), its header
+        where an MZ header points, as the linker lays one out."""
+        image = bytearray(b"MZ" + b"\0" * 0x3E)
+        image[0x3C:0x40] = (0x40).to_bytes(4, "little")
+        image += b"PE\0\0" + (0x8664).to_bytes(2, "little") + len(rows).to_bytes(2, "little")
+        image += b"\0" * 12 + optional.to_bytes(2, "little") + b"\0" * 2 + b"\0" * optional
+        for name, size, flags in rows:
+            image += name.ljust(8, b"\0") + size.to_bytes(4, "little") + b"\0" * 24 + flags.to_bytes(4, "little")
+        return bytes(image)
+
+    image = pe_image([(b".text", 1000, 0x60000020), (b".rdata", 300, 0x40000040), (b".data", 50, 0xC0000040),
+                      (b".bss", 20, 0xC0000080), (b".reloc", 8, 0x42000040)], optional=240)
+    expect("a PE image's sections are read from its own table, past its optional header",
+           pe_sections(image) == [(".text", 1000, 0x60000020), (".rdata", 300, 0x40000040),
+                                  (".data", 50, 0xC0000040), (".bss", 20, 0xC0000080), (".reloc", 8, 0x42000040)])
+    expect("text is what is loaded read-only, data what is written, bss what is not stored, and the "
+           "relocations none of them",
+           pe_sizes(image) == {"text": 1300, "data": 50, "bss": 20})
+    expect("the size line has the totals, then every section",
+           size_line(image) == "text=1300 data=50 bss=20 (.text=1000 .rdata=300 .data=50 .bss=20 .reloc=8)")
+    for bad in (b"", b"ZM" + b"\0" * 0x3E, image[:0x40] + b"XX\0\0" + image[0x44:], image[:-10]):
+        try:
+            pe_sections(bad)
+            expect(f"bytes that are no PE image are refused ({len(bad)} bytes)", False)
         except Refusal:
             pass
     two = render_notices("p", "x86_64-pc-windows-msvc", [], [],
@@ -1278,13 +1567,14 @@ def selftest() -> int:
             for arch, form, differs in rows:
                 built = {"commit": differs.get("commit", commit), "tree_clean": differs.get("clean", True)}
                 version = differs.get("version", "0.1.0")
-                name = package_name(version, "p", arch, built["commit"], form)
+                stdlib = differs.get("stdlib", "std")
+                name = package_name(version, "p", arch, built["commit"], form, stdlib)
                 stage = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / name
                 stage.mkdir()
                 (stage / "README.md").write_text("r\n", encoding="utf-8")
                 manifest = {"format": FORMAT, "format_version": FORMAT_VERSION, "name": name, "version": version,
-                            "profile": "p", "target": ARCHES[arch][0], "form": form, "built_from": built,
-                            "files": file_rows(stage)}
+                            "profile": "p", "target": ARCHES[arch][0], "form": form, "stdlib": stdlib,
+                            "built_from": built, "files": file_rows(stage)}
                 (stage / MANIFEST).write_text(render_json(manifest), encoding="utf-8")
                 archive = out / f"{name}.zip"
                 write_zip(stage, archive, 1700000000)
@@ -1344,6 +1634,10 @@ def selftest() -> int:
         expect("a second package of one width and form, under another name, is a finding",
                any(f.startswith(f"{copy_name}: its manifest makes it") for f in findings)
                and any(": a second package of " in f for f in findings))
+        findings, _ = release_findings(release_dir(every + [("x64", "single", {"stdlib": "nostd"})]),
+                                       commit, "v0.1.0")
+        expect("a package without `std` beside a full release is a finding: no release carries that form yet",
+               len(findings) == 1 and findings[0].endswith("built nostd, a form no release carries yet (std)"))
         expect("an empty directory names every width and form", release_findings(
             pathlib.Path(tempfile.mkdtemp(dir=tmp)), commit, "v0.1.0")[0]
             == ["no package of " + ", ".join(f"{arch} {form}" for arch in ARCHES for form in FORMS)])
@@ -1372,12 +1666,16 @@ def main(argv: list[str]) -> int:
         if len(argv) == 2 and argv[1] == "--selftest":
             return selftest()
         if len(argv) >= 5 and argv[1] == "--build" and argv[3] == "--profile":
-            arches, forms = build_selection(argv[5:])
+            arches, forms, stdlib = build_selection(argv[5:])
             out = pathlib.Path(argv[2]).resolve()
             out.mkdir(parents=True, exist_ok=True)
             for arch in arches:
                 for form in forms:
-                    build(out, argv[4], arch, form)
+                    build(out, argv[4], arch, form, stdlib)
+            return 0
+        if len(argv) >= 2 and argv[1] == "--measure":
+            for arch in measure_selection(argv[2:]):
+                measure(arch)
             return 0
         if len(argv) == 3 and argv[1] == "--verify":
             target = pathlib.Path(argv[2])

@@ -4327,10 +4327,11 @@ STATEMENT_FORMAT = "wz-conformance-statement"
 STATEMENT_FORMAT_VERSION = 3
 
 # The features of the pico ABI's crate that run its sessions on the cooperative engine
-# (docs/capi-pico-on-coop-engine.md): `engine-coop` on a host, `os-posix` on a host without
-# `std`, `os-zephyr` in a Zephyr image. A build that names none runs them on the tokio engine, and
-# so does every build of the other ABIs, whose crates have no other engine.
-STATEMENT_COOP_FEATURES = ("engine-coop", "os-posix", "os-zephyr")
+# (docs/capi-pico-on-coop-engine.md): `engine-coop` on a host, `os-posix` on a POSIX host and
+# `os-windows` on Windows without `std`, `os-zephyr` in a Zephyr image. A build that names none
+# runs them on the tokio engine, and so does every build of the other ABIs, whose crates have no
+# other engine.
+STATEMENT_COOP_FEATURES = ("engine-coop", "os-posix", "os-windows", "os-zephyr")
 # The features that build a library for a platform other than a host, each with the platform's
 # word in the statement; a build that names none is a host's.
 STATEMENT_PLATFORM_FEATURES = (("os-zephyr", "zephyr"),)
