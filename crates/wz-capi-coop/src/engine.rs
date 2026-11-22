@@ -1495,29 +1495,47 @@ fn dispatch_holding_finals<C: ClockSource + 'static>(
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&lane);
         let mut registry = registry.borrow_mut();
-        // The queries this frame carries arrive on this face's link, whichever was dialled last.
-        plane.arriving.store(generation, Ordering::Release);
-        // The application's queryables serve every face, so this face's session states its own
-        // answer to a query it cannot resolve before its frame is dispatched.
-        registry
-            .app
-            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
-        // A query by an id of the shared dictionary is kept, so its replies mirror its key form.
-        #[cfg(feature = "shared-key-ids")]
-        actions.note_requests(&event);
-        registry.dispatch_event(face, event);
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ))]
-        registry.settle_decl_events(|| actions.peer_zid());
-        registry.flush_pending_replies(face, &*actions);
-        for (rid, qos) in registry.take_pending_final_rids(face) {
+        // A Push is no query and no declaration: it is handed to the subscribers alone, and what
+        // follows every record (the drains, the Finals owed) under the one lookup of the face.
+        let owed = if lent_push(&event) {
+            registry.dispatch_push(face, event, &*actions)
+        } else {
+            // The queries this frame carries arrive on this face's link, whichever was dialled
+            // last.
+            plane.arriving.store(generation, Ordering::Release);
+            // The application's queryables serve every face, so this face's session states its
+            // own answer to a query it cannot resolve before its frame is dispatched.
+            registry
+                .app
+                .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
+            // A query by an id of the shared dictionary is kept, so its replies mirror its key
+            // form.
+            #[cfg(feature = "shared-key-ids")]
+            actions.note_requests(&event);
+            registry.dispatch_event(face, event);
+            #[cfg(any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ))]
+            registry.settle_decl_events(|| actions.peer_zid());
+            registry.flush_pending_replies(face, &*actions);
+            registry.take_pending_final_rids(face)
+        };
+        for (rid, qos) in owed {
             if lock(&plane.holds).owe(generation, rid, qos) {
                 actions.send_response_final(rid, qos);
             }
         }
     }
+}
+
+/// Whether `event` is a Push lent where its frame lies: what the subscribers' plane alone reads, so
+/// a link's dispatch hands it there and to no other plane (`Registry::dispatch_push`).
+fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
+    matches!(
+        event,
+        wz_session_core::driver_loop::IterationEvent::InPlace(record) if record.push().is_some()
+    )
 }
 
 /// A subscriber's `callback`, shown each sample's timestamp when `expose` and none otherwise
@@ -1554,6 +1572,11 @@ fn dispatch_all<C: ClockSource + 'static>(
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&lane);
         let mut registry = registry.borrow_mut();
+        // A Push is no query and no declaration: it is handed to the subscribers alone.
+        if lent_push(&event) {
+            registry.dispatch_push(face, event, &*actions);
+            return;
+        }
         // The application's tables serve every face: this face's session states its own answer
         // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
         registry
@@ -3297,6 +3320,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn delivery_list_takes(&self) -> usize {
         self.deliveries.others_taken()
+    }
+
+    /// The lent Pushes the session's links handed to the subscribers' plane alone, the face
+    /// lookups those dispatches made with the drains after them, and the lent Pushes the fan over
+    /// every plane was handed (`Registry::dispatch_push`): what a test of the cost of one received
+    /// sample counts.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
+        lock(&self.core).0.registry.borrow().push_dispatches()
     }
 
     /// Whether the peer of every established link has been told every declaration the session

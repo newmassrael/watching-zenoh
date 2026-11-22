@@ -204,6 +204,12 @@ pub(super) struct Registry {
     /// the cost of a filtered put counts.
     #[cfg(test)]
     peer_looks: core::cell::Cell<usize>,
+    /// The lent Pushes handed to the subscribers' plane alone ([`Self::dispatch_push`]), the
+    /// face lookups their dispatches made with the drains after them, and the lent Pushes that
+    /// reached the fan over every plane instead ([`Self::dispatch_event`]): what a test of the
+    /// cost of one received sample counts.
+    #[cfg(all(test, feature = "std"))]
+    pushes: (usize, usize, usize),
 }
 
 /// The application's part, one face's tables and the other faces', apart so each can be used as
@@ -252,6 +258,8 @@ impl Registry {
             faces_written: 0,
             #[cfg(test)]
             peer_looks: core::cell::Cell::new(0),
+            #[cfg(all(test, feature = "std"))]
+            pushes: (0, 0, 0),
         })
     }
 
@@ -290,6 +298,23 @@ impl Registry {
     #[cfg(test)]
     pub(super) fn peer_looks(&self) -> usize {
         self.peer_looks.get()
+    }
+
+    /// The lent Pushes handed to the subscribers' plane alone, the face lookups their dispatches
+    /// and drains made, and the lent Pushes the fan over every plane was handed.
+    #[cfg(all(test, feature = "std"))]
+    pub(super) fn push_dispatches(&self) -> (usize, usize, usize) {
+        self.pushes
+    }
+
+    /// One more lent Push handed to the subscribers' plane alone, the face lookups since
+    /// `written` its own.
+    #[cfg(all(test, feature = "std"))]
+    fn counted_push(&mut self, written: u64) {
+        let lookups =
+            usize::try_from(self.faces_written.wrapping_sub(written)).unwrap_or(usize::MAX);
+        self.pushes.0 += 1;
+        self.pushes.1 += lookups;
     }
 
     /// The tables of every face, the dial role's first.
@@ -444,6 +469,10 @@ impl Registry {
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
     pub(super) fn dispatch_event(&mut self, id: FaceId, event: IterationEvent<'_, '_>) {
+        #[cfg(all(test, feature = "std"))]
+        if super::lent_push(&event) {
+            self.pushes.2 += 1;
+        }
         // What an earlier dispatch staged for the watches and nobody settled is a group's, whose
         // members are not watched.
         #[cfg(any(
@@ -518,6 +547,41 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    /// A Push of face `id` lent where its frame lies ([`super::lent_push`]), handed to the
+    /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
+    /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
+    /// stages nothing into. What follows the dispatch of every record follows it all the same,
+    /// under the one lookup of the face the dispatch made: the subscribers' tables reconciled with
+    /// what the application registered since, what anything staged drained through `actions`
+    /// ([`Self::flush_pending_replies`]), and the `Final`s owed taken for the caller
+    /// ([`Self::take_pending_final_rids`]). A face the session no longer holds hears nothing.
+    #[cfg(feature = "queryable")]
+    pub(super) fn dispatch_push<S>(
+        &mut self,
+        id: FaceId,
+        event: IterationEvent<'_, '_>,
+        actions: &S,
+    ) -> FinalStage<Static>
+    where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        #[cfg(all(test, feature = "std"))]
+        let written = self.faces_written;
+        let owed = match self.split(id) {
+            Some(Split { app, face, .. }) => {
+                app.subscribers
+                    .dispatch_iteration_event(&mut face.peer.subscribers, event);
+                face.peer.subscribers.reconcile(&app.subscribers);
+                app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
+                face.peer.finals.take_owed()
+            }
+            None => FinalStage::default(),
+        };
+        #[cfg(all(test, feature = "std"))]
+        self.counted_push(written);
+        owed
+    }
+
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
     /// to wait for does with each event.
     #[cfg(not(feature = "queryable"))]
@@ -530,6 +594,30 @@ impl Registry {
         if let Some(Split { app, face, .. }) = self.split(id) {
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
+    }
+
+    /// [`Self::dispatch`] of a lent Push ([`super::lent_push`]), handed to the subscribers' plane
+    /// alone, the one plane that reads a Push, and drained under the one lookup of the face the
+    /// dispatch made.
+    #[cfg(not(feature = "queryable"))]
+    pub(super) fn dispatch_push<S>(
+        &mut self,
+        id: FaceId,
+        event: IterationEvent<'_, '_>,
+        actions: &S,
+    ) where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        #[cfg(all(test, feature = "std"))]
+        let written = self.faces_written;
+        if let Some(Split { app, face, .. }) = self.split(id) {
+            app.subscribers
+                .dispatch_iteration_event(&mut face.peer.subscribers, event);
+            face.peer.subscribers.reconcile(&app.subscribers);
+            app.flush_pending(&mut face.peer, &mut face.gets, actions);
+        }
+        #[cfg(all(test, feature = "std"))]
+        self.counted_push(written);
     }
 
     /// The link of face `id` was lost: every subscriber and queryable its peer declared is gone,
