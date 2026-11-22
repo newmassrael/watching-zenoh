@@ -226,6 +226,24 @@
       "why": "the receive chain reports to its sink, and asks it whether it takes another unit of a datagram and whether its link keeps the datagram"
     },
     {
+      "id": "record-walk-go-on",
+      "where": {"file": "network_message.rs", "anchor": "if !go_on()"},
+      "callees": "^wz_session_core::(drive::(walk_records_in_place|frame_records_extent)|driver_loop::walk_lent_payload|network_message::(try_for_each_record|try_for_each_record_while|for_each_record))::\\{closure#\\d+\\}$",
+      "why": "the record walk (walk_records) asks before each record whether its caller takes another, through `&dyn Fn() -> bool`: the closures of the walk's callers, the ones that stop it (walk_records_in_place, walk_lent_payload) and try_for_each_record's that never does. The callees are every top-level closure of those callers, each record's consumer among them, which overstates and never understates: a consumer is reached deeper through the sites below"
+    },
+    {
+      "id": "record-walk-each",
+      "where": {"file": "network_message.rs", "anchor": "each(WalkedRecord::"},
+      "callees": "^wz_session_core::(drive::(walk_records_in_place|frame_records_extent)|driver_loop::walk_lent_payload|network_message::(try_for_each_record|try_for_each_record_while|for_each_record))::\\{closure#\\d+\\}$",
+      "why": "the walk hands each record, owned or lent (lend_push, lend_request, lend_response, lend_declare, lend_unknown and the rest), to its consumer through `&mut dyn FnMut`, so its body and each kind's reader are compiled once for every consumer; the consumer is a closure of one of the walk's callers, as record-walk-go-on, or try_for_each_record_while's that counts a lent record's class first"
+    },
+    {
+      "id": "record-walk-each-oam",
+      "where": {"file": "network_message.rs", "anchor": "each(walked)"},
+      "callees": "^wz_session_core::(drive::(walk_records_in_place|frame_records_extent)|driver_loop::walk_lent_payload|network_message::(try_for_each_record|try_for_each_record_while|for_each_record))::\\{closure#\\d+\\}$",
+      "why": "lend_oam hands its record to the consumer as record-walk-each does, bound to a name first because the counters' build hands the Oam and every other build a skipped record"
+    },
+    {
       "id": "own-mapping",
       "where": {"file": "wireexpr_resolve.rs"},
       "callees": "NONE",

@@ -712,7 +712,11 @@ IMAGES = (
         # client's row).
         # 4,832 bytes on 2026-11-21, read by Layer Qzk on a build host at the tree
         # that recovers the kit's text (which frame fell was not attributed).
-        peak=4832,
+        # 5,240 bytes over 25 frames on 2026-11-23, read by Layer Qzk on a build host at the
+        # no-heap integration tree: the dial's claim of a slot (`SessionSlots::claim_with`,
+        # 1,648 bytes, the largest frame of the image) above the channel's handshake. Which
+        # frames grew was not attributed.
+        peak=5240,
     ),
     # The fixed-memory ADMIN node over Zephyr's sockets and the secure channel on the T2G kit
     # (`overlays/t2g_admin_fixed_tls.conf`, decision D14 of docs/session-lifecycle-intent.md): it listens,
