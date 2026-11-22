@@ -410,11 +410,12 @@ fn reads_until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) -> u
 }
 
 /// The puts a client writes in one batch window reach a listener's subscriber over the stream
-/// link where they lie in the link's receive buffer: each is handed on lying there, none is copied
-/// into the lane, and the listener hands them all out in a few reads however many the batch holds
-/// (one or two when nothing else arrives; at most a quarter of the puts is asserted), where a link
-/// that handed one sample where it lies a read took a read a put. The listener is stepped by this
-/// thread, so each read is counted. The CONTROL is the subscriber's count.
+/// link where they lie in the link's receive buffer: the batch is one record of the lane, each put
+/// lying in it and none copied into the lane, and the listener hands them all out in a few reads
+/// however many the batch holds (one or two when nothing else arrives; at most a quarter of the
+/// puts is asserted), where a link that handed one sample where it lies a read took a read a put.
+/// The listener is stepped by this thread, so each read is counted. The CONTROL is the
+/// subscriber's count.
 #[test]
 fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let engine = open_with(CoopConfig {
@@ -477,12 +478,12 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     assert_eq!(
         engine.lane_lent() - lent,
         PUTS,
-        "each put handed where it lies in the stream link's buffer"
+        "each put handed where it lies in the stream link's buffer, none copied into the lane"
     );
     assert_eq!(
         engine.lane_handed() - handed,
-        PUTS,
-        "and none copied into the lane"
+        1,
+        "one record of the lane for the batch's puts"
     );
     assert!(
         reads <= PUTS / 4,

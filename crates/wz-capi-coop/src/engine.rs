@@ -3877,6 +3877,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     LaneItem::Sample(sample) => {
                         self.hand_sample(resolved, &sample, sample.subscribers());
                     }
+                    // The samples of a lent datagram, one record for all of them: each handed to
+                    // its subscribers from a view of its entry, and the datagram given back once,
+                    // after the last of them.
+                    LaneItem::Batch(batch) => {
+                        for sample in batch.samples() {
+                            self.hand_sample(resolved, &sample, sample.subscribers());
+                        }
+                    }
                     #[cfg(feature = "query")]
                     LaneItem::Reply(reply) => {
                         let leg = reply.leg();
