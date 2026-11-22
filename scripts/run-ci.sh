@@ -2586,6 +2586,10 @@ layer_c0_test_discipline() {
     # is a quiet host's (`ap_matrix.py run` judges each of its own), never a hosted runner's.
     _runci_leg ap_matrix.selftest -- python3 scripts/host-bench/ap_matrix.py --selftest
     _runci_leg ap_matrix.table --after ap_matrix.selftest -- python3 scripts/host-bench/ap_matrix.py --check-table deploy/ap_superiority.json
+    # The unicast batch size on the wire (`scripts/pico-compare.sh batch`): the reader of a stream's batches and
+    # of an InitSyn's advertised size, and the verdict of a cell, over synthetic bytes. The runs are a build
+    # host's, which builds zenoh-pico once per size.
+    _runci_leg batch_control.selftest -- python3 scripts/host-bench/batch_control.py --selftest
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.

@@ -42,6 +42,17 @@
 #                                             WZ_PERF_EXTERNAL_INCLUDE set, a third arm: the same program
 #                                             against that external library of the pico API, judged against
 #                                             the table WZ_PERF_EXTERNAL_TABLE names outside the repository
+#   scripts/pico-compare.sh batch [sizes] [count]
+#                                             the unicast batch size on the wire: zenoh-pico built once per size
+#                                             (BATCH_UNICAST_SIZE, default sizes 512,2048,8192) against one
+#                                             wz-capi-pico build with `config-document` whose sessions are handed
+#                                             each size by their configuration document (`wz/limits`); one program
+#                                             (scripts/host-bench/batch_probe.c) puts [count] (1200) samples in a
+#                                             batching window through a relay that reads each batch's length off the
+#                                             stream; run by scripts/host-bench/batch_control.py, left under
+#                                             target/pico-compare/batch-runs/host-<time>/ (batch.json, report.txt),
+#                                             exit 0 when every batch of every cell stayed within its size and
+#                                             reached it, 1 when one did not, 2 when a cell was not measured
 #
 # Both sides of every pair are built from the SAME example source: once against the vendored zenoh-pico
 # library and once against `libwz_capi_pico`, in place of it. A number printed here is therefore the
@@ -88,7 +99,8 @@ wz_lib="$WZ_ARTIFACTS/crates/target/release"
 out="$WZ_ARTIFACTS/target/pico-compare"
 mkdir -p "$out/bin"
 
-if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ]; then
+if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ] \
+    && [ "${1:-}" != batch ]; then
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
     (cd crates && cargo build --release -p wz-capi-pico) >"$out/build-wz.log" 2>&1 \
@@ -170,8 +182,8 @@ build_zenoh_c_family() {
 }
 
 case "${1:-}" in
-    parity | perf)
-        # each builds its own arms (parity and perf below)
+    parity | perf | batch)
+        # each builds its own arms (parity, perf and batch below)
         ;;
     nodrop-c)
         build_zenoh_c_family
@@ -678,6 +690,44 @@ perf_matrix() {
         --table "$root/deploy/pico_perf_ceiling.json" ${gate_args[@]+"${gate_args[@]}"}
 }
 
+# batch_probe_build <dir> <arm> <library name> [compiler words...]: the batch probe against an arm's library and
+# headers, as perf_probe_build builds the performance probe.
+batch_probe_build() {
+    local dir="$1" arm="$2" name="$3"
+    shift 3
+    cc -std=gnu11 -O2 "$root/scripts/host-bench/batch_probe.c" -DZENOH_LINUX -I"$dir/include-$arm" "$@" \
+        -o "$dir/bin/batch_probe_$arm" -L"$dir/lib-$arm" "-l$name" "-Wl,-rpath,$dir/lib-$arm" -lpthread \
+        2>"$dir/build-probe-$arm.log" \
+        || perf_fail "batch_probe against arm $arm did not build (see $dir/build-probe-$arm.log)"
+}
+
+# batch_control [sizes] [count]: build the arms (unless PICO_CMP_NO_BUILD=1) and run the batch size cells. Arm P is
+# zenoh-pico built as the same build once per size, arm W one wz-capi-pico build with the document door, which each
+# session of the run is handed its size through. The exit is batch_control.py's.
+batch_control() {
+    local sizes="${1:-512,2048,8192}" count="${2:-1200}" dir="$out/batch" run size
+    local list=()
+    IFS=, read -r -a list <<<"$sizes"
+    if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
+        rm -rf "${dir:?}/bin"
+        mkdir -p "$dir/bin"
+        bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
+            || perf_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
+        python3 -I "$root/scripts/host-bench/batch_control.py" reference --out "$dir" --sizes "$sizes" \
+            >"$dir/build-reference.log" 2>&1 \
+            || perf_fail "the zenoh-pico builds did not finish (see $dir/build-reference.log)"
+        cat "$dir/build-reference.log"
+        perf_wz_arm "$dir" W config-document
+        for size in "${list[@]}"; do
+            batch_probe_build "$dir" "P$size" zenohpico
+        done
+        batch_probe_build "$dir" W wz_capi_pico -DBATCH_PROBE_DOCUMENT -I"$root/crates/wz-capi-core/include"
+    fi
+    run="$out/batch-runs/host-$(date -u +%Y%m%dT%H%M%S)"
+    python3 -I "$root/scripts/host-bench/batch_control.py" run --bin-dir "$dir/bin" --lib-dir "$dir" --run "$run" \
+        --sizes "$sizes" --count "$count"
+}
+
 mode="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$mode" in
@@ -689,8 +739,9 @@ case "$mode" in
     profile) profile "$@" ;;
     parity) parity "$@" ;;
     perf) perf_matrix "$@" ;;
+    batch) batch_control "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count]" >&2
         exit 2
         ;;
 esac

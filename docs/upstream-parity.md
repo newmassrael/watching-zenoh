@@ -748,3 +748,14 @@ What the row costs, stated: a pico group past 32 members is a group whose 33rd m
 by a wz host, where a pico host would hear it. An MCU image is not in the row: its table is the
 one the image declares, as pico's is bounded by the heap the image gives it, and pico on the same
 image would refuse the member it had no memory for.
+
+## 8. Limits of an original, measured on wz
+
+A limit an original's users meet, each measured on wz with the original as the control: the
+original's run first, so that a red of the control says the harness cannot carry the measurement
+and only a control that holds makes wz's result a statement about wz. A row says what was measured
+and what holds it, not that it is green; the run that holds it is the lane named.
+
+| limit | the original | wz | held by |
+|---|---|---|---|
+| the unicast batch size is fixed when the library is built | zenoh-pico's `BATCH_UNICAST_SIZE` (2048) is a CMake cache value written into its `config.h`: each size is a build of the library of its own | `PICO_UNICAST_BATCH_BYTES` in the `wz/limits` of a session's configuration document, read at open (`wz_ext_config_document`, the `config-document` capability): sessions of one process run on different sizes, every batch on the wire stays within its session's size and a burst fills batches to it, and a size past the build's ceiling (65535, the two bytes the InitSyn carries it in) is refused by name | `crates/wz-capi-pico/tests/it/files/batch_size_per_session.rs` (512, 8192 and the build's 2048 in one process, read off the wire through a relay; the `config-document` leg of the non-default test table); `scripts/pico-compare.sh batch` (the same burst through the same relay on both, zenoh-pico built once per size against one wz build) |
