@@ -3,11 +3,13 @@
 #
 # zephyr-capi-pico/rust -- the MCU staticlib of the pico C ABI: `wz-capi-pico` built without `std`
 # for the image (`os-zephyr`), with the planes of the comparison image's pico build (the queryable
-# and liveliness; publication, subscription and the requesting end are not in it), and the image's
-# glue around it: the allocator over the kernel heap, the critical section over the kernel's IRQ
-# lock, the panic handler, and the CYT4BF's MAC behind the Zephyr Ethernet driver, as the
-# comparison image's staticlib carries it. The C ABI's `#[no_mangle]` exports are the library the
-# zenoh-pico program links in place of zenoh-pico.
+# and liveliness; the requesting end is not in it, and publication and subscription are the engine's
+# base, which a program reaches when its header has them), and the image's glue around it: the
+# allocator over the kernel heap, the critical section over the kernel's IRQ lock, the panic
+# handler, and the CYT4BF's MAC behind the Zephyr Ethernet driver, as the comparison image's
+# staticlib carries it. The C ABI's `#[no_mangle]` exports are the library the zenoh-pico program
+# links in place of zenoh-pico. The MCU speed image (deploy/zephyr-mcu-speed) links it on a board
+# whose Ethernet is Zephyr's own driver, without the MAC (`--no-default-features`).
 #
 # Standalone workspace (the empty `[workspace]` table) so cargo does not pull it into
 # crates/Cargo.toml's member build, where a thumb target is not the host.
@@ -30,6 +32,10 @@ path = "src/lib.rs"
 crate-type = ["staticlib"]
 
 [features]
+default = ["board-mac-cyt4bf"]
+# The CYT4BF's MAC behind the Zephyr Ethernet driver (deploy/zephyr-eth-wzmac), the T2G kit's
+# network. A board whose Ethernet has a driver of Zephyr's own builds without it.
+board-mac-cyt4bf = ["dep:wz-eth-mac-cyt4bf"]
 # zenoh-pico's multi-threaded arm (`Z_FEATURE_MULTI_THREAD`), which the image's header is built for
 # when its CONFIG_WZ_PICO_ABI_MULTI_THREAD is on (the CMake passes this feature then).
 multi-thread = ["wz-capi-pico/multi-thread"]
@@ -62,7 +68,7 @@ wz-session-core = { path = "../../../crates/wz-session-core", default-features =
     "no_std",
     "alloc",
 ] }
-wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf" }
+wz-eth-mac-cyt4bf = { path = "../../../crates/wz-eth-mac-cyt4bf", optional = true }
 
 # The MAC glue is the admin node's source, compiled here as it is there; the features it names for
 # its lwIP backend and its pools are that image's, and this image has none of them.
