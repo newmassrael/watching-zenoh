@@ -399,6 +399,10 @@ pub mod segment_sender;
 pub mod serde;
 pub mod session;
 mod session_ext;
+// The most memory a session holds, computed from the limits it opened under: wz doors
+// (`wz_ext.h`) of the unstable surface, over the session core's rows.
+#[cfg(feature = "session-memory")]
+pub mod session_memory;
 #[cfg(feature = "resource-snapshot")]
 pub mod snapshot;
 // Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the

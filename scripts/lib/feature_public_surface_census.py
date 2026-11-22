@@ -637,6 +637,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # wz's own doors `wz_ext_interface_version`, `_session_facts`, `_bytes_view` and
         # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`; and
         # `pub mod additional`, whose public item is wz's own door `wz_ext_additional_interface`.
+        # `session-memory` gates `pub mod session_memory`, whose public items are wz's own doors
+        # `wz_ext_session_memory` and `wz_ext_session_memory_row` and the two structs they write,
+        # declared in `wz_ext.h`; off by default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",
@@ -659,6 +662,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "resource-snapshot",
                 "scout-mcu",
                 "segment-sender",
+                "session-memory",
                 "shared-key-ids",
                 "supervision",
                 "time-base",

@@ -185,6 +185,11 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Profile> {
 }
 
 impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
+    /// The bytes one pending get takes in the registry's storage: its row, and the marker it leaves
+    /// in the finalized ids when it ends, which the same count bounds.
+    pub const ROW_BYTES: usize =
+        core::mem::size_of::<PendingGet<C>>() + core::mem::size_of::<u64>();
+
     /// Hold the registry to the `MAX_PENDING_LIVELINESS_GETS` its creator resolved: a
     /// registration that would leave more gets pending than `quota` admits is refused
     /// ([`RegisterError::TableFull`]), and the gets already pending are kept, as a lowered soft

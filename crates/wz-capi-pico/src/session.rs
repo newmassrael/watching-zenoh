@@ -482,6 +482,29 @@ impl z_owned_session_t {
     }
 }
 
+/// What a session's report of its memory is computed from (`crate::session_memory`): `limits`,
+/// the snapshot the open resolved from the config and hands the engine, how many links the session
+/// may hold by what it listens on, and the numbers its links are opened with from that snapshot,
+/// `tx_queue` and what `pico_link_rx` and `pico_unicast_batch` read. The report is of the
+/// session the program holds, so it is never read from the build's values.
+#[cfg(feature = "session-memory")]
+fn memory_basis(
+    listen: Option<&str>,
+    tx_queue: &TxQueueConf,
+    limits: &SessionLimits,
+) -> crate::session_memory::MemoryBasis {
+    let rx = pico_link_rx(limits);
+    crate::session_memory::MemoryBasis {
+        limits: *limits,
+        links: crate::session_memory::links_of(listen),
+        queue_batches: tx_queue.sizes.iter().sum(),
+        batch_bytes: usize::from(pico_unicast_batch(limits)),
+        rx_bytes: rx.buffer_size,
+        // `pico_link_rx` hands the engine `usize::MAX` where the snapshot states no bound.
+        message_bytes: limits.pico_frag_max_bytes().most(),
+    }
+}
+
 /// What a C session handle points at: the engine's session, behind the port, and what this ABI
 /// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
 pub(crate) struct PicoSessionHandle {
@@ -494,6 +517,9 @@ pub(crate) struct PicoSessionHandle {
     /// by (`z_declare_background_*`), and of the gets it issued. A close waits on them, as an
     /// undeclare waits on its own.
     background: crate::ffi::LatchList,
+    /// What the session's report of its memory is computed from, as its open decided it.
+    #[cfg(feature = "session-memory")]
+    pub(crate) memory: crate::session_memory::MemoryBasis,
 }
 
 impl PicoSessionHandle {
@@ -505,7 +531,16 @@ impl PicoSessionHandle {
             drive,
             ext,
             background: crate::ffi::LatchList::default(),
+            #[cfg(feature = "session-memory")]
+            memory: crate::session_memory::MemoryBasis::default(),
         }
+    }
+
+    /// The handle, its memory reported from `memory`.
+    #[cfg(feature = "session-memory")]
+    fn with_memory(mut self, memory: crate::session_memory::MemoryBasis) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// Whether the session has been closed. A declaration or a get made after it is refused with
@@ -1061,6 +1096,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         time_base,
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
+    #[cfg(feature = "session-memory")]
+    let memory = memory_basis(listen.as_deref(), &tx_queue, &limits);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
@@ -1259,6 +1296,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
+            #[cfg(feature = "session-memory")]
+            let handle = handle.with_memory(memory);
             *zs = z_owned_session_t {
                 _val: slot.fill(handle) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
@@ -1356,6 +1395,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let policy = request.policy;
     let limits = request.limits;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
+    #[cfg(feature = "session-memory")]
+    let memory = memory_basis(request.listen.as_deref(), &tx_queue, &limits);
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -1540,6 +1581,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
     let handle = PicoSessionHandle::new(drive, ext);
+    #[cfg(feature = "session-memory")]
+    let handle = handle.with_memory(memory);
     // The multi-threaded arm's read task starts with the open unless the options say not to.
     #[cfg(feature = "multi-thread")]
     if request.start_read_task {
@@ -2552,6 +2595,65 @@ mod build_numbers {
             |limits| limits.select_pico_unicast_batch_bytes(value),
             |limits| {
                 assert_eq!(usize::from(pico_unicast_batch(&limits)), value);
+            },
+        );
+    }
+
+    /// The row of the report named `part`.
+    #[cfg(feature = "session-memory")]
+    fn memory_row(
+        memory: &wz_session_core::session_memory::SessionMemory,
+        part: &core::ffi::CStr,
+    ) -> wz_session_core::session_memory::MemoryRow {
+        *memory
+            .rows()
+            .iter()
+            .find(|row| row.part == part)
+            .expect("the report has the part")
+    }
+
+    /// `PICO_UNICAST_BATCH_BYTES` stated: the report of a session's memory counts each link's
+    /// queued batches at the stated size, as many as the queue the open builds from the same
+    /// snapshot, and its tables for that snapshot.
+    #[cfg(feature = "session-memory")]
+    #[test]
+    fn session_memory_counts_the_stated_unicast_batch() {
+        let value = another(caps::PICO_UNICAST_BATCH_BYTES);
+        stated(
+            |limits| limits.select_pico_unicast_batch_bytes(value),
+            |limits| {
+                let (tx_queue, _) = pico_link_policy(&SessionPolicy::defaults(), &limits);
+                let basis = memory_basis(None, &tx_queue, &limits);
+                assert_eq!(basis.limits, limits);
+                let queue = memory_row(&basis.report(), c"link transmit queues");
+                assert_eq!(queue.entry_bytes, value);
+                assert_eq!(queue.count, Some(tx_queue.sizes.iter().sum()));
+            },
+        );
+    }
+
+    /// `PICO_FRAG_MAX_BYTES` stated: the report counts each link's two reassemblies at the
+    /// stated size, and a snapshot that states no bound leaves the row without a count.
+    #[cfg(feature = "session-memory")]
+    #[test]
+    fn session_memory_counts_the_stated_reassembly() {
+        let tx_queue =
+            |limits: &SessionLimits| pico_link_policy(&SessionPolicy::defaults(), limits).0;
+        let value = another(caps::PICO_FRAG_MAX_BYTES);
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::at_most(value)),
+            |limits| {
+                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                let reassembly = memory_row(&memory, c"link reassembly");
+                assert_eq!((reassembly.count, reassembly.entry_bytes), (Some(2), value));
+            },
+        );
+        stated(
+            |limits| limits.select_pico_frag_max_bytes(Quota::UNBOUNDED),
+            |limits| {
+                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                assert_eq!(memory_row(&memory, c"link reassembly").count, None);
+                assert_eq!(memory.total(), None);
             },
         );
     }

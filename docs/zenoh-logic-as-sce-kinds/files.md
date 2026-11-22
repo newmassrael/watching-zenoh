@@ -289,6 +289,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/serde.rs` | S7 | |
 | `crates/wz-capi-pico/src/session.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_ext.rs` | S7 | |
+| `crates/wz-capi-pico/src/session_memory.rs` | S7 | |
 | `crates/wz-capi-pico/src/snapshot.rs` | S7 | |
 | `crates/wz-capi-pico/src/stream_supervision.rs` | S12 | |
 | `crates/wz-capi-pico/src/string_array.rs` | S7 | |
@@ -852,6 +853,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/serial_link.rs` | S1 | |
 | `crates/wz-session-core/src/session_actions.rs` | S1 | |
 | `crates/wz-session-core/src/session_init_params.rs` | S1 | |
+| `crates/wz-session-core/src/session_memory.rs` | S10 | |
 | `crates/wz-session-core/src/session_slot.rs` | S1 | |
 | `crates/wz-session-core/src/session_timeouts.rs` | S1 | |
 | `crates/wz-session-core/src/session_zid.rs` | S10 | |

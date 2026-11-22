@@ -153,6 +153,14 @@ config WZ_CAP_POOL_MONITOR
 	  Record how full each of the node's fixed pools has been and list every pool's occupancy and refusals.
 	  Exported by: .
 
+config WZ_CAP_SESSION_MEMORY
+	bool "session-memory"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (wz_ext_session_memory, wz_ext_session_memory_row, wz-own doors).
+	  Exported by: pico.
+
 config WZ_CAP_DECLARATIONS_SYNCED_EVENT
 	bool "declarations-synced-event"
 	default n

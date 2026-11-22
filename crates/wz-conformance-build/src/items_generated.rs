@@ -40,6 +40,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("supervision", &["core", "pico", "c"]),
     ("resource-snapshot", &["core", "pico", "c"]),
     ("pool-monitor", &["core"]),
+    ("session-memory", &["core", "pico"]),
     ("declarations-synced-event", &["core", "pico"]),
     ("remote-declaration-watch", &["core", "pico"]),
     ("group", &["core", "c"]),
