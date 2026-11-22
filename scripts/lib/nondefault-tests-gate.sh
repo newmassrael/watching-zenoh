@@ -1787,14 +1787,15 @@ SKIPS=(
 the pinned OpenMetrics text describes a build without transport-stats' four counters"
     # The `tls/` link of the COOPERATIVE engine through the pico ABI
     # (`tests/it/files/tls_coop_roundtrip.rs`, `tls-mbedtls`; a module of the merged target `it`,
-    # so a row names its test by the path `-- --list` reports there). They are about the engine the build selects, and a build that has the tokio
-    # engine on selects that one, which is every build of this crate the table spells (no leg
-    # of it is `-default`). The cooperative engine runs them in `run-ci.sh`, the lane
-    # `C1co tls engine-coop`, with 2 passed guarded.
+    # so a row names its test by the path `-- --list` reports there). They are the cooperative
+    # engine's, which a library names alone: every build of this crate the table spells keeps the
+    # tokio engine on (no leg of it is `-default`), beside which `tls-mbedtls` is refused. The
+    # census lists them in the crate's cooperative feature set. The cooperative engine runs them
+    # in `run-ci.sh`, the lane `C1co tls engine-coop`, with 2 passed guarded.
     "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way|\
-the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
+the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
     "wz-capi-pico|files::tls_coop_roundtrip::a_dial_that_trusts_another_certificate_does_not_open|\
-the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine on"
+the cooperative engine's test, run by lane C1co tls engine-coop; this table's builds keep the tokio engine, beside which tls-mbedtls is refused"
     # The listener's event for a dropped handshake (`tests/tls_handshake_drop_event.rs`, needs
     # `tls-mbedtls` and `event-ring`): the same cooperative engine, run by lane C1co tls handshake
     # drop event, with 2 passed guarded.
@@ -2010,6 +2011,11 @@ if [[ "${1:-}" == "--census" ]]; then
         local -a argv=(test -p "$pkg")
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
+        elif [[ "$feats" == @args:* ]]; then
+            # A feature set a crate declares (`doc_feature_sets.py`), as its cargo arguments.
+            local -a set_argv
+            read -r -a set_argv <<<"${feats#@args:}"
+            argv+=("${set_argv[@]}")
         elif [[ -n "$feats" ]]; then
             leg_feature_args "$feats"
             argv+=("${LEG_FEATURE_ARGS[@]}")
@@ -2085,8 +2091,24 @@ if [[ "${1:-}" == "--census" ]]; then
             continue
         fi
 
+        # A crate gate 7 checks once per feature set it declares (`sets`) cannot be listed with
+        # every feature on: its population is the union of what each declared set lists.
+        listed_all() {
+            local set_lines label set_args
+            if [[ "$tier" != "sets" ]]; then
+                list_names "$pkg" "@all" ""
+                return
+            fi
+            set_lines="$(python3 "$here/doc_feature_sets.py" "$pkg")" || return 1
+            [[ -n "$set_lines" ]] || return 1
+            while read -r label set_args; do
+                [[ -n "$label" ]] || continue
+                list_names "$pkg" "@args:$set_args" "" || return 1
+            done <<<"$set_lines" | sort -u
+            return "${PIPESTATUS[0]}"
+        }
         if ! list_names "$pkg" "" "" > "$tmp/d" ||
-            ! list_names "$pkg" "@all" "" > "$tmp/a"; then
+            ! listed_all > "$tmp/a"; then
             # Refused above with cargo's own words. Its SKIPS rows are not
             # reported a second time as never examined: the listing is the cause.
             for row in "${SKIPS[@]}"; do

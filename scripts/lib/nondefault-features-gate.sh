@@ -110,6 +110,17 @@ lib_only=""
 # with every target, the slot set its library alone, the manifest says why).
 excluded="wz wz-tls-mbedtls"
 
+# Tier 4: checked once per feature set the crate declares under `[package.metadata.wz-docs]`
+# (`scripts/lib/doc_feature_sets.py`, the sets Layers C1bf and C1bz build), with every target.
+# A crate that refuses a combination of its own features and is in no tier above: `wz-capi-pico`
+# has one engine per library, so its tokio set gives up the cooperative forms and its cooperative
+# set the tokio engine. Derived from the manifests below, so a crate that declares sets later is
+# checked this way without a row here.
+
+# The reader of the feature sets a crate declares (`[package.metadata.wz-docs]`), by its path
+# before the directory changes.
+sets_reader="$(cd "$(dirname "$0")" && pwd)/doc_feature_sets.py"
+
 cd "$(dirname "$0")/../../crates" || exit 1
 
 # The crates that HAVE a non-default feature, straight from cargo metadata.
@@ -132,8 +143,20 @@ for pkg in sorted(meta["packages"], key=lambda p: p["name"]):
         print(pkg["name"])
 PY
 
-mapfile -t with_nondefault < <(cargo metadata --no-deps --format-version 1 2>/dev/null |
-    python3 -c "$derive_py")
+meta_json="$(cargo metadata --no-deps --format-version 1 2>/dev/null)"
+mapfile -t with_nondefault < <(python3 -c "$derive_py" <<<"$meta_json")
+# The members whose manifest declares feature sets (tier 4).
+read -r -d '' sets_py <<'PY'
+import json
+import sys
+
+meta = json.load(sys.stdin)
+for pkg in sorted(meta["packages"], key=lambda p: p["name"]):
+    docs = (pkg.get("metadata") or {}).get("wz-docs") or {}
+    if docs.get("feature-sets"):
+        print(pkg["name"])
+PY
+with_sets=" $(python3 -c "$sets_py" <<<"$meta_json" | tr '\n' ' ')"
 if [[ ${#with_nondefault[@]} -eq 0 ]]; then
     echo "  nondefault-features FAIL: cargo metadata named no crate with a" \
          "non-default feature. Either the derivation is dead or every feature" \
@@ -154,6 +177,8 @@ if [[ "${1:-}" == "--list-members" ]]; then
             echo "$pkg excluded"
         elif [[ " $lib_only " == *" $pkg "* ]]; then
             echo "$pkg lib-only"
+        elif [[ "$with_sets" == *" $pkg "* ]]; then
+            echo "$pkg sets"
         else
             echo "$pkg all-targets"
         fi
@@ -180,6 +205,25 @@ checked=0
 for pkg in "${members[@]}"; do
     [[ -n "$pkg" ]] || continue
     if [[ " $excluded " == *" $pkg "* ]]; then
+        continue
+    fi
+    if [[ "$with_sets" == *" $pkg "* && " $lib_only " != *" $pkg "* ]]; then
+        checked=$((checked + 1))
+        if ! sets="$(python3 "$sets_reader" "$pkg")" || [[ -z "$sets" ]]; then
+            echo "  nondefault-features FAIL: $pkg declares feature sets that" \
+                 "doc_feature_sets.py could not read (the line above says why)"
+            fail=1
+            continue
+        fi
+        while read -r label set_args; do
+            [[ -n "$label" ]] || continue
+            read -r -a set_argv <<<"$set_args"
+            if ! cargo clippy -p "$pkg" --all-targets "${set_argv[@]}" --quiet -- -D warnings; then
+                echo "  nondefault-features FAIL: $pkg does not compile CLEAN in its" \
+                     "declared feature set \`$label\` (all targets)."
+                fail=1
+            fi
+        done <<<"$sets"
         continue
     fi
     if [[ " $lib_only " == *" $pkg "* ]]; then
