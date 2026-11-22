@@ -28,6 +28,16 @@
       "witness": {"lane": "Qza", "qemu_machine": "mps2-an385"}
     },
     {
+      "board": "mps2/an385",
+      "link": "ethernet-qemu-lan9118",
+      "app": "zephyr-mcu-speed",
+      "network": "zephyr-sockets",
+      "rust_target": "thumbv7m-none-eabi",
+      "grade": "QEMU",
+      "witness": {"lane": "Qzs", "qemu_machine": "mps2-an385"},
+      "note": "The MCU speed matrix's image (docs/mcu-speed-matrix.md), in its four builds: zenoh-pico or wz's pico C ABI under the same program, in pico's single- and multi-threaded arms. Only the wz builds carry Rust; the target is theirs. Layer Qzs boots each build once a cell under -icount and reads its verdict from the console."
+    },
+    {
       "board": "kit_t2g_b_h_lite/cyt4bf8cds/m7_0",
       "link": "rmii-dp83825i",
       "app": "zephyr-admin-node",
