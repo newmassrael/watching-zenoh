@@ -541,7 +541,7 @@ heap's own header of each block, not a measurement.
 | site | when | bytes | unit |
 |------|------|------:|------|
 | the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
-| the engine (`Arc::new_cyclic`), with the lane's event records (`DELIVERY_LANE_EVENTS` of them, inline) and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB | U4 (the records), U1 |
+| the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
 | the session's handle (`Slot::take`, a `Box` without the pools) and its drive (`Box<dyn SessionDrive>`) | open | some hundreds | U9, U10 |
@@ -621,8 +621,8 @@ The lane's preset is one record's room: the larger of the batch and the largest 
 (4,096), a key of 256 bytes, a clock id of 16 and a 4-byte id for each of the 3 subscribers. Both
 threading arms deliver from the call that reads (`CoopEngine::read`: a step, then the delivery
 after the lock), so the room one record takes is what either needs; a link is read only while the
-lane has that room, so at exactly the floor a pass hands on one record of a full lane, and a lane a
-little longer (`arm_w.conf` keeps 4,608) lets one pass hand on the small samples that follow it.
+lane has that room, so at exactly the floor a pass hands on one record of a full lane, which is what
+`arm_w.conf` states at its own limits, 4,180 bytes (section 9.5).
 
 ### 9.2 The heap each cell is expected to peak at
 
@@ -636,14 +636,14 @@ still. The preset is what an image of the pico C ABI that states no limit gets.
 | part of the arena | build's defaults | pico preset alone | `arm_w.conf` |
 |-------------------|------------------:|------------------:|---------------:|
 | a receive buffer and one transmit slot of the batch (two slots before section 9.4) | 4,096 | 4,096 | 4,096 |
-| the delivery lane | 65,536 | 4,380 | 4,608 |
-| two reassembly chains of the largest rejoined message | 8,192 | 8,192 | 8,192 |
+| the delivery lane | 65,536 | 4,380 | 4,180 |
+| the session's two reassembly buffers of the largest rejoined message, which its links share (section 9.5) | 8,192 | 8,192 | 8,192 |
 | the application's tables (48, 10 and 4 rows), each row its key's place | about 1,900 | about 420 | about 180 |
 | the pending gets, each row its key's place | about 630 | about 100 | about 140 |
 | the face's peer tables (its interests, declares, replies, finals), an interest's row its key's place | about 19,900 | about 4,200 | about 600 |
 | the engine's record of declarations (224, 34 and 16 rows), each row holding its key's place (about 52 bytes a row) | about 11,700 | about 1,800 | about 900 |
 | the key arena every keyed row keeps its key in (`KEY_ARENA_BYTES`: 97,152, 4,096 and the 1,024 `arm_w.conf` states, and its state) | about 97,200 | about 4,150 | about 1,060 |
-| **the arena** | **about 209,100** | **about 27,300** | **about 19,800** |
+| **the arena** | **about 209,100** | **about 27,300** | **about 19,400** |
 
 Outside the arena the open takes the registry's rows of what the peer declares and its aliases,
 inline at their build capacities and each the id and place of a key (24 bytes), the engine with its
@@ -661,7 +661,8 @@ four rows of each.
 
 The arm W cells measured 42,800 to 43,500 bytes once the engine's record kept its keys in the key
 arena (QEMU, `mps2-an385`), about 16,000 over the `arm_w.conf` column of the table before
-the application's and the peers' rows followed: what that is, is section 9.5's first question.
+the application's and the peers' rows followed. Section 9.5 says what of it is known: no thread,
+and the lane's event slots at the build's 64.
 
 ### 9.3 What the reservation still holds that zenoh-pico's heap does not
 
@@ -683,16 +684,17 @@ The rest, and what each form of section 9 would take:
   One slot is that change to the session core's send path: close the open frame before another frame
   takes the link's slot, and wait on a stream link's write rather than refuse; it is not a limit,
   and no build of the engine can take it as the send path stands.
-- **The second reassembly buffer, 4,096 bytes a link: already zenoh-pico's own.** zenoh-pico keeps
+- **The second reassembly buffer, 4,096 bytes a session: already zenoh-pico's own.** zenoh-pico keeps
   one defragmentation buffer for each reliability of a transport
   (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @ `_z_wbuf_t _dbuf_best_effort;`),
   each `Z_FRAG_MAX_SIZE` long when a fragment first arrives
   (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
   `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`): two at its worst, which is what the arena lends
-  each link (`LENT_CHAINS`, the per-peer quota of `reassembly_pool_mcu`, 2). One buffer would drop
-  the chain of one reliability while the other's is open, which zenoh-pico rejoins. The difference
-  left is only when: zenoh-pico's are taken when a fragment comes, the arena's at the open (decision
-  E3); the two stage any two chains of the link, where zenoh-pico's are one of each reliability.
+  each session (`LENT_CHAINS`, the per-peer quota of `reassembly_pool_mcu`, 2). One buffer would
+  drop the chain of one reliability while the other's is open, which zenoh-pico rejoins. The
+  difference left is only where they lie: a chain claims one when its first fragment comes, as
+  zenoh-pico takes one, but from a table the open reserved (decision E3), which the session's links
+  share (section 9.5); the two stage any two chains, where zenoh-pico's are one of each reliability.
 - **Key text in every row, about 22,000 bytes at the preset: taken (section 9.4); what follows is
   the cost as it stood.** The lent
   policy holds a key inline in the row that owns it (`Lent`'s text is `heapless::String` of
@@ -783,17 +785,72 @@ which no host measures as a peak. What is left above zenoh-pico's peak is sectio
 
 ### 9.5 What each cell's heap still holds, against zenoh-pico's
 
-The arm W cells as `arm_w.conf` builds them, from the plan's rows (`ArenaPlan::rows` in
-`crates/wz-capi-coop/src/arena.rs`) and section 9's sites, for a 32-bit core; estimates, not a
+The arm W cells as `arm_w.conf` builds them, for a 32-bit core; estimates read from the source, not a
 measurement. zenoh-pico's put cell peaked at 8,360 bytes: its receive and transmit buffers and its
 session's lists.
 
+**The 16,000 bytes the measurement held beyond the estimate are not a thread.** The st cells start
+no task: the open's start of the read task and `zp_start_read_task` are compiled only with
+`multi-thread` (`crates/wz-capi-pico/src/session.rs`), which the st image's staticlib is built
+without (`deploy/zephyr-mcu-speed/CMakeLists.txt` passes it for `mt` alone), `start_reader` is the
+engine's one caller of `wz_os_thread_spawn` (`crates/wz-capi-coop/src/engine.rs`), and the st
+cells' report (`MCU-SPEED STACK`) lists the kernel's, the network stack's and `main` and no other
+thread, where the mt cells list `wz-os`. What the estimate left out that the source shows is the
+lane's event slots: the lane's storage of them is the build's (`DELIVERY_LANE_EVENTS`, 64 unless the
+image states fewer), on the heap beside the engine and not in the arena, about 150 bytes a slot (an
+entry of the lane's bookkeeping and one of its rehearsal's copy, a place in the list handed on, and
+the record of what a sample is besides its bytes), about 9,600 bytes at 64. `arm_w.conf` states
+8: the samples of a datagram are one record, and a link is read only while the lane has a slot free
+(`a_lent_batch_takes_one_event_slot_however_many_samples_it_holds` in
+`crates/wz-capi-coop/src/tests/lane.rs`). About 7,000 bytes of the measurement are left that this
+reading does not attribute; what they are is a measurement's to say (the heap after `z_open` and
+after each declaration), not a further estimate's.
+
+**The reassembly buffers are the session's, each claimed when a chain starts.** A link's Router
+claims a buffer of the session's one table when a chain's first fragment arrives and gives it back
+when the chain ends, completed, aborted or timed out (`LentStaging` in
+`crates/wz-session-core/src/chain_staging.rs`), and the table holds `LENT_CHAINS` buffers however
+many links the session may hold, one for each reliability a peer has a chain open in, as zenoh-pico
+keeps one for each (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+`_z_wbuf_t _dbuf_best_effort;`). A chain that finds none free is refused as pool exhaustion: the
+Router drops it and the session counts it (`RefuseReason::PoolExhausted`, reported as
+`ReassemblyDropReason::PoolExhausted`), as zenoh-pico drops a chain whose buffer it cannot allocate
+(`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`).
+The table is still reserved at the open (decision E3), so a session of one link, which these cells
+are, reserves the 8,192 bytes it did; one that listens no longer reserves two for each link it may
+hold.
+
+**The lane is one record's room.** Each call that reads hands what it read to the callbacks before it
+returns, in both threading arms (`CoopEngine::read`: a step, then the delivery after the session's
+lock), so the st arm delivers in the call that reads, as zenoh-pico does. What the lane holds a
+call's records across is the lock: the callbacks run after it, so a callback may call into its
+session (decision D8). `arm_w.conf` states the least lane the build accepts, one record of the
+largest message at the image's limits, 4,180 bytes
+(`the_speed_images_lane_is_the_room_of_one_record`), and a pass reads one datagram, as zenoh-pico's
+read takes one batch. A lane of none would need the records the lane writes whole to be read where
+they lie as well (a rejoined message in its reassembly buffer, held until its callbacks return as a
+datagram is held), and a sample offered from inside a callback kept in a small area of its own; that
+is the next cut, not taken here.
+
 | what | bytes | zenoh-pico | the next structural cut |
 |------|------:|------------|--------------------------|
-| what the measurement holds beyond the estimate | about 16,000 | none | find it first: it is the size of the read task's stack (`CONFIG_WZ_OS_THREAD_STACK_SIZE`, 16,384), which `k_thread_stack_alloc` takes from the heap unless the image places a static pool as `arm_w_mt.conf` does; if the measured cells start the task under `arm_w.conf`, the pool or a stack sized to the task is the cut |
-| two reassembly buffers of the largest rejoined message | 8,192 | none until a fragment arrives, then one per reliability (section 9.3) | lend a chain's buffer when its first fragment arrives, from a pool the links share, instead of reserving two per link at the open: a change of decision E3 for the reassembly rows, and the cells, whose messages are one batch, would hold none |
-| the delivery lane | 4,608 | none: a sample is handed to its callback from the receive buffer | a single-threaded session that delivers in the call that reads, after the step and before the next read, with no lane (section 9) |
+| what the measurement held beyond the estimate and this reading does not attribute | about 7,000 | none | measure the heap after the open and after each declaration |
+| the session's reassembly buffers, claimed by a chain while it is open | 8,192 | none until a fragment arrives, then one per reliability | a count of them the image states, none for an image whose messages fit a batch, its chains then refused and counted |
+| the delivery lane | 4,180 | none: a sample is handed to its callback from the receive buffer | the records written whole read where they lie, and a re-entered callback's samples in a small area of their own |
+| the lane's event slots (8) and its two queues of 64 handles | about 1,200 and about 1,150 | none | the queues' capacity is their document's (`sources/session/delivery_lane_queue.scxml`): one of the image's event slots needs the document to take it from the limit |
 | a receive buffer and one transmit slot of the batch | 4,096 | the same, a read and a write buffer | none: this is zenoh-pico's own floor |
 | the objects of the open outside the arena: the engine and its planes, the kernel objects, the handle, the registry's face tables | about 5,100 | its session and transport structs | the registry's face tables (their rows of what the peer declares, inline at the build's capacities, about 400) lent from the arena as the other tables are (section 4.5); the kernel objects one per lock the engine keeps, not one per entity |
 | the tables lent from the arena: the record, the application's, the gets, a face's peer tables, and the key arena | about 2,900 | lists of what is declared, allocated per entity | the key held twice by a local declaration (the record's and the application's table's) shared as one block, by handing the record's `KeyRef` to the registration, about 100 here and 600 at the pico preset |
 | each declaration and each message | some hundreds, freed by the put | the same order | the places the owned objects of section 9 still allocate (U6, U7, U9) |
+
+What each cell is expected to peak at with the event slots `arm_w.conf` states (about 8,400 bytes
+fewer than at 64) and its lane at the floor (428 fewer), from the cells measured before them; the
+reassembly buffers move no cell, each holding one link:
+
+| cell (threads, workload, size) | zenoh-pico, measured | arm W, measured before | arm W, expected |
+|--------------------------------|---------------------:|-----------------------:|----------------:|
+| st, put, 8 bytes | 8,360 | 42,792 | about 34,000 |
+| st, sub, 8 bytes | 8,216 | 43,008 | about 34,200 |
+| st, rtt, 8 bytes | 9,960 | 43,488 | about 34,700 |
+| st, 64 and 1,024 bytes | 8,216 to 9,960 | not measured since section 9.4 | the 8-byte cell's, and a copied payload of about 1,100 in the rtt cell at 1,024 |
+| mt, every workload and size | 8,312 to 10,072 | not measured since section 9.4 | st's, and about 250 for the read task's thread (its stack is the static pool `arm_w_mt.conf` places) |
