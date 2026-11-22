@@ -121,6 +121,21 @@ fn a_get_for_the_session_alone_is_answered_by_its_own_queryables_inside_the_call
     );
 }
 
+/// Run `body` on a thread of its own and wait at most five seconds for what it returns: a call
+/// that waits on a lock it holds fails the test by name instead of holding the run for ever.
+fn within_five_seconds<R: Send + 'static>(
+    what: &str,
+    body: impl FnOnce() -> R + Send + 'static,
+) -> R {
+    let (done, outcome) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(body());
+    });
+    outcome
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
+}
+
 /// A get made for any destination goes out and reaches the session's own queryables, and ends
 /// when both have answered: the own reply is there when the call returns, the leg is still open
 /// for the router's Final, and the router's reply and Final come with the steps.
@@ -459,16 +474,19 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
 
     let minted = Arc::new(AtomicUsize::new(0));
     let counting = minted.clone();
-    let refused = engine.get_held(
-        "demo/lq/b",
-        &WireKey::literal(),
-        &get_unconsolidated(),
-        None,
-        &mut || {
-            counting.fetch_add(1, Ordering::SeqCst);
-            Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
-        },
-    );
+    let asking = engine.clone();
+    let refused = within_five_seconds("the refused get", move || {
+        asking.get_held(
+            "demo/lq/b",
+            &WireKey::literal(),
+            &get_unconsolidated(),
+            None,
+            &mut || {
+                counting.fetch_add(1, Ordering::SeqCst);
+                Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+            },
+        )
+    });
     assert_eq!(refused, Err(NoRoomToHold));
     assert_eq!(minted.load(Ordering::SeqCst), 0, "no leg was minted");
     assert_eq!(asked.load(Ordering::SeqCst), 1, "no queryable was asked");

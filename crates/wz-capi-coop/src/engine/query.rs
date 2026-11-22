@@ -247,7 +247,12 @@ impl<'a> OwnFinalHold<'a> {
         holds: &'a Mutex<FinalHolds>,
         rid: wz_session_core::wire_id::RequestId,
     ) -> Option<Self> {
-        lock(holds).take(LOCAL_QUERY, rid).then_some(Self {
+        // The table's lock is let go of before a hold is made, and a hold is made only for a row
+        // taken: a hold's drop locks the table to give its row back, so one dropped under the
+        // lock would wait on it, and one made for a refused row would give back a row it never
+        // took.
+        let taken = lock(holds).take(LOCAL_QUERY, rid);
+        taken.then(|| Self {
             holds: Some(holds),
             rid,
         })
@@ -576,5 +581,49 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopH
         if let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) {
             engine.answer(generation, rid, ReplyStage::new(), true);
         }
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "local-queryable"))]
+mod tests {
+    //! The row of the plane's held Finals a get of the session's own takes, refused when every
+    //! row is taken.
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Run `body` on a thread of its own and wait at most five seconds for what it returns: a take
+    /// that waits on the lock it holds fails here by name instead of holding the run for ever.
+    fn within_five_seconds<R: Send + 'static>(
+        what: &str,
+        body: impl FnOnce() -> R + Send + 'static,
+    ) -> R {
+        let (done, outcome) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(body());
+        });
+        outcome
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what} did not return within five seconds"))
+    }
+
+    /// A table of one row refuses a second get's row and returns at once, leaving the first row
+    /// held; once the first is let go of, the row takes the next. The CONTROL is the first take.
+    #[test]
+    fn a_full_table_refuses_the_row_and_keeps_the_one_held() {
+        let (first, refused, still_full, next) = within_five_seconds("a refused take", || {
+            let holds = Mutex::new(FinalHolds::holding(1));
+            let first = OwnFinalHold::take(&holds, 1);
+            let refused = OwnFinalHold::take(&holds, 2).is_none();
+            let still_full = OwnFinalHold::take(&holds, 3).is_none();
+            let held = first.is_some();
+            drop(first);
+            let next = OwnFinalHold::take(&holds, 4).is_some();
+            (held, refused, still_full, next)
+        });
+        assert!(first, "CONTROL: the one row is taken");
+        assert!(refused, "every row taken: refused");
+        assert!(still_full, "the refusal gave back no row it never took");
+        assert!(next, "the row the first let go of takes the next");
     }
 }
