@@ -26674,7 +26674,16 @@ _runci_build_capi_c_for_oracle() {
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
 
+# THE SHARED-MEMORY LEGS NEED LOCKABLE MEMORY, as E18's do and for the same reason: a session's
+# provider is a POSIX pool `mlock`ed whole (`commons/zenoh-shm/src/shm/unix.rs` @
+# `unsafe { mlock(ptr, len.get()) }?;` upstream, and wz's own copy of it), 16 MiB by default, and a reader locks the segment it opens too. A hosted
+# runner grants 8 MiB, so the sender's pool failed there, its provider read ERROR and every put of
+# the promotion differential went plain (run 45051019628, and every run since the test waits on
+# the provider's state); every build host grants GiB. Raised here, so the lane carries its own
+# precondition wherever it runs.
 layer_c1cc_api_compat_c() {
+    uring_raise_memlock $((64 * 1024 * 1024))
+    echo "  C1cc: RLIMIT_MEMLOCK soft=$(uring_soft_memlock_bytes) hard=$(uring_hard_memlock_bytes) bytes (-1 = unlimited)"
     _runci_build_capi_c_for_oracle C1cc || return 1
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     (cd crates && cargo clippy -p wz-capi-core --all-targets --quiet -- -D warnings) || return 1
