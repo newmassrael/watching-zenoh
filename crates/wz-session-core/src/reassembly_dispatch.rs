@@ -797,6 +797,57 @@ where
         }
     }
 
+    /// [`Self::with_staging`] built where `place` lies, and lent back: each slot is made in its
+    /// own place in the array, so the Router (one slot machine per slot, kilobytes in all) is never
+    /// a value on its maker's stack and is not copied into the place it ends in. What a session
+    /// that keeps its Router inside a longer-lived value (its pump) builds it with.
+    ///
+    /// `place` is overwritten without dropping what it held. A panic in the middle leaves it
+    /// partly written and not dropped: a leak, and on the profiles that build in place
+    /// (`panic = "abort"` on a board) not even that.
+    // Not inlined, for the stack: a slot is built in this frame before it is written, and inlined
+    // that frame would be its caller's for as long as the caller runs.
+    #[inline(never)]
+    pub fn init_in(
+        place: &mut core::mem::MaybeUninit<Self>,
+        config: ReassemblyConfig,
+        staging: S,
+    ) -> &mut Self {
+        use core::ptr::addr_of_mut;
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (it is `place`). An array of `SLOTS`
+        // slots has the layout of `SLOTS` consecutive slots, so each is written once through its
+        // own address, as is every other field; `every_field_is_written` holds the list of fields
+        // to the struct's, so `place` is fully written before it is lent back.
+        unsafe {
+            let slots = addr_of_mut!((*at).slots).cast::<Slot<SLOTS, CAP, S>>();
+            for index in 0..SLOTS {
+                slots.add(index).write(Slot::new());
+            }
+            addr_of_mut!((*at).config).write(config);
+            addr_of_mut!((*at).staging).write(staging);
+            addr_of_mut!((*at).capacity_refusals).write(0);
+            addr_of_mut!((*at).opened).write(0);
+            addr_of_mut!((*at).displaced).write(None);
+            place.assume_init_mut()
+        }
+    }
+
+    /// A field added to the Router and not written by [`Self::init_in`] would be read
+    /// uninitialised. This destructures the struct with no `..`, so adding a field without naming
+    /// it here (and so without writing it there) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(router: Self) {
+        let Self {
+            slots: _,
+            config: _,
+            staging: _,
+            capacity_refusals: _,
+            opened: _,
+            displaced: _,
+        } = router;
+    }
+
     /// The open chain the last ingest ended for a fragment that was not of
     /// it, if it ended one.
     ///
@@ -1994,6 +2045,50 @@ mod tests {
         assert_eq!(d.capacity_refusals(), 1);
         assert_eq!(d.active_chains(), 0);
         assert_eq!(d.staging_available(), 2, "both buffers are free again");
+    }
+
+    /// A Router built in its place serves as one built by value does: a chain of the lent bound
+    /// reassembles, one past it is refused and counted, and the buffers it claimed go back to
+    /// their table when it is dropped where it lies.
+    #[test]
+    fn a_router_built_in_place_serves_as_one_built_by_value() {
+        use crate::chain_staging::LentStaging;
+        use core::mem::MaybeUninit;
+
+        let cells = lent_cells(8, 2);
+        let mut place = MaybeUninit::<ReassemblyDispatcher<4, 64, LentStaging<4, 64>>>::uninit();
+        let d = ReassemblyDispatcher::init_in(
+            &mut place,
+            ReassemblyConfig::new(2, 5_000),
+            LentStaging::claim(&cells, 2),
+        );
+        assert_eq!(
+            (
+                d.active_chains(),
+                d.capacity_refusals(),
+                d.staging_available()
+            ),
+            (0, 0, 2),
+            "every slot free, nothing refused, both buffers on hand"
+        );
+        assert_eq!(d.max_message_bytes(), 64);
+        let mut out = None;
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |m| {
+            out = Some(m.to_vec())
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        assert_eq!(out.as_deref(), Some(&b"aaaabbbb"[..]));
+        d.ingest(frag(PEER_A, true, 3, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 4, 0, b"bbbbb"), MASK, 0, |_| {
+            panic!("past the bound, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(d.capacity_refusals(), 1);
+        assert_eq!(cells.in_use(), 2, "the Router holds the buffers it claimed");
+        // SAFETY: `init_in` wrote the whole Router into `place`, and it is dropped once.
+        unsafe { place.assume_init_drop() };
+        assert_eq!(cells.in_use(), 0, "dropped in place, it gives them back");
     }
 
     /// A lent staging serves as many chains as it claimed buffers, gives a buffer back when its

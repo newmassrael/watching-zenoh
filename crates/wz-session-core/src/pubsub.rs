@@ -1268,6 +1268,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// S9a — `peer` is the side of the registry the sending peer owns (its
     /// aliases, its interests), passed in so one table serves many sessions; a
     /// [`SubscriberRegistry`] passes its own.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<Q: Storage>(
         &mut self,

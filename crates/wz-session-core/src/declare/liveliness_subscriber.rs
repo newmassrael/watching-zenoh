@@ -1493,6 +1493,9 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
 
     /// [`Self::dispatch_iteration_event`] with the claim filter of
     /// [`Self::dispatch_messages_unclaimed`].
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event_unclaimed<'a, Q: Storage>(
         &mut self,

@@ -734,6 +734,11 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
     /// peers declare, counted by the matching verdicts beside this face's own.
+    // Each plane's fan below is a function of its own and not inlined here: inlined, the
+    // temporaries of every plane (the views and records each decodes) are laid out in this one
+    // frame, which the compiler does not overlap reliably, and the frame is held on every event
+    // however few planes the event concerns. Out of line, the stack under this call is this frame
+    // and the one plane running.
     #[inline(never)]
     pub fn dispatch_event_among<
         R: ReplySink,

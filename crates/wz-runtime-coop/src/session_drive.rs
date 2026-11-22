@@ -1070,6 +1070,31 @@ impl<
         Self::build(runtime, link, actions, clock, config, reasm)
     }
 
+    /// [`Self::with_router`] built in `place` and lent back, its Router made in its own field by
+    /// `make_router`: neither the pump nor the Router (kilobytes: one slot machine per slot) is a
+    /// value on any stack on the way, where `with_router` takes the Router by value and the pump
+    /// is returned by value. What a task that keeps its pump in its own future builds it with
+    /// (`spawn_session_with_router`).
+    ///
+    /// `make_router` writes the Router in the place it is handed and lends it back, which safe
+    /// code does only by writing it there ([`MaybeUninit::write`]); one that lends back anything
+    /// else is refused with a panic, before the pump is used. `place` is overwritten without
+    /// dropping what it held.
+    #[cfg(feature = "reassembly")]
+    pub fn with_router_in(
+        place: &mut MaybeUninit<Self>,
+        runtime: CoopRuntime<C, D>,
+        link: L,
+        actions: SessionHandle<C, D>,
+        clock: CoopTime<C>,
+        config: SessionDriveConfig,
+        make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
+    ) -> &mut Self {
+        Self::build_in(place, runtime, link, actions, clock, config, make_router);
+        // SAFETY: `build_in` wrote every field of the pump into `place`.
+        unsafe { place.assume_init_mut() }
+    }
+
     /// What `Self::new` and [`Self::with_reassembly_arena`] share: the pump as a value, made by
     /// [`Self::build_in`] in a place of its own.
     #[inline(always)]
@@ -1090,7 +1115,7 @@ impl<
             clock,
             config,
             #[cfg(feature = "reassembly")]
-            reasm,
+            |slot| slot.write(reasm),
         );
         // SAFETY: `build_in` wrote every field of the pump into `place`.
         unsafe { place.assume_init() }
@@ -1107,6 +1132,10 @@ impl<
     ///
     /// A panic in the middle leaves `place` partly written, and it is not dropped: a leak, and
     /// on the profiles that build this (`panic = "abort"` on a board) not even that.
+    ///
+    /// With `reassembly` the Router is written in its field by `make_router`, which lends it back
+    /// from there: a maker that lends back anything but the place it was handed has not written
+    /// it, and is refused with a panic.
     #[inline(never)]
     fn build_in(
         place: &mut MaybeUninit<Self>,
@@ -1115,7 +1144,7 @@ impl<
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        #[cfg(feature = "reassembly")] reasm: R,
+        #[cfg(feature = "reassembly")] make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) {
         let SessionDriveConfig {
             timeouts,
@@ -1154,7 +1183,15 @@ impl<
             core::ptr::addr_of_mut!((*at).deadline_tracker)
                 .write(HandshakeDeadlineTracker::new(timeouts));
             #[cfg(feature = "reassembly")]
-            core::ptr::addr_of_mut!((*at).reasm).write(reasm);
+            {
+                let router = &mut *core::ptr::addr_of_mut!((*at).reasm).cast::<MaybeUninit<R>>();
+                let field: *const R = router.as_ptr();
+                let made: *const R = make_router(router);
+                assert!(
+                    core::ptr::eq(made, field),
+                    "the Router is written in the field it was handed"
+                );
+            }
             #[cfg(not(feature = "reassembly"))]
             core::ptr::addr_of_mut!((*at)._router).write(core::marker::PhantomData);
             #[cfg(feature = "rx-in-place")]
@@ -1504,27 +1541,37 @@ where
     ))
 }
 
-/// [`spawn_session`] over a reassembly Router its maker built (`SessionPump::with_router`): a
-/// session whose fragment chains stage into buffers its session's arena lent.
+/// [`spawn_session`] over a reassembly Router its maker builds: a session whose fragment chains
+/// stage into buffers its session's arena lent.
+///
+/// The pump is built in the task's own future when the task first runs
+/// ([`SessionPump::with_router_in`]), and `make_router` writes the Router in the pump's field, so
+/// neither is moved through the stack of the call that opens the session; only the maker, which
+/// holds what the Router is made of, is. The pump is dropped with the task, whether the session
+/// ended or the task was dropped before.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub fn spawn_session_with_router<C, L, R, F>(
+pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     link: L,
     actions: SessionHandle<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
-    reasm: R,
+    make_router: M,
     mut on_event: F,
 ) -> CoopLocalJoinHandle<DriverOutcome>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: PumpRouter + 'static,
+    M: FnOnce(&mut MaybeUninit<R>) -> &mut R + 'static,
     F: FnMut(IterationEvent<'_, '_>) + 'static,
 {
     let runtime = local.runtime().clone();
     local.spawn_local(async move {
-        let mut pump = SessionPump::with_router(runtime, link, actions, clock, config, reasm);
+        let mut place = InPlace::<SessionPump<C, L, dyn BoxedLinkDriver, R>>::empty();
+        let pump = place.build(|slot| {
+            SessionPump::with_router_in(slot, runtime, link, actions, clock, config, make_router)
+        });
         loop {
             if let Some(outcome) = pump.step(&mut on_event) {
                 return outcome;
@@ -1532,6 +1579,55 @@ where
             yield_now().await;
         }
     })
+}
+
+/// A value built where its holder lies and dropped with it: the place a task's future keeps its
+/// pump in, so the pump is written in the future's own memory and not moved into it. Before it is
+/// built it holds nothing, and dropping it drops nothing.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+struct InPlace<T> {
+    value: MaybeUninit<T>,
+    built: bool,
+}
+
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+impl<T> InPlace<T> {
+    /// A place with nothing in it.
+    const fn empty() -> Self {
+        Self {
+            value: MaybeUninit::uninit(),
+            built: false,
+        }
+    }
+
+    /// Have `make` write the value in this place and lend it back, and lend it on. A maker that
+    /// lends back anything but the place it was handed has not written it there, and is refused
+    /// with a panic; the place then holds nothing still. Built once: the place is the value's for
+    /// as long as the holder lives.
+    fn build(&mut self, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> &mut T {
+        debug_assert!(!self.built, "a place is built once");
+        let place: *const T = self.value.as_ptr();
+        let made: *const T = make(&mut self.value);
+        assert!(
+            core::ptr::eq(made, place),
+            "the value is written in the place it was handed"
+        );
+        self.built = true;
+        // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing a
+        // `T` there (`MaybeUninit::write`).
+        unsafe { self.value.assume_init_mut() }
+    }
+}
+
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+impl<T> Drop for InPlace<T> {
+    fn drop(&mut self) {
+        if self.built {
+            // SAFETY: `built` is set only once `build` saw the value written here, and the value
+            // is dropped here alone, once.
+            unsafe { self.value.assume_init_drop() };
+        }
+    }
 }
 
 // ───────────── the pump in a cell of a table the image declares ─────────────
@@ -1852,7 +1948,7 @@ impl<
                 clock,
                 config,
                 #[cfg(feature = "reassembly")]
-                reasm,
+                |slot| slot.write(reasm),
             );
         }
         Ok(PumpRef { cell })
@@ -2245,6 +2341,68 @@ mod wake_budget_tests {
         );
     }
 
+    /// A session spawned over a Router its maker writes in the pump: the maker runs once, when the
+    /// task first runs and not before; the pump it was written in steps its link; and the pump,
+    /// with the handle to the session it holds, goes with its task when the task is dropped.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_session_spawned_over_a_router_made_in_place_runs_and_goes_with_its_task() {
+        use crate::reassembly_rx::{mcu_reassembly_config, CoopReassembly};
+        use core::cell::Cell;
+        use wz_session_core::chain_staging::BuildsOwnStorage;
+
+        let runtime = CoopRuntime::new(Stopped);
+        let local = CoopLocalSet::new(&runtime);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let link = Rc::new(Recording::default());
+        let made = Rc::new(Cell::new(0u32));
+        let counted = Rc::clone(&made);
+        let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let before = Rc::strong_count(&actions);
+        let task = spawn_session_with_router(
+            &local,
+            Rc::clone(&link),
+            actions.clone(),
+            clock,
+            SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+            move |place| {
+                counted.set(counted.get() + 1);
+                CoopReassembly::init_in(
+                    place,
+                    mcu_reassembly_config(&policy),
+                    BuildsOwnStorage::new(),
+                )
+            },
+            |_event: IterationEvent<'_, '_>| {},
+        );
+        assert_eq!(made.get(), 0, "nothing is built before the task runs");
+        local.run_until_idle();
+        assert_eq!(
+            made.get(),
+            1,
+            "the Router is made once, when the task first runs"
+        );
+        assert!(
+            !link.budgets.borrow().is_empty(),
+            "the pump built in the task stepped its link"
+        );
+        let running = Rc::strong_count(&actions);
+        assert!(running > before, "the pump holds the handle to its session");
+        task.abort();
+        local.run_until_idle();
+        assert_eq!(made.get(), 1, "a dropped task makes nothing more");
+        assert!(
+            Rc::strong_count(&actions) < running,
+            "the pump, and the handles it held, went with its task"
+        );
+    }
+
     #[test]
     fn the_application_layers_deadline_bounds_what_the_link_may_wait() {
         // An idle acceptor with no peer has no deadline of its own nearer than its handshake's.
@@ -2260,5 +2418,43 @@ mod wake_budget_tests {
         );
         // A deadline that is now is a wait of nothing.
         assert_eq!(waited(Some(0)), 0);
+    }
+}
+
+#[cfg(all(test, feature = "reassembly", not(feature = "session-slot")))]
+mod in_place_tests {
+    use super::InPlace;
+    use alloc::boxed::Box;
+    use core::cell::Cell;
+
+    /// Counts its drops in the cell it was made with.
+    struct Counted<'a>(&'a Cell<u32>);
+
+    impl Drop for Counted<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// The value is written where the place lies, lent on, and dropped once, with the place.
+    #[test]
+    fn a_value_built_in_place_is_dropped_once_with_its_holder() {
+        let drops = Cell::new(0);
+        {
+            let mut place = InPlace::empty();
+            let value = place.build(|slot| slot.write(Counted(&drops)));
+            assert_eq!(value.0.get(), 0, "built and lent, not dropped");
+        }
+        assert_eq!(drops.get(), 1, "dropped once, with the place");
+    }
+
+    /// A maker that lends back a value it did not write in the place is refused, and the place,
+    /// not taken as built, drops nothing as the refusal unwinds through it.
+    #[test]
+    #[should_panic(expected = "the value is written in the place it was handed")]
+    fn a_maker_that_lends_back_another_value_is_refused() {
+        let elsewhere: &'static mut u32 = Box::leak(Box::new(7));
+        let mut place = InPlace::<u32>::empty();
+        let _ = place.build(|_slot| elsewhere);
     }
 }

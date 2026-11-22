@@ -1216,6 +1216,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// [`Self::dispatch_declare_with_local`]. This is the entry point the
     /// production observer fan uses, so both runtime profiles get the
     /// local half without either of them mirroring the local table.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a, Q: Storage>(
         &mut self,

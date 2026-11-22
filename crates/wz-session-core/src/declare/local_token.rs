@@ -537,6 +537,9 @@ impl<P: Storage> LocalTokenRegistry<P> {
     /// Non-`FramePayload` events (Lease branch, non-poll outcomes) are
     /// no-ops. `alloc`-gated (consumes owned messages). Returns the refused
     /// chain count of [`Self::dispatch_messages`].
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<'a, Q: Storage>(
         &self,

@@ -1316,6 +1316,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
     /// R311y797 — [`Self::dispatch_iteration_event`] threading the
     /// session-local half; the entry point the observer fan uses, so an
     /// inbound frame's declarations re-evaluate against BOTH halves.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     pub fn dispatch_iteration_event_with_local<'a, Q: Storage>(
         &mut self,
