@@ -348,8 +348,9 @@ pub(crate) fn push_body(
     // Written straight from the owned fields, as `request_body` is. A borrowed projection holds its
     // lists as the owner's profile holds them, so at `Heap` it would allocate a vector for the
     // extension chain on every send (measured: one allocation and 40 bytes a subscriber on the
-    // router's forward).
-    move |sink| push.encode(sink)
+    // router's forward). Through the source a router's fan-out writes its leaves' Push with, so an
+    // image links one Push writer for both.
+    move |sink| crate::encoded_push::PushAs::sent(push).write(sink)
 }
 
 /// The bytes `push` encodes to: what a frame buffer for it needs to reserve. It is the generated
@@ -362,17 +363,13 @@ pub(crate) fn push_body(
 /// Exact matters, because the lend path asks a link for a slot of this size (`send_lent`) and a slot
 /// too small is a refused send.
 ///
-/// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`) and the
-/// multicast group send (`multicast_tx_push`, behind `session-multicast`). Inside this crate alone only
-/// the second is reached: the unicast methods are `pub` entry points that the runtime crates call, and a
-/// build of this crate with the Push codec and `alloc` and none of `session-multicast` has no caller of
-/// its own (measured, with `codec-request`, `codec-response`, `declare-subscriber` and `liveliness-token`
-/// added one at a time: dead in each). The allowance is for that build and is not a decision that the
-/// function is optional.
+/// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`), the
+/// multicast group send (`multicast_tx_push`, behind `session-multicast`) and
+/// [`encode_frame_with_push_qos`], which measures through it so that every Push is counted by the one
+/// source the send writes it through.
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
-#[cfg_attr(not(feature = "session-multicast"), allow(dead_code))]
 pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
-    wz_codecs::push::PushWire::measure(push).len()
+    crate::encoded_push::PushAs::sent(push).encoded_len()
 }
 
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
@@ -701,7 +698,7 @@ pub fn encode_frame_with_push_qos(
     encode_frame_envelope(
         sn,
         frame_flags(reliable),
-        wz_codecs::push::PushWire::measure(&push).len(),
+        push_capacity_hint(&push),
         ext_qos,
         push_body(&push),
     )

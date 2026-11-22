@@ -27,13 +27,14 @@ use wz_codecs::msg_del::MsgDelSource;
 use wz_codecs::msg_put::MsgPutSource;
 use wz_codecs::push::{PushSource, PushVariantSource, PushWire};
 use wz_codecs::wireexpr::{WireexprSource, WireexprVariantSource, WireexprWire};
-use wz_codecs::wireexpr_local::WireexprLocalParts;
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocalParts;
+use wz_codecs::wireexpr_local::{WireexprLocalParts, WireexprLocalSource};
 
 use crate::ext_header::ext_eid;
 use crate::ext_nodeid::NODEID_EXT_HEADER;
 use crate::sample::QosLevel;
-use crate::wire::parts::WireexprOwned;
+use crate::wire::parts::{
+    WireexprLocalOwned, WireexprNonlocalOwned, WireexprOwned, WireexprOwnedVariant,
+};
 use crate::wire::PushOwned;
 use crate::wireexpr_resolve::id_and_suffix;
 
@@ -48,38 +49,33 @@ const FLAG_PUSH_M: u8 = 0x40;
 #[derive(Debug, Clone, Copy)]
 pub struct LeafPush<'a> {
     received: &'a PushOwned,
-    key: LeafKey<'a>,
+    key: KeyAs<'a>,
     keyexpr: &'a str,
-}
-
-/// The key expression a leaf is sent.
-#[derive(Debug, Clone, Copy)]
-enum LeafKey<'a> {
-    /// The received Push's own, already a literal, kept as it came as `reliteralize_push` keeps it.
-    Own(&'a WireexprOwned),
-    /// The key the router resolved, as a literal.
-    Literal(WireexprLocalParts<'a>),
+    rekeyed: bool,
 }
 
 impl<'a> LeafPush<'a> {
     /// `received` as it is delivered to a leaf under `keyexpr`, the key the router resolved it to.
-    /// A Push whose key is already a literal keeps it, and `keyexpr` is not read for its bytes.
-    /// `LengthOutOfRange` for a key past the protocol's `u16` length, which no literal carries.
+    /// A Push whose key is already a literal keeps it, as `reliteralize_push` keeps it, and
+    /// `keyexpr` is not read for its bytes. `LengthOutOfRange` for a key past the protocol's `u16`
+    /// length, which no literal carries.
     pub fn new(received: &'a PushOwned, keyexpr: &'a str) -> Result<Self, CodecError> {
-        let (key, keyexpr) = match id_and_suffix(&received.keyexpr.body) {
-            (0, own) => (LeafKey::Own(&received.keyexpr), own.unwrap_or_default()),
+        let (key, keyexpr, rekeyed) = match id_and_suffix(&received.keyexpr.body) {
+            (0, own) => (KeyAs::of(&received.keyexpr), own.unwrap_or_default(), false),
             _ => (
-                LeafKey::Literal(WireexprLocalParts {
+                KeyAs::Local(LocalKey::Literal(WireexprLocalParts {
                     id: 0,
                     suffix: Some(crate::codec_owned::sent_suffix(keyexpr)?),
-                }),
+                })),
                 keyexpr,
+                true,
             ),
         };
         Ok(Self {
             received,
             key,
             keyexpr,
+            rekeyed,
         })
     }
 
@@ -90,8 +86,7 @@ impl<'a> LeafPush<'a> {
 
     /// Whether the received Push is already what a leaf is sent: a literal that names no source.
     pub fn is_as_received(&self) -> bool {
-        matches!(self.key, LeafKey::Own(_))
-            && !crate::push_routing_context::push_names_a_source(self.received)
+        !self.rekeyed && !crate::push_routing_context::push_names_a_source(self.received)
     }
 
     /// The message a leaf is sent, made as a copy of the received Push: re-keyed and its source
@@ -103,21 +98,19 @@ impl<'a> LeafPush<'a> {
     }
 
     /// The bytes [`Self::to_push`]'s message encodes to, written from the received Push without
-    /// making the message.
+    /// making the message, through the writer a session frames its own Push with (`PushAs`).
     pub fn encode(&self) -> EncodedPush {
-        match self.key {
-            LeafKey::Own(own) => self.encode_under(own),
-            LeafKey::Literal(local) => self.encode_under(LiteralKey(local)),
-        }
-    }
-
-    fn encode_under<K: WireexprSource>(&self, key: K) -> EncodedPush {
-        let view = LeafView {
+        let view = PushAs {
             push: self.received,
-            key,
+            key: self.key,
+            without_source: true,
         };
-        let mut bytes = Vec::with_capacity(PushWire::measure(&view).len());
-        let Ok(()) = PushWire::encode_source(&view, &mut VecSink::new(&mut bytes));
+        let mut bytes = Vec::with_capacity(view.encoded_len());
+        {
+            let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
+            view.write(&mut sink)
+                .expect("a Vec grows, so its sink is infallible");
+        }
         let tail_at = 1 + WireexprWire::measure(&view.key).len();
         #[cfg(feature = "transport-stats")]
         let keyexpr_at = tail_at - self.keyexpr.len()..tail_at;
@@ -153,31 +146,99 @@ fn carries_shared_memory(push: &PushOwned) -> bool {
     }
 }
 
-/// A literal key expression, id 0 and the key as its suffix, as the codec's writer reads one.
-struct LiteralKey<'a>(WireexprLocalParts<'a>);
+/// The key expression a Push is written under: the one it holds, or a literal in its place.
+#[derive(Debug, Clone, Copy)]
+enum KeyAs<'a> {
+    /// An id of the receiver's mapping, as the Push holds it.
+    Nonlocal(&'a WireexprNonlocalOwned),
+    /// An id of the sender's mapping or a literal.
+    Local(LocalKey<'a>),
+}
 
-impl WireexprSource for LiteralKey<'_> {
+/// The sender-mapped arm of a [`KeyAs`]: one type for both, so that the arm's writer is linked
+/// once.
+#[derive(Debug, Clone, Copy)]
+enum LocalKey<'a> {
+    /// As the Push holds it.
+    Owned(&'a WireexprLocalOwned),
+    /// A literal the router resolved, in place of an alias.
+    Literal(WireexprLocalParts<'a>),
+}
+
+impl<'a> KeyAs<'a> {
+    /// `keyexpr` as the Push holds it.
+    fn of(keyexpr: &'a WireexprOwned) -> Self {
+        match &keyexpr.body {
+            WireexprOwnedVariant::WireexprNonlocal(arm) => Self::Nonlocal(arm),
+            WireexprOwnedVariant::WireexprLocal(arm) => Self::Local(LocalKey::Owned(arm)),
+        }
+    }
+}
+
+impl WireexprSource for KeyAs<'_> {
     fn body(
         &self,
     ) -> WireexprVariantSource<
         '_,
         impl wz_codecs::wireexpr_nonlocal::WireexprNonlocalSource,
-        impl wz_codecs::wireexpr_local::WireexprLocalSource,
+        impl WireexprLocalSource,
     > {
-        // A literal is never in the receiver's mapping: the other arm is named only for its type.
-        WireexprVariantSource::<WireexprNonlocalParts<'_>, WireexprLocalParts<'_>>::WireexprLocal(
-            &self.0,
-        )
+        match self {
+            KeyAs::Nonlocal(arm) => WireexprVariantSource::WireexprNonlocal(*arm),
+            KeyAs::Local(arm) => WireexprVariantSource::WireexprLocal(arm),
+        }
     }
 }
 
-/// The received Push as the codec's writer reads the message a leaf is sent: `key` in place of
-/// its key expression, and its extension chain without the routing source. Every other field is
-/// the received Push's own, and the header's `N`, `M` and `Z` flags are derived by the writer from
+impl WireexprLocalSource for LocalKey<'_> {
+    fn id(&self) -> u16 {
+        match self {
+            LocalKey::Owned(arm) => WireexprLocalSource::id(*arm),
+            LocalKey::Literal(parts) => parts.id,
+        }
+    }
+    fn suffix(&self) -> Option<sce_forge_runtime::codec::Text<'_, 65535>> {
+        match self {
+            LocalKey::Owned(arm) => WireexprLocalSource::suffix(*arm),
+            LocalKey::Literal(parts) => parts.suffix,
+        }
+    }
+}
+
+/// A Push as the codec's writer reads it: a session's own Push as it holds it ([`Self::sent`],
+/// what `frame_encode::push_body` writes), or the message a router's leaf is sent, its key in
+/// place of the one received and its extension chain without the routing source
+/// ([`LeafPush::encode`]). The header's `N`, `M` and `Z` flags are derived by the writer from
 /// the fields it is handed.
-struct LeafView<'p, K> {
-    push: &'p PushOwned,
-    key: K,
+///
+/// One type for both, and not a source per caller, because the writer is generic over its source:
+/// each source type would link a copy of the Push's writer and of its measure.
+#[derive(Clone, Copy)]
+pub(crate) struct PushAs<'a> {
+    push: &'a PushOwned,
+    key: KeyAs<'a>,
+    without_source: bool,
+}
+
+impl<'a> PushAs<'a> {
+    /// `push` as it is: its own key expression and its whole extension chain.
+    pub(crate) fn sent(push: &'a PushOwned) -> Self {
+        Self {
+            push,
+            key: KeyAs::of(&push.keyexpr),
+            without_source: false,
+        }
+    }
+
+    /// The bytes the Push encodes to, counted by the generated codec, so exact.
+    pub(crate) fn encoded_len(&self) -> usize {
+        PushWire::measure(self).len()
+    }
+
+    /// Write the Push into `sink`.
+    pub(crate) fn write(&self, sink: &mut crate::tx_buf::TxSink<'_>) -> Result<(), CodecError> {
+        PushWire::encode_source(self, sink)
+    }
 }
 
 /// Whether `header` is the routing source's, by the extension's identity, as
@@ -188,7 +249,7 @@ fn names_the_source(header: u8) -> bool {
 
 // The signatures are the codec's trait's.
 #[allow(clippy::type_complexity)]
-impl<K: WireexprSource> PushSource for LeafView<'_, K> {
+impl PushSource for PushAs<'_> {
     fn header(&self) -> u8 {
         self.push.header
     }
@@ -199,9 +260,14 @@ impl<K: WireexprSource> PushSource for LeafView<'_, K> {
         &self,
     ) -> Option<BoundedIter<impl Iterator<Item = impl ExtEntrySource> + Clone, { usize::MAX }, 1>>
     {
+        let without_source = self.without_source;
         // A chain left empty is no chain, as the edit that takes the source out leaves it.
         let chain = self.push.extensions.as_deref()?;
-        BoundedIter::new(chain.iter().filter(|entry| !names_the_source(entry.header)))
+        BoundedIter::new(
+            chain
+                .iter()
+                .filter(move |entry| !(without_source && names_the_source(entry.header))),
+        )
     }
     fn body(
         &self,
@@ -565,6 +631,41 @@ mod tests {
                     "{case}, under {form}"
                 );
             }
+        }
+    }
+
+    /// A session's own Push is written through the same source as a leaf's, as it holds itself:
+    /// its key in either mapping arm, with or without a suffix, and its whole extension chain, the
+    /// routing source included. Turned red by a sent Push whose source is left out, whose key arm
+    /// is read as the other one, or whose count differs from what is written.
+    #[test]
+    fn a_sent_push_is_written_as_it_holds_itself() {
+        let mut nonlocal = build_push_aliased(5, Some("/x"), PAYLOAD).expect("an aliased push");
+        nonlocal.keyexpr = crate::wire::parts::WireexprOwned {
+            body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
+                id: 5,
+                suffix_len: Some(2),
+                suffix: Some(crate::wire::wire_string("/x").expect("a short suffix")),
+            }),
+        };
+        let mut pushes: Vec<(String, PushOwned)> = received_puts()
+            .into_iter()
+            .map(|(case, push, _)| (case, push))
+            .collect();
+        pushes.push((String::from("receiver-mapped id"), nonlocal.clone()));
+        pushes.push((
+            String::from("receiver-mapped id, source"),
+            with_chain(nonlocal, vec![qos_entry(), source_entry()]),
+        ));
+        for (case, push) in pushes {
+            let sent = PushAs::sent(&push);
+            let mut bytes: Vec<u8> = Vec::new();
+            {
+                let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
+                sent.write(&mut sink).expect("a Vec grows");
+            }
+            assert_eq!(bytes, push.encode_to_vec(), "{case}");
+            assert_eq!(sent.encoded_len(), bytes.len(), "{case}");
         }
     }
 
