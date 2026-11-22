@@ -4,9 +4,12 @@
 //! The channel as a stream over a stream: [`TlsStream`] is a [`StreamSocket`] over another one,
 //! [`TlsDial`] the [`StreamDial`] that connects the stream under it and completes the handshake
 //! before the link sees a byte, and [`TlsListener`] the [`StreamListen`] that takes a connection
-//! and completes the handshake as the accepting end. The stream link's framing, loss handling
-//! and lent-slot send (`wz_runtime_coop::stream_link`) stay written once: they run over this
-//! stream as over a plain connection.
+//! and completes the handshake as the accepting end. A dial begun without waiting
+//! ([`StreamDial::dial_started`]) runs the same handshake one step for each ask of
+//! [`StreamSocket::connected`], so whoever holds the session while it asks never waits on the
+//! peer's records. The stream link's framing, loss handling and lent-slot send
+//! (`wz_runtime_coop::stream_link`) stay written once: they run over this stream as over a plain
+//! connection.
 //!
 //! Who the peer is depends on the policy the dial or the listener was made with:
 //!
@@ -82,6 +85,19 @@ pub struct TlsStream<S: StreamSocket + 'static> {
     peer_zid: Option<Zid>,
     /// Whether that zid is the peer's credential (pinned), or only the key's name (chain).
     pinned: bool,
+    /// How far a stream begun without waiting is in its opening; `Open` for one handed out whole.
+    opening: Opening,
+}
+
+/// Where a [`TlsStream`] is in its opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opening {
+    /// The stream under the channel is still connecting.
+    Connecting,
+    /// Connected; the handshake has not finished.
+    Handshaking,
+    /// The handshake is done and the peer is known.
+    Open,
 }
 
 impl<S: StreamSocket + 'static> TlsStream<S> {
@@ -167,6 +183,40 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
             self.lower.socket.writability()
         }
+    }
+
+    /// A stream begun without waiting connects the stream under it, then runs one step of its
+    /// handshake for each ask: a step that waits for the peer's records (or for room) answers
+    /// `Ok(false)` and is taken up again at the next ask. The stream keeps no deadline of its
+    /// own; whoever asks gives the dial up (the engine at its open deadline), and dropping the
+    /// stream ends the connection.
+    fn connected(&mut self) -> Result<bool, Self::Error> {
+        if self.opening == Opening::Connecting {
+            match self.lower.socket.connected() {
+                Ok(false) => return Ok(false),
+                Ok(true) => self.opening = Opening::Handshaking,
+                Err(e) => return Err(TlsStreamError::Transport(e)),
+            }
+        }
+        if self.opening == Opening::Handshaking {
+            match self.session.get_mut().handshake(&self.lower) {
+                Ok(Step::Done(())) => {}
+                Ok(Step::Wait(_)) => return Ok(false),
+                Err(e) => return Err(self.transport_error(e)),
+            }
+            match peer_of(self.session.get_mut(), self.pinned) {
+                Ok(peer_zid) => {
+                    self.peer_zid = peer_zid;
+                    self.opening = Opening::Open;
+                }
+                // Done, but the peer is not who the policy needs.
+                Err(e) => {
+                    self.lower.socket.shutdown();
+                    return Err(TlsStreamError::Tls(e));
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
@@ -471,16 +521,18 @@ fn open_error(e: TlsError) -> LinkOpenError {
     }
 }
 
-/// The zid a finished handshake names the peer by, when the policy needs one.
+/// The zid a finished handshake names the peer by, when the policy needs one: a `pinned` one
+/// (`Policy::pinned`) always does.
 fn peer_of<T: Transport>(
     session: &Session<'static, T>,
-    policy: &Policy,
+    pinned: bool,
 ) -> Result<Option<Zid>, TlsError> {
-    match policy {
+    if pinned {
         // A pinned peer is known by its key: a handshake that gave none is no handshake.
-        Policy::Pinned(_) => session.peer_zid().map(Some),
+        session.peer_zid().map(Some)
+    } else {
         // A chain peer was verified by its chain; the key is only named when it presented one.
-        Policy::Chain(_) => Ok(session.peer_zid().ok()),
+        Ok(session.peer_zid().ok())
     }
 }
 
@@ -496,6 +548,7 @@ fn established<S: StreamSocket + 'static>(
         session: RefCell::new(session),
         peer_zid,
         pinned: policy.pinned(),
+        opening: Opening::Open,
     }
 }
 
@@ -533,13 +586,35 @@ where
                 }
             }
         }
-        match peer_of(&session, &self.policy) {
+        match peer_of(&session, self.policy.pinned()) {
             Ok(peer_zid) => Ok(established(lower, session, peer_zid, &self.policy)),
             Err(e) => {
                 lower.socket.shutdown();
                 Err(open_error(e))
             }
         }
+    }
+
+    /// The session is made under the policy and the connection under it begun without waiting
+    /// (the wrapped dial's `dial_started`); the stream is returned at once and completes its
+    /// handshake as it is asked ([`StreamSocket::connected`]). The [`HandshakeBudget`] bounds
+    /// the waiting [`Self::dial`] only: a begun dial is given up by whoever asks it.
+    fn dial_started(&self, to: SocketAddr) -> Result<Self::Stream, LinkOpenError> {
+        let session = self
+            .policy
+            .open::<Lower<D::Stream>>(Role::Client, Some(to.ip()))
+            .map_err(open_error)?;
+        let lower = Lower {
+            socket: self.inner.dial_started(to)?,
+            error: Cell::new(None),
+        };
+        Ok(TlsStream {
+            lower,
+            session: RefCell::new(session),
+            peer_zid: None,
+            pinned: self.policy.pinned(),
+            opening: Opening::Connecting,
+        })
     }
 
     // The trait declares the method where the runtime has its heap link layer
@@ -687,7 +762,7 @@ where
         loop {
             match pending.session.handshake(&pending.lower) {
                 Ok(Step::Done(())) => {
-                    return match peer_of(&pending.session, &self.policy) {
+                    return match peer_of(&pending.session, self.policy.pinned()) {
                         Ok(peer_zid) => Ok(Some(established(
                             pending.lower,
                             pending.session,
