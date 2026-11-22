@@ -6662,6 +6662,24 @@
       "carry_forward_bullets": [
         "Census findings W12 onward (§7.3) stay recorded and not changed; W9, W10 and W11 are fixed."
       ]
+    },
+    "Round 4599": {
+      "decision_summary": "- A host bench builds the pico ABI on the engine the shipped profile selects, and every reading and table states its engine; a table filled from another engine is refused.\n- The pico performance table now reads the coop engine; its rows start empty.",
+      "changes_bullets": [
+        "wz_config.bench_engine resolves the engine from configs/profiles/host-peer-ext.conf; PICO_CMP_ENGINE overrides it.",
+        "pico-compare.sh and perf_matrix.py build with it, stamp the build and refuse a mismatched stamp.",
+        "docs/reason-review-pins.md: the close ingress row names R4597, the round that re-read it."
+      ],
+      "verification_bullets": [
+        "wz-config selftest 449/449, perf-matrix selftest 93/93, batch-control 18/18, check-table passes on the coop table.",
+        "Fleet lanes 0 and C0 pass on the landing branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Fill the coop table from a full perf run; the first reading of 11-22 was taken from the tokio engine and is not used."
+      ]
     }
   },
   "inventory_entries": {
