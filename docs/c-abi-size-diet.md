@@ -460,9 +460,9 @@ written, and section 4's commands turn them into readings.
 | id | change | form | estimate | status |
 |----|--------|------|---------:|--------|
 | R3-a | a Put or Del with options written from its parts | both | -4K to -8K | landed |
-| R3-b | owned declarations and interests in the lend-only build | both | -3K to -6K | not done (plan below) |
+| R3-b | owned declarations and interests in the lend-only build | both | -3K to -6K | landed in round 4 (section 8) |
 | R3-c | `pubsub-source-info` only with `unstable-api` | both | -1K to -2K | landed |
-| R3-d | `FramePayload.messages` in the lend-only build | both | -1K to -3K | not done (plan below) |
+| R3-d | `FramePayload.messages` in the lend-only build | both | -1K to -3K | not done; selector corrected in section 8 |
 | R3-e1 | the policy doors and the open's resolver as `config-policy` | both | -6K to -12K | landed |
 | R3-e2 | the digest door as `conformance-digest` | both | -0.1K to -0.3K | landed |
 
@@ -522,7 +522,7 @@ their feature lists name neither capability, as the preset does.
 digests and must be regenerated (`python3 scripts/lib/wz_config.py --write`); the Kconfig file, the defconfig and
 `items_generated.rs` were written as the generator writes them, and `--check` holds all four.
 
-### R3-b and R3-d: not done, and how
+### R3-b and R3-d: the plan of round 3 (R3-b landed in round 4, section 8)
 
 R3-b. The cooperative engine declares through `send_declare_subscriber`, `send_declare_keyexpr`,
 `send_interest_kinds` and the undeclare and final sends of `session_actions`, whose `alloc` arm
@@ -575,3 +575,108 @@ The next ten, by estimated bytes, each with its lighter form:
 Together about -31K to -63K. With round 3's -12K to -25K that is not the -148,900 the 1.0x goal
 needs: the code volume of the session core's send side and tables is the other half, and the
 estimates above say where to read first, not that reading them closes the gap.
+
+## 8. Round 4: owned declarations and interests in the lend-only build, and what is left
+
+Nothing of round 4 was built or measured when this was written: the estimates are from the code,
+and section 4's commands turn them into readings. The starting figures are the brief's: no_std
+488,873 before round 3 without the link flags, and with the link flags on both arms about 435K
+against zenoh-pico's 329,664 (about 1.32x, an estimate) before round 3's three landed changes.
+
+| id | change | form | estimate | status |
+|----|--------|------|---------:|--------|
+| R3-b | declarations, retractions, answers and interests from their parts in `tx-lend-only` | both | -2K to -6K net | landed |
+| R3-d | `FramePayload.messages` of no size | both | -1K to -3K | not done; the selector is `OWNED_RECORDS` (below) |
+
+### R3-b: a lend-only session writes its control messages from their parts (landed)
+
+`refactor(session-core): Send a lend-only session's declares from parts`. The writers of
+`lent_control` and the one dispatch the session with no allocator already used
+(`dispatch_declare_lent`, `LentDeclaration`) are compiled in `tx-lend-only` too, and every
+declaration a client originates goes through them there:
+
+- a subscriber, queryable or token declaration, after the same outbound pico-safety gate the owned
+  form runs (`check_outbound_held_keyexpr`: the key resolved through the outbound mappings, as
+  `prepare_declare_*` resolves it), recorded for the reconnect replay as before;
+- a key expression's declaration and its retraction (`LentDeclaration::Keyexpr`,
+  `UndeclareKeyexpr`), unless a namespace is to decorate the key, which is done to the owned
+  declaration (`rewrites_originated_keys`, a constant `false` without `routing-namespace`);
+- the retraction of a subscriber, a queryable or a token, by its id or naming its key: the
+  `ext_keyexpr` body is the owned extension's own bytes (`declare_ext_keyexpr::ext_wireexpr_body`,
+  which `build_ext_wireexpr` now builds from), and a body the extension cannot carry falls back to
+  the id alone, as the owned builders do;
+- the answers to a peer's interest (a subscriber, a queryable, a token, the final), through
+  `send_declare_from_parts`: the owned answer is built only where something reads it, a namespace
+  (which sends the owned answer as `send_declare` does) or an installed egress policy (which is
+  asked its verdict of the owned answer before the one from parts leaves);
+- every interest a session originates (`send_interest_kinds`, the final, the liveliness
+  subscriber's with the declare `ext_qos` the owned builder stamps, the liveliness get), through
+  `dispatch_interest_lent`, which counts with the writer it sends with. An interest with neither
+  CURRENT nor FUTURE is refused with the owned builder's own error (`PresentIfMismatch`) before the
+  writer's assertion could be reached.
+
+The count of a declaration from parts in a heap build is `tx_buf::encoded_len` over the writer
+(as T11 counts the owned sends); the build with no allocator keeps its `measure`, unchanged. In
+the C ABI's preset (no `session-reconnect`, no `routing-namespace`, no egress policy installed),
+nothing reaches `dispatch_declare`, `dispatch_interest`, the owned `DeclareWire` and `InterestWire`
+encoders over the transport storage, or the `build_declare_*`, `build_undeclare_*` and
+`build_interest_*` builders of a declaration the client makes; the reconnect replay
+(`replay_one_entry`) still builds owned ones, so a build with `session-reconnect` keeps them. What
+the preset still links of the owned form: `build_declare_subscriber_reply_with_id`,
+`build_declare_final_reply` and a `DeclareOwned` drop, on the path that asks an egress policy,
+whose flag is a run-time one. Added: the lent encoders of the kinds that were sent owned before
+(`DeclKexpr`, `UndeclKexpr`, `UndeclSubscriber`, the lent `Interest`), each smaller than its owned
+twin, which holds its fields in heap storage.
+
+Held by `lent_control::tests::the_lend_only_kinds_are_written_as_their_owned_builders_write_them`
+(every new kind against the owned builder a heap session sends, bytes and arm, over ids, mapping ids
+up to `ExprId::MAX`, empty and long suffixes and every queryable info) and
+`a_lend_only_kind_refuses_and_names_as_its_builder_does`; the interest and the four existing kinds
+were already held there. The send paths themselves run under `tx-lend-only` in the C library's
+own tests (`cargo test -p wz-capi-pico --no-default-features --features engine-coop,...`, Layer
+C1p32's pico-coop leg), which declare subscribers, retract them and ask interests against a peer.
+
+Items 1 and 6 of section 7 are expected to follow from this: with no client send owned, the owned
+network-message dispatch (`send_network_message_qos_dispatch`, the probe arms of
+`try_send_network_message_qos`) has no caller in the preset, and the owned-profile codec instances
+of a Declare and an Interest have none either. The check is `nm -C` of the no_std library for
+`DeclareWire`, `InterestWire`, `dispatch_declare`, `dispatch_interest` and `build_interest`, and
+`footprint_attribution.py --scope 'DeclareWire|InterestWire|dispatch_(declare|interest)|build_(un)?declare|build_interest|drop_in_place<.*(Declare|Interest)'`
+between the two builds.
+
+### R3-d: why not, and the selector it needs
+
+The plan of section 6 made the list of no size under `rx-lent-only`. That selector is wrong: in a
+build with `rx-lent-only` the group plane still decodes owned batches into `FramePayload`
+(`multicast_rx`, the `DriverLoopOutcome::FramePayload` it builds from `parse_frame_payload_in`),
+and so does the copying receive and a reassembled chain where the receive is not in place
+(`driver_loop::reassembled_chain_outcome`). The build in which no batch carries an owned record is
+the one `driver_loop::OWNED_RECORDS` names `false` (`rx-lent-only` and `rx-lent-control`, no
+`transport-stats`, `routing-namespace`, `multicast-declarations`, `multicast-ingress-gate` or
+`transport-compression`), where `owned_records` already answers `None` and debug builds assert the
+batch empty. The change is a list type of no size under exactly that predicate, and every site that
+fills a batch in a build that predicate covers changed to make none: `reassembled_chain_outcome`,
+the copying decode of `driver_loop`, `multicast_rx`'s group path and the synthesized outcomes of
+`wz-session-mcu` (`admin_host`). An `--all-features` build has `transport-stats`, so the
+session core's own tests, which build batches with records, keep the vector. Not done here: the
+construction sites span four crates and have to be found by a build, not by reading.
+
+### The ten of section 7 after round 4
+
+| # | what | status |
+|---|------|--------|
+| 1 | owned network-message dispatch | expected gone with R3-b (no caller in the preset); to be read with `nm` |
+| 2 | per-type ABI object families | not done: the bodies that are identical across types (`loan`, `move`, `null` of one size) are candidates for LLVM's function merging, which rustc runs by default; what differs per type is `drop` and `take`, so the gain is unknown until `nm -S` reads the `_drop` and `_take` sizes |
+| 3 | formatted panics | no_std: the panic handler ignores its `PanicInfo`, so the formatting closures are dead under fat LTO; the std form is where it pays |
+| 4 | `alloc` growth paths | the no-heap work's |
+| 5 | owned declarations and interests | landed (R3-b) |
+| 6 | owned-profile codec instances | expected gone with R3-b; to be read with `nm` |
+| 7 | one-face registry | not done: `CoopEngine::attach_face` lets a client build hold more than its dial face, so a one-face form is a capability decision, not a cut |
+| 8 | outbound key mappings | the key storage work's |
+| 9 | `FramePayload.messages` | not done (above) |
+| 10 | per-limit setters | to be read with `--scope 'limit_binding|policy_binding'` after R3-e |
+
+**New estimate** (labelled, not measured): round 3 -11K to -22K and round 4 -2K to -6K on about
+435K give about 407K to 422K against 329,664, 1.23x to 1.28x. The 1.0x goal still needs -77K to
+-92K, and the code volume the next round reads first is the session core's send side and tables
+and `wz_capi_coop`.

@@ -286,7 +286,15 @@ use crate::declare::local_token::build_token_reply;
     feature = "alloc"
 ))]
 use crate::declare_build::*;
-#[cfg(feature = "declare-interest")]
+// A lend-only session writes every interest it originates from its parts (`lent_control`), so
+// there the builders are named only by the reconnect replay.
+#[cfg(all(
+    feature = "declare-interest",
+    any(
+        not(all(feature = "alloc", feature = "tx-lend-only")),
+        feature = "session-reconnect"
+    )
+))]
 use crate::interest_build::*;
 // R311y771 — `InterestKinds` named explicitly, not left to the glob above.
 // The glob is gated on `declare-interest`; the type appears in the SIGNATURE
@@ -3125,12 +3133,16 @@ enum DispatchStage {
     ReservedChain,
 }
 
-/// The declaration a session with no allocator sends, as the arguments of the writer of
-/// [`crate::lent_control`] that makes it. [`SessionLinkActions::dispatch_declare_lent`] takes one
-/// of these, so the five kinds share one dispatch and one encoder.
+/// A declaration written from its parts, as the arguments of the writer of
+/// [`crate::lent_control`] that makes it: every one a session with no allocator sends, and every
+/// one a lend-only session (`tx-lend-only`) sends, where an owned `DeclareOwned` would be built
+/// only to be encoded into the slot its link lends and dropped.
+/// [`SessionLinkActions::dispatch_declare_lent`] takes one of these, so the kinds share one
+/// dispatch and one encoder.
 #[cfg(all(
-    not(feature = "alloc"),
+    any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
+        feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
@@ -3167,11 +3179,50 @@ enum LentDeclaration<'a> {
         mapping_id: crate::wire_id::ExprId,
         suffix: Option<&'a str>,
     },
+    /// A queryable declared in answer to an interest.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    QueryableReply {
+        interest_id: u64,
+        queryable_id: u64,
+        keyexpr: &'a str,
+        complete: bool,
+    },
+    #[cfg(feature = "declare-keyexpr")]
+    Keyexpr {
+        mapping_id: crate::wire_id::ExprId,
+        suffix: &'a str,
+    },
+    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+    UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
+    /// A retraction, naming its key when `key` holds the `ext_keyexpr` body.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        feature = "declare-undeclare"
+    ))]
+    UndeclareSubscriber { id: u64, key: Option<&'a [u8]> },
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-queryable",
+        feature = "declare-undeclare"
+    ))]
+    UndeclareQueryable { id: u64, key: Option<&'a [u8]> },
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-token",
+        feature = "declare-undeclare"
+    ))]
+    UndeclareToken { id: u64, key: Option<&'a [u8]> },
 }
 
 #[cfg(all(
-    not(feature = "alloc"),
+    any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
+        feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
@@ -3228,6 +3279,57 @@ impl<'a> LentDeclaration<'a> {
             } => with.declaration(crate::lent_control::token_declaration(
                 id, mapping_id, suffix,
             )),
+            #[cfg(all(
+                feature = "alloc",
+                feature = "declare-queryable",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
+            ))]
+            Self::QueryableReply {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            } => with.declaration(crate::lent_control::queryable_reply_declaration(
+                interest_id,
+                queryable_id,
+                keyexpr,
+                crate::queryable_info::QueryableInfo {
+                    complete,
+                    distance: 0,
+                },
+            )),
+            #[cfg(feature = "declare-keyexpr")]
+            Self::Keyexpr { mapping_id, suffix } => {
+                with.declaration(crate::lent_control::kexpr_declaration(mapping_id, suffix))
+            }
+            #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+            Self::UndeclareKeyexpr { mapping_id } => with.declaration(Ok(
+                crate::lent_control::undeclare_kexpr_declaration(mapping_id),
+            )),
+            #[cfg(all(
+                feature = "alloc",
+                feature = "declare-subscriber",
+                feature = "declare-undeclare"
+            ))]
+            Self::UndeclareSubscriber { id, key } => with.declaration(Ok(
+                crate::lent_control::undeclare_subscriber_declaration(id, key),
+            )),
+            #[cfg(all(
+                feature = "alloc",
+                feature = "declare-queryable",
+                feature = "declare-undeclare"
+            ))]
+            Self::UndeclareQueryable { id, key } => with.declaration(Ok(
+                crate::lent_control::undeclare_queryable_declaration(id, key),
+            )),
+            #[cfg(all(
+                feature = "alloc",
+                feature = "declare-token",
+                feature = "declare-undeclare"
+            ))]
+            Self::UndeclareToken { id, key } => with.declaration(Ok(
+                crate::lent_control::undeclare_token_declaration(id, key),
+            )),
         }
     }
 
@@ -3238,9 +3340,19 @@ impl<'a> LentDeclaration<'a> {
     ///
     /// A declaration that cannot be composed counts as zero: the encoder then refuses it with the
     /// same error, and the dispatch reports that refusal.
+    ///
+    /// A lend-only session with an allocator counts with the writer it sends with
+    /// (`frame_encode::push_capacity_hint` says why), so each kind's encoder is compiled once.
     #[inline(never)]
     fn encoded_len(&self) -> usize {
-        self.compose(CountDeclaration)
+        #[cfg(not(feature = "alloc"))]
+        {
+            self.compose(CountDeclaration)
+        }
+        #[cfg(feature = "alloc")]
+        {
+            crate::tx_buf::encoded_len(as_encoder(&|sink| self.encode(sink)))
+        }
     }
 
     /// The declaration's bytes into `sink`, or the refusal of one that cannot be composed.
@@ -3255,8 +3367,9 @@ impl<'a> LentDeclaration<'a> {
 /// What [`LentDeclaration::compose`] does with the declaration it composes, whose type is the
 /// kind's own.
 #[cfg(all(
-    not(feature = "alloc"),
+    any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
+        feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
@@ -3306,8 +3419,9 @@ impl DeclarationWith for CountDeclaration {
 
 /// A declaration written into the transmit sink.
 #[cfg(all(
-    not(feature = "alloc"),
+    any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
+        feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
@@ -3317,8 +3431,9 @@ impl DeclarationWith for CountDeclaration {
 struct WriteDeclaration<'s, 'b>(&'s mut crate::tx_buf::TxSink<'b>);
 
 #[cfg(all(
-    not(feature = "alloc"),
+    any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
+        feature = "declare-keyexpr",
         feature = "declare-subscriber",
         feature = "declare-queryable",
         feature = "declare-token",
@@ -3863,7 +3978,51 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
             )
             .map(|_| ());
     }
-    #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
+    // A lend-only session writes the reply from its parts, as the session with no allocator
+    // does, and builds the owned one only for what reads it (`send_declare_from_parts`).
+    #[cfg(all(
+        feature = "liveliness-token",
+        feature = "alloc",
+        feature = "tx-lend-only"
+    ))]
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
+        self.send_declare_from_parts(
+            || {
+                build_token_reply(token_id, keyexpr, interest_id)
+                    .and_then(|reply| {
+                        reply.try_into_owned_in::<crate::transport_profile::TransportStorage>()
+                    })
+                    .ok()
+            },
+            || {
+                let reply = |sink: &mut crate::tx_buf::TxSink<'_>| {
+                    build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)
+                };
+                let _ = self.dispatch_network_message_at(
+                    DispatchStage::Fresh,
+                    Priority::Control,
+                    /*reliable=*/ true,
+                    crate::sample::QosLevel::DEFAULT,
+                    crate::tx_buf::encoded_len(as_encoder(&reply)),
+                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+                    as_encoder(&reply),
+                );
+            },
+        );
+    }
+    #[cfg(all(
+        feature = "liveliness-token",
+        feature = "alloc",
+        not(feature = "tx-lend-only")
+    ))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         // A keyexpr past the session's `MAX_KEYEXPR_BYTES` or the protocol's bound is not
         // answered, as the subscriber reply below skips one: the chain's `DeclFinal` still
@@ -3891,7 +4050,21 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     }
     #[cfg(all(
         any(feature = "liveliness-token", feature = "declare-subscriber"),
-        feature = "alloc"
+        feature = "alloc",
+        feature = "tx-lend-only"
+    ))]
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        self.send_declare_from_parts(
+            || Some(crate::declare_build::build_declare_final_reply(interest_id)),
+            || {
+                let _ = self.dispatch_declare_lent(&LentDeclaration::FinalReply { interest_id });
+            },
+        );
+    }
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "alloc",
+        not(feature = "tx-lend-only")
     ))]
     fn send_declare_final_reply(&self, interest_id: u64) {
         // R311y530 — built through the UNGATED `declare_build` twin rather than
@@ -3916,7 +4089,44 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
             keyexpr,
         });
     }
-    #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "alloc",
+        feature = "tx-lend-only"
+    ))]
+    fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
+        // The heap form's bound, below.
+        if !self
+            .params
+            .limits
+            .max_keyexpr_bytes_held()
+            .admits(keyexpr.len())
+        {
+            return;
+        }
+        self.send_declare_from_parts(
+            || {
+                crate::declare_build::build_declare_subscriber_reply_with_id(
+                    interest_id,
+                    subscriber_id,
+                    keyexpr,
+                )
+                .ok()
+            },
+            || {
+                let _ = self.dispatch_declare_lent(&LentDeclaration::SubscriberReply {
+                    interest_id,
+                    subscriber_id,
+                    keyexpr,
+                });
+            },
+        );
+    }
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "alloc",
+        not(feature = "tx-lend-only")
+    ))]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
         // A reply keyexpr past the session's `MAX_KEYEXPR_BYTES`, or longer than the
         // bounded codec field, is not answered; the chain's `DeclFinal` still terminates
@@ -3961,6 +4171,44 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
     // without either keeps the trait's default and sends nothing.
     #[cfg(all(
         feature = "alloc",
+        feature = "tx-lend-only",
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        let info = crate::queryable_info::QueryableInfo {
+            complete,
+            distance: 0,
+        };
+        self.send_declare_from_parts(
+            || {
+                crate::declare_build::build_declare_queryable_reply_with_id(
+                    interest_id,
+                    queryable_id,
+                    keyexpr,
+                    info,
+                )
+                .ok()
+            },
+            || {
+                let _ = self.dispatch_declare_lent(&LentDeclaration::QueryableReply {
+                    interest_id,
+                    queryable_id,
+                    keyexpr,
+                    complete,
+                });
+            },
+        );
+    }
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
         feature = "declare-queryable",
         any(feature = "liveliness-token", feature = "declare-subscriber")
     ))]
@@ -13301,7 +13549,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::dispatch_declare`] for a declaration the caller writes itself, from its
     /// own text, through the borrowed writers of [`crate::lent_control`]: the route a
     /// session with no allocator sends a `Declare` by, since the owned
-    /// `DeclareOwned` that `dispatch_declare` takes is a heap object. The routing is
+    /// `DeclareOwned` that `dispatch_declare` takes is a heap object, and the route a
+    /// lend-only session sends one by, whose slot would take the owned one's bytes. The routing is
     /// the same (`Priority::Control`, the declare QoS, the `Declare` stats label);
     /// only the body's source differs. Always reliable, as `dispatch_declare`'s
     /// callers pass it.
@@ -13312,8 +13561,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Declare` itself is built inside that closure, below the dispatch, and not by the
     /// caller: a caller that held it would carry its size in its own frame.
     #[cfg(all(
-        not(feature = "alloc"),
+        any(not(feature = "alloc"), feature = "tx-lend-only"),
         any(
+            feature = "declare-keyexpr",
             feature = "declare-subscriber",
             feature = "declare-queryable",
             feature = "declare-token",
@@ -13594,6 +13844,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
             as_encoder(&encode_body),
         )
+    }
+
+    /// [`Self::dispatch_interest`] for an interest a lend-only session writes from its parts
+    /// ([`crate::lent_control`]), into the slot its link lends: the same routing, with `qos` the
+    /// `ext_qos` the interest carries, which the owned dispatch reads off the owned message. Always
+    /// reliable, as every interest sender passes it. One encoder for every interest the session
+    /// asks, counted by the writer it sends with.
+    #[cfg(all(
+        feature = "declare-interest",
+        feature = "alloc",
+        feature = "tx-lend-only"
+    ))]
+    fn dispatch_interest_lent(
+        &self,
+        interest: &wz_codecs::lent::Interest<'_>,
+        qos: crate::sample::QosLevel,
+    ) -> Result<(), SendWireError> {
+        let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
+        self.dispatch_network_message_at(
+            DispatchStage::Fresh,
+            Priority::Control,
+            /*reliable=*/ true,
+            qos,
+            crate::tx_buf::encoded_len(as_encoder(&encode_body)),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
+            as_encoder(&encode_body),
+        )
+        .map(|_| ())
     }
 
     /// R311jp — express short-circuit, zenoh-pico parity: an
@@ -14143,6 +14421,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `ExprId`, as zenoh's `DeclareKeyExpr.id` is and zenoh-pico's
         // `uint16_t _id` is, so no id a caller can name is too wide for the wire.
         check_outbound_keyexpr_pico_safe(suffix)?;
+        // A lend-only session writes it from its parts, unless a namespace is to decorate the key
+        // (below), which is done to the owned declaration.
+        #[cfg(feature = "tx-lend-only")]
+        if !self.rewrites_originated_keys() {
+            return self
+                .dispatch_declare_lent(&LentDeclaration::Keyexpr { mapping_id, suffix })
+                .map_err(SendDeclareError::from);
+        }
         let declare = build_declare_kexpr(mapping_id, suffix)?;
         // §5.21 routing-namespace — bake the namespace into the wire alias
         // DEFINITION (this is a direct `dispatch_declare`, below the egress
@@ -14412,7 +14698,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })
             .map_err(SendDeclareError::from)
         }
-        #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
+        // A lend-only session writes it from its parts too, after the gate
+        // `prepare_declare_subscriber` runs, and records it as the owned send does.
+        #[cfg(all(
+            feature = "declare-subscriber",
+            feature = "alloc",
+            feature = "tx-lend-only"
+        ))]
+        {
+            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.declare_subscriber_recorded(
+                subscriber_id,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                || {
+                    self.dispatch_declare_lent(&LentDeclaration::Subscriber {
+                        id: u64::from(subscriber_id),
+                        mapping_id: keyexpr_mapping_id,
+                        suffix: keyexpr_suffix,
+                    })
+                    .map_err(SendDeclareError::from)
+                },
+            )
+        }
+        #[cfg(all(
+            feature = "declare-subscriber",
+            feature = "alloc",
+            not(feature = "tx-lend-only")
+        ))]
         {
             // R311ou — build half (R300 pico-safety gate + envelope) is the
             // shared `prepare_declare_subscriber` SSOT, also called by the
@@ -14482,7 +14795,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })
             .map_err(SendDeclareError::from)
         }
-        #[cfg(all(feature = "declare-queryable", feature = "alloc"))]
+        // A lend-only session: see `send_declare_subscriber`.
+        #[cfg(all(
+            feature = "declare-queryable",
+            feature = "alloc",
+            feature = "tx-lend-only"
+        ))]
+        {
+            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.declare_queryable_recorded(
+                queryable_id,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                complete,
+                || {
+                    self.dispatch_declare_lent(&LentDeclaration::Queryable {
+                        id: u64::from(queryable_id),
+                        mapping_id: keyexpr_mapping_id,
+                        suffix: keyexpr_suffix,
+                        complete,
+                    })
+                    .map_err(SendDeclareError::from)
+                },
+            )
+        }
+        #[cfg(all(
+            feature = "declare-queryable",
+            feature = "alloc",
+            not(feature = "tx-lend-only")
+        ))]
         {
             // R311ow — build half (R300 pico-safety gate + envelope) is the
             // shared `prepare_declare_queryable` SSOT, also called by the
@@ -14563,7 +14904,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             })
             .map_err(SendDeclareError::from)
         }
-        #[cfg(all(feature = "declare-token", feature = "alloc"))]
+        // A lend-only session: see `send_declare_subscriber`.
+        #[cfg(all(feature = "declare-token", feature = "alloc", feature = "tx-lend-only"))]
+        {
+            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
+                self.dispatch_declare_lent(&LentDeclaration::Token {
+                    id: u64::from(token_id),
+                    mapping_id: keyexpr_mapping_id,
+                    suffix: keyexpr_suffix,
+                })
+                .map_err(SendDeclareError::from)
+            })
+        }
+        #[cfg(all(
+            feature = "declare-token",
+            feature = "alloc",
+            not(feature = "tx-lend-only")
+        ))]
         {
             let declare =
                 self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
@@ -14889,6 +15247,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.dispatch_declare(declare, /*reliable=*/ true);
     }
 
+    /// The answer to a peer's interest in a lend-only session: `lent` writes it from its parts
+    /// into the slot the link lends, where [`Self::send_declare`] would encode the owned one there.
+    /// The owned answer (`owned`, `None` for one that cannot be built, which is not sent either
+    /// way) is built only for what reads it: a namespace decorates the owned answer's key, so a
+    /// session that holds one sends it as `send_declare` does, and an egress policy asks its
+    /// verdict of the owned answer, which decides whether the one from parts leaves.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "tx-lend-only",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn send_declare_from_parts(
+        &self,
+        owned: impl FnOnce() -> Option<crate::transport_profile::owned::DeclareOwned>,
+        lent: impl FnOnce(),
+    ) {
+        if self.rewrites_originated_keys() {
+            if let Some(declare) = owned() {
+                self.send_declare(declare);
+            }
+            return;
+        }
+        if self
+            .egress_reply_gate_set
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            let Some(declare) = owned() else {
+                return;
+            };
+            let message =
+                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
+            if !self.reply_gate_admits(&message) {
+                return;
+            }
+        }
+        lent();
+    }
+
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
     /// outbound link, retracting a previously declared keyexpr
     /// mapping (id) on the peer. The peer's inbound dispatch
@@ -14913,14 +15309,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             // The id is an `ExprId`, as zenoh's `UndeclareKeyExpr { id }` and
             // pico's `uint16_t _id` are, so every id this takes fits the wire.
-            let declare = build_undeclare_kexpr(mapping_id);
             // A4 — drop the matching replay entry (pico `_z_prune_declaration` undeclare-filter
             // on `_id`) and send the retraction, as one step: a retraction of an entry a paced
             // replay has not reached sends nothing, the peer never having heard of it.
             // F2 — this surface has no error channel; a transport-down reject drops the emit
-            // exactly as the dead link would.
+            // exactly as the dead link would. A lend-only session writes it from its parts.
             let _ = self.retract_keyexpr_recorded(mapping_id, || {
-                let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+                #[cfg(feature = "tx-lend-only")]
+                let _ =
+                    self.dispatch_declare_lent(&LentDeclaration::UndeclareKeyexpr { mapping_id });
+                #[cfg(not(feature = "tx-lend-only"))]
+                let _ = self
+                    .dispatch_declare(build_undeclare_kexpr(mapping_id), /*reliable=*/ true);
             });
             // R234 — drop the (mapping_id, suffix) pair so subsequent
             // `publish_aliased_auto` calls return `None` on this id and
@@ -15218,6 +15618,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// The outbound pico-safety gate (R300) of a declaration a lend-only session writes from its
+    /// parts: the key the peer will read, resolved through this session's outbound mappings, as
+    /// `prepare_declare_subscriber` gates it before it builds the owned one.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "tx-lend-only",
+        any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token"
+        )
+    ))]
+    fn check_outbound_held_keyexpr(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> Result<(), SendDeclareError> {
+        let reconstructed = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
+        Ok(check_outbound_keyexpr_pico_safe(&reconstructed)?)
+    }
+
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
     /// the outbound link, retracting a previously declared
     /// subscription (id) on the peer. The peer drops the
@@ -15233,7 +15654,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_subscriber(&self, subscriber_id: u64) {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-        self.retract_subscriber(subscriber_id, build_undeclare_subscriber(subscriber_id));
+        self.retract_subscriber(subscriber_id, None);
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = subscriber_id;
     }
@@ -15249,29 +15670,62 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-        // A key past the protocol's bound cannot be named, so its retraction carries the
-        // id alone, which the peer retracts by as well; the replay cache is pruned either way.
-        self.retract_subscriber(
-            subscriber_id,
-            build_undeclare_subscriber_on_wire(subscriber_id, mapping_id, suffix)
-                .unwrap_or_else(|_| build_undeclare_subscriber(subscriber_id)),
-        );
+        self.retract_subscriber(subscriber_id, Some((mapping_id, suffix)));
         #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
         let _ = (subscriber_id, mapping_id, suffix);
     }
 
     /// The emit and the replay-cache prune every subscriber retraction shape
-    /// shares, so the shapes differ in the frame and in nothing else.
+    /// shares, so the shapes differ in the frame and in nothing else: by the id alone, or
+    /// naming `key` (`mapping_id` + `suffix`, the wire form) as well. A key past the
+    /// protocol's bound cannot be named, so its retraction carries the id alone, which the
+    /// peer retracts by as well; the replay cache is pruned either way.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
-    fn retract_subscriber(&self, subscriber_id: u64, declare: DeclareOwned) {
+    fn retract_subscriber(&self, subscriber_id: u64, key: Option<(crate::wire_id::ExprId, &str)>) {
         // A4 — drop the matching replay entry (pico `_z_prune_declaration` undeclare-filter on
         // `_id`) and send the retraction, as one step: one for an entry a paced replay had not
         // reached is not sent, the peer never having heard of it.
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
         let _ = self.retract_subscriber_recorded(subscriber_id, || {
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            // A lend-only session writes the retraction from its parts.
+            #[cfg(feature = "tx-lend-only")]
+            {
+                let body = Self::named_key_body(key);
+                let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
+                    id: subscriber_id,
+                    key: body.as_deref(),
+                });
+            }
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let declare = match key {
+                    Some((mapping_id, suffix)) => {
+                        build_undeclare_subscriber_on_wire(subscriber_id, mapping_id, suffix)
+                            .unwrap_or_else(|_| build_undeclare_subscriber(subscriber_id))
+                    }
+                    None => build_undeclare_subscriber(subscriber_id),
+                };
+                let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            }
         });
+    }
+
+    /// The `ext_keyexpr` body a retraction written from its parts names `key` by: the bytes of
+    /// the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    #[cfg(all(
+        feature = "tx-lend-only",
+        feature = "declare-undeclare",
+        any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token"
+        )
+    ))]
+    fn named_key_body(key: Option<(crate::wire_id::ExprId, &str)>) -> Option<Vec<u8>> {
+        key.map(|(mapping_id, suffix)| {
+            crate::declare_ext_keyexpr::ext_wireexpr_body(mapping_id, suffix)
+        })
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -15285,7 +15739,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_queryable(&self, queryable_id: u64) {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
-        self.retract_queryable(queryable_id, build_undeclare_queryable(queryable_id));
+        self.retract_queryable(queryable_id, None);
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = queryable_id;
     }
@@ -15300,12 +15754,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
-        // Named by its id alone past the key's bound, as the subscriber retraction is.
-        self.retract_queryable(
-            queryable_id,
-            build_undeclare_queryable_on_wire(queryable_id, mapping_id, suffix)
-                .unwrap_or_else(|_| build_undeclare_queryable(queryable_id)),
-        );
+        self.retract_queryable(queryable_id, Some((mapping_id, suffix)));
         #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
         let _ = (queryable_id, mapping_id, suffix);
     }
@@ -15313,17 +15762,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The emit and the replay-cache prune every queryable retraction shape
     /// shares — see [`Self::retract_subscriber`].
     #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
-    fn retract_queryable(
-        &self,
-        queryable_id: u64,
-        declare: crate::transport_profile::owned::DeclareOwned,
-    ) {
+    fn retract_queryable(&self, queryable_id: u64, key: Option<(crate::wire_id::ExprId, &str)>) {
         // A4 — drop the matching replay entry and send the retraction, as one step: see
-        // [`Self::retract_subscriber`].
+        // [`Self::retract_subscriber`], whose key rule this follows.
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
         let _ = self.retract_queryable_recorded(queryable_id, || {
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            #[cfg(feature = "tx-lend-only")]
+            {
+                let body = Self::named_key_body(key);
+                let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
+                    id: queryable_id,
+                    key: body.as_deref(),
+                });
+            }
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let declare = match key {
+                    Some((mapping_id, suffix)) => {
+                        build_undeclare_queryable_on_wire(queryable_id, mapping_id, suffix)
+                            .unwrap_or_else(|_| build_undeclare_queryable(queryable_id))
+                    }
+                    None => build_undeclare_queryable(queryable_id),
+                };
+                let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            }
         });
     }
 
@@ -15339,7 +15802,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// at the call site (R311o type-ungating cascade prerequisite).
     pub fn send_undeclare_token(&self, token_id: u64) {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-        self.retract_token(token_id, build_undeclare_token(token_id));
+        self.retract_token(token_id, None);
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
     }
@@ -15356,12 +15819,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: &str,
     ) {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-        // Named by its id alone past the key's bound, as the subscriber retraction is.
-        self.retract_token(
-            token_id,
-            build_undeclare_token_on_wire(token_id, mapping_id, suffix)
-                .unwrap_or_else(|_| build_undeclare_token(token_id)),
-        );
+        self.retract_token(token_id, Some((mapping_id, suffix)));
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = (token_id, mapping_id, suffix);
     }
@@ -15369,7 +15827,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The emit and the replay-cache prune every token retraction shape shares
     /// — see [`Self::retract_subscriber`].
     #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-    fn retract_token(&self, token_id: u64, declare: crate::transport_profile::owned::DeclareOwned) {
+    fn retract_token(&self, token_id: u64, key: Option<(crate::wire_id::ExprId, &str)>) {
         // A4 — drop the matching replay entry (first-match, pico `_z_prune_declaration` filter
         // semantics) and send the retraction, as one step: see [`Self::retract_subscriber`]. The
         // seam-routed teardown of a `LivelinessToken` goes through
@@ -15377,7 +15835,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
         let _ = self.retract_token_recorded(token_id, || {
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            #[cfg(feature = "tx-lend-only")]
+            {
+                let body = Self::named_key_body(key);
+                let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
+                    id: token_id,
+                    key: body.as_deref(),
+                });
+            }
+            #[cfg(not(feature = "tx-lend-only"))]
+            {
+                let declare = match key {
+                    Some((mapping_id, suffix)) => {
+                        build_undeclare_token_on_wire(token_id, mapping_id, suffix)
+                            .unwrap_or_else(|_| build_undeclare_token(token_id))
+                    }
+                    None => build_undeclare_token(token_id),
+                };
+                let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+            }
         });
     }
 
@@ -15468,7 +15944,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "declare-interest")]
+        // A lend-only session writes it from its parts: the token interest with the declare
+        // `ext_qos` the owned builder stamps.
+        #[cfg(all(
+            feature = "declare-interest",
+            feature = "alloc",
+            feature = "tx-lend-only"
+        ))]
+        {
+            let interest = crate::lent_control::interest_propagated(crate::lent_control::interest(
+                interest_id,
+                InterestKinds::TOKENS,
+                history,
+                /*future=*/ true,
+                /*aggregate=*/ false,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )?);
+            self.declare_subscriber_interest_recorded(
+                interest_id,
+                history,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                || self.dispatch_interest_lent(&interest, crate::declare_ext_qos::QOS_DECLARE),
+            )
+        }
+        #[cfg(all(
+            feature = "declare-interest",
+            not(all(feature = "alloc", feature = "tx-lend-only"))
+        ))]
         {
             let interest = build_interest_liveliness_subscriber(
                 interest_id,
@@ -15552,7 +16056,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "declare-interest")]
+        // A lend-only session writes it from its parts: CURRENT alone, no `ext_qos`.
+        #[cfg(all(
+            feature = "declare-interest",
+            feature = "alloc",
+            feature = "tx-lend-only"
+        ))]
+        {
+            let interest = crate::lent_control::interest(
+                interest_id,
+                InterestKinds::TOKENS,
+                /*current=*/ true,
+                /*future=*/ false,
+                /*aggregate=*/ false,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )?;
+            self.declare_get_interest_recorded(
+                interest_id,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                || self.dispatch_interest_lent(&interest, crate::sample::QosLevel::DEFAULT),
+            )
+        }
+        #[cfg(all(
+            feature = "declare-interest",
+            not(all(feature = "alloc", feature = "tx-lend-only"))
+        ))]
         {
             let interest =
                 build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
@@ -15757,7 +16287,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(feature = "declare-interest")]
+        // A lend-only session writes it from its parts. An interest with neither CURRENT nor
+        // FUTURE is the Final form, which carries no keyexpr: the owned builder refuses it, and
+        // so does this.
+        #[cfg(all(feature = "declare-interest", feature = "tx-lend-only"))]
+        {
+            if !current && !future {
+                return Err(SendWireError::from(
+                    sce_forge_runtime::codec::CodecError::PresentIfMismatch,
+                ));
+            }
+            let interest = crate::lent_control::interest(
+                interest_id,
+                kinds,
+                current,
+                future,
+                aggregate,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            )?;
+            self.declare_matching_interest_recorded(
+                interest_id,
+                kinds,
+                current,
+                future,
+                aggregate,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+                || self.dispatch_interest_lent(&interest, crate::sample::QosLevel::DEFAULT),
+            )
+        }
+        #[cfg(all(feature = "declare-interest", not(feature = "tx-lend-only")))]
         {
             let interest = build_interest_kinds_with_aggregate(
                 interest_id,
@@ -15870,7 +16430,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311g1 — signature-stability: body cfg, signature stable.
     /// Silent no-op when `declare-interest` off.
     pub fn send_interest_final(&self, interest_id: u64) {
-        #[cfg(feature = "declare-interest")]
+        // A lend-only session writes it from its parts.
+        #[cfg(all(
+            feature = "declare-interest",
+            feature = "alloc",
+            feature = "tx-lend-only"
+        ))]
+        {
+            let interest = crate::lent_control::interest_final(interest_id);
+            let _ = self.retract_interest_recorded(interest_id, || {
+                let _ = self.dispatch_interest_lent(&interest, crate::sample::QosLevel::DEFAULT);
+            });
+        }
+        #[cfg(all(
+            feature = "declare-interest",
+            not(all(feature = "alloc", feature = "tx-lend-only"))
+        ))]
         {
             let interest = build_interest_final(interest_id);
             // A4 — drop the matching replay entry (first-match; pico's interest prune filter
