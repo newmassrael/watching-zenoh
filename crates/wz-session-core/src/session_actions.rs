@@ -2746,7 +2746,20 @@ impl LentRecord {
         }
     }
 
-    /// Record `slot` as held for the conduit.
+    /// Record `slot` as held for the conduit: the open of a batch frame in a lent slot, which
+    /// exists where a data send does.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     fn hold(&self, slot: crate::link::TxSlot) {
         self.slot
             .store(slot.0, core::sync::atomic::Ordering::Relaxed);

@@ -613,19 +613,52 @@ mod tests {
     /// whole of it.
     #[test]
     fn a_timed_wait_for_room_reports_the_time_it_took() {
-        let (near, _far) = pair();
+        use std::os::fd::AsRawFd;
+
+        let (near, far) = pair();
+        // Small buffers at both ends, so the stacks are full after a few writes: a loopback
+        // connection grows them to megabytes otherwise, and keeps moving bytes into the far end's
+        // buffer after a write was refused, which gives the near end room again.
+        set_buffer(near.fd, libc::SO_SNDBUF, 4096);
+        set_buffer(far.as_raw_fd(), libc::SO_RCVBUF, 4096);
         let (room, took_us) = near.wait_writable_timed(2_000_000);
         assert!(room, "an empty stream takes bytes");
         assert!(took_us < 1_000_000, "found at once, not after {took_us} us");
+        // Fill until a write that does not wait is refused, and again whenever the stacks have
+        // since moved bytes on and made room, until a wait finds none.
         let chunk = [0x5au8; 1024];
-        while let Some(Ok(taken)) = near.send_parts_now(&[&chunk]) {
-            if taken == 0 {
-                break;
+        let mut waits = 0;
+        let took_us = loop {
+            loop {
+                match near.send_parts_now(&[&chunk]) {
+                    Some(Ok(0)) => break,
+                    Some(Ok(_)) => {}
+                    other => panic!("a write to a sound stream: {other:?}"),
+                }
             }
-        }
-        let (room, took_us) = near.wait_writable_timed(50_000);
-        assert!(!room, "a stream whose peer reads nothing has no room");
+            let (room, took_us) = near.wait_writable_timed(50_000);
+            if !room {
+                break took_us;
+            }
+            waits += 1;
+            assert!(waits < 1_000, "the stream never filled");
+        };
         assert!(took_us >= 40_000, "the wait took its time: {took_us} us");
+    }
+
+    /// Set the socket buffer `option` (`SO_SNDBUF`, `SO_RCVBUF`) of `fd` to `bytes`.
+    fn set_buffer(fd: c_int, option: c_int, bytes: c_int) {
+        // SAFETY: `bytes` is a live `c_int` and the length passed is its size.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                option,
+                (&bytes as *const c_int).cast(),
+                size_of::<c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, 0, "the kernel takes a buffer size");
     }
 
     wz_runtime_coop::with_heap_link_seams! {
