@@ -220,14 +220,6 @@ pub(crate) struct SampleMarshal {
     loaned_encoding: crate::encoding::z_loaned_encoding_t,
 }
 
-/// A loaned encoding view not yet pointed at anything ([`SampleMarshal::bind`] points it).
-fn unbound_encoding() -> crate::encoding::z_loaned_encoding_t {
-    crate::encoding::z_loaned_encoding_t {
-        handle: core::ptr::null_mut(),
-        _pad: [core::ptr::null_mut(); 4],
-    }
-}
-
 /// Where a marshal's key lies.
 enum KeyText {
     /// Text of the marshal's own: a reply's, a token's, a sample kept past its callback.
@@ -303,7 +295,7 @@ impl SampleMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
-            loaned_encoding: unbound_encoding(),
+            loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
         }
     }
 
@@ -439,7 +431,7 @@ impl SampleMarshal {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
-            loaned_encoding: unbound_encoding(),
+            loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
         }
     }
 }
