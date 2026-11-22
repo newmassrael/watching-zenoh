@@ -690,6 +690,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/drive.rs` | S1 | |
 | `crates/wz-session-core/src/driver_loop.rs` | S1 | |
 | `crates/wz-session-core/src/duty_outbox.rs` | S2 | |
+| `crates/wz-session-core/src/encoded_push.rs` | S2 | |
 | `crates/wz-session-core/src/encoding.rs` | S2 | |
 | `crates/wz-session-core/src/encoding_hint.rs` | S2 | |
 | `crates/wz-session-core/src/entropy.rs` | S1 | |

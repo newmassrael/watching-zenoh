@@ -2540,18 +2540,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_room = 2usize
             .saturating_add(config.listen.len())
             .saturating_add(config.groups.len());
+        let limits = resolve_limits(&config);
         let mut core = Core {
             local,
             runtime,
             clock,
-            registry: Rc::new(RefCell::new(Registry::new(&resolve_limits(&config)))),
+            registry: Rc::new(RefCell::new(Registry::new(&limits))),
             faces: vec![Face {
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
-                replay: Replay::with_pacing(ReplayPacing::of_snapshot(
-                    &policy,
-                    &resolve_limits(&config),
-                )),
+                replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
             }],
             rooms: Arc::new(LinkRooms::default()),
             next_face: 1,
@@ -2590,7 +2588,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "queryable")]
             queryables: Vec::new(),
             #[cfg(feature = "queryable")]
-            plane: Arc::new(QueryPlane::default()),
+            plane: Arc::new(QueryPlane::held_to(&limits)),
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]

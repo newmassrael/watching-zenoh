@@ -6757,6 +6757,58 @@
       "carry_forward_bullets": [
         "C1cc `the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc` fails on its oracle (libzenohc's sender sent a 4096-byte put with no threshold stated without shared memory); C1bzr shard 2 used 94% of its budget; both are for the sessions that own those lanes."
       ]
+    },
+    "Round 4604": {
+      "decision_summary": "With SCE ADR 0108's map and set landed on the Interpreter, Rust and C11 and wz pinned at `7f52c3d78ee`, the census rows whose only gap was U1 were read again against what the pin accepts (`vendor/sce/docs/SCE_ACCEPTED_SUBSET.md`, \"Map and set variables\" to \"An algorithm's map slot\"), each at its code's current lines. Of 51 such rows, 24 fit a bounded map or set now, with host objects kept in a host table under the same key; 6 wait for a map value that holds a collection; 10 fit but state no bound on their table, recorded as W16; and 11 need something the map does not give (a minimum by deadline, a walk in key order, a key that is a sum type, access by place, or a table that does not exist yet). U3's 20 rows were placed by probes of the pin: a record with a bounded byte string leaves U3 now as a list element and as a map value once Rust copies it, a record with a list field waits for ADR 0086 section 7.3's lowering, and a collection inside a collection waits for ADR 0108's nested values. Section 5's order is restated with what has landed on SCE (`origin/main` `635dd67664a`): ADR 0110's gate, ADR 0111 accepted with U16 and U18 in it, and the SCE session's items 4a to 4c before its implementation.",
+      "changes_bullets": [
+        "docs/zenoh-logic-as-sce-kinds.md: section 7.4 (U1's 51 rows and U3's 20 rows by verdict, W16); section 5's order and what is unscheduled; the U1 and U3 catalogue cells; section 8's U3 point removed.",
+        "docs/zenoh-logic-as-sce-kinds/S2.md: row 10's note states the map that now holds it."
+      ],
+      "verification_bullets": [
+        "Each of the 51 rows' cited code was read at today's lines (four read-only passes), against the pinned subset; the U3 shapes by `sce-codegen check` probes built from the pin. SCE facts read on `origin/main` `635dd67664a` (ADR 0108 order of work through 7b, ADR 0110 and 0111 status). `MAX_PENDING_FINALS` checked unused in wz-capi-coop, wz-capi-core and wz-capi-pico.",
+        "The pre-push hook's round-fed gates 170 of 170."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection"
+      ],
+      "carry_forward_bullets": [
+        "W16: state a bound for the ten tables (section 7.4), the cooperative engine's held finals first (`MAX_PENDING_FINALS`).",
+        "The 24 rows that fit the map now are the next moves into SCE documents, after S5 M5's MCU move lands with the `Linear` storage."
+      ]
+    },
+    "Round 4605": {
+      "decision_summary": "- A router encodes an aliased Put once and re-writes only its key per face in place; the session's own send keeps its one Push writer.\n- Only router builds carry the new path; the pico and MCU builds link what main links.",
+      "changes_bullets": [
+        "encoded_push.rs: LeafPush re-keys a received Push in place and drops its routing source; SplicedPush sends head and tail.",
+        "SharedCarrier borrows the received Push; a face that must hold it takes one copy, counted.",
+        "capic-router-node budget +1,432; files.md and S2 census rows for encoded_push.rs."
+      ],
+      "verification_bullets": [
+        "encoded_push 6, router_forward lib 358, wz-runtime-tokio lib 779, session-core lib 1190, hot-path budgets unchanged; clippy of both crates clean.",
+        "Fleet lanes 0, C0, Q pass; C1cs held every pico case, the router node moved by the stated bytes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Measure the D13 router cells with aliased publishers on a machine no other run shares."
+      ]
+    },
+    "Round 4606": {
+      "decision_summary": "W16, first table: the cooperative engine's held ResponseFinals (census S7 row 13) are held to the session's MAX_PENDING_FINALS. caps.rs stated the bound and wz-capi-coop never read it, so FinalHolds grew with every request a callback or a kept query held. Before choosing what a full table does, zenoh-pico was read at its pin: _z_trigger_queryables (vendor/zenoh-pico/src/session/queryable.c) returns _Z_ERR_SYSTEM_OUT_OF_MEMORY before any callback when it cannot build the query, and sends neither a reply nor a Final. The session core's FinalStage refuses the same way (a request it cannot owe a Final for is refused before its queryables run). The cooperative engine now does the same: a request with no row left is not copied out, its callback never runs, and the Final the dispatch owes for it is not sent. The refusal is kept for the rest of its dispatch, so a second queryable the request matches does not answer what the first could not. The bound is the session's limit (SessionLimits::max_pending_finals_held), so a heap build with nothing stated stays unbounded as before and a fixed build reads the caps value.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/engine/query.rs: FinalHolds holds rows, the requests refused in the running dispatch and the session's quota; take returns whether a hold was taken; owe consumes a refusal and returns false so no Final is sent; QueryPlane::held_to builds the plane with the session's limits; arrive queues nothing for a refused request; hold_query holds nothing when take refuses. crates/wz-capi-coop/src/engine.rs: the open resolves the limits once and hands them to the registry, the dial face's replay pacing and the query plane. crates/wz-capi-coop/src/tests/queryable.rs: a_query_past_the_finals_held_is_refused_without_a_final (limit 2, two kept queries, the third refused with no callback and no Final, a freed row holds the next). docs/zenoh-logic-as-sce-kinds.md section 7.4: S7 13 moves from \"Has no stated bound\" (10 to 9) to \"Fits now\" (24 to 25); the W16 paragraph says so. docs/zenoh-logic-as-sce-kinds/S7.md row 13: the bound, the refusal and today's lines."
+      ],
+      "verification_bullets": [
+        "bx: cargo test -p wz-capi-coop --features queryable,local-queryable --lib queryable: ran=7, 7 passed, rc=0 (the new test among them). bx: cargo clippy -p wz-capi-coop --features queryable,local-queryable,group --all-targets -- -D warnings: rc=0. bx: cargo build -p wz-capi-pico --no-default-features --features engine-coop: rc=0. Size, both trees on one host (local), only the two engine files changed between them: capability_cost_gate.py --measure pico-client-coop-query 1,382,844 before, 1,383,148 after (+304), budget 1,387,100. Shape probe with sce-codegen built at the SCE pin 7f52c3d78eed: map<record:FinalKey, record:FinalHold>[8] and set<record:FinalKey>[8] with has, put and a record value taken, changed and put back: rust ok, c11 ok. The pre-push round-fed gates run directly: 170 of 170 rc=0. rustfmt --check rc=0."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "W16 has nine tables left: S1 55, S2 7, 39, 44, S4 24, 58, S7 10, S8 53, S10 22, each to be bounded after reading what zenoh-pico does at the same limit. Hosted run 45027021871 (1288f22e9) was cancelled with no job, so the reading of C1g, C1bnl, C1ay and C1sb after round 4603 moves to the next hosted run. Local pico-client-coop-query reads ratio 3.16 against the committed ceiling row 3.0977 already on the tree before this round (local toolchain cmake 4.4.2, row read with 3.28.3); this round adds 0.0007 of it, and the hosted C1cs reading decides."
+      ]
     }
   },
   "inventory_entries": {
