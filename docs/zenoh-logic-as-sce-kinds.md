@@ -485,11 +485,14 @@ The list above is the census as taken. This list records what changed since.
   zenoh-pico's task creation and `z_open` do where `pthread_create` refuses. It
   had panicked, and `zp_start_read_task` caught no panic, so the process
   aborted; `z_open` ignored the start's answer.
-- **W9, compared.** Upstream installs a listener and then reports the history
-  (`zenoh/src/api/session.rs` @ `for transport in self.runtime().get_transports() {`), so a face that
-  comes up between the two can be reported twice and none is lost. wz reports
-  the history first and then installs its watch, so such a face is lost, and
-  one that goes down there is reported up and never down. Not yet changed.
+- **W9, fixed (2026-11-22).** Upstream installs a listener and then reports the
+  history (`zenoh/src/api/session.rs` @ `for transport in self.runtime().get_transports() {`),
+  so a face that comes up between the two can be reported twice and none is
+  lost. wz reported the history first and then installed its watch, so such a
+  face was lost, and one that went down there was reported up and never down.
+  The zenoh-c ABI's listeners now install the watch first, as upstream does, and
+  hold what it is told while the history is reported, reporting it after in
+  order, as the zenoh-pico ABI's listeners already did.
 - **The reset-generation pilot (S2 row 30 and S5 row M5), half done.** The rule
   is `sources/algorithms/take_generation.scxml`, an algorithm that takes the
   table `inout` (SCE ADR 0108, a `map<record, uint64>` keyed by the zid as its

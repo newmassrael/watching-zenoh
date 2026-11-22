@@ -511,6 +511,57 @@ define_event_closure!(
 /// there is no concurrent invocation for the C side to have to synchronise.
 struct EventClosure<T> {
     closure: std::sync::Mutex<T>,
+    /// While a listener declared with `history` reports the faces connected at its declaration,
+    /// the transitions its watch is told, in the order it was told them; `None` once they go
+    /// straight to the closure. Held only briefly, never across a call.
+    held: std::sync::Mutex<Option<std::collections::VecDeque<(FaceEventKind, FaceSnapshot)>>>,
+}
+
+impl<T> EventClosure<T> {
+    /// `closure`, holding what its watch is told until [`Self::finish_history`] when `history`.
+    fn new(closure: T, history: bool) -> Self {
+        Self {
+            closure: std::sync::Mutex::new(closure),
+            held: std::sync::Mutex::new(history.then(std::collections::VecDeque::new)),
+        }
+    }
+
+    /// Hand a transition to `deliver`, or hold it while the history is being reported.
+    fn deliver_or_hold(
+        &self,
+        kind: FaceEventKind,
+        snapshot: &FaceSnapshot,
+        deliver: fn(&Self, FaceEventKind, &FaceSnapshot),
+    ) {
+        {
+            let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(queue) = held.as_mut() {
+                queue.push_back((kind, snapshot.clone()));
+                return;
+            }
+        }
+        deliver(self, kind, snapshot);
+    }
+
+    /// Hand `deliver` what was held while the history was reported, in order, and let what
+    /// comes after go straight through. The hold ends only when it is found empty under its
+    /// lock, so no transition overtakes one still held.
+    fn finish_history(&self, deliver: fn(&Self, FaceEventKind, &FaceSnapshot)) {
+        loop {
+            let next = {
+                let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+                match held.as_mut().map(std::collections::VecDeque::pop_front) {
+                    Some(Some(next)) => next,
+                    Some(None) => {
+                        *held = None;
+                        return;
+                    }
+                    None => return,
+                }
+            };
+            deliver(self, next.0, &next.1);
+        }
+    }
 }
 
 // SAFETY: as stated on `EventClosure` — a single invoking role.
@@ -2005,28 +2056,33 @@ unsafe fn declare_link_listener(
             take_transport_filter(opts.transport)
         })
     };
-    let closure = Arc::new(EventClosure {
-        closure: std::sync::Mutex::new(taken),
-    });
+    let closure = Arc::new(EventClosure::new(taken, history));
     let source = held.face_source();
+    let sink = closure.clone();
+    // A group member's arrival and departure are TRANSPORT events alone: zenoh's multicast
+    // handler announces the member's transport and hands it a peer handler whose link hooks
+    // its multicast transport never calls
+    // (`zenoh/src/api/connectivity.rs` @ `impl TransportMulticastEventHandler for ConnectivityMulticastHandler {`).
+    // Its link is reported by the listing and by the history below, which read the links.
+    //
+    // The watch is installed BEFORE the links are read, as upstream installs a listener and then
+    // reports its history (`zenoh/src/api/session.rs` @
+    // `for link in self.runtime().get_links(transport.as_ref()) {`): a link that comes up between
+    // the two is reported, where reading first lost it. What the watch is told meanwhile is held
+    // and reported after the history, in order, so a link's going never precedes its report.
+    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
+        if !snapshot.is_multicast && passes(filter, snapshot) {
+            sink.deliver_or_hold(kind, snapshot, deliver_link_event);
+        }
+    }));
     if history {
         for snapshot in source.connected() {
             if passes(filter, &snapshot) {
                 deliver_link_event(&closure, FaceEventKind::Up, &snapshot);
             }
         }
+        closure.finish_history(deliver_link_event);
     }
-    let sink = closure.clone();
-    // A group member's arrival and departure are TRANSPORT events alone: zenoh's multicast
-    // handler announces the member's transport and hands it a peer handler whose link hooks
-    // its multicast transport never calls
-    // (`zenoh/src/api/connectivity.rs` @ `impl TransportMulticastEventHandler for ConnectivityMulticastHandler {`).
-    // Its link is reported by the listing and by the history above, which read the links.
-    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        if !snapshot.is_multicast && passes(filter, snapshot) {
-            deliver_link_event(&sink, kind, snapshot);
-        }
-    }));
     Ok(Box::into_raw(Box::new(ListenerState { source, watcher })) as Handle)
 }
 
@@ -2112,23 +2168,27 @@ unsafe fn declare_transport_listener(
     };
     // SAFETY: the caller's contract.
     let history = !options.is_null() && unsafe { (*options).history };
-    let closure = Arc::new(EventClosure {
-        closure: std::sync::Mutex::new(taken),
-    });
+    let closure = Arc::new(EventClosure::new(taken, history));
     let source = held.face_source();
+    let sink = closure.clone();
+    // Installed BEFORE the transports are read, as upstream installs a listener and then reports
+    // its history (`zenoh/src/api/session.rs` @
+    // `for transport in self.runtime().get_transports() {`): a transport that comes up between the
+    // two is reported, where reading first lost it, and one that went there was reported up and
+    // never down. What the watch is told meanwhile is held and reported after the history.
+    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
+        if snapshot.is_multicast {
+            sink.deliver_or_hold(kind, &as_announced(snapshot), deliver_transport_event);
+        } else {
+            sink.deliver_or_hold(kind, snapshot, deliver_transport_event);
+        }
+    }));
     if history {
         for snapshot in source.connected() {
             deliver_transport_event(&closure, FaceEventKind::Up, &snapshot);
         }
+        closure.finish_history(deliver_transport_event);
     }
-    let sink = closure.clone();
-    let watcher = source.watch(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        if snapshot.is_multicast {
-            deliver_transport_event(&sink, kind, &as_announced(snapshot));
-        } else {
-            deliver_transport_event(&sink, kind, snapshot);
-        }
-    }));
     Ok(Box::into_raw(Box::new(ListenerState { source, watcher })) as Handle)
 }
 
@@ -2893,5 +2953,66 @@ mod tests {
         assert_eq!(z_whatami_t::from(whatami_c_from_wire(0)), Z_WHATAMI_ROUTER);
         assert_eq!(z_whatami_t::from(whatami_c_from_wire(1)), Z_WHATAMI_PEER);
         assert_eq!(z_whatami_t::from(whatami_c_from_wire(2)), Z_WHATAMI_CLIENT);
+    }
+
+    /// What the watch of a listener declared with `history` is told while the history is being
+    /// reported is held and reported after it, in order; once the history ends a transition goes
+    /// straight to the closure. The watch is installed before the faces are read, so a face that
+    /// came up in between reaches the program this way, where reading first lost it.
+    ///
+    /// # Control
+    ///
+    /// A closure declared without `history` holds nothing: the same transition reaches the
+    /// program at once.
+    #[test]
+    fn a_transition_told_during_the_history_is_reported_after_it_in_order() {
+        static SEEN: std::sync::Mutex<Vec<(u8, u8)>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn record(event: *mut z_loaned_transport_event_t, _: *mut c_void) {
+            let event = unsafe { &*event.cast::<z_owned_transport_event_t>() };
+            SEEN.lock()
+                .unwrap()
+                .push((event.transport.zid[0], event.kind));
+        }
+        fn face(zid: u8) -> FaceSnapshot {
+            FaceSnapshot {
+                zid: [zid; 16],
+                whatami: 1,
+                is_qos: false,
+                is_multicast: false,
+                is_shm: false,
+                links: Vec::new(),
+            }
+        }
+        fn closure() -> z_owned_closure_transport_event_t {
+            z_owned_closure_transport_event_t {
+                context: std::ptr::null_mut(),
+                call: Some(record),
+                drop: None,
+            }
+        }
+        let up = kind_of(FaceEventKind::Up) as u8;
+        let down = kind_of(FaceEventKind::Down) as u8;
+
+        let listener = EventClosure::new(closure(), true);
+        listener.deliver_or_hold(FaceEventKind::Up, &face(9), deliver_transport_event);
+        listener.deliver_or_hold(FaceEventKind::Down, &face(9), deliver_transport_event);
+        assert!(
+            SEEN.lock().unwrap().is_empty(),
+            "held while the history is reported"
+        );
+        deliver_transport_event(&listener, FaceEventKind::Up, &face(1));
+        listener.finish_history(deliver_transport_event);
+        assert_eq!(*SEEN.lock().unwrap(), [(1, up), (9, up), (9, down)]);
+        listener.deliver_or_hold(FaceEventKind::Up, &face(5), deliver_transport_event);
+        assert_eq!(
+            SEEN.lock().unwrap().last(),
+            Some(&(5, up)),
+            "live after the history"
+        );
+
+        SEEN.lock().unwrap().clear();
+        let control = EventClosure::new(closure(), false);
+        control.deliver_or_hold(FaceEventKind::Up, &face(7), deliver_transport_event);
+        assert_eq!(*SEEN.lock().unwrap(), [(7, up)]);
     }
 }
