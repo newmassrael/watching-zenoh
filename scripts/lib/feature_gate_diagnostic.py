@@ -787,12 +787,10 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "session-unicast-accept",
                 "session-unicast-open",
                 # `transport-batching` LEFT this list: see its own row below.
-                # Round 3171's `transport-tx-lend` gates the buffer seam of
-                # `tx_buf.rs`: both public items it gates are behind an
-                # `all(feature, ..)` attribute, so rustc's note names no
-                # feature for them. (Its two lend attempts on the session are
-                # methods behind the same shape.)
-                "transport-tx-lend",
+                # `transport-tx-lend` LEFT this list: the session's count of the frames it built
+                # in a lent slot and the ones it built itself (`session_actions::FrameLendCounts`
+                # and `frame_lend_counts`) are under the bare feature in a public module, a
+                # simple site the submodule probe reads, so the feature is probed there.
             )
         },
         **{
