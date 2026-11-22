@@ -227,6 +227,15 @@ pub trait SessionDatagramLink {
     /// a link that does not keep ([`Self::keeps_input`]).
     fn keep(&self) {}
 
+    /// Whether the bytes [`Self::recv_with`] lends stay where they lie, unwritten, after `f`
+    /// returns, until the link is next asked to receive or to be serviced: what lets the link's
+    /// owner hand what it read to a callback where the datagram lies, holding the link back from
+    /// receiving and from being serviced until the callback returns. The provided form answers
+    /// `false`, which a link whose buffer its stack may write at any time answers too.
+    fn lends_until_next_receive(&self) -> bool {
+        false
+    }
+
     /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
     /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
     /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
@@ -376,6 +385,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn keep(&self) {
         (**self).keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        (**self).lends_until_next_receive()
     }
 
     #[cfg(feature = "alloc")]

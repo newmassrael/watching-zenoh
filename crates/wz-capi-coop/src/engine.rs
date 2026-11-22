@@ -984,7 +984,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for LiveCore<
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, L, C> {
     fn drop(&mut self) {
         // SAFETY: the session's lock is held: `core` is let go after this body.
-        unsafe { self.lane.held() }.seal();
+        unsafe { self.lane.held() }.seal_all();
     }
 }
 
@@ -3376,6 +3376,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.samples.handed_on()
     }
 
+    /// How many samples the session's delivery lane handed to their callbacks where their
+    /// datagram lies since the open: what a test of the cost of one received sample counts.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn lane_lent(&self) -> usize {
+        self.samples.lent_count()
+    }
+
     /// How often the list of the threads delivering beside the first was taken since the open
     /// ([`Deliveries`]): what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
@@ -3656,30 +3663,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Some(held) => held,
                 None => own.insert(Resolved::new()),
             };
+            // A sample handed where its datagram lies is older than anything written into the lane
+            // while it waited, so it goes first; the link it lies in is read again once it is back.
+            if let Some(lent) = delivery.take_lent() {
+                handed = true;
+                let sample = lent.sample();
+                self.hand_sample(resolved, sample, sample.subscribers());
+                drop(lent);
+            }
             while let Some((item, head)) = delivery.take() {
                 handed = true;
                 match item {
                     LaneItem::Sample(sample) => {
-                        let hand = |id: SubId, callback: &SubscriberCallback| {
-                            #[cfg(feature = "local-subscriber")]
-                            let _running = self.deliveries.run(TargetKey::Subscriber(id));
-                            #[cfg(not(feature = "local-subscriber"))]
-                            let _ = id;
-                            (lock(callback))(&sample);
-                        };
-                        // A subscriber undeclared since the sample was queued has no callback
-                        // left, and is passed over.
-                        for (at, id) in sample.subscribers().enumerate() {
-                            if at < RESOLVED_SUBSCRIBERS {
-                                if let Some(callback) =
-                                    self.resolved_subscriber_callback(resolved, at, id)
-                                {
-                                    hand(id, callback);
-                                }
-                            } else if let Some(callback) = self.subscriber_callback(id) {
-                                hand(id, &callback);
-                            }
-                        }
+                        self.hand_sample(resolved, &sample, sample.subscribers());
                     }
                     #[cfg(feature = "query")]
                     LaneItem::Reply(reply) => {
@@ -3726,6 +3722,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             drop(delivery);
         }
         handed
+    }
+
+    /// Hand `sample` to the callback of each of `subscribers`, in order, with no lock of the
+    /// library held: the first [`RESOLVED_SUBSCRIBERS`] by the callbacks `resolved` keeps, the rest
+    /// by a look in the table each. A subscriber undeclared since the sample arrived has no callback
+    /// left, and is passed over.
+    fn hand_sample(
+        &self,
+        resolved: &mut Resolved,
+        sample: &dyn SampleView,
+        subscribers: impl Iterator<Item = SubId>,
+    ) {
+        let hand = |id: SubId, callback: &SubscriberCallback| {
+            #[cfg(feature = "local-subscriber")]
+            let _running = self.deliveries.run(TargetKey::Subscriber(id));
+            #[cfg(not(feature = "local-subscriber"))]
+            let _ = id;
+            (lock(callback))(sample);
+        };
+        for (at, id) in subscribers.enumerate() {
+            if at < RESOLVED_SUBSCRIBERS {
+                if let Some(callback) = self.resolved_subscriber_callback(resolved, at, id) {
+                    hand(id, callback);
+                }
+            } else if let Some(callback) = self.subscriber_callback(id) {
+                hand(id, &callback);
+            }
+        }
     }
 
     /// Hand each query the session queued to its queryable's callback, and send what it answered.
@@ -4831,7 +4855,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             &keyexpr,
             allowed_origin,
             // SAFETY: the registry hands its sinks a sample under the session's lock.
-            BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.held() }.offer(id, sample)),
+            BoxedSink::new(move |sample: &dyn SampleView| {
+                unsafe { lane.held() }.offer_sample(id, sample)
+            }),
         );
         // A registration the observer refuses is a refused declaration, told as one: an id
         // answered for it would name a subscriber that hears nothing and was never announced.

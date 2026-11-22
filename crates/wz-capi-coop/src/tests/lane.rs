@@ -543,6 +543,76 @@ fn the_lane_hands_its_samples_on_in_order_to_one_delivery_at_a_time() {
     assert!(lane.deliver().is_some(), "let go, the side is free again");
 }
 
+/// A sample whose parts lie in the datagram a link lends the step is handed to its callbacks where
+/// they lie, once for every subscriber it reaches, and holds the links back until it is given
+/// back; one offered while a delivery runs, or whose payload lies elsewhere, is written into the
+/// lane instead.
+#[test]
+fn a_sample_whose_parts_lie_in_the_lent_datagram_is_handed_where_they_lie() {
+    use crate::lane::{LaneGate, SharedLane};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let Some(lane) = lane(256, 4) else {
+        return;
+    };
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane));
+    // SAFETY (every hold, the gate and the lending here): this thread is the lane's one writer,
+    // as a session's step is under its lock, and the sample's payload stands for the datagram it
+    // lies in, which outlives every use below.
+    let gate = unsafe { LaneGate::new(Quiet, lane.clone(), room(32)) };
+    let sample = filled(8, 7);
+    let datagram = sample.payload();
+    let offer = |subscribers: &[SubId], sample: &Sample| {
+        unsafe { lane.set_lending(Some(datagram)) };
+        let mut held = unsafe { lane.held() };
+        for subscriber in subscribers {
+            held.offer_sample(*subscriber, sample);
+        }
+        held.seal_all();
+        drop(held);
+        unsafe { lane.set_lending(None) };
+    };
+    offer(&[1, 2], &sample);
+    assert!(!gate.takes_input(), "the lent datagram holds the link back");
+    assert_eq!(lane.handed_on(), 0, "nothing was written into the lane");
+    let delivery = lane.deliver().expect("one delivery");
+    let lent = delivery.take_lent().expect("the sample was lent");
+    assert_eq!(
+        lent.sample().payload().as_ptr(),
+        datagram.as_ptr(),
+        "handed where it lies"
+    );
+    assert_eq!(lent.sample().keyexpr(), "demo/lane");
+    assert_eq!(lent.sample().subscribers().collect::<Vec<_>>(), vec![1, 2]);
+    drop(lent);
+    assert!(
+        delivery.take().is_none(),
+        "nothing was written into the lane"
+    );
+    drop(delivery);
+    assert!(gate.takes_input(), "given back, the link is read again");
+
+    let running = lane.deliver().expect("a delivery runs");
+    offer(&[3], &sample);
+    assert_eq!(
+        lane.handed_on(),
+        1,
+        "offered while a delivery runs, the sample is written into the lane"
+    );
+    while let Some((_, head)) = running.take() {
+        drop(head);
+    }
+    drop(running);
+
+    offer(&[4], &filled(8, 9));
+    assert_eq!(
+        lane.handed_on(),
+        2,
+        "a payload outside the lent datagram is written into the lane"
+    );
+    assert_eq!(lane.lent_count(), 1, "one sample was lent");
+}
+
 /// A sample offered for several subscribers is written once and handed to each of them, in the
 /// order it was offered to them: it takes the room of one copy and the ids, and one event slot.
 #[test]

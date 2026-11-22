@@ -945,13 +945,14 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     );
 }
 
-/// The samples of a read are handed from the session to its deliveries with no lock of the lane:
-/// each is handed on once, through the lane's queue, when the session lets go of its lock, and
-/// given back once its callback has returned. A read that finds nothing hands nothing on. One
-/// thread delivers, so the list of the threads delivering beside it is never taken. The CONTROL
-/// is the count of the samples handed to the subscriber.
+/// The samples a read takes from a link that leaves its datagram where it lies are handed to the
+/// subscriber's callback where they lie: none is written into the delivery lane, which has no
+/// lock, and each holds the link back only until its callback returns, the next read going on
+/// from the record after it. A read that finds nothing hands nothing out. One thread delivers, so
+/// the list of the threads delivering beside it is never taken. The CONTROL is the count of the
+/// samples handed to the subscriber.
 #[test]
-fn a_received_sample_is_handed_on_once_and_an_empty_read_hands_nothing() {
+fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
@@ -975,14 +976,18 @@ fn a_received_sample_is_handed_on_once_and_an_empty_read_hands_nothing() {
     until(&engine, "the declarations to be told", || {
         engine.declarations_synced()
     });
-    let (handed, list) = (engine.lane_handed(), engine.delivery_list_takes());
+    let (handed, lent, list) = (
+        engine.lane_handed(),
+        engine.lane_lent(),
+        engine.delivery_list_takes(),
+    );
     for _ in 0..4 {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        engine.lane_handed(),
-        handed,
-        "a read with nothing to read handed something on"
+        (engine.lane_handed(), engine.lane_lent()),
+        (handed, lent),
+        "a read with nothing to read handed something out"
     );
     const SAMPLES: usize = 8;
     for _ in 0..SAMPLES {
@@ -993,9 +998,14 @@ fn a_received_sample_is_handed_on_once_and_an_empty_read_hands_nothing() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     assert_eq!(
-        engine.lane_handed() - handed,
+        engine.lane_lent() - lent,
         SAMPLES,
-        "each sample handed on once"
+        "each sample handed where its datagram lies"
+    );
+    assert_eq!(
+        engine.lane_handed() - handed,
+        0,
+        "and none written into the lane"
     );
     assert_eq!(
         engine.delivery_list_takes(),

@@ -684,6 +684,13 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         self.keeping.set(true);
     }
 
+    // The receive buffer is written by a receive (`recv_with`, `try_recv`) and by the wait of a
+    // service (`wait_for_datagram`) alone, so what a receive lent lies there until the link is next
+    // asked for either.
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         if self.owner_waits {
