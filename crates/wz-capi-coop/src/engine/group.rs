@@ -53,7 +53,7 @@ use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, GroupDue, GroupTxPace, GroupTxStage, JoinAsk,
+    spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupTxPace, GroupTxStage, JoinAsk,
     MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
@@ -197,6 +197,14 @@ impl GroupTransport for Watched {
         }
         took
     }
+
+    fn keeps_input(&self) -> bool {
+        self.inner.keeps_input()
+    }
+
+    fn keep(&mut self) {
+        self.inner.keep();
+    }
 }
 
 /// What a message of the session waits with when the group's stage has no room for it: a pass of
@@ -232,6 +240,9 @@ pub(super) struct GroupJoining {
     pub(super) id: FaceId,
     pub(super) join: GroupJoin,
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
+    /// Whether the session has room for what the group delivers: the delivery lane's room for one
+    /// record of the group's batch.
+    pub(super) input_gate: GroupInputGate,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
     /// The session limits the session's open resolved: the group's replies are held to them.
@@ -310,6 +321,7 @@ impl GroupFace {
             id,
             join,
             transport,
+            input_gate,
             params,
             policy,
             limits,
@@ -350,7 +362,8 @@ impl GroupFace {
         )
         .with_join_ask(join_ask.clone())
         .with_tx_stage(tx.clone())
-        .with_due(due.clone());
+        .with_due(due.clone())
+        .with_input_gate(input_gate);
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let on_event = answering_asks(
             noting_members(

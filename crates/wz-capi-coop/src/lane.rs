@@ -1230,6 +1230,20 @@ impl MatchFlips {
     }
 }
 
+/// The group twin of [`LaneGate`]: whether the lane has the room one record of a group can take
+/// (`room`, decision Q4), asked before each datagram of the group and before each further message
+/// and record of one its transport keeps. While it has not, what the members send waits in the
+/// group's socket. A group's record does not claim that room as a link's does
+/// ([`SampleLane::offering_gated`]): the room of a group's batch is not one the lane is lengthened
+/// to hold.
+#[cfg(feature = "group")]
+pub(crate) fn takes_a_group_read(
+    lane: Arc<Mutex<SampleLane>>,
+    room: ReadRoom,
+) -> impl Fn() -> bool + 'static {
+    move || lane.lock().takes_a_read(room)
+}
+
 /// `pump`, which gives the session nothing while the lane has not the room one record can take
 /// (`room`, decision Q4): not the next datagram, and not the next record of one the link keeps.
 /// What the peer sends meanwhile waits in the link, and the transport's flow control carries the

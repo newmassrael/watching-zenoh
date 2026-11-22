@@ -2113,12 +2113,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(not(feature = "queryable"))]
         let dispatch = group::dispatch(self.registry.clone(), id);
+        // The group is handed a record of its datagrams only while the delivery lane has the room
+        // one record of the group's batch can take (decision Q4), as a link is.
+        let room = crate::lane::read_room::<
+            { caps::PICO_FRAG_MAX_BYTES },
+            { caps::MAX_KEYEXPR_BYTES },
+            { caps::MAX_SUBSCRIPTIONS },
+            { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        >(
+            usize::from(params.batch_size),
+            &resolve_limits(&self.config),
+        );
+        let input_gate = wz_session_mcu::group_drive::GroupInputGate::new(
+            crate::lane::takes_a_group_read(self.lane.clone(), room),
+        );
         let face = GroupFace::join(
             &self.local,
             GroupJoining {
                 id,
                 join,
                 transport,
+                input_gate,
                 params,
                 policy: self.policy,
                 limits: resolve_limits(&self.config),

@@ -1551,3 +1551,277 @@ mod woken {
         SessionDrive::close(&*member);
     }
 }
+
+/// What a member sends is read where its datagram lies, record by record, as a link's frames are:
+/// a beacon and a frame in one datagram both reach the session, a member's declarations are kept
+/// apart from another member's of the same id, and a datagram whose walk the host stopped is read
+/// on from where it stopped.
+mod in_place {
+    use std::sync::Arc;
+
+    use wz_capi_port::{FilterPlane, SessionDrive, SessionEngine, WireKey};
+    use wz_session_core::declare_build::build_declare_subscriber;
+    use wz_session_core::frame_encode::{encode_frame_with_declare, encode_frame_with_push};
+    use wz_session_core::handshake_encode::encode_multicast_close_into_slice;
+    use wz_session_core::limits::SessionLimits;
+    use wz_session_core::multicast_join::encode_join;
+    use wz_session_core::multicast_params::{zid_vec, GroupJoinRule, MulticastParams};
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::push_build::build_push_literal;
+    use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+    use wz_session_core::sn::{mask_from_res, MulticastTxConduits};
+    use wz_session_core::WhatAmI;
+
+    use super::{eventually, member_config, open_member, source, subscribe, Network, GROUP};
+
+    /// The terms member `member` beacons, the group's (`super::profile`).
+    fn params(member: u8) -> MulticastParams {
+        let policy = SessionPolicy::defaults();
+        MulticastParams {
+            whatami: WhatAmI::Peer,
+            zid: zid_vec(&[member; 4]),
+            lease_ms: 10_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: TxQueueConf::of_snapshot(&policy, &SessionLimits::BUILD),
+            link_rx: LinkRxConf::default(),
+            join_rule: GroupJoinRule::Pico,
+            max_sessions: None,
+            policy,
+            limits: SessionLimits::BUILD,
+        }
+    }
+
+    /// Member `member`'s beacon, which says its first frame is numbered 0.
+    fn beacon(member: u8) -> Vec<u8> {
+        let params = params(member);
+        encode_join(
+            &params,
+            &MulticastTxConduits::new(mask_from_res(params.seq_num_res)),
+        )
+    }
+
+    /// One reliable frame numbered `sn` whose records are a Put of `b"x"` on each of `keys`, in
+    /// order: the first record's frame with the records of the others behind it. A frame numbered
+    /// below 128 with no extension has a head of two bytes, which is what is taken off the others.
+    fn frame_of_puts(sn: u64, keys: &[&str]) -> Vec<u8> {
+        assert!(sn < 128, "a head of two bytes");
+        let mut frame = Vec::new();
+        for (at, key) in keys.iter().enumerate() {
+            let one =
+                encode_frame_with_push(sn, build_push_literal(key, b"x").expect("a put"), true);
+            frame.extend_from_slice(if at == 0 { &one } else { &one[2..] });
+        }
+        frame
+    }
+
+    /// Hand `datagram` to `to`'s session as its stack hands in what the group carries, from
+    /// `from`'s address.
+    fn hand_in(network: &Network, to: u8, from: u8, datagram: &[u8]) {
+        let (link, transport) = {
+            let joined = network.joined.lock().unwrap();
+            let to = joined
+                .iter()
+                .find(|joined| joined.member == to)
+                .expect("the member joined");
+            (to.link, to.transport.upgrade().expect("its transport"))
+        };
+        transport
+            .received(link, datagram, Some(source(from).as_str()))
+            .expect("the stack takes the datagram");
+    }
+
+    /// Two members that number their subscribers alike reach the session as two: each one's
+    /// declaration, read where its datagram lies behind the member's beacon, opens its own filter,
+    /// the second does not take the first's place, and the first's departure retracts its own
+    /// declaration and nothing else.
+    #[test]
+    fn two_members_declarations_of_one_id_read_in_place_stay_apart() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let filter = |key: &str| {
+            session
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    key.to_owned(),
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+        };
+        let (on_a, on_b) = (filter("demo/scoped/a"), filter("demo/scoped/b"));
+        assert!(
+            session.write_filter_active(on_a) && session.write_filter_active(on_b),
+            "CONTROL: no member holds a subscriber yet"
+        );
+
+        for (member, key) in [(9u8, "demo/scoped/a"), (8, "demo/scoped/b")] {
+            let mut datagram = beacon(member);
+            datagram.extend_from_slice(&encode_frame_with_declare(
+                0,
+                build_declare_subscriber(2, 0, Some(key)).expect("a subscriber"),
+                true,
+            ));
+            hand_in(&network, 1, member, &datagram);
+        }
+        eventually("each member's subscriber to open its filter", || {
+            !session.write_filter_active(on_a) && !session.write_filter_active(on_b)
+        });
+
+        let mut close = [0u8; 8];
+        let len = encode_multicast_close_into_slice(&mut close).expect("a close");
+        hand_in(&network, 1, 9, &close[..len]);
+        eventually("the leaving member's subscriber to be retracted", || {
+            session.write_filter_active(on_a)
+        });
+        assert!(
+            !session.write_filter_active(on_b),
+            "the member that stayed keeps its subscriber of the same id"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// A frame of several samples behind a member's beacon is delivered whole, in order and once
+    /// each, however many of its records the delivery lane takes at a time.
+    #[test]
+    fn a_frame_of_several_samples_from_a_member_is_delivered_whole_and_in_order() {
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        SessionDrive::start_read_task(&*session).expect("the read task starts");
+        let heard = subscribe(&session, "demo/kept/**");
+        let keys = ["demo/kept/a", "demo/kept/b", "demo/kept/c"];
+        let mut datagram = beacon(7);
+        datagram.extend_from_slice(&frame_of_puts(0, &keys));
+        hand_in(&network, 1, 7, &datagram);
+        eventually("the three samples", || heard.lock().unwrap().len() >= 3);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            3,
+            "each sample once: a datagram read on is not read again from its start"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// Below the engine: the group's receive over a datagram its transport keeps. A host with room
+    /// for no other stops the walk before the next message, and with room for one record stops it
+    /// before the next record; each walk goes on from where the last stopped, the frame admitted
+    /// by its sequence number once, until the datagram is read whole.
+    #[cfg(not(feature = "transport-stats"))]
+    #[test]
+    fn a_kept_group_datagram_is_read_on_from_where_the_host_stopped() {
+        use core::net::SocketAddr;
+        use wz_session_core::driver_loop::{EventSink, InPlaceRecord, IterationEvent};
+        use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+        use wz_session_core::multicast_rx::dispatch_multicast_inbound_kept;
+        use wz_session_core::reassembly_dispatch::{ReassemblyConfig, ReassemblyDispatcher};
+        use wz_session_core::wire_const::T_MID_KEEP_ALIVE;
+        use wz_session_core::wireexpr_resolve::id_and_suffix_view;
+
+        /// The keys of the Puts it was handed, and how many more records it takes.
+        struct Host {
+            keys: Vec<String>,
+            room: usize,
+        }
+
+        impl EventSink for Host {
+            fn event(&mut self, _event: IterationEvent<'_, '_>) {}
+
+            fn record(&mut self, record: InPlaceRecord<'_, '_>) {
+                if let Some(push) = record.push() {
+                    let (_, suffix) = id_and_suffix_view(&push.keyexpr.body);
+                    self.keys.push(suffix.unwrap_or_default().to_owned());
+                }
+                self.room = self.room.saturating_sub(1);
+            }
+
+            fn takes_another(&mut self) -> bool {
+                self.room > 0
+            }
+        }
+
+        let keys = ["demo/kept/a", "demo/kept/b", "demo/kept/c"];
+        let mut datagram = beacon(9);
+        datagram.push(T_MID_KEEP_ALIVE);
+        datagram.extend_from_slice(&frame_of_puts(0, &keys));
+        let from = SocketAddr::from(([192, 0, 2, 9], 7447));
+        let local = params(1);
+        let group = || {
+            let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+            assert!(dispatcher.create().open());
+            assert!(!dispatcher.notify_link_ready().release());
+            let reasm: ReassemblyDispatcher<4, 4096> =
+                ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000));
+            (dispatcher, reasm)
+        };
+
+        let (mut dispatcher, mut reasm) = group();
+        let mut host = Host {
+            keys: Vec::new(),
+            room: 0,
+        };
+        let mut walk = |host: &mut Host, resume| {
+            dispatch_multicast_inbound_kept(
+                &mut dispatcher,
+                &mut reasm,
+                &local,
+                &datagram,
+                from,
+                1_000,
+                resume,
+                true,
+                host,
+                &(),
+            )
+        };
+        let stopped = walk(&mut host, None);
+        assert!(
+            stopped.is_some(),
+            "stopped after the beacon, before the next message"
+        );
+        assert!(host.keys.is_empty());
+        host.room = 1;
+        let stopped = walk(&mut host, stopped);
+        assert!(stopped.is_some(), "stopped after one record");
+        assert_eq!(host.keys, ["demo/kept/a"]);
+        host.room = 1;
+        let stopped = walk(&mut host, stopped);
+        assert!(stopped.is_some());
+        assert_eq!(
+            host.keys,
+            ["demo/kept/a", "demo/kept/b"],
+            "the next record, its frame not refused as one seen"
+        );
+        host.room = usize::MAX;
+        let stopped = walk(&mut host, stopped);
+        assert_eq!(stopped, None, "read whole");
+        assert_eq!(host.keys, keys);
+
+        // CONTROL: a transport that keeps nothing has its datagram read whole at once.
+        let (mut dispatcher, mut reasm) = group();
+        let mut whole = Host {
+            keys: Vec::new(),
+            room: 0,
+        };
+        let stopped = dispatch_multicast_inbound_kept(
+            &mut dispatcher,
+            &mut reasm,
+            &local,
+            &datagram,
+            from,
+            1_000,
+            None,
+            false,
+            &mut whole,
+            &(),
+        );
+        assert_eq!(stopped, None);
+        assert_eq!(whole.keys, keys);
+    }
+}
