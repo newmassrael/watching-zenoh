@@ -489,3 +489,79 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         "{reads} reads for {PUTS} puts of one batch: a few, not one a put"
     );
 }
+
+/// A read whose step left a link holding input steps the next read at once: here a second batch,
+/// whole in the stream link's buffer behind the one the first read handed out, is read with the
+/// session taken once, for the step, where a read that works out its wait takes it twice. The
+/// CONTROL is the first read, which finds nothing held before it and takes the session twice.
+#[test]
+fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
+    let engine = open_with(CoopConfig {
+        whatami: WhatAmI::Peer,
+        zid: Some(vec![0xa1; 4]),
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        ..client_config()
+    });
+    let endpoint = engine.listening().pop().expect("one port is bound");
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    engine.declare_subscriber_on_wire(
+        "demo/s/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
+    reads_until(&engine, "the client's face", || engine.faces_up() == 1);
+    let peer = dialing.join().expect("the client opens");
+    std::thread::sleep(Duration::from_millis(100));
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+
+    const PUTS: usize = 8;
+    let put = || {
+        peer.publish_on_wire_all(
+            "demo/s/x",
+            &WireKey::literal(),
+            b"x",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the window holds");
+    };
+    assert_eq!(
+        peer.batch_start_all(),
+        1,
+        "the client's link opens a window"
+    );
+    for _ in 0..PUTS {
+        put();
+    }
+    assert_eq!(peer.batch_flush_all(), 1, "the first batch is written");
+    for _ in 0..PUTS {
+        put();
+    }
+    assert_eq!(peer.batch_stop_all(), 1, "the second batch is written");
+    std::thread::sleep(Duration::from_millis(100));
+    let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
+    let before = takes(&engine);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        (takes(&engine) - before, received.load(Ordering::SeqCst)),
+        (2, PUTS),
+        "CONTROL: the first read works out its wait and steps, and hands out the first batch"
+    );
+    let before = takes(&engine);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        (takes(&engine) - before, received.load(Ordering::SeqCst)),
+        (1, 2 * PUTS),
+        "the second batch was held: the read steps at once and hands it out"
+    );
+}
