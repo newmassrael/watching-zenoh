@@ -77,6 +77,10 @@ if(WZ_MCU_SPEED_ARM STREQUAL "P")
   list(APPEND EXTRA_CONF_FILE ${switches_conf})
 else()
   list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/arm_w.conf)
+  # The read task's stack where zenoh-pico's mt arm keeps its tasks' stacks: not in the heap.
+  if(WZ_MCU_SPEED_THREADS STREQUAL "mt")
+    list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/arm_w_mt.conf)
+  endif()
 endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})

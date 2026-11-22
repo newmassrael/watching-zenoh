@@ -4,5 +4,7 @@
 mainmenu "The MCU speed matrix: one pico API program over zenoh-pico or over wz"
 
 rsource "../zephyr-common/Kconfig.wz"
+# The limits arm W states for its session (arm_w.conf); arm P has no use for them.
+rsource "../Kconfig.limits"
 
 source "Kconfig.zephyr"
