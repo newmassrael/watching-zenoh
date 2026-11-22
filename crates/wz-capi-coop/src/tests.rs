@@ -1442,6 +1442,7 @@ mod one_face;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
+mod redial_wait;
 mod replay;
 #[cfg(all(
     feature = "shared-key-ids",

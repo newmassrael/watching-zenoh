@@ -1556,20 +1556,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Dial from endpoint `from` on; when none answers, wait `redial_ms` to dial them all again,
     /// or end with the last endpoint's reason when the session redials none.
+    ///
+    /// The wait is counted from the end of the dials, read from the clock after them. A dial
+    /// blocks the read step, which holds the session, and a host may refuse one only after
+    /// retries of its own (a refused loopback connect takes about two seconds on Windows): a wait
+    /// counted from before the dials would then already be over, the next read would dial again at
+    /// once, and the session would be held through dial after dial with no room for a publish or
+    /// a close to take it.
     fn dial_or_wait(
         &mut self,
         from: usize,
         last: OpenError,
-        now_us: u64,
         redial_ms: Option<u64>,
     ) -> Result<Link<C>, OpenError> {
         match (self.dial_from(from, last), redial_ms) {
             (Ok(link), _) => Ok(link),
             (Err(OpenError::EntropyUnavailable), _) => Err(OpenError::EntropyUnavailable),
             (Err(last), None) => Err(last),
-            (Err(_), Some(ms)) => Ok(Link::Waiting {
-                at_us: now_us.saturating_add(ms.saturating_mul(1000)),
-            }),
+            (Err(_), Some(ms)) => {
+                let ended_us = self.clock.now_us();
+                Ok(Link::Waiting {
+                    at_us: ended_us.saturating_add(ms.saturating_mul(1000)),
+                })
+            }
         }
     }
 
@@ -1636,7 +1645,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 if redial_ms.is_none() {
                     return Err(OpenError::Unreachable(String::from("the link was lost")));
                 }
-                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+                self.dial_or_wait(0, OpenError::NoEndpoint, redial_ms)?
             }
             Link::Opening {
                 wire,
@@ -1676,7 +1685,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         "{}: {why}",
                         self.config.endpoints[next - 1]
                     ));
-                    self.dial_or_wait(next, last, now_us, redial_ms)?
+                    self.dial_or_wait(next, last, redial_ms)?
                 } else {
                     Link::Opening {
                         wire,
@@ -1686,14 +1695,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
             }
             Link::Waiting { at_us } if now_us >= at_us => {
-                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+                self.dial_or_wait(0, OpenError::NoEndpoint, redial_ms)?
             }
             // The face that held the node is gone, and so is any link in the making to it: the
             // node is dialled again. Read from the face table each step and not told by the face
             // that goes, so a link that dies in its handshake frees the node as well.
             #[cfg(feature = "listen")]
             Link::Held { zid } if !self.node_is_held(&zid, id) => {
-                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+                self.dial_or_wait(0, OpenError::NoEndpoint, redial_ms)?
             }
             link => link,
         };

@@ -301,8 +301,11 @@ fn the_dialling_session_tears_down_in_time_after_its_peer_is_gone() {
         let mut pong = pair.pong;
         z_publisher_drop(z_publisher_move(&mut *pong));
     }
-    // Long enough for the dialler to read the end of its link and begin to dial again, which is
-    // where its teardown then finds it.
+    // Long enough for the dialler to read the end of its link and begin to dial its endpoint
+    // again, which is where its teardown then finds it, as in the order a ping and a pong of the
+    // host bench end in: the pong closes on the first stop and the ping puts two more. A host that
+    // refuses that dial only after retries of its own (Windows) held the session through dial
+    // after dial, and the puts below waited for it without end.
     std::thread::sleep(Duration::from_millis(500));
     each_step_returns(
         "the dialler, its peer gone",
