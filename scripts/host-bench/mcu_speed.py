@@ -129,7 +129,7 @@ METRICS = {
     "sub_msgs_per_busy_s": "higher",
     "rtt_p50_us": "lower", "rtt_p90_us": "lower", "rtt_p99_us": "lower", "rtt_mean_us": "lower",
     "rtt_min_us": "lower", "rtt_max_us": "lower", "instr_per_rtt": "lower", "lost": "lower",
-    "stack_bytes": "lower", "heap_peak_bytes": "lower",
+    "stack_bytes": "lower", "heap_peak_bytes": "lower", "nic_refused": "lower", "udp_drop": "lower",
 }
 #: The figures the gate holds, per workload. The share the probe got of a put loop is read, not held: a
 #: datagram the emulator's network drops is the network's, and both arms send into the same one.
@@ -147,6 +147,9 @@ RESULT_KEYS = {
             "max_cycles", "mean_cycles", "busy_cycles", "hz"),
 }
 MEMORY_KEYS = ("stack_used", "heap_peak", "heap_size")
+NET_KEYS = ("bytes_received", "ipv4_recv", "ipv4_drop", "udp_recv", "udp_drop", "processing_error")
+#: The line the emulator's user network writes for a frame the guest's network card would not take.
+NIC_REFUSED = "Failed to send packet"
 
 #: Seconds: a probe's declarations before the image boots, an image's boot to its READY line, a cell's
 #: whole run, and the router's start.
@@ -215,6 +218,11 @@ def stacks_of(text: str) -> list[dict]:
             out.append({"thread": found.get("thread", "unnamed"), "used": int(found["used"]),
                         "size": int(found["size"])})
     return out
+
+
+def net_of(text: str) -> dict[str, int] | None:
+    lines = tagged(text, "NET")
+    return integers(lines[-1], NET_KEYS) if lines else None
 
 
 def failure_of(text: str) -> str | None:
@@ -339,14 +347,18 @@ def stop_process(proc: subprocess.Popen) -> None:
 
 
 class Console:
-    """A program whose output is read line by line as it comes, and written to a log."""
+    """A program whose standard output is read line by line as it comes, and written to a log; its
+    standard error goes to a file of its own. The emulator writes its own complaints there (its user
+    network's "Failed to send packet" among them) at any byte of a line the guest is printing, so a
+    stream that merged the two cut the guest's lines apart."""
 
-    def __init__(self, argv: list[str], log: pathlib.Path):
+    def __init__(self, argv: list[str], log: pathlib.Path, errors: pathlib.Path):
         self.lines: list[str] = []
         self.lock = threading.Lock()
         self.log = log.open("w", encoding="utf-8")
+        self.errors = errors.open("w", encoding="utf-8")
         self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT)
+                                     stderr=self.errors)
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
 
@@ -385,6 +397,7 @@ class Console:
         stop_process(self.proc)
         self.reader.join(timeout=5)
         self.log.close()
+        self.errors.close()
         return self.text()
 
 
@@ -466,9 +479,11 @@ def run_cell(plan: Plan, image: pathlib.Path, workload: str, size: int, stem: pa
             probe = Probe(probe_argv(plan, "sub" if workload == "put" else "pong", size),
                           stem.with_name(stem.name + ".probe"))
             time.sleep(SETTLE_S)
-            console = Console(qemu, stem.with_name(stem.name + ".console"))
+            console = Console(qemu, stem.with_name(stem.name + ".console"),
+                              stem.with_name(stem.name + ".qemu-stderr"))
         else:
-            console = Console(qemu, stem.with_name(stem.name + ".console"))
+            console = Console(qemu, stem.with_name(stem.name + ".console"),
+                              stem.with_name(stem.name + ".qemu-stderr"))
             ready = console.wait_for(("READY", "FAIL"), READY_S)
             if ready is None:
                 raise Lost(f"the image said nothing ready in {READY_S:.0f} s")
@@ -485,7 +500,29 @@ def run_cell(plan: Plan, image: pathlib.Path, workload: str, size: int, stem: pa
             console_text = console.stop()
         if probe is not None:
             probe_text = probe.stop()
-    return cell_figures(workload, console_text, probe_text, plan.shift)
+    errors = stem.with_name(stem.name + ".qemu-stderr")
+    refused = errors.read_text(encoding="utf-8", errors="replace").count(NIC_REFUSED) if errors.exists() else 0
+    net = net_of(console_text)
+    try:
+        figures = cell_figures(workload, console_text, probe_text, plan.shift)
+    except Lost as why:
+        raise Lost(f"{why}{network_note(refused, net)}") from None
+    figures["nic_refused"] = float(refused)
+    if net is not None:
+        figures["udp_drop"] = float(net["udp_drop"])
+    return figures
+
+
+def network_note(refused: int, net: dict[str, int] | None) -> str:
+    """What the network did in a lost cell: the frames the emulator could not hand the guest's card,
+    and what the guest's stack took in and dropped."""
+    note = ""
+    if refused:
+        note += f"; the emulator's network could not hand the guest {refused} frame(s)"
+    if net is not None:
+        note += (f"; the guest's stack took {net['udp_recv']} UDP datagram(s) and dropped "
+                 f"{net['udp_drop']} ({net['ipv4_drop']} at IPv4)")
+    return note
 
 
 def start_router(zenohd: str, udp: int, tcp: int, log: pathlib.Path, log_filter: str = "") -> subprocess.Popen:
@@ -926,6 +963,12 @@ def cmd_selftest() -> int:
     expect("the memory line is read", (memory_of(put) or {}).get("stack_used") == 9000)
     expect("a stack line is read", stacks_of(put) == [{"thread": "main", "used": 3000, "size": 16384}])
     expect("a failure says why", failure_of("MCU-SPEED FAIL why=open\n") == "open")
+    net = net_of("MCU-SPEED NET bytes_received=10 ipv4_recv=5 ipv4_drop=1 udp_recv=4 udp_drop=2 processing_error=0\r\n")
+    expect("the network line is read", net is not None and net["udp_recv"] == 4 and net["udp_drop"] == 2)
+    expect("a lost cell says what the network refused and dropped",
+           network_note(3, net) == "; the emulator's network could not hand the guest 3 frame(s); the guest's "
+                                   "stack took 4 UDP datagram(s) and dropped 2 (1 at IPv4)")
+    expect("a cell whose network did nothing of note says nothing", network_note(0, None) == "")
     expect("a line that only begins like the tag is not the image's",
            tagged("MCU-SPEEDY RESULT x=1\n", "RESULT") == [])
     expect("the probe's total is read",

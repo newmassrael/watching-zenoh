@@ -27,6 +27,8 @@
 
 #include <zephyr/arch/common/semihost.h>
 #include <zephyr/kernel.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_stats.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/sys_heap.h>
 
@@ -467,6 +469,25 @@ static void stack_of(const struct k_thread *thread, void *unused)
 	       (unsigned int)thread->stack_info.size);
 }
 
+/* What the network stack took in and dropped over the boot: whether a workload's datagrams reached
+ * the UDP layer, so a cell that received nothing tells a link that delivered nothing from a socket
+ * that was not read.
+ */
+static void report_network(void)
+{
+	struct net_stats stats;
+
+	if (net_mgmt(NET_REQUEST_STATS_GET_ALL, NULL, &stats, sizeof(stats)) != 0) {
+		printk("MCU-SPEED NET unavailable=1\n");
+		return;
+	}
+	printk("MCU-SPEED NET bytes_received=%u ipv4_recv=%u ipv4_drop=%u udp_recv=%u udp_drop=%u "
+	       "processing_error=%u\n",
+	       (unsigned int)stats.bytes.received, (unsigned int)stats.ipv4.recv,
+	       (unsigned int)stats.ipv4.drop, (unsigned int)stats.udp.recv,
+	       (unsigned int)stats.udp.drop, (unsigned int)stats.processing_error);
+}
+
 static void report_memory(void)
 {
 	struct sys_memory_stats stats = {0};
@@ -524,6 +545,7 @@ int main(void)
 	} else {
 		rc = fail("workload");
 	}
+	report_network();
 	if (rc == 0) {
 		report_memory();
 		printk("MCU-SPEED DONE\n");
