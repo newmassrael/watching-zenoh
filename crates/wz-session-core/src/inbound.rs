@@ -849,7 +849,11 @@ pub fn parse_inbound_consuming_into(
 /// a `Frame` or a `Fragment` is not decoded and reads as a message it does not take
 /// ([`InboundFrame::Unknown`]). The receive that reads its data units where they lie hands this
 /// reader every other unit, so it links no owned decode of a `Frame` or a `Fragment` through it.
-#[cfg(all(feature = "alloc", feature = "codec-frame"))]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
 pub(crate) fn parse_control_consuming_into(
     bytes: &[u8],
     out: &mut InboundFrame,
