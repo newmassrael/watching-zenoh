@@ -294,6 +294,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # Oam of a peer: `InPlaceRecord::declare` and `interest` exist in every slot build
             # and answer `None` without it.
             "rx-control",
+            # `rx-lent-only` is a selector a final build names: what it gates is the private
+            # `dispatch_owned_projection` of each in-place receive (pubsub, query, reply) and the
+            # match arms that call it or count the refusal, all inside private items. Its public
+            # trace is the constant `driver_loop::RX_LENT_ONLY`, a `cfg!` that exists in every
+            # build and says whether it is on.
+            "rx-lent-only",
+            # `limits-lent-at-open` is the same kind of selector: it appears only as `cfg!` in the
+            # constant `limit_binding::LIMITS_LENT_AT_OPEN`, which exists in every build, and what
+            # it changes is the capacity, so the domain, of each limit bound at the open.
+            "limits-lent-at-open",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now
