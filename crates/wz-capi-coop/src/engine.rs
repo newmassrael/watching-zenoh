@@ -605,10 +605,10 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// a subscriber's callback while the count was what it reads now hands that callback the next
     /// sample without looking it up again ([`Resolved`]).
     removed: AtomicU64,
-    /// The callbacks kept from one delivery to the next ([`Resolved`]), only ever tried: a
-    /// delivery that finds them held by another keeps a set of its own for its pass, and a removal
-    /// that finds them held leaves them to the delivery that holds them.
-    resolved: Mutex<Resolved>,
+    /// The callbacks kept from one delivery to the next ([`Resolved`]), only ever tried, with no
+    /// lock: a delivery that finds them held by another keeps a set of its own for its pass, and a
+    /// removal that finds them held leaves them to the delivery that holds them.
+    resolved: TryCell<Resolved>,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -894,6 +894,63 @@ impl Resolved {
         }
         self.removed = removed;
         core::mem::replace(&mut self.callbacks, [const { None }; RESOLVED_SUBSCRIBERS])
+    }
+}
+
+/// A value one holder at a time reaches, taken by a compare-exchange and never waited for: a
+/// holder that finds it taken goes without, as `Mutex::try_lock` would have it go, with no lock of
+/// the kernel taken or given. What the deliveries keep across samples ([`Resolved`]) is held so.
+struct TryCell<T> {
+    taken: portable_atomic::AtomicBool,
+    value: core::cell::UnsafeCell<T>,
+}
+
+// SAFETY: the value is reached by the one holder of `taken` alone, from the exchange that took it
+// (acquire) to the store that gives it back (release), so each holder sees what the one before
+// it left, and the value moves between threads only as a `Send` value does.
+unsafe impl<T: Send> Sync for TryCell<T> {}
+
+impl<T> TryCell<T> {
+    fn new(value: T) -> Self {
+        Self {
+            taken: portable_atomic::AtomicBool::new(false),
+            value: core::cell::UnsafeCell::new(value),
+        }
+    }
+
+    /// The value, held until the guard drops; `None` while another holds it.
+    fn try_take(&self) -> Option<TryHeld<'_, T>> {
+        self.taken
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| TryHeld { cell: self })
+    }
+}
+
+/// A [`TryCell`]'s value, held.
+struct TryHeld<'a, T> {
+    cell: &'a TryCell<T>,
+}
+
+impl<T> Deref for TryHeld<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: this guard holds the cell (`TryCell::try_take`).
+        unsafe { &*self.cell.value.get() }
+    }
+}
+
+impl<T> DerefMut for TryHeld<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as `deref`.
+        unsafe { &mut *self.cell.value.get() }
+    }
+}
+
+impl<T> Drop for TryHeld<'_, T> {
+    fn drop(&mut self) {
+        self.cell.taken.store(false, Ordering::Release);
     }
 }
 
@@ -3114,7 +3171,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             matching: Arc::new(Queued::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
             removed: AtomicU64::new(0),
-            resolved: Mutex::new(Resolved::new()),
+            resolved: TryCell::new(Resolved::new()),
             #[cfg(feature = "queryable")]
             plane,
             #[cfg(feature = "query")]
@@ -3593,7 +3650,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The callbacks found for the samples' subscribers, kept from one sample to the next and
             // from one delivery to the next: the engine's, unless another delivery holds them now,
             // which leaves this one a set of its own for this pass.
-            let mut kept = self.resolved.try_lock();
+            let mut kept = self.resolved.try_take();
             let mut own = None;
             let resolved: &mut Resolved = match kept.as_deref_mut() {
                 Some(held) => held,
@@ -4171,7 +4228,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// when no delivery holds them now; one that does lets go of them as it ends
     /// ([`Self::let_go_of_resolved`]).
     fn forget_resolved(&self) {
-        let Some(mut kept) = self.resolved.try_lock() else {
+        let Some(mut kept) = self.resolved.try_take() else {
             return;
         };
         let stale = kept.take_stale(self.removed.load(Ordering::SeqCst));
@@ -4181,7 +4238,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// End a delivery's hold on the kept callbacks: what it kept from before a removal is let go
     /// of, with no lock held, and a removal counted after that, which found them held, is seen to.
-    fn let_go_of_resolved(&self, kept: Option<MutexGuard<'_, Resolved>>) {
+    fn let_go_of_resolved(&self, kept: Option<TryHeld<'_, Resolved>>) {
         let Some(mut kept) = kept else {
             return;
         };
@@ -6213,6 +6270,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.get_mut().0.end_links();
+    }
+}
+
+/// The cell the deliveries keep their callbacks in is taken with no lock and never waited for: a
+/// second taker goes without while the first holds it, and finds what it left once it lets go.
+#[cfg(test)]
+mod try_cell_tests {
+    use super::TryCell;
+
+    #[test]
+    fn a_held_cell_is_not_taken_again_until_it_is_let_go() {
+        let cell = TryCell::new(1u32);
+        let mut held = cell.try_take().expect("a free cell is taken");
+        *held += 1;
+        assert!(cell.try_take().is_none(), "held by the first taker");
+        drop(held);
+        let again = cell.try_take().expect("let go, it is free again");
+        assert_eq!(*again, 2, "the second taker finds what the first left");
     }
 }
 
