@@ -1344,7 +1344,12 @@ pub(crate) fn report_lent_record(
         )),
         // Read and judged, and nothing reads it further: no event, and the walk
         // counts it as a record dispatched.
-        #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+        #[cfg(all(
+            feature = "rx-lent-control",
+            feature = "rx-control",
+            feature = "transport-stats",
+            feature = "alloc"
+        ))]
         WalkedRecord::Oam(_) => {}
         #[cfg(feature = "rx-lent-control")]
         WalkedRecord::Skipped => {}

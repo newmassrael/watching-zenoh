@@ -1334,9 +1334,15 @@ pub(crate) enum WalkedRecord<'r, 'f> {
     #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
     Interest(&'r wz_codecs::lent::Interest<'f>),
     /// An Oam decoded where the payload lies, valid for the call
-    /// ([`RecordForm::LentControl`]). No consumer reads it further; it is handed over as itself
-    /// so the transport counters read the band it carries, as they read the owned Oam's.
-    #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+    /// ([`RecordForm::LentControl`]), in a build with the transport counters: no consumer reads
+    /// it further, and it is handed over as itself so the counters read the band it carries, as
+    /// they read the owned Oam's. A build without them hands it over as [`Self::Skipped`].
+    #[cfg(all(
+        feature = "rx-lent-control",
+        feature = "rx-control",
+        feature = "transport-stats",
+        feature = "alloc"
+    ))]
     Oam(&'r wz_codecs::lent::Oam<'f>),
     /// A record the walk read and no consumer reads further: the tail of a payload
     /// that opens with a MID this build has no decoder for (the walk ends there, as
@@ -1965,7 +1971,12 @@ fn lend_oam<'f>(
     wz_codecs::lent::Oam::decode_into(cursor, &mut oam)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(oam_view_admission(&oam))?;
-    each(WalkedRecord::Oam(&oam))
+    // The counters read its band (`RecordClass`); nothing else reads it.
+    #[cfg(all(feature = "transport-stats", feature = "alloc"))]
+    let walked = WalkedRecord::Oam(&oam);
+    #[cfg(not(all(feature = "transport-stats", feature = "alloc")))]
+    let walked = WalkedRecord::Skipped;
+    each(walked)
 }
 
 /// The tail of a payload that opens with a MID this build has no decoder for: its
@@ -3295,7 +3306,12 @@ impl<'k> RecordClass<'k> {
                     })
                     .iter(),
             )),
-            #[cfg(all(feature = "rx-lent-control", feature = "rx-control"))]
+            #[cfg(all(
+                feature = "rx-lent-control",
+                feature = "rx-control",
+                feature = "transport-stats",
+                feature = "alloc"
+            ))]
             WalkedRecord::Oam(oam) => Some(Self::control(
                 crate::stats::MessageLabel::Oam,
                 oam.extensions
@@ -4287,7 +4303,7 @@ mod record_walk_tests {
                 WalkedRecord::Interest(i) => ('i', i.interest_id),
                 WalkedRecord::ResponseFinal(r) => ('r', u64::from(r.request_id)),
                 WalkedRecord::Skipped => ('-', 0),
-                #[cfg(feature = "rx-control")]
+                #[cfg(all(feature = "rx-control", feature = "transport-stats", feature = "alloc"))]
                 WalkedRecord::Oam(_) => ('-', 0),
                 WalkedRecord::Owned(_) => panic!("the control walk owns nothing"),
                 #[allow(unreachable_patterns)]
