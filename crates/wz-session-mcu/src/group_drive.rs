@@ -1413,6 +1413,23 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             // acknowledgement, and a node already leaving has no recovery to
             // take — its peers fall back to the lease sweep, which is exactly
             // the pre-round behaviour. `send_to_group` already drops the error.
+            //
+            // What the session staged, a batch window's open frames among them, is written
+            // ahead of the Close, as zenoh-pico sends its batch before a transport message
+            // (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_send_t_msg_inner(`)
+            // and the tokio engine's group flushes its window before it queues one: a window
+            // the program left open is not lost with the link.
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "session-slot"),
+                feature = "codec-push"
+            ))]
+            if let Some(stage) = staged.as_ref() {
+                stage.batch_flush();
+                if !stage.offer_held(&mut *transport) {
+                    stage.write(&mut *transport);
+                }
+            }
             let mut dgram = [0u8; 2];
             if let Ok(len) = encode_multicast_close_into_slice(&mut dgram) {
                 transport.send_to_group(&dgram[..len]);
@@ -1491,6 +1508,19 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         }
         // JoinEmit: multicast the self-advertising JOIN beacon when due.
         if now >= *next_join_ms && !full {
+            // A batch window's open frames go on their lanes at the beacon, as zenoh-pico sends
+            // its batch before a transport message and the tokio engine's group flushes its
+            // window before it queues a JOIN: a window the program leaves open holds what it
+            // holds until the next beacon at the latest. The frames are written after the beacon,
+            // which advertises what was written, so a member reads their numbers as the next.
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "session-slot"),
+                feature = "codec-push"
+            ))]
+            if let Some(stage) = staged.as_ref() {
+                stage.batch_flush();
+            }
             // With a stage, the conduits as written: its producers number their messages before
             // the socket takes them, and a member that read a JOIN advertising one not yet written
             // would drop it as stale when it came.
