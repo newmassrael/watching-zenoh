@@ -314,10 +314,14 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
 # The advanced subscriber's host, which the tests run on this engine, and the publisher's cache
 # the stand-in answers the host's gets from.
 wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
+# The stand-in accepts the engine's session, answers its gets and declares the queryables a test
+# tells it to (`declare-queryable`), in every test build: an engine built without `query` and
+# `queryable` is then shown a peer's queryable it keeps no table of.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
     "query-queryable",
     "request-put-del",
+    "declare-queryable",
 ] }
 
 [lints]
