@@ -1159,7 +1159,16 @@ declare -A BASELINE_MC_TEXT=(
     # landing meant to add, and data and bss are flat, so this is ROM for a feature, not a leak.
     # On build host hkl002 main's 7de14394c reads byte-equal to c72460b30 (84892 / 85048), so the
     # figures here are the hosted readings themselves. Old: 78276/78260.
-    ["thumbv7m-none-eabi"]=84112
+    #
+    # 2026-11-22 -- thumbv7m 84112 -> 84480 (+368), read by the fleet's Layer Q preflight of the
+    # branch that makes the cooperative engine heap-free, past the band; thumbv7em-hf was not read
+    # out of its band there and stays. The growth is the group receive of that branch: a group
+    # datagram's messages read where they lie on a lending heap (25a67b9e0) and the state that
+    # resumes one the holder had no room for (b78f3887e), the same work that grows the session
+    # slot by 8 bytes (deploy/session_slot_bytes.json). It is not split by symbol at this reading,
+    # and the reading host's offset over hosted is not established: a hosted reading that differs
+    # moves this again. data and bss were not read out of their bands. Old: 84112.
+    ["thumbv7m-none-eabi"]=84480
     ["thumbv7em-none-eabihf"]=84300
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
