@@ -228,6 +228,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/advanced_plane.rs` | S7 | |
 | `crates/wz-capi-pico/src/app_transport.rs` | S12 | |
 | `crates/wz-capi-pico/src/bytes.rs` | S7 | |
+| `crates/wz-capi-pico/src/c_enum.rs` | S7 | |
 | `crates/wz-capi-pico/src/cancellation.rs` | S7 | |
 | `crates/wz-capi-pico/src/clock_source.rs` | S7 | |
 | `crates/wz-capi-pico/src/codec.rs` | S7 | |
