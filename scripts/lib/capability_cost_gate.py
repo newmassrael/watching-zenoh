@@ -67,9 +67,11 @@ caller's own configuration among them, so a linker chosen there (`-fuse-ld=`) wo
 case with another linker than the cases beside it, while the variable replaces every configured
 table. The workspace's own configuration has flags for windows-msvc only. What the rule does not
 remove is the toolchain: a host with another C compiler or linker builds other bytes from the
-same tree, and its reading is comparable only to readings made with that toolchain, so each pico
-case prints the linker of both of its libraries as each library's `.comment` names it
-(`linker_of`).
+same tree, and its reading is comparable only to readings made with that toolchain. So every
+library and every reference is linked by the same linker, GNU ld through the C compiler
+(`GATE_RUSTFLAGS`, `reference_build`; a host without it is refused by name, `gnu_ld_version`),
+and each pico case prints the linker of both of its libraries as each library's `.comment` names
+it (`linker_of`); a library another linker wrote is a finding (`link_findings`).
 
 ## The denominator
 
@@ -156,6 +158,17 @@ TARGET = artifact("crates/target")
 PICO_BASE = ",".join(
     wz_config.read_decl_toml(wz_config.DECL.read_text(encoding="utf-8"))["base"]["pico"]
 )
+
+# The linker of every library this gate builds and of every zenoh-pico reference: GNU ld, driven
+# by the C compiler (`cc -fuse-ld=bfd`), so both arms of a ratio are linked by one linker. The
+# toolchain's own default on this target is its bundled lld, which no C build reaches without
+# naming that toolchain's directory, while GNU ld comes with the C compiler on every host that
+# builds here, hosted ubuntu-22.04 included. `gnu_ld_version` refuses a host without it by name
+# before anything is built, and `link_findings` refuses a library another linker wrote.
+GNU_LD = "-fuse-ld=bfd"
+GATE_RUSTFLAGS = ["-C", "linker=cc", "-C", f"link-arg={GNU_LD}"]
+# What `comment_linker` answers for a library whose `.comment` names no linker, as GNU ld's.
+NO_LINKER_NAMED = "no linker named in .comment"
 
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
@@ -1903,11 +1916,16 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
     with; empty when it was linked as asked."""
     findings: list[str] = []
+    if GNU_LD in lib.link_args and lib.linker and not lib.linker.startswith(NO_LINKER_NAMED):
+        findings.append(f"{subject}: linked with `{GNU_LD}` and its .comment names {lib.linker}: "
+                        f"another linker than GNU ld wrote it, so the two arms of the ratio are "
+                        f"not linked alike. A `-fuse-ld=` or `-C linker=` given after the gate's "
+                        f"(the caller's RUSTFLAGS, the C compiler's own default) chose it.")
     if discards_unwind_tables(lib.link_args) and lib.eh_frame:
         findings.append(f"{subject}: linked with the script that discards the unwind tables and "
                         f"still has an `.eh_frame`: the linker ({lib.linker}) kept them, so its "
-                        f"text is that of the form with tables. GNU ld and lld take the script's "
-                        f"INSERT; mold refuses it.")
+                        f"text is that of the form with tables. GNU ld honours the script's "
+                        f"discard; lld keeps .eh_frame under it and mold refuses it.")
     if PACKED_RELOCS_LINK not in lib.link_args:
         return findings
     if not lib.relr:
@@ -1921,6 +1939,24 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
                         f"it with its pointers unrelocated. The linker ({lib.linker}) writes that "
                         f"need when the library asks libc.so.6 for a GLIBC_2 version.")
     return findings
+
+
+def gnu_ld_line(output: str) -> str | None:
+    """The `GNU ld ...` line of `cc -fuse-ld=bfd -Wl,--version`, or None."""
+    return next((line.strip() for line in output.splitlines() if line.startswith("GNU ld")), None)
+
+
+def gnu_ld_version(env: Mapping[str, str]) -> str:
+    """The GNU ld the C compiler links with when asked for it (`GNU_LD`): the linker of both arms
+    of every case. A host without it is refused by name rather than linked by another."""
+    proc = subprocess.run(["cc", GNU_LD, "-Wl,--version"], capture_output=True, text=True,
+                          env=dict(env), check=False)
+    line = gnu_ld_line(proc.stdout + proc.stderr)
+    if line is None:
+        raise RuntimeError(f"`cc {GNU_LD}` finds no GNU ld (ld.bfd) on this host, and every "
+                           f"library this gate builds and its zenoh-pico reference are linked with "
+                           f"it, so both arms of a ratio have one linker: install binutils' ld.bfd")
+    return line
 
 
 def linker_of(lib: pathlib.Path) -> str:
@@ -1938,21 +1974,21 @@ def comment_linker(dump: str) -> str:
         words = line.split("]", 1)[1].strip() if "]" in line else ""
         if re.search(r"\b(LLD|lld|mold|gold)\b", words):
             return words.split(" (", 1)[0]
-    return "no linker named in .comment (GNU ld names none)"
+    return f"{NO_LINKER_NAMED} (GNU ld names none)"
 
 
 def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
-    linked: list[str] = []
+    flags = list(GATE_RUSTFLAGS)
     if case.cargo_configs:
         triple = host_triple()
-        flags = case_config_flags(case, triple, target_cfg(triple))
-        env = with_rustflags(env, flags)
-        linked = link_args(flags)
+        flags += case_config_flags(case, triple, target_cfg(triple))
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
+    env = with_rustflags(env, flags)
+    linked = link_args(flags)
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
@@ -2051,14 +2087,15 @@ def reference_key(pin: str, toolchain: str, flags: list[str], env: Mapping[str, 
 def reference_build(link_args: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The linker arguments and the C flags of the zenoh-pico reference of a case whose library
     was linked with `link_args`, so a choice of the build moves both sides of the ratio alike:
-    packed relocations as they are, and for a library whose unwind tables are discarded, C
+    the linker (`GNU_LD`) and packed relocations as they are, and for a library whose unwind tables are discarded, C
     compiled without unwind tables (`NO_UNWIND_CFLAGS`) and linked with the same script, for
     what the C runtime's own objects still bring."""
     link: list[str] = []
     cflags: list[str] = []
     for arg in link_args:
-        if arg == PACKED_RELOCS_LINK:
-            link.append(arg)
+        if arg in (GNU_LD, PACKED_RELOCS_LINK):
+            if arg not in link:
+                link.append(arg)
         elif discards_unwind_tables((arg,)):
             link.append(f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}")
             cflags += NO_UNWIND_CFLAGS
@@ -2381,6 +2418,13 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
     except ValueError as e:
         print(f"  capability-cost: {e}", file=sys.stderr)
         return 2
+    try:
+        linker = gnu_ld_version(env)
+    except RuntimeError as e:
+        print(f"  capability-cost: {e}", file=sys.stderr)
+        return 2
+    print(f"  capability-cost: every library and zenoh-pico reference is linked by {linker} "
+          f"(cc {GNU_LD})")
     table = load_ceiling()
     rows = ceiling_rows(table)
     if not measure_only:
@@ -2609,12 +2653,28 @@ def cmd_selftest() -> int:
            and "mold 2.30.0" in found[0]
            and link_findings("t", Measured(900, [], 3, link_args=(DISCARD_UNWIND_LINK,))) == []
            and link_findings("t", Measured(900, [], 3, eh_frame=True)) == [])
+    expect("every library the gate builds is linked by GNU ld through cc",
+           link_args(GATE_RUSTFLAGS) == [GNU_LD] and "linker=cc" in GATE_RUSTFLAGS)
+    expect("the GNU ld line of the C compiler's linker version is read, and none is None",
+           gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
+           == "GNU ld (GNU Binutils for Ubuntu) 2.38"
+           and gnu_ld_line("LLD 18.1.3 (compatible with GNU linkers)\n") is None
+           and gnu_ld_line("") is None)
+    expect("a library asked for GNU ld whose .comment names another linker is a finding",
+           len(found := link_findings("t", Measured(900, [], 3, link_args=(GNU_LD,),
+                                                    linker="Linker: LLD 22.1.6"))) == 1
+           and "Linker: LLD 22.1.6" in found[0]
+           and link_findings("t", Measured(900, [], 3, link_args=(GNU_LD,),
+                                           linker=comment_linker(""))) == []
+           and link_findings("t", Measured(900, [], 3, linker="mold 2.30.0")) == [])
     absolute = f"-Wl,-T,{CRATES / DISCARD_UNWIND_SCRIPT}"
     expect("a reference is built as its case: packed as it is, without tables where it has none",
            reference_build(()) == ((), ())
            and reference_build((PACKED_RELOCS_LINK, "-Wl,-x")) == ((PACKED_RELOCS_LINK,), ())
            and reference_build((PACKED_RELOCS_LINK, DISCARD_UNWIND_LINK))
-           == ((PACKED_RELOCS_LINK, absolute), NO_UNWIND_CFLAGS))
+           == ((PACKED_RELOCS_LINK, absolute), NO_UNWIND_CFLAGS)
+           and reference_build((GNU_LD, PACKED_RELOCS_LINK, GNU_LD))
+           == ((GNU_LD, PACKED_RELOCS_LINK), ()))
     expect("the discard is read by its path from crates/ and by its absolute path alike",
            discards_unwind_tables((DISCARD_UNWIND_LINK,)) and discards_unwind_tables((absolute,))
            and not discards_unwind_tables(("-Wl,-T,other.ld", PACKED_RELOCS_LINK)))

@@ -166,9 +166,26 @@ mold on that host (the no_std library read here names mold 2.30.0, the std one l
 flags of the environment, which every other case was built with, replace it. The gate now reads
 a case's configuration files itself and passes their flags in the environment
 (`fix(gate): Build configured size cases apart from the caller's config`), so every case is
-linked by the toolchain's linker unless the caller exports another. The two arms are still linked
-by different linkers (lld against GNU ld), as they were before this change; linking both with one
-is a separate choice for the owner.
+linked by the toolchain's linker unless the caller exports another.
+
+**One linker for both arms (decided 2026-11-23).** The wz arm was linked by the toolchain's lld
+and the reference by GNU ld. Every library the gate builds is now linked by GNU ld through the C
+compiler (`-C linker=cc -C link-arg=-fuse-ld=bfd`, `GATE_RUSTFLAGS`), and every reference with
+`-fuse-ld=bfd` too (`fix(gate): Link both arms of every case with GNU ld`). GNU ld is chosen
+because it comes with the C compiler on every host that builds here, hosted ubuntu-22.04
+included, where a system lld is not certain and the toolchain's own lld is reached by no C build
+without naming the toolchain's directory; it is also the linker that honours T7's discard (below).
+Before anything is built the gate asks `cc -fuse-ld=bfd -Wl,--version` for GNU ld and refuses the
+host by name without it, prints the version, and refuses a library whose `.comment` names
+another linker (lld and mold write their name there, GNU ld none). This applies to every size
+case, the zenoh-c ones too: one set of rustc flags for all of them keeps cargo from rebuilding the
+shared target directory between cases, and it moves every case's reading by the difference
+between the two linkers, which the first run after it states.
+
+Read by the main session on hkl002 at the first four commits (wz linked by lld, the reference by
+GNU ld, both packed): `pico-client-coop` 959,273 against 401,760, 2.39 (1,008,731 and 2.50
+before); `pico-client-coop-nostd` 461,898, 1.15 (533,036 and 1.32 before, linked by mold then),
+with its `.eh_frame` kept (T7).
 
 **What the gate's number moves by.** The gate reads Berkeley `size` text, which counts every
 allocated read-only section: `.rela.dyn`, `.relr.dyn`, `.eh_frame` and `.eh_frame_hdr` are in
