@@ -1894,9 +1894,10 @@ pub struct z_put_options_t {
 
 crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "local-subscriber");
 
+// `source_info` has no accessor here: a session's put reads it only with `unstable-api`, where the
+// field exists and is read as itself.
 unstable_option_fields!(z_put_options_t {
     reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_delete_options_t` (`api/types.h:413-425`).
@@ -1923,9 +1924,9 @@ crate::locality::locality_option_field!(
     "local-subscriber"
 );
 
+// `source_info` is read only with `unstable-api`, as the put's is.
 unstable_option_fields!(z_delete_options_t {
     reliability: z_reliability_t = Z_RELIABILITY_RELIABLE,
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
 });
 
 /// pico `z_publisher_delete_options_t` (`api/types.h:454-459`).
@@ -1935,10 +1936,6 @@ pub struct z_publisher_delete_options_t {
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
-
-unstable_option_fields!(z_publisher_delete_options_t {
-    source_info: *mut z_source_info_t = core::ptr::null_mut(),
-});
 
 /// Fill default put options (pico `z_put_options_default`).
 ///
@@ -2143,7 +2140,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
         opts = opts.with_timestamp(ts);
     }
     #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info_hint_of((*options).source_info()) {
+    if let Some(si) = source_info_hint_of((*options).source_info) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -2170,7 +2167,7 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
         opts = opts.with_timestamp(ts);
     }
     #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info_hint_of((*options).source_info()) {
+    if let Some(si) = source_info_hint_of((*options).source_info) {
         opts = opts.with_source_info(si);
     }
     opts
@@ -2285,7 +2282,7 @@ pub unsafe extern "C" fn z_publisher_delete(
                 opts = opts.with_timestamp(ts);
             }
             #[cfg(feature = "unstable-api")]
-            if let Some(si) = source_info_hint_of((*options).source_info()) {
+            if let Some(si) = source_info_hint_of((*options).source_info) {
                 opts = opts.with_source_info(si);
             }
         }
