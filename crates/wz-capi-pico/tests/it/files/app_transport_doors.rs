@@ -455,6 +455,8 @@ unsafe extern "C" fn on_query_drop(_context: *mut c_void) {}
 struct Replies {
     payloads: Mutex<Vec<Vec<u8>>>,
     done: AtomicBool,
+    /// When the get's closure was dropped, which is the get's end; written before `done`.
+    ended_at: Mutex<Option<Instant>>,
 }
 
 unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void) {
@@ -467,6 +469,7 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void
 
 unsafe extern "C" fn on_reply_drop(context: *mut c_void) {
     let replies = Arc::from_raw(context as *const Replies);
+    *replies.ended_at.lock().unwrap() = Some(Instant::now());
     replies.done.store(true, Ordering::SeqCst);
 }
 
@@ -1034,6 +1037,97 @@ fn a_client_session_opens_over_the_programs_transport_on_the_builds_engine() {
         let dialler = open_over(Z_CONFIG_CONNECT_KEY, LISTEN, dialling);
         assert_eq!(pipe.dials.load(Ordering::SeqCst), 1);
         put_and_get(&listener, &dialler);
+        close(dialler);
+        close(listener);
+    }
+    drop_transport(dialling);
+    drop_transport(listening);
+    wait_until("both transports to drop", Duration::from_secs(10), || {
+        pipe.drops.load(Ordering::SeqCst) == 2
+    });
+}
+
+/// One get of `key` on `session`, which the queryable there answers once: the time from the
+/// call to the drop of the get's closure, which is the get's end.
+unsafe fn timed_get(session: &z_owned_session_t, key: &CStr) -> Duration {
+    let replies = Arc::new(Replies::default());
+    let mut closure = std::mem::zeroed();
+    assert_eq!(
+        z_closure_reply(
+            &mut closure,
+            Some(on_reply),
+            Some(on_reply_drop),
+            Arc::into_raw(Arc::clone(&replies)) as *mut c_void,
+        ),
+        Z_OK
+    );
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut opts: z_get_options_t = std::mem::zeroed();
+    z_get_options_default(&mut opts);
+    opts.timeout_ms = 5000;
+    let asked = Instant::now();
+    assert_eq!(
+        z_get(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            std::ptr::null(),
+            z_closure_reply_move(&mut closure),
+            &mut opts,
+        ),
+        Z_OK
+    );
+    wait_until("the get to end", Duration::from_secs(10), || {
+        replies.done.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        replies.payloads.lock().unwrap().as_slice(),
+        [b"answer-over-the-pipe".to_vec()],
+        "each get is answered"
+    );
+    let ended = replies
+        .ended_at
+        .lock()
+        .unwrap()
+        .expect("the end is stamped before it is told");
+    ended.duration_since(asked)
+}
+
+/// A get between two open sessions over the program's transport ends within a few milliseconds,
+/// on the engine the build has: the request, the reply and the Final are each written by the
+/// thread that makes them and wake the read task at the other end at once, as zenoh-pico sends a
+/// query's replies and its final from the call that answers it
+/// (`vendor/zenoh-pico/src/session/queryable.c` @ `z_result_t _z_trigger_queryables(`). The figure
+/// read is the median of `GETS` gets, timed from the call to the drop of the get's closure, so a
+/// get a busy host holds up does not decide it. A read task that waits for its link with the
+/// session held makes the asking thread wait for the session turn after turn, and each get then
+/// takes hundreds of milliseconds.
+#[test]
+fn a_get_between_two_open_sessions_over_the_programs_transport_ends_at_once() {
+    const GETS: usize = 21;
+    let pipe = Arc::new(Pipe::default());
+    let listening = make_transport(&pipe, Side::Listening);
+    let dialling = make_transport(&pipe, Side::Dialling);
+    unsafe {
+        let listener = open_over(Z_CONFIG_LISTEN_KEY, LISTEN, listening);
+        let dialler = open_over(Z_CONFIG_CONNECT_KEY, LISTEN, dialling);
+        let mut queryable = serve(&listener, c"demo/ask");
+        wait_for_peer(&dialler);
+        // The route made: a get is answered before any is timed.
+        assert_eq!(
+            ask(&dialler, c"demo/ask"),
+            [b"answer-over-the-pipe".to_vec()]
+        );
+        let mut took: Vec<Duration> = (0..GETS)
+            .map(|_| timed_get(&dialler, c"demo/ask"))
+            .collect();
+        took.sort();
+        let median = took[GETS / 2];
+        assert!(
+            median < Duration::from_millis(20),
+            "the median get took {median:?}; every get: {took:?}"
+        );
+        z_undeclare_queryable(z_queryable_move(&mut queryable));
         close(dialler);
         close(listener);
     }
