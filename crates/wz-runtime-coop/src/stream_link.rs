@@ -13,8 +13,10 @@
 //!
 //! A stream keeps no message boundaries, so zenoh writes every batch behind its length, a
 //! little-endian `u16` counted inside the batch size ([`STREAM_BATCH_LENGTH_BYTES`]). The receive
-//! gathers what the socket has into the driver's buffer and hands the session one whole batch at a time, where the buffer holds it; the bytes of
-//! the next batch, however the stream cut them, stay in front of the buffer for the next receive.
+//! gathers what the socket has into the driver's buffer and hands the session one whole batch at a
+//! time, where the buffer holds it, and leaves it there until the next receive; the bytes of the
+//! next batch, however the stream cut them, stay behind it, and are moved to the front of the
+//! buffer only when the stream must be read for the rest of one.
 //! The send writes the length into the headroom the driver asked the session to leave in front of
 //! the frame, so length and batch leave in one write from the slot the session encoded into.
 //!
@@ -463,8 +465,20 @@ pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`: a batch's length and the batch behind it.
     rx_len: usize,
-    /// How many bytes at the front of `rx_buf` were received and not yet handed to the session.
+    /// How many bytes at the front of `rx_buf` were received.
     held: Cell<usize>,
+    /// How many of those bytes the session was handed already: the batch the last receive lent,
+    /// which lies where it is until the next receive, and the empty batches before it. The next
+    /// receive starts behind them, and moves what follows them to the front only when it must
+    /// read the stream for the rest of a batch.
+    spent: Cell<usize>,
+    /// Whether a whole batch lies behind the spent bytes, as the last receive left the buffer: what
+    /// the next receive hands over without a read. Kept apart from the buffer so that asking it
+    /// does not touch the bytes a lent batch may still be read from.
+    ready: Cell<bool>,
+    /// The bytes the receive moved within its buffer, which the tests count.
+    #[cfg(test)]
+    moved: Cell<usize>,
     /// Whether the session asked, while a batch is lent, to keep it
     /// ([`SessionDatagramLink::keep`]): it then stays at the front, lent again by the next receive.
     keeping: Cell<bool>,
@@ -513,6 +527,10 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             rx_buf: RefCell::new(rx_buf),
             rx_len,
             held: Cell::new(0),
+            spent: Cell::new(0),
+            ready: Cell::new(false),
+            #[cfg(test)]
+            moved: Cell::new(0),
             keeping: Cell::new(false),
             tx: TxLender::new(tx),
             lost: Cell::new(None),
@@ -546,61 +564,77 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
         }
     }
 
-    /// Whether the front of the buffer is a whole batch, so the next receive needs no read.
+    /// Whether a whole batch lies in the buffer for the next receive, which then needs no read.
     fn batch_held(&self) -> bool {
-        let Ok(mut buf) = self.rx_buf.try_borrow_mut() else {
-            return false;
-        };
-        let held = self.held.get();
-        matches!(front(&buf.as_mut()[..held], self.rx_len), Front::Batch(_))
+        self.ready.get()
     }
 
     /// Hand the next whole batch to `f` where the buffer holds it, reading the socket until there
     /// is one or nothing more is queued; `false` when there is none. An empty batch is passed
-    /// over. The bytes behind the batch are moved to the front for the next receive.
+    /// over. The batch stays where it lies after `f` returns, until the next receive: the bytes
+    /// behind it are moved to the front only when the stream must be read for the rest of a batch,
+    /// as zenoh-pico compacts its buffer only before such a read
+    /// (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+    /// `_z_zbuf_set_rpos(&ztu->_common._zbuf, _z_zbuf_get_rpos(&ztu->_common._zbuf) - _Z_MSG_LEN_ENC_SIZE);`).
     fn receive(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         if self.lost.get().is_some() {
             return false;
         }
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
-        loop {
-            let held = self.held.get();
-            match front(&bytes[..held], self.rx_len) {
+        let mut start = self.spent.get();
+        let mut held = self.held.get();
+        let lent = loop {
+            match front(&bytes[start..held], self.rx_len) {
+                Front::Batch(0) => start += STREAM_BATCH_LENGTH_BYTES,
                 Front::Batch(len) => {
-                    let end = STREAM_BATCH_LENGTH_BYTES + len;
-                    if len > 0 {
-                        self.keeping.set(false);
-                        f(&bytes[STREAM_BATCH_LENGTH_BYTES..end]);
-                        if self.keeping.replace(false) {
-                            return true;
-                        }
+                    let end = start + STREAM_BATCH_LENGTH_BYTES + len;
+                    self.keeping.set(false);
+                    f(&bytes[start + STREAM_BATCH_LENGTH_BYTES..end]);
+                    // A batch kept is lent again by the next receive; one let go is passed over
+                    // there.
+                    if !self.keeping.replace(false) {
+                        start = end;
                     }
-                    bytes.copy_within(end..held, 0);
-                    self.held.set(held - end);
-                    if len > 0 {
-                        return true;
-                    }
+                    break true;
                 }
                 Front::TooLong => {
                     self.end(LostCause::PeerClosed);
-                    return false;
+                    break false;
                 }
-                Front::Partial => match self.socket.try_read(&mut bytes[held..]) {
-                    Ok(Some(0)) => {
-                        self.end(LostCause::PeerClosed);
-                        return false;
+                Front::Partial => {
+                    // Nothing before the part of a batch is lent any more: it moves to the front,
+                    // so the rest is read behind it and the whole batch fits where it lies.
+                    if start > 0 {
+                        bytes.copy_within(start..held, 0);
+                        #[cfg(test)]
+                        self.moved.set(self.moved.get() + (held - start));
+                        held -= start;
+                        start = 0;
                     }
-                    Ok(Some(n)) => self.held.set(held + n),
-                    Ok(None) => return false,
-                    Err(e) => {
-                        self.error.set(Some(e));
-                        self.end(LostCause::OsError);
-                        return false;
+                    match self.socket.try_read(&mut bytes[held..]) {
+                        Ok(Some(0)) => {
+                            self.end(LostCause::PeerClosed);
+                            break false;
+                        }
+                        Ok(Some(n)) => held += n,
+                        Ok(None) => break false,
+                        Err(e) => {
+                            self.error.set(Some(e));
+                            self.end(LostCause::OsError);
+                            break false;
+                        }
                     }
-                },
+                }
             }
-        }
+        };
+        self.spent.set(start);
+        self.held.set(held);
+        self.ready.set(matches!(
+            front(&bytes[start..held], self.rx_len),
+            Front::Batch(_)
+        ));
+        lent
     }
 
     /// Whether the link owes the stream anything ([`Owed`]).
@@ -985,6 +1019,13 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         self.keeping.set(true);
     }
 
+    // The receive buffer is written by a receive alone (`receive`: its read of the stream and the
+    // move to the front before it), never by a service, which waits and writes what is owed, so
+    // what a receive lent lies there until the link is next asked to receive.
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         if self.owner_waits {
@@ -1254,6 +1295,46 @@ mod tests {
             "let go: the next"
         );
         assert_eq!(received(&link), None);
+    }
+
+    /// A batch a receive lent lies where it was lent until the next receive, whatever is asked of
+    /// the link meanwhile (a service, whether it holds input), which is what lets its owner hand
+    /// the batch's records to their callbacks there; the batch behind it is lent where the stream
+    /// put it, and only the part of a batch the buffer holds when the stream must be read again is
+    /// moved: 3 bytes for the three batches here, where moving what followed each batch at once
+    /// moved 11.
+    #[test]
+    fn a_lent_batch_lies_where_it_was_lent_until_the_next_receive() {
+        let link = link();
+        assert!(link.lends_until_next_receive());
+        let mut wire = batch(b"one");
+        wire.extend(batch(b"two"));
+        wire.extend(&batch(b"three")[..3]);
+        queue(&link, &wire);
+        let mut first: *const u8 = core::ptr::null();
+        assert!(link.recv_with(&mut |bytes| first = bytes.as_ptr()));
+        link.service();
+        assert!(link.holds_input(), "the second batch lies behind the first");
+        // SAFETY: the pointer is into the link's own buffer, which lives as long as `link`, and
+        // nothing borrows the buffer now.
+        let lent = unsafe { core::slice::from_raw_parts(first, 3) };
+        assert_eq!(lent, b"one", "still where it was lent");
+        let mut second: *const u8 = core::ptr::null();
+        assert!(link.recv_with(&mut |bytes| second = bytes.as_ptr()));
+        assert_eq!(
+            second,
+            first.wrapping_add(3 + STREAM_BATCH_LENGTH_BYTES),
+            "the batch behind it is lent where the stream put it"
+        );
+        assert_eq!(link.moved.get(), 0, "nothing moved yet");
+        assert!(!link.holds_input(), "part of a batch is not one");
+        queue(&link, &batch(b"three")[3..]);
+        assert_eq!(received(&link).as_deref(), Some(&b"three"[..]));
+        assert_eq!(
+            link.moved.get(),
+            3,
+            "the part of the third batch, moved once before the read"
+        );
     }
 
     #[test]
