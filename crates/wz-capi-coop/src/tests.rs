@@ -877,6 +877,183 @@ fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue
     );
 }
 
+/// A read step on a session with nothing due reads the session's clock once, after its tasks ran,
+/// and moves every face, sweeps the gets and looks for a due job by that one reading; its wait,
+/// with no deadline to work out, reads it not at all. The session's lock is taken twice: for the
+/// wait and for the step. The counts are the same in every build: the sweep of the gets, each
+/// face and the look for a due job share the step's reading and its take.
+#[test]
+fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let (reads, takes) = (
+        engine.clock_reads(),
+        engine.takes.core.load(Ordering::SeqCst),
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(engine.clock_reads() - reads, 1, "one reading for the step");
+    assert_eq!(
+        engine.takes.core.load(Ordering::SeqCst) - takes,
+        2,
+        "one take for the wait and one for the step"
+    );
+}
+
+/// The samples handed a subscriber find its callback in the table of callbacks once, not once a
+/// sample, however many steps they arrive in: what a delivery found is kept for the samples behind
+/// it and for the next step's, so a round trip's one sample a step is handed it with no lock of
+/// the table, no search of it and no count taken on the callback. The CONTROL is the next test: a
+/// removal from the table ends what was kept.
+#[test]
+fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let looks = engine.takes.callbacks.load(Ordering::SeqCst);
+    for _ in 0..8 {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    // Every push reaches the session's socket before the session reads one.
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the pushes", || {
+        received.load(Ordering::SeqCst) == 8
+    });
+    let found = engine.takes.callbacks.load(Ordering::SeqCst) - looks;
+    assert_eq!(
+        found, 1,
+        "one look in the table for 8 samples: the callback is kept across them and across steps"
+    );
+}
+
+/// A subscriber that undeclares itself from inside its callback is handed nothing more, though the
+/// delivery kept its callback and the lane still holds samples for it: the removal from the table
+/// ends what the delivery kept, as a look in the table for each sample would have found nothing.
+#[test]
+fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::new(Mutex::new(None));
+    let own_id = own.clone();
+    let session = Arc::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/**".to_owned(),
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                let own_id = own_id.clone();
+                let session = session.clone();
+                Box::new(move |_sample: &dyn SampleView| {
+                    if count.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+                        let id = own_id.lock().unwrap().take();
+                        if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                            engine.undeclare_subscriber(id);
+                        }
+                    }
+                })
+            }),
+        )
+        .expect("declared");
+    *own.lock().unwrap() = Some(id);
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    for _ in 0..8 {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the third push", || {
+        received.load(Ordering::SeqCst) >= 3
+    });
+    // What is left of the pushes is read and passed over.
+    for _ in 0..10 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        3,
+        "nothing is handed to a subscriber after its undeclaration"
+    );
+}
+
+/// Under the pico profile a droppable publish that finds the session held by a read step waits for
+/// the step, blocked, and is sent once the step lets go: the holder holds no send, so the publish
+/// is no congestion drop, and it does not spin on the session while it waits. The CONTROL is the
+/// time it took: no less than the step held the session.
+#[test]
+fn a_droppable_publish_behind_a_read_step_waits_without_spinning_and_is_sent() {
+    use wz_session_core::qos::CongestionControl;
+    use wz_session_core::session_init_params::HeldDrop;
+    let router = Router::start(CatchAll::Held);
+    assert_eq!(
+        config(&router).tx_queue.held_drop,
+        HeldDrop::DropAtOnce,
+        "the pico profile"
+    );
+    let engine = open(&router);
+    let spins = engine.takes.spins.load(Ordering::SeqCst);
+    let (holds, held) = channel();
+    let step = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            engine.holding_as_a_step(|| {
+                holds.send(()).expect("the test waits for the hold");
+                std::thread::sleep(Duration::from_millis(200));
+            });
+        })
+    };
+    held.recv().expect("the step holds the session");
+    let started = Instant::now();
+    let sent = engine.publish_on_wire_all(
+        "demo/behind",
+        &WireKey::literal(),
+        b"behind",
+        &PublishOptions::put()
+            .with_locality(Locality::Remote)
+            .with_congestion_control(CongestionControl::Drop),
+    );
+    let took = started.elapsed();
+    step.join().expect("the step");
+    assert!(sent.is_ok(), "the publish was sent: {sent:?}");
+    assert_eq!(
+        engine.takes.spins.load(Ordering::SeqCst),
+        spins,
+        "no turn spun on the held session"
+    );
+    assert!(
+        took >= Duration::from_millis(150),
+        "CONTROL: it waited for the step, {took:?}"
+    );
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/behind"))
+    });
+}
+
 /// A write filter asks the router who subscribes and suppresses until a subscriber is declared,
 /// then lets a put through; a session that is closed answers every step as closed. The router
 /// holds no subscriber of its own until the test declares one, so what opens the filter is that

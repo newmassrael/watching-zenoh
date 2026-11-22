@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_coop::session_drive::LinkWritability;
 
-use crate::engine::{LinkRooms, Room};
+use crate::engine::{Holder, LinkRooms, Room};
 
 /// A link's wait for room that answers what the test set, and keeps how long each ask was for.
 struct Answer {
@@ -100,9 +100,9 @@ fn only_the_faces_without_room_are_the_congestion() {
 /// Under the pico profile a publish that finds the session held by another publish sending on a
 /// face is a congestion drop at once on that face, as pico's try-lock drops the message behind a
 /// transmit lock another send holds: no link is asked for room, though one has room to give, and
-/// the drop names the face the holder sends on and no other. A session held by what is not a send
-/// (a read step, a timer) is waited for, with nothing asked either. Under zenoh's profile the same
-/// publish asks the link.
+/// the drop names the face the holder sends on and no other. A session held by a publish between
+/// its sends is tried again, and one held by what is not a publish (a read step, a timer) is waited
+/// for, blocked, with nothing asked either. Under zenoh's profile the same publish asks the link.
 #[test]
 fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
@@ -110,20 +110,25 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     let free = answer(true);
     held(&rooms, 1, &free);
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Some(7), 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000),
         Room::Held(7)
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, None, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Publish, 1_000),
         Room::Free,
-        "a holder that is not sending is waited for"
+        "a publish between its sends is tried again"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Step, 1_000),
+        Room::Stepping,
+        "a holder that is not a publish is waited for"
     );
     assert!(
         free.asked.lock().unwrap().is_empty(),
         "the link was asked for room"
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, None, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );

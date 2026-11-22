@@ -591,6 +591,14 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
     targets: Mutex<Vec<(TargetKey, Target)>>,
+    /// How many callbacks were taken out of `targets`, counted under its lock: a delivery that found
+    /// a subscriber's callback while the count was what it reads now hands that callback the next
+    /// sample without looking it up again ([`Resolved`]).
+    removed: AtomicU64,
+    /// The callbacks kept from one delivery to the next ([`Resolved`]), only ever tried: a
+    /// delivery that finds them held by another keeps a set of its own for its pass, and a removal
+    /// that finds them held leaves them to the delivery that holds them.
+    resolved: Mutex<Resolved>,
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
@@ -640,12 +648,16 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 }
 
 /// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
-/// queue of handed legs were taken: what a test of the cost of one message counts.
+/// queue of handed legs were taken, and a subscriber's callback was looked up in the table of
+/// them: what a test of the cost of one message counts.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Takes {
     pub(crate) core: core::sync::atomic::AtomicUsize,
     pub(crate) handed: core::sync::atomic::AtomicUsize,
+    pub(crate) callbacks: core::sync::atomic::AtomicUsize,
+    /// The turns a droppable publish spun on a held session before it tried the session again.
+    pub(crate) spins: core::sync::atomic::AtomicUsize,
 }
 
 /// The session state no other thread may touch while one does; see the module doc.
@@ -663,9 +675,14 @@ pub(crate) struct LinkRooms(Mutex<Vec<(FaceId, Weak<dyn LinkWritability>)>>);
 /// faces its holder waits on and still sent to the others ([`CoopEngine::live_to_publish`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Room {
-    /// Every face asked takes bytes, or the holder is not a publish sending on one: whoever holds
-    /// the session is not waiting on a face, and lets go of it once its step is done.
+    /// Every face asked takes bytes, or the holder is a publish between its sends: whoever holds
+    /// the session is not waiting on a face, and the session is tried again.
     Free,
+    /// Nothing was asked: what holds the session is not a publish (a read step, a timer, the
+    /// drive), which lets go of it once its step is done, and the queue profile drops a message
+    /// only behind a send. The publish waits for the session, blocked, as a send's lock that the
+    /// holder does not hold would not stop pico's put.
+    Stepping,
     /// These faces took no bytes within the wait.
     Congested(Vec<FaceId>),
     /// No face that is up gives a wait to ask.
@@ -680,23 +697,44 @@ pub(crate) enum Room {
 /// the session numbers its faces from 1 (`Core::next_face`).
 const NOT_SENDING: FaceId = 0;
 
-/// A publish sending on a face, marked for as long as this lives ([`CoopEngine`]'s
-/// `sending_on`): what tells a droppable publish that finds the session held which face a send
-/// holds, as pico's transmit lock is held by a send, or that something that is not one holds the
-/// session (a read step, a timer, the drive), which lets go once its step is done. Only the holder
-/// of the session sends, so one face is marked at a time.
-struct SendingOn<'a>(&'a AtomicU64);
+/// What [`CoopEngine`]'s `sending_on` holds while a publish holds the session and sends on no
+/// face: before its first send and between two. No face has the id, the session numbering its
+/// faces up from 1 one at a time.
+const PUBLISHING: FaceId = FaceId::MAX;
+
+/// Who holds the session, as a droppable publish that finds it held reads it ([`SendingOn`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// What is not a publish: a read step, a timer, the drive. It lets go once its step is done.
+    Step,
+    /// A publish, between its sends.
+    Publish,
+    /// A send on this face, a publish's or what a read step sends of the legs handed to it.
+    Sending(FaceId),
+}
+
+/// A send on a face, or a publish holding the session ([`PUBLISHING`]), marked for as long as this
+/// lives ([`CoopEngine`]'s `sending_on`): what tells a droppable publish that finds the session
+/// held which face a send holds, as pico's transmit lock is held by a send, or that a publish holds
+/// it between its sends, or that something that is not a publish holds the session (a read step, a
+/// timer, the drive), which lets go once its step is done. Only the holder of the session sends,
+/// so one mark is in force at a time; a send ends with the mark it found, so a publish is marked
+/// as one between its sends.
+struct SendingOn<'a> {
+    mark: &'a AtomicU64,
+    was: FaceId,
+}
 
 impl<'a> SendingOn<'a> {
     fn enter(mark: &'a AtomicU64, face: FaceId) -> Self {
-        mark.store(face, Ordering::SeqCst);
-        Self(mark)
+        let was = mark.swap(face, Ordering::SeqCst);
+        Self { mark, was }
     }
 }
 
 impl Drop for SendingOn<'_> {
     fn drop(&mut self) {
-        self.0.store(NOT_SENDING, Ordering::SeqCst);
+        self.mark.store(self.was, Ordering::SeqCst);
     }
 }
 
@@ -710,19 +748,16 @@ impl LinkRooms {
 
     /// What a droppable publish that found the session held is told, by the queue profile's
     /// `held_drop`: zenoh's asks the faces for room within `wait_us` ([`Self::within`]). Pico's
-    /// asks nothing: on the face another publish is `sending_on` it is dropped at once
-    /// ([`Room::Held`]), as pico's try-lock fails on a transmit lock another send holds, and
-    /// behind a holder that is not a publish sending it waits for the session ([`Room::Free`]).
-    pub(crate) fn for_held(
-        &self,
-        held_drop: HeldDrop,
-        sending_on: Option<FaceId>,
-        wait_us: u64,
-    ) -> Room {
-        match (held_drop, sending_on) {
+    /// asks nothing: on the face a send holds it is dropped at once ([`Room::Held`]), as pico's
+    /// try-lock fails on a transmit lock another send holds; behind a publish between its sends it
+    /// tries the session again ([`Room::Free`]); and behind a holder that is not a publish it waits
+    /// for the session ([`Room::Stepping`]).
+    pub(crate) fn for_held(&self, held_drop: HeldDrop, holder: Holder, wait_us: u64) -> Room {
+        match (held_drop, holder) {
             (HeldDrop::WaitForRoom, _) => self.within(wait_us),
-            (HeldDrop::DropAtOnce, Some(face)) => Room::Held(face),
-            (HeldDrop::DropAtOnce, None) => Room::Free,
+            (HeldDrop::DropAtOnce, Holder::Sending(face)) => Room::Held(face),
+            (HeldDrop::DropAtOnce, Holder::Publish) => Room::Free,
+            (HeldDrop::DropAtOnce, Holder::Step) => Room::Stepping,
         }
     }
 
@@ -910,6 +945,44 @@ type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 /// from the read task and one from the program's own `zp_read` never overlap.
 type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
 
+/// How many subscribers of one sample a delivery keeps the callbacks of ([`Resolved`]): a sample
+/// for more is handed to the ones past these by a look in the table each.
+const RESOLVED_SUBSCRIBERS: usize = 4;
+
+/// The callbacks the deliveries found for the subscribers of the sample handed last, by their
+/// place in the sample's list, and the count of removals from the table of callbacks they were
+/// found at ([`CoopEngine::removed`]). The next sample, in this delivery or the next step's, is
+/// almost always for the same subscribers: it is handed the same callbacks with no lock of the
+/// table, no search of it and no count taken on the callback, while nothing has been taken out of
+/// the table since. What was kept from before a removal is let go of by the removal, or, when a
+/// delivery holds the set then, by that delivery as it ends.
+struct Resolved {
+    removed: u64,
+    callbacks: [Option<(SubId, SubscriberCallback)>; RESOLVED_SUBSCRIBERS],
+}
+
+impl Resolved {
+    fn new() -> Self {
+        Self {
+            removed: 0,
+            callbacks: [const { None }; RESOLVED_SUBSCRIBERS],
+        }
+    }
+
+    /// What this kept from before the removals counted up to `removed`, taken out for the caller
+    /// to let go of with no lock held; nothing when it kept nothing older.
+    fn take_stale(
+        &mut self,
+        removed: u64,
+    ) -> [Option<(SubId, SubscriberCallback)>; RESOLVED_SUBSCRIBERS] {
+        if self.removed == removed {
+            return [const { None }; RESOLVED_SUBSCRIBERS];
+        }
+        self.removed = removed;
+        core::mem::replace(&mut self.callbacks, [const { None }; RESOLVED_SUBSCRIBERS])
+    }
+}
+
 /// A queryable's callback, locked while it runs as a subscriber's is.
 #[cfg(feature = "queryable")]
 type QueryableCallback = Arc<Mutex<QueryCallback>>;
@@ -1080,6 +1153,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// ([`Self::idle_wait`]) and handed back after it ([`Self::give_back_waits`]), so a turn of
     /// the read allocates nothing once the buffer holds as many waits as the session has had.
     waits: Vec<Arc<dyn LinkReadiness>>,
+    /// How often a read's wait and its step read the session's clock ([`Self::now_us`]), which the
+    /// tests count.
+    #[cfg(test)]
+    clock_reads: core::cell::Cell<usize>,
     matches: Rows<MatchEntry, { caps::MAX_MATCHING_LISTENERS }>,
     next_match: MatchId,
     #[cfg(feature = "queryable")]
@@ -1807,9 +1884,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// Move every face's link on, after the session was stepped; see [`Self::poll_face`]. `Err`
-    /// when the session ends, which only the dial role's face can bring about.
-    fn poll_links(&mut self, redial_ms: Option<u64>) -> Result<(), OpenError> {
+    /// Move every face's link on, after the session was stepped, against the step's reading of the
+    /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
+    /// role's face can bring about.
+    fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
         // The connections that arrived come first, so their handshakes are moved on in this pass.
         #[cfg(feature = "listen")]
         self.accept_links();
@@ -1819,7 +1897,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
         for at in (0..self.faces.len()).rev() {
-            self.poll_face(at, redial_ms)?;
+            self.poll_face(at, redial_ms, now_us)?;
         }
         Ok(())
     }
@@ -1833,8 +1911,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// its lost or failed link takes the face with it. `Err` when the session ends: the dial
     /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
     /// gave no entropy.
-    fn poll_face(&mut self, at: usize, redial_ms: Option<u64>) -> Result<(), OpenError> {
-        let now_us = self.clock.now_us();
+    fn poll_face(
+        &mut self,
+        at: usize,
+        redial_ms: Option<u64>,
+        now_us: u64,
+    ) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
         let id = self.faces[at].id;
         let link = core::mem::replace(&mut self.faces[at].link, Link::Waiting { at_us: now_us });
@@ -2428,13 +2510,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .min()
     }
 
-    /// `most` milliseconds, or the whole milliseconds left until `due_ms` (rounded up, so a wait
-    /// never ends a clock reading before the time it waits for), whichever is less.
-    fn wait_until(&self, most: u32, due_ms: u64) -> u32 {
-        let left_us = due_ms
-            .saturating_mul(1000)
-            .saturating_sub(self.clock.now_us());
+    /// `most` milliseconds, or the whole milliseconds left at `now_us` until `due_ms` (rounded up,
+    /// so a wait never ends a clock reading before the time it waits for), whichever is less.
+    fn wait_until(most: u32, due_ms: u64, now_us: u64) -> u32 {
+        let left_us = due_ms.saturating_mul(1000).saturating_sub(now_us);
         u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
+    }
+
+    /// The session's clock, read: what a read's wait is worked out from and what its step moves
+    /// the links, sweeps the gets and looks for a due job against, each read once.
+    fn now_us(&self) -> u64 {
+        #[cfg(test)]
+        self.clock_reads.set(self.clock_reads.get() + 1);
+        self.clock.now_us()
+    }
+
+    /// The milliseconds of `now_us`, a step's reading of the clock, when a periodic job is due
+    /// by it: what the read runs its jobs against once its delivery is done.
+    #[cfg(feature = "ticker")]
+    fn jobs_due_at(&self, now_us: u64) -> Option<u64> {
+        let now_ms = now_us / 1000;
+        self.tickers
+            .next_due_ms()
+            .is_some_and(|due_ms| due_ms <= now_ms)
+            .then_some(now_ms)
+    }
+
+    /// A build without periodic jobs has none due.
+    #[cfg(not(feature = "ticker"))]
+    fn jobs_due_at(&self, _now_us: u64) -> Option<u64> {
+        None
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
@@ -2443,10 +2548,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&mut self) -> IdleWait {
         let most = self.config.idle_wait_ms;
+        // The clock is read the first time a deadline asks for it, and that reading serves every
+        // deadline after it: a wait with nothing due reads it not at all.
+        let mut clock_now: Option<u64> = None;
         // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
         #[cfg(feature = "query")]
         let most = match self.next_get_deadline_ms() {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is the next turn of a replay a link owes its peer, which is not due by input.
@@ -2456,13 +2568,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .filter_map(|face| face.replay.next_turn_ms())
             .min()
         {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is a periodic job the program started, which no input brings about either.
         #[cfg(feature = "ticker")]
         let most = match self.tickers.next_due_ms() {
-            Some(due_ms) => self.wait_until(most, due_ms),
+            Some(due_ms) => Self::wait_until(
+                most,
+                due_ms,
+                *clock_now.get_or_insert_with(|| self.now_us()),
+            ),
             None => most,
         };
         // And so is a group's turn: its task takes one datagram a step, so a group that took one
@@ -2475,7 +2595,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             0
         } else {
             let most = match self.groups.iter().filter_map(GroupFace::due_us).min() {
-                Some(due_us) => self.wait_until(most, due_us.div_ceil(1_000)),
+                Some(due_us) => Self::wait_until(
+                    most,
+                    due_us.div_ceil(1_000),
+                    *clock_now.get_or_insert_with(|| self.now_us()),
+                ),
                 None => most,
             };
             if self.groups.iter().any(GroupFace::unwaited) {
@@ -2508,7 +2632,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     }
                 }
                 Link::Waiting { at_us } => {
-                    dial_left_ms = Some(at_us.saturating_sub(self.clock.now_us()) / 1000);
+                    let now_us = *clock_now.get_or_insert_with(|| self.now_us());
+                    dial_left_ms = Some(at_us.saturating_sub(now_us) / 1000);
                 }
                 // Nothing to wait for until the face that holds the node is lost, which is
                 // another face's link.
@@ -2818,6 +2943,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             next_filter: 1,
             interests,
             waits: Vec::with_capacity(wait_room),
+            #[cfg(test)]
+            clock_reads: core::cell::Cell::new(0),
             matches,
             next_match: 1,
             #[cfg(feature = "queryable")]
@@ -2871,7 +2998,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 let spare = core.idle_wait().wait();
                 core.give_back_waits(spare);
                 core.local.run_until_idle();
-                core.poll_links(None)?;
+                let now_us = core.now_us();
+                core.poll_links(None, now_us)?;
             }
         }
         Ok(Arc::new_cyclic(|this| Self {
@@ -2890,6 +3018,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             samples,
             matching: Arc::new(Mutex::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
+            removed: AtomicU64::new(0),
+            resolved: Mutex::new(Resolved::new()),
             #[cfg(feature = "queryable")]
             plane,
             #[cfg(feature = "query")]
@@ -3077,6 +3207,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .map(|core| (core.0.dial().replay.pacing(), core.0.policy))
     }
 
+    /// How often the session's read path read its clock since the open ([`Core::now_us`]): what a
+    /// test of the cost of one read step counts. Read under the lock, uncounted as a take.
+    #[cfg(test)]
+    pub(crate) fn clock_reads(&self) -> usize {
+        lock(&self.core).0.clock_reads.get()
+    }
+
     /// Whether the peer of every established link has been told every declaration the session
     /// holds. A session with no link established owes nothing yet, so it is synced, as the slot
     /// node's is before a client has come: synced is a statement about established sessions, not
@@ -3115,8 +3252,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// give no wait to ask is waited for. Under the pico profile the publish is dropped at once on
     /// the face another publish is sending on, with nothing asked ([`LinkRooms::for_held`]), and
     /// the caller is told ([`FanoutError::HeldConduit`]), as pico's put fails when its held
-    /// transmit lock drops it. Either drop is the faces' it names alone, as each of zenoh's
-    /// transports drops on its own queue: the publish is still owed to the others
+    /// transmit lock drops it; behind a publish between its sends it tries the session again, and
+    /// behind what is not a publish it waits for the session, blocked, since that holder holds no
+    /// send and lets go once its step is done. Either drop is the faces' it names alone, as each
+    /// of zenoh's transports drops on its own queue: the publish is still owed to the others
     /// ([`ToPublish::DroppedOn`], [`Self::hand_off`]).
     fn live_to_publish(&self, droppable: bool) -> ToPublish<'_, L, C> {
         if !droppable {
@@ -3135,16 +3274,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
                 return ToPublish::Live(guard);
             }
-            let (faces, told) = match self.rooms.for_held(
-                self.held_drop,
-                self.held_face(),
-                self.wait_before_drop_us,
-            ) {
+            let room = self
+                .rooms
+                .for_held(self.held_drop, self.holder(), self.wait_before_drop_us);
+            let (faces, told) = match room {
                 Room::Free => {
+                    #[cfg(test)]
+                    self.takes.spins.fetch_add(1, Ordering::Relaxed);
                     core::hint::spin_loop();
                     continue;
                 }
-                Room::Unasked => return self.live().map_or(ToPublish::Closed, ToPublish::Live),
+                Room::Unasked | Room::Stepping => {
+                    return self.live().map_or(ToPublish::Closed, ToPublish::Live)
+                }
                 Room::Congested(faces) => (faces, false),
                 Room::Held(face) => (vec![face], true),
             };
@@ -3154,10 +3296,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// The face a publish holding the session sends on now, if one does ([`SendingOn`]).
-    fn held_face(&self) -> Option<FaceId> {
-        let face = self.sending_on.load(Ordering::SeqCst);
-        (face != NOT_SENDING).then_some(face)
+    /// Who holds the session now, as its holder marked itself ([`SendingOn`]).
+    fn holder(&self) -> Holder {
+        match self.sending_on.load(Ordering::SeqCst) {
+            NOT_SENDING => Holder::Step,
+            PUBLISHING => Holder::Publish,
+            face => Holder::Sending(face),
+        }
+    }
+
+    /// Run `held` while holding the session as a read step holds it: what a test of a publish that
+    /// finds the session held by what is not a publish runs beside one.
+    #[cfg(test)]
+    pub(crate) fn holding_as_a_step(&self, held: impl FnOnce()) {
+        let _core = self.live();
+        held();
     }
 
     /// What the session's transports counted (`transport-stats`), in the report a tokio session
@@ -3195,18 +3348,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
     /// publish) takes the session's lock itself. One is taken at a time, so a job that stops
     /// another finds it not yet started, and each is put back a period after its run ended. What
-    /// is due is read against the time this call began, so a job that takes longer than its own
-    /// period runs once per call and does not keep the caller here.
+    /// is due is read against `started_ms`, the reading of the clock the read's step made, so a
+    /// job that takes longer than its own period runs once per call and does not keep the caller
+    /// here.
+    ///
+    /// A read calls this only when its step found a job due by that reading, so a read with
+    /// nothing due takes the lock for its jobs not at all. The first due job is taken under one
+    /// take, and a job that ran is put back and the next taken under one more.
     #[cfg(feature = "ticker")]
-    fn run_due_tickers(&self) {
-        // Every read steps here, almost always with nothing due: the clock is read and the first
-        // due job taken under one take of the lock, and a job that ran is put back and the next
-        // taken under one more.
-        let (started_ms, mut next) = match self.live() {
-            Some(mut core) => {
-                let started_ms = core.0.clock.now_us() / 1000;
-                (started_ms, core.0.tickers.take_next_due(started_ms))
-            }
+    fn run_due_tickers(&self, started_ms: u64) {
+        let mut next = match self.live() {
+            Some(mut core) => core.0.tickers.take_next_due(started_ms),
             None => return,
         };
         while let Some((id, tick)) = next {
@@ -3218,6 +3370,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             });
         }
     }
+
+    /// A build without periodic jobs has none due ([`Core::jobs_due_at`]).
+    #[cfg(not(feature = "ticker"))]
+    fn run_due_tickers(&self, _started_ms: u64) {}
 
     /// Hand out what the session delivered, with no lock held.
     ///
@@ -3255,6 +3411,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// [`Self::deliver`] entered. Whether anything was handed out.
     fn hand_out(&self) -> bool {
         let mut handed = false;
+        // The callbacks found for the samples' subscribers, kept from one sample to the next and from
+        // one delivery to the next: the engine's, unless another delivery holds them now, which
+        // leaves this one a set of its own for this pass.
+        let mut kept = self.resolved.try_lock();
+        let mut own = None;
+        let resolved: &mut Resolved = match kept.as_deref_mut() {
+            Some(held) => held,
+            None => own.insert(Resolved::new()),
+        };
         // Each popped under its queue's lock alone, which is released before the callback runs:
         // the pop is its own statement, since a guard in a `while let` condition would live
         // through the body and a callback that steps the session again would wait on it.
@@ -3268,13 +3433,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let _handed = Handed(&self.samples);
             match item {
                 LaneItem::Sample(sample) => {
+                    let hand = |id: SubId, callback: &SubscriberCallback| {
+                        #[cfg(feature = "local-subscriber")]
+                        let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
+                        #[cfg(not(feature = "local-subscriber"))]
+                        let _ = id;
+                        (lock(callback))(&sample);
+                    };
                     // A subscriber undeclared since the sample was queued has no callback left,
                     // and is passed over.
-                    for id in sample.subscribers() {
-                        if let Some(callback) = self.subscriber_callback(id) {
-                            #[cfg(feature = "local-subscriber")]
-                            let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
-                            (lock(&callback))(&sample);
+                    for (at, id) in sample.subscribers().enumerate() {
+                        if at < RESOLVED_SUBSCRIBERS {
+                            if let Some(callback) =
+                                self.resolved_subscriber_callback(resolved, at, id)
+                            {
+                                hand(id, callback);
+                            }
+                        } else if let Some(callback) = self.subscriber_callback(id) {
+                            hand(id, &callback);
                         }
                     }
                 }
@@ -3314,6 +3490,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
+        self.let_go_of_resolved(kept);
+        drop(own);
         // A face that came up or went down, told to each watcher as it stands now: the list is
         // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
         #[cfg(feature = "connectivity")]
@@ -3440,6 +3618,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 };
             }
         };
+        // Marked as the holder for as long as it holds the session: a droppable publish that
+        // finds it held between this one's sends tries the session again, where one behind what
+        // is not a publish waits for it.
+        let publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
         // What was handed to the session before this publish leaves before it, and what was
         // handed while this publish held the session leaves after it.
         let before = self.send_handed(&core.0);
@@ -3455,6 +3637,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             &[],
         );
         let after = self.send_handed(&core.0);
+        drop(publishing);
         drop(core);
         // Let go of with nothing of the session held: a key a leg names may keep a declaration
         // that is retracted as it drops, which takes the session (`WireKey`).
@@ -3642,12 +3825,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// The callback of subscriber `id`, while the subscriber is declared.
     fn subscriber_callback(&self, id: SubId) -> Option<SubscriberCallback> {
+        #[cfg(test)]
+        self.takes.callbacks.fetch_add(1, Ordering::Relaxed);
         lock(&self.targets)
             .iter()
             .find_map(|(t, target)| match target {
                 Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
                 _ => None,
             })
+    }
+
+    /// The callback of subscriber `id`, the `at`th of the sample a delivery hands, `at` under
+    /// [`RESOLVED_SUBSCRIBERS`]: the one `resolved` kept for that place when it is `id`'s and
+    /// nothing was taken out of the table since it was found, else the table's, kept there for the
+    /// samples after. A subscriber undeclared since has none.
+    fn resolved_subscriber_callback<'r>(
+        &self,
+        resolved: &'r mut Resolved,
+        at: usize,
+        id: SubId,
+    ) -> Option<&'r SubscriberCallback> {
+        drop(resolved.take_stale(self.removed.load(Ordering::SeqCst)));
+        let kept = &mut resolved.callbacks[at];
+        if !matches!(kept, Some((held, _)) if *held == id) {
+            *kept = self.subscriber_callback(id).map(|callback| (id, callback));
+        }
+        kept.as_ref().map(|(_, callback)| callback)
     }
 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
@@ -3808,20 +4011,55 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
     fn take_target(&self, key: TargetKey) -> Option<Target> {
-        let mut targets = lock(&self.targets);
-        let at = targets.iter().position(|(t, _)| *t == key)?;
-        Some(targets.remove(at).1)
+        let taken = {
+            let mut targets = lock(&self.targets);
+            let at = targets.iter().position(|(t, _)| *t == key)?;
+            self.removed.fetch_add(1, Ordering::SeqCst);
+            targets.remove(at).1
+        };
+        // What the deliveries kept goes first, so the caller's drop of the callback is its last.
+        self.forget_resolved();
+        Some(taken)
+    }
+
+    /// Let go of the callbacks the deliveries kept from before the last removal from the table,
+    /// when no delivery holds them now; one that does lets go of them as it ends
+    /// ([`Self::let_go_of_resolved`]).
+    fn forget_resolved(&self) {
+        let Some(mut kept) = self.resolved.try_lock() else {
+            return;
+        };
+        let stale = kept.take_stale(self.removed.load(Ordering::SeqCst));
+        drop(kept);
+        drop(stale);
+    }
+
+    /// End a delivery's hold on the kept callbacks: what it kept from before a removal is let go
+    /// of, with no lock held, and a removal counted after that, which found them held, is seen to.
+    fn let_go_of_resolved(&self, kept: Option<MutexGuard<'_, Resolved>>) {
+        let Some(mut kept) = kept else {
+            return;
+        };
+        let stale = kept.take_stale(self.removed.load(Ordering::SeqCst));
+        let seen = kept.removed;
+        drop(kept);
+        drop(stale);
+        if self.removed.load(Ordering::SeqCst) != seen {
+            self.forget_resolved();
+        }
     }
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
-    /// that ended.
-    fn step(&self, core: &mut Core<L, C>) -> bool {
+    /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
+    /// does by that reading, which it returns; `None` once the session ended.
+    fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
         core.local.run_until_idle();
+        let now_us = core.now_us();
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
         {
-            let now_ms = core.clock.now_us() / 1000;
+            let now_ms = now_us / 1000;
             let mut registry = core.registry.borrow_mut();
             for gets in registry.all_gets_mut() {
                 gets.replies.sweep_timed_out(now_ms);
@@ -3836,9 +4074,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         let redial_ms = core.config.redial_ms;
-        if core.poll_links(redial_ms).is_err() {
+        if core.poll_links(redial_ms, now_us).is_err() {
             self.closed.store(true, Ordering::Release);
-            return false;
+            return None;
         }
         // A group told the session's keyexprs that came up, at the open or joined again, asks
         // for its members' with the session's next entity id, as the tokio engine's group asks
@@ -3852,7 +4090,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
         }
-        true
+        Some(now_us)
     }
 
     /// Hold the Interest for `keyexpr` on `plane`, sending it in `form` for its first holder:
@@ -5693,20 +5931,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let spare = wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        let (stepped, handed) = match self.live() {
+        // One take of the session for the step: its links, what publishes handed to it, and
+        // whether a periodic job is due by the clock reading the step made.
+        let (stepped, handed, jobs_due_ms) = match self.live() {
             Some(mut core) => {
                 core.0.give_back_waits(spare);
                 let stepped = self.step(&mut core.0);
+                let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
                 // What publishes handed to the session while it was held leaves on this step too,
                 // so a program that only reads its session sends it.
-                (stepped, self.send_handed_now(&core.0))
+                (
+                    stepped.is_some(),
+                    self.send_handed_now(&core.0),
+                    jobs_due_ms,
+                )
             }
-            None => (false, VecDeque::new()),
+            None => (false, VecDeque::new(), None),
         };
         drop(handed);
         self.deliver();
-        #[cfg(feature = "ticker")]
-        self.run_due_tickers();
+        if let Some(started_ms) = jobs_due_ms {
+            self.run_due_tickers(started_ms);
+        }
         if stepped {
             Ok(())
         } else {

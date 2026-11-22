@@ -13707,17 +13707,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         };
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
-        // The Put's own size, from the same writer run into a sink that keeps nothing: a Push
-        // has no size constant (its payload's bound is a u32 length), and the link lends a slot
-        // of this size. A Put the writer refuses counts as zero, and the encoder below refuses
-        // it with the same error, which the dispatch reports.
-        let size = {
-            let mut count = sce_forge_runtime::codec::CountSink::new();
-            match crate::lent_push::write_plain_put(&mut count, mapping_id, suffix, value, qos) {
-                Ok(()) => count.len(),
-                Err(_) => 0,
-            }
-        };
+        // The Put's own size, worked out from its parts: a Push has no size constant (its
+        // payload's bound is a u32 length), and the link lends a slot of this size, which the
+        // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
+        // below refuses it with the same error, which the dispatch reports.
+        let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
         let sent = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
