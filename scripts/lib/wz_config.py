@@ -5262,8 +5262,14 @@ def cmd_selftest() -> int:
     # states nothing (`statement_engine`). They are left out of the count of distinct digests and
     # held to equal their twin instead, so a change of the engine rule turns one of them red.
     same_as = {"every limit and policy stated at its default": "nothing stated",
-               "every name of every ABI on": "every name of the ABI on",
-               "the tokio engine beside a cooperative feature": "nothing stated"}
+               "every name of every ABI on": "every name of the ABI on"}
+    # A vector a build refuses (two engines named in one pico build) states no build, so it has no
+    # digest: it is held to its refusal instead, and left out of the digest count.
+    refused = [v for v in vectors if v.get("refused")]
+    expect("the two-engine pico statement is a refused vector with no digest",
+           any(v["case"] == "the tokio engine beside a cooperative feature" for v in refused)
+           and all("digest" not in v for v in refused))
+    vectors = [v for v in vectors if not v.get("refused")]
     by_case = {(v["abi"], v["case"]): v["digest"] for v in vectors}
     twins = [(abi, case, twin) for (abi, case) in by_case for c, twin in same_as.items()
              if case == c]
@@ -5273,7 +5279,7 @@ def cmd_selftest() -> int:
            and len({v["digest"] for v in vectors if v["case"] not in same_as})
            == len(vectors) - len(twins))
     expect("each vector that states a build another states has that build's digest",
-           len(twins) == 2 * len(ABIS) + 1
+           len(twins) == 2 * len(ABIS)
            and all(by_case[(abi, case)] == by_case[(abi, twin)] for abi, case, twin in twins))
     expect("the cooperative engine and the zephyr platform each state a build of their own",
            len({by_case[("pico", "nothing stated")], by_case[("pico", "the cooperative engine")],
