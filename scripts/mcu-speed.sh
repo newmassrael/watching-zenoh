@@ -103,6 +103,17 @@ build_image() {
         refuse "the image of arm $arm ($threads) did not build (see $log)"
     fi
     cp "$dir/zephyr/zephyr.elf" "$images/$arm-$threads.elf" || refuse "the image of arm $arm ($threads) has no ELF"
+    # Arm W's frames and its chain under `z_open` are held to the main stack (row zephyr-mcu-speed-w of
+    # scripts/lib/stack_frame_gate.py): an image that would overflow it at the open is refused here,
+    # by the frame that does it, and not left to a cell that never answers.
+    if [[ "$arm" == W ]]; then
+        local stack_log="$logs/stack-$arm-$threads.log"
+        if ! python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check zephyr-mcu-speed-w \
+            --elf "$images/$arm-$threads.elf" >"$stack_log" 2>&1; then
+            cat "$stack_log" >&2
+            refuse "the image of arm W ($threads) has a frame or a chain over its stack (see $stack_log)"
+        fi
+    fi
     echo "mcu-speed: built arm $arm ($threads) for $board"
 }
 
