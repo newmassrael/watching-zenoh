@@ -945,6 +945,74 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     );
 }
 
+/// The samples of a read are handed out with one take of the delivery lane's lock each to queue
+/// them, one each to take them from the lane (each under the take that gives the one before it
+/// back), and one more a read that delivered to find the lane empty: a read that finds nothing
+/// takes it not at all, the link's gate and every queue a delivery looks at reading words instead.
+/// One thread delivers, so the list of the threads delivering beside it is never taken. The
+/// CONTROL is the count of the samples handed, which the count of takes is read against.
+#[test]
+fn a_received_sample_takes_the_lane_twice_and_an_empty_read_not_at_all() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let (lane, list) = (engine.lane_takes(), engine.delivery_list_takes());
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        engine.lane_takes(),
+        lane,
+        "a read with nothing to read or hand out took the lane's lock"
+    );
+    const SAMPLES: usize = 8;
+    for _ in 0..SAMPLES {
+        router.send(Command::Push("demo/a", b"x"));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    until(&engine, "the pushes", || {
+        received.load(Ordering::SeqCst) == SAMPLES
+    });
+    let taken = engine.lane_takes() - lane;
+    // Two takes a sample, and one a read that handed any, which is one read at least and one a
+    // sample at most.
+    assert!(
+        (2 * SAMPLES + 1..=3 * SAMPLES).contains(&taken),
+        "{taken} takes of the lane for {SAMPLES} samples"
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        engine.lane_takes() - lane,
+        taken,
+        "the read after them took the lane's lock"
+    );
+    assert_eq!(
+        engine.delivery_list_takes(),
+        list,
+        "one thread delivered, and took the list of the others"
+    );
+}
+
 /// A subscriber that undeclares itself from inside its callback is handed nothing more, though the
 /// delivery kept its callback and the lane still holds samples for it: the removal from the table
 /// ends what the delivery kept, as a look in the table for each sample would have found nothing.

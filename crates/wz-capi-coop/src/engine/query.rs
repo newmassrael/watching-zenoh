@@ -60,6 +60,7 @@ use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo};
 
+use super::queued::Queued;
 use super::{lock, CoopEngine};
 
 /// A query copied out of the dispatch that delivered it, for a callback that runs after.
@@ -427,7 +428,7 @@ pub(super) struct QueryPlane {
     pub(super) holds: Mutex<FinalHolds>,
     /// The queries waiting for their callbacks, in the order they arrived: the queryable they
     /// matched, the query, and the generation of its link.
-    pub(super) queries: Mutex<VecDeque<(QblId, OwnedQuery, u64)>>,
+    pub(super) queries: Queued<VecDeque<(QblId, OwnedQuery, u64)>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -451,7 +452,7 @@ impl QueryPlane {
             #[cfg(feature = "local-queryable")]
             asking: AtomicBool::new(false),
             holds: Mutex::new(FinalHolds::holding(rows)),
-            queries: Mutex::new(VecDeque::new()),
+            queries: Queued::new(VecDeque::new()),
             refused: AtomicU64::new(0),
             #[cfg(feature = "local-queryable")]
             asked: Mutex::new(BoundedVec::new_static()),
@@ -473,7 +474,9 @@ impl QueryPlane {
         if generation == LOCAL_QUERY && lock(&self.asked).push(id).is_ok() {
             return;
         }
-        lock(&self.queries).push_back((id, OwnedQuery::of(view), generation));
+        self.queries
+            .lock()
+            .push_back((id, OwnedQuery::of(view), generation));
     }
 
     /// The queryables the session's own get matched while it was asked, the list left empty.

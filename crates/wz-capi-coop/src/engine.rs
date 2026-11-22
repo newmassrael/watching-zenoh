@@ -134,6 +134,11 @@ use {
     wz_session_core::declare_form::GroupDeclaration,
 };
 
+mod deliveries;
+use deliveries::Deliveries;
+mod queued;
+use queued::Queued;
+
 mod registry;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
@@ -590,7 +595,7 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// and the changes of its matching statuses. Apart, so a matching flip does not take a
     /// sample's room.
     samples: Arc<SharedLane>,
-    matching: Arc<Mutex<MatchFlips>>,
+    matching: Arc<Queued<MatchFlips>>,
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
@@ -631,18 +636,11 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     #[cfg(any(feature = "query", feature = "ticker"))]
     next_local: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
-    /// The threads handing deliveries out for this engine now ([`Delivering`]): a callback that
-    /// steps its session again from one of them queues what it delivers for the outer delivery.
-    delivering: Lock<Vec<ThreadId>>,
-    /// The subscribers and queryables whose callbacks run now, and the thread each runs on
-    /// ([`Running`]): what the session's own put or get asks to tell a callback it can call at
-    /// once from one the asking thread is inside of.
-    #[cfg(any(
-        feature = "local-subscriber",
-        feature = "liveliness",
-        feature = "local-queryable"
-    ))]
-    running: Lock<Vec<(ThreadId, TargetKey)>>,
+    /// The threads handing deliveries out for this engine now, and the callbacks each runs
+    /// ([`Deliveries`]): a callback that steps its session again from one of them queues what it
+    /// delivers for the outer delivery, and the session's own put or get tells a callback it can
+    /// call at once from one the asking thread is inside of.
+    deliveries: Deliveries,
     /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
     arena_bytes: usize,
     /// The takes of the session's locks on a message's paths, which the tests count.
@@ -853,92 +851,34 @@ impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
 unsafe impl<C: ClockSource + 'static> Send for LinkOwnSpace<C> {}
 unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
 
-/// One thread's delivery for one engine, from `enter` to drop. The engine keeps the threads
-/// delivering for it ([`CoopEngine::delivering`]); a set held per engine and keyed by thread is
-/// what a thread-local set keyed by engine was, without a thread-local, which an MCU kernel does
-/// not give a Rust image.
-struct Delivering<'a> {
-    set: &'a Lock<Vec<ThreadId>>,
-    thread: ThreadId,
+/// A head a delivery took from the session's lane, given back when the delivery is done with it:
+/// with the next head taken under the same take of the lane's lock once its callbacks returned
+/// ([`Self::complete_and_take`]), or alone when one unwinds.
+struct Handed<'a> {
+    lane: &'a SharedLane,
+    given_back: bool,
 }
 
-impl<'a> Delivering<'a> {
-    /// `None` when this thread is already delivering for the engine whose set this is.
-    fn enter(set: &'a Lock<Vec<ThreadId>>) -> Option<Self> {
-        let thread = os::current();
-        set.with(|threads| {
-            if threads.contains(&thread) {
-                return None;
-            }
-            threads.push(thread);
-            Some(Self { set, thread })
-        })
-    }
-}
-
-impl Drop for Delivering<'_> {
-    fn drop(&mut self) {
-        let thread = self.thread;
-        self.set.with(|threads| threads.retain(|t| *t != thread));
-    }
-}
-
-/// A callback running on this thread, noted in the engine's table of them from its call to its
-/// return, or its unwinding.
-#[cfg(any(
-    feature = "local-subscriber",
-    feature = "liveliness",
-    feature = "local-queryable"
-))]
-struct Running<'a> {
-    set: &'a Lock<Vec<(ThreadId, TargetKey)>>,
-    entry: (ThreadId, TargetKey),
-}
-
-#[cfg(any(
-    feature = "local-subscriber",
-    feature = "liveliness",
-    feature = "local-queryable"
-))]
-impl<'a> Running<'a> {
-    fn enter(set: &'a Lock<Vec<(ThreadId, TargetKey)>>, key: TargetKey) -> Self {
-        let entry = (os::current(), key);
-        set.with(|running| running.push(entry));
-        Self { set, entry }
+impl<'a> Handed<'a> {
+    fn new(lane: &'a SharedLane) -> Self {
+        Self {
+            lane,
+            given_back: false,
+        }
     }
 
-    /// Whether the callback of `key` runs on this thread now: a call into it from here would
-    /// wait on itself.
-    #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
-    fn here(set: &Lock<Vec<(ThreadId, TargetKey)>>, key: TargetKey) -> bool {
-        let entry = (os::current(), key);
-        set.with(|running| running.contains(&entry))
+    /// Give the head back and take the next one, under one take of the lane's lock.
+    fn complete_and_take(mut self) -> Option<LaneItem> {
+        self.given_back = true;
+        self.lane.lock().complete_and_take_front()
     }
 }
-
-#[cfg(any(
-    feature = "local-subscriber",
-    feature = "liveliness",
-    feature = "local-queryable"
-))]
-impl Drop for Running<'_> {
-    fn drop(&mut self) {
-        let entry = self.entry;
-        self.set.with(|running| {
-            if let Some(at) = running.iter().rposition(|held| *held == entry) {
-                running.remove(at);
-            }
-        });
-    }
-}
-
-/// A sample a delivery took from the head of the session's lane, given back when the delivery is
-/// done with it: when its callback returns, or unwinds.
-struct Handed<'a>(&'a SharedLane);
 
 impl Drop for Handed<'_> {
     fn drop(&mut self) {
-        self.0.lock().complete();
+        if !self.given_back {
+            self.lane.lock().complete();
+        }
     }
 }
 
@@ -3146,7 +3086,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "transport-stats")]
             unsent_drops: AtomicU64::new(0),
             samples,
-            matching: Arc::new(Mutex::new(MatchFlips::new())),
+            matching: Arc::new(Queued::new(MatchFlips::new())),
             targets: Mutex::new(Vec::new()),
             removed: AtomicU64::new(0),
             resolved: Mutex::new(Resolved::new()),
@@ -3167,13 +3107,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(any(feature = "query", feature = "ticker"))]
             next_local: AtomicU64::new(1),
             reader: Mutex::new(None),
-            delivering: Lock::new(Vec::new()),
-            #[cfg(any(
-                feature = "local-subscriber",
-                feature = "liveliness",
-                feature = "local-queryable"
-            ))]
-            running: Lock::new(Vec::new()),
+            deliveries: Deliveries::new(),
             arena_bytes,
             #[cfg(test)]
             takes: Takes::default(),
@@ -3358,6 +3292,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.samples.takes()
     }
 
+    /// How often the list of the threads delivering beside the first was taken since the open
+    /// ([`Deliveries`]): what a test of the cost of one received sample counts.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn delivery_list_takes(&self) -> usize {
+        self.deliveries.others_taken()
+    }
+
     /// Whether the peer of every established link has been told every declaration the session
     /// holds. A session with no link established owes nothing yet, so it is synced, as the slot
     /// node's is before a client has come: synced is a statement about established sessions, not
@@ -3526,7 +3467,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
     fn deliver(&self) {
-        let Some(_delivering) = Delivering::enter(&self.delivering) else {
+        let Some(_delivering) = self.deliveries.enter() else {
             return;
         };
         // A callback can queue more for this delivery than the pass that ran it has already passed
@@ -3539,8 +3480,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // closure's `drop(context)`). A lane another delivery still hands out may hold a reply
         // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        while self.samples.lock().is_idle() {
-            let next = lock(&self.gets.ended).take();
+        while self.gets.ended.is_pending() && self.samples.is_idle() {
+            let next = self.gets.ended.lock().take();
             let Some(leg) = next else {
                 break;
             };
@@ -3552,9 +3493,55 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// One pass over what the session queued for the program's callbacks, under the delivery
-    /// [`Self::deliver`] entered. Whether anything was handed out.
+    /// [`Self::deliver`] entered. Whether anything was handed out. The lane, the matching changes
+    /// and the queries each say without their locks whether they hold anything, so a pass that
+    /// finds nothing, which every delivery's last pass is, takes none of their locks.
     fn hand_out(&self) -> bool {
-        let mut handed = false;
+        let mut handed = self.samples.owes_a_delivery() && self.hand_out_lane();
+        // A face that came up or went down, told to each watcher as it stands now: the list is
+        // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
+        #[cfg(feature = "connectivity")]
+        while let Some((kind, face)) = self.faces.next_event() {
+            handed = true;
+            for sink in self.faces.sinks() {
+                sink(kind, &face);
+            }
+        }
+        // What a peer declared or retracted, told to the watch it is owed to.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        while let Some((sink, told)) = self.decl_watches.next() {
+            sink(told.event());
+        }
+        while self.matching.is_pending() {
+            // Popped under the queue's lock alone, which is released before the sink runs.
+            let next = self.matching.lock().next();
+            let Some((id, matching)) = next else {
+                break;
+            };
+            handed = true;
+            let sink = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Matching(sink) if *t == TargetKey::Matching(id) => Some(sink.clone()),
+                    _ => None,
+                });
+            if let Some(sink) = sink {
+                sink(matching);
+            }
+        }
+        let asked = self.hand_queries();
+        handed || asked
+    }
+
+    /// Hand what the session's lane holds to the callbacks it is for, the head first. Whether
+    /// anything was handed. Each head is taken under the take of the lane's lock that gives the
+    /// one before it back ([`Handed::complete_and_take`]), so a pass takes the lock once for each
+    /// head and once more to find the lane empty, and never holds it while a callback runs: a
+    /// callback that steps the session again would wait on it.
+    fn hand_out_lane(&self) -> bool {
         // The callbacks found for the samples' subscribers, kept from one sample to the next and from
         // one delivery to the next: the engine's, unless another delivery holds them now, which
         // leaves this one a set of its own for this pass.
@@ -3564,22 +3551,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             Some(held) => held,
             None => own.insert(Resolved::new()),
         };
-        // Each popped under its queue's lock alone, which is released before the callback runs:
-        // the pop is its own statement, since a guard in a `while let` condition would live
-        // through the body and a callback that steps the session again would wait on it.
+        let mut next = self.samples.lock().take_front();
+        let handed = next.is_some();
         loop {
-            let next = self.samples.lock().take_front();
-            let Some(item) = next else {
+            let Some(item) = next.take() else {
                 break;
             };
-            handed = true;
             // The head goes back to the lane when the last callback returns, or one unwinds.
-            let _handed = Handed(&self.samples);
+            let held = Handed::new(&self.samples);
             match item {
                 LaneItem::Sample(sample) => {
                     let hand = |id: SubId, callback: &SubscriberCallback| {
                         #[cfg(feature = "local-subscriber")]
-                        let _running = Running::enter(&self.running, TargetKey::Subscriber(id));
+                        let _running = self.deliveries.run(TargetKey::Subscriber(id));
                         #[cfg(not(feature = "local-subscriber"))]
                         let _ = id;
                         (lock(callback))(&sample);
@@ -3627,50 +3611,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                                     _ => None,
                                 });
                         if let Some(callback) = callback {
-                            let _running = Running::enter(&self.running, TargetKey::Liveliness(id));
+                            let _running = self.deliveries.run(TargetKey::Liveliness(id));
                             (lock(&callback))(sample.as_sample());
                         }
                     }
                 }
             }
+            next = held.complete_and_take();
         }
         self.let_go_of_resolved(kept);
         drop(own);
-        // A face that came up or went down, told to each watcher as it stands now: the list is
-        // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
-        #[cfg(feature = "connectivity")]
-        while let Some((kind, face)) = self.faces.next_event() {
-            handed = true;
-            for sink in self.faces.sinks() {
-                sink(kind, &face);
-            }
-        }
-        // What a peer declared or retracted, told to the watch it is owed to.
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
-        ))]
-        while let Some((sink, told)) = self.decl_watches.next() {
-            sink(told.event());
-        }
-        loop {
-            let next = lock(&self.matching).next();
-            let Some((id, matching)) = next else {
-                break;
-            };
-            handed = true;
-            let sink = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Matching(sink) if *t == TargetKey::Matching(id) => Some(sink.clone()),
-                    _ => None,
-                });
-            if let Some(sink) = sink {
-                sink(matching);
-            }
-        }
-        let asked = self.hand_queries();
-        handed || asked
+        handed
     }
 
     /// Hand each query the session queued to its queryable's callback, and send what it answered.
@@ -3678,8 +3629,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(feature = "queryable")]
     fn hand_queries(&self) -> bool {
         let mut handed = false;
-        loop {
-            let next = lock(&self.plane.queries).pop_front();
+        while self.plane.queries.is_pending() {
+            let next = self.plane.queries.lock().pop_front();
             let Some((id, query, generation)) = next else {
                 break;
             };
@@ -3707,7 +3658,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // A get of the session's own made from inside this callback reads it as running here,
             // and leaves its query for when it returns.
             #[cfg(feature = "local-queryable")]
-            let _running = Running::enter(&self.running, TargetKey::Queryable(id));
+            let _running = self.deliveries.run(TargetKey::Queryable(id));
             let mut responder = query::responder_for(
                 query.rid(),
                 query.keyexpr(),
@@ -4027,7 +3978,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .local_publish(&sample);
         let reached = self.samples.lock().captured();
         drop(core);
-        let inside = |id: &SubId| Running::here(&self.running, TargetKey::Subscriber(*id));
+        let inside = |id: &SubId| self.deliveries.runs_here(TargetKey::Subscriber(*id));
         let mut later: BoundedVec<
             SubId,
             { caps::MAX_SUBSCRIPTIONS },
@@ -4047,10 +3998,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         {
             // A callback that steps the session from inside the put hands out nothing itself, as
             // one inside a delivery does: what the lane holds may be for a callback running here.
-            let _delivering = Delivering::enter(&self.delivering);
+            let _delivering = self.deliveries.enter();
             for id in reached.iter().filter(|id| !inside(id)) {
                 if let Some(callback) = self.subscriber_callback(*id) {
-                    let _running = Running::enter(&self.running, TargetKey::Subscriber(*id));
+                    let _running = self.deliveries.run(TargetKey::Subscriber(*id));
                     (lock(&callback))(&sample);
                 }
             }
@@ -4094,7 +4045,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// sent), and leave no end of it waiting for a delivery.
     #[cfg(feature = "query")]
     fn end_leg_now(&self, leg: u64) {
-        lock(&self.gets.ended).forget(leg);
+        self.gets.ended.lock().forget(leg);
         drop(self.take_target(TargetKey::Reply(leg)));
     }
 
@@ -4409,10 +4360,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         {
             // A callback that steps the session or asks a get from inside one of these hands out
             // nothing itself, as one inside a delivery does.
-            let _delivering = Delivering::enter(&self.delivering);
+            let _delivering = self.deliveries.enter();
             for &id in asked.iter() {
-                if Running::here(&self.running, TargetKey::Queryable(id)) {
-                    lock(&self.plane.queries).push_back((
+                if self.deliveries.runs_here(TargetKey::Queryable(id)) {
+                    self.plane.queries.lock().push_back((
                         id,
                         query::OwnedQuery::of(get),
                         query::LOCAL_QUERY,
@@ -5013,7 +4964,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let local = count_local && Self::local_matches(core, plane, &keyexpr);
         let now = Self::peer_matches(core, plane, &keyexpr) || local;
         let queue = self.matching.clone();
-        let report = BoxedMatchingSink::new(move |matching| lock(&queue).flip(id, matching));
+        let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         let watch = {
@@ -5035,7 +4986,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // An already-matching registration is told so at once, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
         if now {
-            lock(&self.matching).flip(id, true);
+            self.matching.lock().flip(id, true);
         }
         keep(
             &mut core.matches,
@@ -5072,7 +5023,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 Self::release_interest(core, entry.plane, &entry.keyexpr);
             }
         }
-        lock(&self.matching).forget(id);
+        self.matching.lock().forget(id);
         drop(self.take_target(TargetKey::Matching(id)));
     }
 
@@ -6045,11 +5996,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         drop(handed);
         #[cfg(feature = "query")]
-        lock(&self.gets.ended).clear();
+        self.gets.ended.lock().clear();
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
-        drop(core::mem::take(&mut *lock(&self.plane.queries)));
+        drop(core::mem::take(&mut *self.plane.queries.lock()));
         let taken: Vec<_> = subscribers
             .into_iter()
             .chain(matches)

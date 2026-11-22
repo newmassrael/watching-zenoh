@@ -804,6 +804,12 @@ impl SampleLane {
         !self.handing && self.lane.stats().queued_events == 0
     }
 
+    /// Whether a delivery finds anything at the head now: something is queued, the sample held
+    /// open among it, and no delivery holds the head.
+    fn owes_a_delivery(&self) -> bool {
+        !self.handing && self.lane.stats().queued_events > 0
+    }
+
     /// Count a sample the lane had no room for, by its congestion control.
     fn refuse(&mut self, record: &Record) {
         self.count_refused(record.holds_sender());
@@ -961,6 +967,13 @@ impl SampleLane {
         self.handing = false;
     }
 
+    /// [`Self::complete`], then [`Self::take_front`]: what a delivery that hands out one head
+    /// after another does under one take of the lock for each.
+    pub(crate) fn complete_and_take_front(&mut self) -> Option<LaneItem> {
+        self.complete();
+        self.take_front()
+    }
+
     /// What the lane did not hand a subscriber.
     pub(crate) fn counts(&self) -> LaneCounts {
         self.counts
@@ -968,7 +981,8 @@ impl SampleLane {
 }
 
 /// The session's lane behind its lock, with what is read of it without the lock: whether it has
-/// the room the links ask for before each record ([`LaneGate`]). The word is written by whoever
+/// the room the links ask for before each record ([`LaneGate`]), whether a delivery would find
+/// anything at its head, and whether it is idle. Each word is written by whoever
 /// held the lock, as it lets go ([`LaneGuard`]), so it says what the lane was when it was last let
 /// go, as a read under the lock said what it was when that lock was let go: a gate that reads it
 /// just before a delivery gives room back holds its link back for one more step, as one that took
@@ -978,6 +992,12 @@ pub(crate) struct SharedLane {
     /// Whether the lane has the room the links ask for (`SampleLane::takes_a_link_read`), as the
     /// lane's last holder left it.
     reads: AtomicBool,
+    /// Whether a delivery finds anything at the head (`SampleLane::owes_a_delivery`), as the
+    /// lane's last holder left it.
+    owes: AtomicBool,
+    /// Whether the lane is idle ([`SampleLane::is_idle`]), as the lane's last holder left it.
+    #[cfg(feature = "query")]
+    idle: AtomicBool,
     /// What a link's dispatch tells the lane while it runs, which a debug build's check of the
     /// gate's bound reads ([`SampleLane::offering_gated`]): told to the lane each time it is
     /// taken, so the dispatch tells it without taking the lock twice a record.
@@ -991,9 +1011,15 @@ pub(crate) struct SharedLane {
 impl SharedLane {
     pub(crate) fn new(lane: SampleLane) -> Self {
         let reads = lane.takes_a_link_read();
+        let owes = lane.owes_a_delivery();
+        #[cfg(feature = "query")]
+        let idle = lane.is_idle();
         Self {
             lane: Mutex::new(lane),
             reads: AtomicBool::new(reads),
+            owes: AtomicBool::new(owes),
+            #[cfg(feature = "query")]
+            idle: AtomicBool::new(idle),
             #[cfg(debug_assertions)]
             gated: AtomicBool::new(false),
             #[cfg(test)]
@@ -1018,6 +1044,21 @@ impl SharedLane {
     /// Whether the lane has the room the links ask for before each record, read without its lock.
     pub(crate) fn takes_a_link_read(&self) -> bool {
         self.reads.load(Ordering::Acquire)
+    }
+
+    /// Whether a delivery would find anything at the head, read without the lock: a delivery that
+    /// reads it clear takes the lock not at all. What a thread queued is read by that thread's own
+    /// delivery after it; a delivery on another thread that reads it just before misses it as one
+    /// that took the lock just before would have.
+    pub(crate) fn owes_a_delivery(&self) -> bool {
+        self.owes.load(Ordering::Acquire)
+    }
+
+    /// Whether the lane holds nothing and no delivery holds its head
+    /// ([`SampleLane::is_idle`]), read without the lock.
+    #[cfg(feature = "query")]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.idle.load(Ordering::Acquire)
     }
 
     /// Whether what is offered from here on is a record a link's gate let through
@@ -1063,6 +1104,13 @@ impl Drop for LaneGuard<'_> {
         self.shared
             .reads
             .store(self.lane.takes_a_link_read(), Ordering::Release);
+        self.shared
+            .owes
+            .store(self.lane.owes_a_delivery(), Ordering::Release);
+        #[cfg(feature = "query")]
+        self.shared
+            .idle
+            .store(self.lane.is_idle(), Ordering::Release);
     }
 }
 
@@ -1356,6 +1404,11 @@ impl MatchFlips {
     /// `listener` is gone: nothing it was owed is handed.
     pub(crate) fn forget(&mut self, listener: MatchId) {
         self.flips.retain(|(id, _)| *id != listener);
+    }
+
+    /// Whether no change is owed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.flips.is_empty()
     }
 }
 
