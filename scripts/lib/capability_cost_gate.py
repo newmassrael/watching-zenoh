@@ -481,7 +481,20 @@ CASES: tuple[Case, ...] = (
     # the open's timeout is a named future (`timeout_on` -1,000 or so per caller). Chosen
     # growth. Each budget that moves is the hosted reading of run 44895098050, that growth, and
     # 3,500, to the hundred; the five capic cases that stay sit under theirs with the growth.
-    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 2_020_500,
+    # 2026-11-23 -- the session drive made one loop for every caller and the dial and the
+    # initiator's open made once (`session_glue::drive_session_dyn`, `session_open::dial_locator`),
+    # with the face loop's steps taken as effects (`accept_loop::FaceLoop`). Every case read on one
+    # machine at main `634d1b7ba` and with the change, both trees built there. A build that drives
+    # sessions from more than one place (the accept loop, the C ABI's roles, a reconnect) lost the
+    # copies its callers held of the loop, the dial and the handshake: pico-peer -28,336,
+    # pico-default -12,768, capic-peer -23,996, capic-router-node -49,636, capic-default -262,136,
+    # capic-default-lean -244,452. A client, which drives one session from one place, pays the
+    # boundaries for nothing: +619 of text symbols in this case and the rest in unwind tables and
+    # vtables, +3,904 here, +2,364 pico-client-small, +1,360 pico-client-udp, +3,448 capic-client,
+    # +2,828 capic-client-small, +13,988 capic-scout. Chosen: the boundaries are the structure that
+    # keeps a library's code from growing with the number of places that drive it, and each case's
+    # budget moves by its own change and keeps its headroom.
+    Case("pico-client","wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 2_024_404,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,007,557 hosted, +9,344 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
@@ -509,7 +522,9 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +5,072 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +14,846 on
     # one machine.
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_655_600,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: +2,364 on one machine; the budget moves by it and keeps its headroom.
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_657_964,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,644,062 hosted, +8,004 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
@@ -539,7 +554,9 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +7,600 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +12,976 on
     # one machine.
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_087_300,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: +1,360 on one machine; the budget moves by it and keeps its headroom.
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 2_088_660,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 2,075,981 hosted, +7,732 on one machine.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
@@ -974,7 +991,9 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +9,128 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +13,680 on
     # one machine.
-    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_247_200,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -28,336 on one machine; the budget moves by it and keeps its headroom.
+    Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 3_218_864,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 3,241,530 hosted, +2,124 on one machine.
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
@@ -1012,7 +1031,9 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +26,144 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +17,224 on
     # one machine.
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_751_800,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -12,768 on one machine; the budget moves by it and keeps its headroom.
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_739_032,
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 4,740,260 hosted, +8,024 on one machine.
          forbid=(SINGLE_THREADED,),
@@ -1043,14 +1064,18 @@ CASES: tuple[Case, ...] = (
               "machine's reading and 3,500, to the hundred"),
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +18,362 on
     # one machine.
-    Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_018_400,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: +3,448 on one machine; the budget moves by it and keeps its headroom.
+    Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_021_848,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
                  ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +19,522 on
     # one machine.
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 2_006_400,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: +2,828 on one machine; the budget moves by it and keeps its headroom.
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 2_009_228,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST,
                  ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          profile="capi-small",
@@ -1098,12 +1123,16 @@ CASES: tuple[Case, ...] = (
               "budget is that reading and 3,500, rounded up to the hundred."),
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,209 on
     # one machine.
-    Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_295_300,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: +13,988 on one machine; the budget moves by it and keeps its headroom.
+    Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_309_288,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
          require=(SCOUTING, UDP)),
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,448 on
     # one machine.
-    Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_085_500,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -23,996 on one machine; the budget moves by it and keeps its headroom.
+    Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_061_504,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST, ROUTER_NODE),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
     # The C ABI as a node (`router-node`, which implies `peer` and the query and liveliness
@@ -1195,7 +1224,9 @@ CASES: tuple[Case, ...] = (
     # at `cd240d4b4` and +30,148 since.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +20,420 on
     # one machine.
-    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_450_916,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -49,636 on one machine; the budget moves by it and keeps its headroom.
+    Case("capic-router-node", "wz-capi-c", "libwz_capi_c.so", "router-node", 6_401_280,
          # 2026-11-22, alias -- an aliased Put fanned out to clients is encoded once and its key re-
          # written per face in place (`LeafPush`, `docs/router-fanout-cost.md` row 6): 6,449,020 on
          # the fleet (+1,432 over the budget, router builds only; the pico and MCU cases held at main's).
@@ -1343,7 +1374,11 @@ CASES: tuple[Case, ...] = (
     # the loop's state machine and its drop): 11,495,965 at main `85330b9e0` -> 11,496,805 on one
     # machine (+840), both trees built there; the budget moves by that growth and keeps the
     # headroom the note above states.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_508_644,
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -262,136 on one machine (11,506,377 -> 11,244,241). The hosted run of main
+    # `634d1b7ba` read this case at 11,511,533, 2,889 over the budget; the budget is that reading less
+    # this change, and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_252_900,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=837,
@@ -1415,6 +1450,8 @@ CASES: tuple[Case, ...] = (
     # 9,531,881 -> 9,566,045 on pc2 (+34,164). Chosen; that reading and 3,500, to the hundred.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +21,732 on
     # one machine.
+    # 2026-11-23 -- one session drive, dial and open for every caller, as pico-client's note of
+    # this day says: -244,452 on one machine; the budget moves by it and keeps its headroom.
     Case("capic-default-lean", "wz-capi-c", "libwz_capi_c.so",
          "link-udp,timestamping,peer,scout,query,queryable,liveliness,liveliness-get,advanced,"
          "group,gossip,transport_tls,transport_quic,transport_quic_datagram,transport_ws,"
@@ -1432,7 +1469,7 @@ CASES: tuple[Case, ...] = (
          # case about 1 percent over that host, which put main at its budget and this batch 3,469 over.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 9,691,657 hosted, +3,561 on one machine.
-         9_698_800,
+         9_454_348,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),

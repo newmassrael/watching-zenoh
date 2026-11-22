@@ -6809,6 +6809,77 @@
       "carry_forward_bullets": [
         "W16 has nine tables left: S1 55, S2 7, 39, 44, S4 24, 58, S7 10, S8 53, S10 22, each to be bounded after reading what zenoh-pico does at the same limit. Hosted run 45027021871 (1288f22e9) was cancelled with no job, so the reading of C1g, C1bnl, C1ay and C1sb after round 4603 moves to the next hosted run. Local pico-client-coop-query reads ratio 3.16 against the committed ceiling row 3.0977 already on the tree before this round (local toolchain cmake 4.4.2, row read with 3.28.3); this round adds 0.0007 of it, and the hosted C1cs reading decides."
       ]
+    },
+    "Round 4607": {
+      "decision_summary": "- A fenced control frame leaves ahead of everything queued after the fence: the stream writer packs and takes only what was queued before the fence while it holds, and the pooled stream queue opens a new slot for a frame queued after it.\n- The encoded Push module's documentation resolves its own links: the outer doc block on its declaration is a plain comment.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: take_next, take_lane_packed and pack_heap skip a lane whose head was queued after the held fence; send_encoded and lend open a slot of their own after the fence. Two tests that asserted the old order now assert the barrier's order; four new tests.",
+        "crates/wz-session-core/src/lib.rs: the outer doc block on `pub mod encoded_push` becomes a plain comment so rustdoc resolves the module's links from the module."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --features transport-qos,transport-unicast,transport-link-tcp --test it files::packed_writer_e2e:: : 3 passed.",
+        "cargo test -p wz-runtime-tokio --lib writer_queue::tests:: : 78 passed; with runtime-zero-copy: 83 passed.",
+        "cargo test -p wz-runtime-tokio --lib: 781 passed; --test it: 288 passed.",
+        "RUSTDOCFLAGS=\"-D warnings\" cargo doc -p wz-session-core --no-deps --all-features: no error.",
+        "cargo clippy -p wz-runtime-tokio --all-targets (default and runtime-zero-copy) -D warnings: clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "The aliased fan-out copy test under pubsub-ts-stack and the capic-default budget of the same hosted run are repaired by another session's round, as agreed between the two sessions."
+      ]
+    },
+    "Round 4608": {
+      "decision_summary": "- Layer C1g leaves the session-planes job for a job of its own, session-observer, with the same setup and its own 1200 s budget: run 45030244784 ended session-planes at 1158 s of 1200 s (96%) with every lane green, and C1g was 534 s of it (it read 199 s when session-planes was made).\n- Split rather than a larger timeout, for the reason the R2163 note gives: the growth is monotonic in legs, and a job of its own charges it to its own budget.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: new job session-observer (Layer C1g and the budget margin guard), C1g removed from session-planes and its name, session-observer added to evict-superseded's needs.",
+        ".github/cache-classes.json: session-observer is an owner of apt-archives and a reader of rust-ci, as session-planes is.",
+        "scripts/lib/apt_package_census.py and .github/apt-packages/ci/session-observer.list: the job takes session-planes' baseline list."
+      ],
+      "verification_bullets": [
+        "The 170 round-fed gates of .githooks/pre-push: 170 passed.",
+        "Every gate under scripts/lib that reads ci.yml: passed (decline_arming_gate --check OK; crossimpl_audit needs the CI inventory file and was not run).",
+        "actionlint .github/workflows/ci.yml: clean; the workflow parses with session-observer in evict-superseded's needs.",
+        "Predicted from run 45030244784's own layer times: session-planes about 630 s (52%) and session-observer about 670 s (56%) of 1200 s."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The first hosted run after this landing reads both jobs' margins; a prediction is not a measurement."
+      ]
+    },
+    "Round 4609": {
+      "decision_summary": "The face loop split, decided by structure rather than by trade (owner, 2026-11-22: \"the longest-run correct structure\"). Round 4601 held the split back because it added 50 to 100 KB of release text; a symbol diff showed the pieces were not the growth: the session drive loop (`drive_session_until_terminal_with_extra_deadline`, seven type parameters) was compiled again for every caller's closures (three `wz_capi_core::drive::drive_face` instances of about 15 KB, the accept loop's held, spawned and joined drives), and the dial (`dial_locator`) and the initiator's open were inlined into each role that awaited them, so any change around them moved which copies the inliner made. An `#[inline(never)]` on an async fn does not reach its poll body (measured on `dial_locator`), so the copies could not be pinned by attribute. The structure that bounds them: (1) the drive's decisions are `SessionDrive`'s, non-generic methods lent the caller's hooks per call (sans-I/O); the waiting is `drive_core`, over a hook set `K: LoopHooks`; `drive_session_dyn` / `drive_session_dyn_send` erase the hooks and box the loop, so a library compiles the loop once per Send-ness and no caller inlines it; the accept loop and the C ABI drive every face through them, and the closure form boxes the loop it awaits (a future that awaits a drive holds a pointer). (2) `dial_locator` and `initiator_open` return their futures boxed and erased: one dial and one handshake body for every role. (3) With those in place the face loop is a state (`FaceLoop`, `step` leaves effects: dial, settle an open, wait a peer's retry, drive, report; the time a step arrived is its input) and a shell (`FaceLoopIo`: the race, the opens, the drives held or spawned, the observer). Release text on one machine, main 634d1b7ba against this branch, every case: pico-peer -28,336, pico-default -12,768, capic-peer -23,996, capic-router-node -49,636, capic-default -262,136, capic-default-lean -244,452; a client, which drives one session from one place, pays the boundaries (+619 of symbols, the rest unwind tables and vtables): pico-client +3,904, pico-client-small +2,364, pico-client-udp +1,360, capic-client +3,448, capic-client-small +2,828, capic-scout +13,988; the coop cases 0. Each budget moves by its own change; capic-default, which main's hosted run read 2,889 over its budget, takes that reading less this change and 3,500. Debug frames: the face loop's poll 172,032 to about 20 KB, the largest accept_loop test 347,288 to 151,944. Two reds of main under pubsub-ts-stack, settled with their owner (Round 4600's session) as this round's: the aliased sixteen-client fan-out asserted no copy in every build, but a timestamp-stack fan-out is not shared and re-keys the aliased Put once; it is held to the shared builds and a twin holds the timestamp-stack build (one copy, no shared encode, each face its own message with the literal and the payload); and the router hot path budget had no row for pubsub-ts-stack (Block k1 12 allocations / 622 bytes, k16 102 / 7,552).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: `SessionDrive` (the drive's decisions), `drive_core`, `LoopHooks` / `DriveClosures` / `DriveHooks`, `drive_session_dyn` and `drive_session_dyn_send`; the closure form boxes the loop; `park_on_drain`'s checks are `park_wake_ends`.",
+        "crates/wz-runtime-tokio/src/session_open.rs: `dial_locator` and `initiator_open` return boxed, erased futures over `dial_locator_on` / `initiator_open_on`.",
+        "crates/wz-runtime-tokio/src/accept_loop.rs: `FaceLoop` (state, `step`, `Effect`) and `FaceLoopIo` (shell); `drive_face`, `drive_face_shared` and `drive_joined_face` drive through `drive_session_dyn`(`_send`) with `face_hooks`; the credit gate is `read_gate_wait`, boxed only while the gate is closed.",
+        "crates/wz-capi-core/src/drive.rs: `drive_face` drives through `drive_session_dyn_send`.",
+        "crates/wz-runtime-tokio/src/router_forward.rs: the aliased no-copy fan-out test is `not(pubsub-ts-stack)`; `an_aliased_fan_out_with_a_timestamp_stack_is_sent_to_each_face_re_keyed` added.",
+        "crates/wz-runtime-tokio/tests/router_hot_path_cost.rs: a BUDGET row for pubsub-ts-stack.",
+        "scripts/lib/capability_cost_gate.py: twelve budgets move by their measured change (capic-default to 11,252,900).",
+        "docs/reason-review-pins.md: session-close-ingress / accept_loop.rs, session_glue.rs, session_open.rs to their new blobs; the four cited anchors (`fn plan_endpoint`, `pub enum ConnectReconcile`, `AddNodePassive {`, the loop head's `check_out_of_band` and both arms' `out_of_band_signalled`) re-read and hold."
+      ],
+      "verification_bullets": [
+        "clippy -D warnings, lib and tests, wz-runtime-tokio: --all-features, default, transport-multilink, routing-peer, routing-peer+multilink, routing-peer+session-close-ingress+tls, the reconcile set, no-default (tcp); wz-capi-core lib and tests; cargo check --workspace --all-targets.",
+        "Tests through bx: wz-runtime-tokio --all-features every target 4,385 passed (64 suites, the two pubsub-ts-stack reds of main fixed in this round), default --lib 1,099; wz-capi-core --all-targets 498; wz-capi-pico 264; wz-capi-c --lib 221; the ts-stack twin and the shared test each in its own build, router_hot_path_cost under --all-features.",
+        "C1cs, capability_cost_gate.py --measure, every case, on one machine for main 634d1b7ba and this branch (figures in the decision); --selftest 51/51.",
+        "Debug frames, objdump prologues of the --all-features lib test binary.",
+        "reduced_docs_gate measure --only wz-runtime-tokio and wz-capi-core (184 configurations): no finding above or below the ledger.",
+        "reason_review_pin_gate OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Debug frames left: FaceLoopIo::new 84,168 (the loop's state and shell made by value), dial_locator_on 80,824 (every scheme's arm in one frame), the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage 151,944.",
+        "C1cs: confirm the moved budgets against the next hosted reading (this round measured on one machine, before rebasing over e4a2bacad); pico-peer's and pico-default's ratios fell, tighten their ratchet rows from the grading host.",
+        "drive_multicast_session_running (about 26 KB in pico-default) is a loop of its own, not on the shared drive.",
+        "From Round 4596: the MAPS_PROBE settle of the shared-memory differential, and recording upstream 1.10.2's blocking z_obtain_shm_provider defect."
+      ]
     }
   },
   "inventory_entries": {

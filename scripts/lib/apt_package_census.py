@@ -247,6 +247,8 @@ _add(
         # (the check at the end of this file holds that claim), and the install is
         # cached with the rest of the job's apt archive.
         "session-planes",
+        # Layer C1g, peeled off session-planes for its budget: the same build.
+        "session-observer",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach
@@ -323,6 +325,8 @@ _add(
         "codegen-verify",
         "verdict-legs",
         "session-planes",
+        # Layer C1g, peeled off session-planes for its budget: the same build.
+        "session-observer",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach
@@ -614,6 +618,8 @@ _add(
         # --all-features -e normal,build,dev -i bindgen` matches no package -- so
         # it takes this row's package, which is kept on every job, and nothing else.
         "session-planes",
+        # Layer C1g, peeled off session-planes for its budget: the same build.
+        "session-observer",
         # R2163 — Layer C1cn's own job, peeled off `ci` for its budget. It
         # compiles EVERY member at its non-default features, so every reason on
         # this row that reaches a member reaches it. Its Rust lanes do not reach

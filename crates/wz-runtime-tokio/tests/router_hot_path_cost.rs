@@ -259,7 +259,7 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 /// from the hybrid clock: five more allocations and 50 more bytes a forward to one subscriber, 20 and
 /// 320 to sixteen (the `Drop` cases). Measured on a build host with `routing-router-hat` alone, and
 /// with the features of the crate's wide leg beside it in groups: only `time-hlc` moves the figure.
-#[cfg(not(feature = "time-hlc"))]
+#[cfg(not(any(feature = "time-hlc", feature = "pubsub-ts-stack")))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
     ("drop_k1", CongestionControl::Drop, 1, 5, 442),
     ("block_k1", CongestionControl::Block, 1, 3, 139),
@@ -268,12 +268,26 @@ const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
 ];
 
 /// The same cases in a build with `time-hlc`.
-#[cfg(feature = "time-hlc")]
+#[cfg(all(feature = "time-hlc", not(feature = "pubsub-ts-stack")))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
     ("drop_k1", CongestionControl::Drop, 1, 10, 492),
     ("block_k1", CongestionControl::Block, 1, 8, 263),
     ("drop_k16", CongestionControl::Drop, 16, 85, 6_432),
     ("block_k16", CongestionControl::Block, 16, 23, 1_133),
+];
+
+/// The same cases in a build with `pubsub-ts-stack`, with `time-hlc` or without: the router records
+/// its routing on each destination's message, so a fan-out is not shared and a Put the router may not
+/// drop is made for each face as a dropped one is (`a_fan_out_with_a_timestamp_stack_is_sent_to_each_face_on_its_own`
+/// in the router's tests): four more allocations and 359 more bytes a forward to one subscriber than
+/// `time-hlc` alone, 79 and 6,419 to sixteen (the `Block` cases). Measured with
+/// `routing-router-hat,pubsub-ts-stack` and with `time-hlc` beside them, which read the same.
+#[cfg(feature = "pubsub-ts-stack")]
+const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
+    ("drop_k1", CongestionControl::Drop, 1, 10, 492),
+    ("block_k1", CongestionControl::Block, 1, 12, 622),
+    ("drop_k16", CongestionControl::Drop, 16, 85, 6_432),
+    ("block_k16", CongestionControl::Block, 16, 102, 7_552),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at

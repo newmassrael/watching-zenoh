@@ -1205,9 +1205,10 @@ pub mod initial_sn;
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_build;
 
-/// A Push a router received, encoded once for its fan-out to leaf sessions: the extensions and
-/// body every session shares, behind the key expression of the form each is sent. Owned `Vec`
-/// output (alloc-gated) and `codec-push` gated, as [`push_build`] is.
+// A Push a router received, encoded once for its fan-out to leaf sessions: the extensions and
+// body every session shares, behind the key expression of the form each is sent. Owned `Vec`
+// output (alloc-gated) and `codec-push` gated, as `push_build` is. A plain comment, not an
+// outer doc: the module documents itself, and rustdoc would resolve its own links from here.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod encoded_push;
 
