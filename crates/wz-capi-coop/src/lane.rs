@@ -508,7 +508,7 @@ impl SampleLane {
 
     /// The session's lane over the `area_bytes` bytes at `area`, held to `limits`, built where the
     /// lock it is shared behind keeps it: the lane is kilobytes (an event record for each slot),
-    /// and built as a value and moved into its lock and the lock into its allocation it lay in the
+    /// and built as a value, moved into its lock and the lock into its allocation, it lay in the
     /// frame of the session's open once for each move.
     ///
     /// # Safety
@@ -541,12 +541,12 @@ impl SampleLane {
     /// `area` points at `area_bytes` bytes valid for reads and writes, used by nothing else, for
     /// as long as the lane is used; `area_bytes` is `limits`' `DELIVERY_LANE_BYTES`.
     #[inline(never)]
-    pub(crate) unsafe fn over_in(
-        place: &mut MaybeUninit<Self>,
+    pub(crate) unsafe fn over_in<'p>(
+        place: &'p mut MaybeUninit<Self>,
         area: NonNull<u8>,
         area_bytes: usize,
         limits: &SessionLimits,
-    ) -> &mut Self {
+    ) -> &'p mut Self {
         debug_assert_eq!(area_bytes, limits.delivery_lane_bytes());
         let at = place.as_mut_ptr();
         // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
