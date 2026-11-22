@@ -822,7 +822,10 @@ function Invoke-InVs([string]$name, [string[]]$lines, [string]$log) {
     $bat = Join-Path $script:WorkDir "$name.bat"
     # vcvarsall.bat's own exit status is not its verdict (an optional component it looks for and lacks sets
     # it), so what is asked of it is that cl is then found.
-    $text = '@echo off' + $CRLF + 'call ' + $Q + $script:VcVars + $Q + ' x64 > ' + $Q + $log + $Q + ' 2>&1' + $CRLF +
+    # VsDevCmd starts a telemetry helper that inherits the redirected handle and keeps the log open, so a
+    # later line cannot append to it: the helper is switched off, and the environment's own output goes to
+    # a file of its own.
+    $text = '@echo off' + $CRLF + 'set VSCMD_SKIP_SENDTELEMETRY=1' + $CRLF + 'call ' + $Q + $script:VcVars + $Q + ' x64 > ' + $Q + $log + '.vcvars' + $Q + ' 2>&1' + $CRLF +
             'where cl >> ' + $Q + $log + $Q + ' 2>&1' + $CRLF + 'if errorlevel 1 exit /b 1' + $CRLF
     foreach ($line in $lines) {
         $text += $line + ' >> ' + $Q + $log + $Q + ' 2>&1' + $CRLF + 'if errorlevel 1 exit /b 1' + $CRLF
