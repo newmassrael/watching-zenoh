@@ -1466,6 +1466,30 @@ pub(crate) fn try_for_each_record_while<'f>(
     go_on: &dyn Fn() -> bool,
     mut each: impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
+    walk_records(payload, record, form, go_on, &mut each)
+}
+
+/// The walk of [`try_for_each_record_while`], with the consumer behind a trait object.
+// One body for every consumer: generic over it, the walk and each kind's reader (and the codec's
+// decode of that kind) were compiled again for each closure, and in the crate of each generic
+// caller as well, while what differs between consumers is only the call that hands a record over.
+// Out of line so that a caller's crate does not take a copy of it back.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+#[inline(never)]
+fn walk_records<'f>(
+    payload: &'f [u8],
+    record: &mut RecordBuf,
+    form: RecordForm,
+    go_on: &dyn Fn() -> bool,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+) -> Result<(usize, bool), crate::parse_error::InboundParseError> {
     let mut stopped = false;
     // Without a lendable codec there is nothing to lend, and every form is owned.
     #[cfg(not(any(
@@ -1520,7 +1544,7 @@ pub(crate) fn try_for_each_record_while<'f>(
             )
         ))]
         if form == RecordForm::LentControl {
-            match lend_any_record(&mut cursor, &mut each)? {
+            match lend_any_record(&mut cursor, each)? {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
@@ -1538,7 +1562,7 @@ pub(crate) fn try_for_each_record_while<'f>(
         )))]
         {
             let RecordForm::LentControl = form;
-            match lend_any_record(&mut cursor, &mut each)? {
+            match lend_any_record(&mut cursor, each)? {
                 Walk::Continue => continue,
                 Walk::End => break,
             }
@@ -1561,7 +1585,7 @@ pub(crate) fn try_for_each_record_while<'f>(
             ))]
             if form == RecordForm::Lent {
                 let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
-                if lend_record(mid, &mut cursor, &mut each)? {
+                if lend_record(mid, &mut cursor, each)? {
                     continue;
                 }
             }
@@ -1630,7 +1654,7 @@ pub(crate) fn try_for_each_record_while<'f>(
 fn lend_record<'f>(
     mid: u8,
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<bool, crate::parse_error::InboundParseError> {
     match mid {
         #[cfg(all(
@@ -1765,7 +1789,7 @@ fn admit_lent(
 #[inline(never)]
 fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<Lend, crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`), at the frame's lifetime: the
     // codec's lent message is invariant in it, and the record is lent for the call alone.
@@ -1793,7 +1817,7 @@ fn lend_push<'f>(
 #[inline(never)]
 fn lend_request<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // The record is read as its view: a few words and the bytes its chains occupy, where the eager
     // record is over a kilobyte (its extension vectors are inline, sized for their declared
@@ -1832,7 +1856,7 @@ fn lend_request<'f>(
 #[inline(never)]
 fn lend_response<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
     // occupy, where the lent record is over a kilobyte (its extension lists are inline, sized for
@@ -1886,7 +1910,7 @@ enum Walk {
 ))]
 fn lend_any_record<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<Walk, crate::parse_error::InboundParseError> {
     let mid = cursor
         .peek_slice(1)
@@ -1938,7 +1962,7 @@ fn lend_any_record<'f>(
 #[inline(never)]
 fn lend_declare<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_response`): `Declare::decode` builds a
     // default, decodes into it, and returns it by value, and the `?` that unwraps it moves it again,
@@ -1964,7 +1988,7 @@ fn lend_declare<'f>(
 #[inline(never)]
 fn lend_response_final<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`).
     let mut response_final = wz_codecs::lent::ResponseFinal::<'f>::default();
@@ -1987,7 +2011,7 @@ fn lend_response_final<'f>(
 #[inline(never)]
 fn lend_interest<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that lends it (see `lend_declare`).
     let mut interest = wz_codecs::lent::Interest::<'f>::default();
@@ -2010,7 +2034,7 @@ fn lend_interest<'f>(
 #[inline(never)]
 fn lend_oam<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Decoded into the binding that holds it (see `lend_declare`).
     let mut oam = wz_codecs::lent::Oam::default();
@@ -2034,7 +2058,7 @@ fn lend_oam<'f>(
 ))]
 fn lend_unknown<'f>(
     cursor: &mut SceCursor<'f>,
-    each: &mut impl FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
+    each: &mut dyn FnMut(WalkedRecord<'_, 'f>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<Walk, crate::parse_error::InboundParseError> {
     let rest = cursor.remaining();
     cursor
