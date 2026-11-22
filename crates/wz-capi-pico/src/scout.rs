@@ -830,7 +830,7 @@ pub unsafe extern "C" fn z_scout(
     // The scout's two snapshots, resolved as `z_open` resolves them from its config: a scout
     // handed no config reads pico's defaults, the empty config, and one whose policies or limits
     // the build refuses is refused with the open's code.
-    let unstated = PolicyStatements::default();
+    let unstated = PolicyStatements::none();
     let snapshots =
         crate::session::resolve_snapshots(cfg.as_deref().map_or(&unstated, |cfg| &cfg.policies));
     // The window's clock: the time base the config names, which `cfg` holds and is kept for the

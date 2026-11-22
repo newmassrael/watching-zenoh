@@ -79,6 +79,12 @@ pub(crate) struct PolicyStatements;
 
 #[cfg(not(feature = "config-policy"))]
 impl PolicyStatements {
+    /// A config that stated nothing: what a scout opens under, and the tests.
+    #[cfg(any(test, feature = "scout"))]
+    pub(crate) const fn none() -> Self {
+        Self
+    }
+
     /// `policy` and `limits` as they are: the build's, which no statement can move here.
     #[inline(always)]
     pub(crate) fn compose_into(
@@ -123,6 +129,12 @@ pub(crate) struct PolicyStatements {
 
 #[cfg(feature = "config-policy")]
 impl PolicyStatements {
+    /// A config that stated nothing: what a scout opens under, and the tests.
+    #[cfg(any(test, feature = "scout"))]
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
     /// The layers written over `policy` and the limits the document states over `limits`, the
     /// snapshot of a session's ([`policy_document::resolve_under_into`]), or
     /// `Z_ERR_CONFIG_INVALID_VALUE` when `Self::compose` refuses them: what an open hands its
@@ -555,7 +567,7 @@ mod tests {
             Resolved::unchanged(SessionPolicy::defaults())
         );
         assert_eq!(
-            resolve_policy(&PolicyStatements::default()),
+            resolve_policy(&PolicyStatements::none()),
             Ok(Resolved::unchanged(SessionPolicy::defaults()))
         );
     }
@@ -567,7 +579,7 @@ mod tests {
     #[test]
     fn the_open_resolves_the_snapshots_the_record_of_origins_resolves() {
         assert_eq!(
-            resolve_snapshots(&PolicyStatements::default()),
+            resolve_snapshots(&PolicyStatements::none()),
             Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
         );
         let (entry, value) = one_allowed();
@@ -1099,7 +1111,7 @@ mod build_default_tests {
     #[test]
     fn a_config_that_states_nothing_opens_under_the_builds_policies_and_limits() {
         assert_eq!(
-            crate::session::resolve_snapshots(&PolicyStatements::default()),
+            crate::session::resolve_snapshots(&PolicyStatements::none()),
             Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
         );
     }
