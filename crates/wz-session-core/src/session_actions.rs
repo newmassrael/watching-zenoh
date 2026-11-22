@@ -3237,8 +3237,14 @@ impl EncodedPush {
     pub fn of(push: &crate::wire::PushOwned) -> Self {
         let mut bytes =
             alloc::vec::Vec::with_capacity(crate::frame_encode::push_capacity_hint(push));
-        push.encode(&mut crate::tx_buf::TxSink::over(&mut bytes))
-            .expect("a Vec grows, so its sink is infallible");
+        // Through the encoder the send path frames a Push with (`push_body` over a sink of the
+        // build's `EncodeBuf`), so an image links the Push's writers once, not a second copy of
+        // them for a sink over a vector.
+        {
+            let mut sink = crate::tx_buf::TxSink::new(&mut bytes);
+            crate::frame_encode::push_body(push)(&mut sink)
+                .expect("a Vec grows, so its sink is infallible");
+        }
         Self { bytes }
     }
 
