@@ -2879,7 +2879,8 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
 /// refuse one, and upstream dispatches only what arrives through a known peer.
 ///
 /// Gated on the union of its two callers' gates: the reassembled-chain ingest
-/// above, and the RX dispatch module.
+/// above, and the RX dispatch module's owned decode, which a build whose group lends its
+/// records has none of.
 #[cfg(all(
     feature = "alloc",
     any(
@@ -2887,7 +2888,15 @@ impl<E: crate::driver_loop::EventSink + ?Sized> crate::driver_loop::EventSink
         all(
             feature = "codec-join",
             feature = "codec-frame",
-            feature = "codec-close"
+            feature = "codec-close",
+            not(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                not(feature = "transport-stats"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))
         )
     )
 ))]
