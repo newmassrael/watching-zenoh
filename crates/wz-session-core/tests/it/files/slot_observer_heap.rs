@@ -390,8 +390,11 @@ fn for_one_session_the_slot_observer_does_what_the_application_observer_does() {
 struct Block([u8; ARENA_ALIGN]);
 
 /// A peer's tables lent `each` rows of every table, with room for each reply's key and payload
-/// of 64 bytes, from an arena the test process leaks, so it outlives them.
+/// of 64 bytes, and their rows' keys kept in a key arena of 1 KiB, from an arena the test process
+/// leaks, so it outlives them.
 fn lent_peers(each: usize) -> PeerTables<Lent> {
+    use wz_session_core::key_arena::KeySpace;
+
     let rows = PeerRows {
         sub_interests: each,
         pending_declares: each,
@@ -399,13 +402,17 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
         reply_bytes: ReplyStage::<Lent>::area_bytes(each, 64, 64).expect("a small area"),
         finals: each,
     };
-    let bytes = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
+    let bytes = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space")
+        + KeySpace::span_bytes(1024).expect("a small key arena");
     let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
     let region: &'static mut [Block] = vec![Block([0; ARENA_ALIGN]); blocks].leak();
     // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least `bytes`
     // bytes, and is leaked, so nothing else uses it and it outlives every lent table.
     let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) };
-    PeerTables::<Lent>::lent(&mut arena, rows, &SessionLimits::defaults())
+    let keys = arena
+        .lend_keys(1024)
+        .expect("the arena is laid out for the key arena");
+    PeerTables::<Lent>::lent(&mut arena, keys, rows, &SessionLimits::defaults())
         .expect("the arena is laid out for the tables")
 }
 

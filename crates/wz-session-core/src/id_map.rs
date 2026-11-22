@@ -44,7 +44,7 @@ use hashbrown::HashMap;
 
 #[cfg(feature = "alloc")]
 use crate::bounded::{BoundedVec, Static};
-use crate::bounded::{CapacityFull, Profile, Storage, TextBacking};
+use crate::bounded::{CapacityFull, KeyMaker, KeyUnkept, Profile, Storage};
 use crate::caps;
 
 /// A table of values by the id the peer gave them.
@@ -92,9 +92,15 @@ pub trait IdMap<V> {
         V: 'a;
 
     /// How many NEW ids were refused since the table was made, for want of room
-    /// or past the bound [`Self::bind_within`] asked. Zero on the growable
-    /// backing while no bound refuses, as its room refuses nothing.
+    /// or past the bound [`Self::bind_within`] asked, or as [`Self::count_refused`]
+    /// counts them. Zero on the growable backing while no bound refuses, as its room
+    /// refuses nothing.
     fn refusals(&self) -> u32;
+
+    /// Count a binding refused before it reached the table, for want of room where the value
+    /// it would have held is kept (a key the session's key arena has no room for): the
+    /// declaration is dropped as one the table has no room for is, and counted with them.
+    fn count_refused(&mut self);
 
     /// Whether any id is bound.
     fn is_bound(&self) -> bool {
@@ -208,6 +214,10 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
     fn refusals(&self) -> u32 {
         self.refused
     }
+
+    fn count_refused(&mut self) {
+        self.refused = self.refused.saturating_add(1);
+    }
 }
 
 /// The growable backing of [`IdMap`]: the `hashbrown` map the registries always
@@ -296,46 +306,48 @@ impl<V> IdMap<V> for GrowableIdMap<V> {
     fn refusals(&self) -> u32 {
         self.refused
     }
+
+    fn count_refused(&mut self) {
+        self.refused = self.refused.saturating_add(1);
+    }
 }
 
-/// The text of a keyexpr as a peer's table holds it, in the storage policy `P`: a
-/// `String` on the growable policy, and a buffer of [`caps::MAX_KEYEXPR_BYTES`]
-/// bytes on the static one.
-pub type KeyText<P = Profile> = <P as Storage>::Text<{ caps::MAX_KEYEXPR_BYTES }>;
+/// A keyexpr as a peer's table holds it, in the storage policy `P` ([`Storage::Key`]): a
+/// `String` on the growable policy, a buffer of [`caps::MAX_KEYEXPR_BYTES`] bytes on the
+/// static one, and the place of a block of the session's key arena on the lent one.
+pub type KeyText<P = Profile> = <P as Storage>::Key;
 
 /// A keyexpr the peer named is longer than [`caps::MAX_KEYEXPR_BYTES`], which a
-/// table of the static policy cannot hold, or than the quota the session's creator
-/// stated ([`key_text_within`]).
+/// table of the static policy cannot hold ([`key_text`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyexprTooLong;
 
-/// `literal` as the text a table of policy `P` holds, or [`KeyexprTooLong`] when
-/// the policy cannot hold it. The caller drops the declaration, as it drops one the
-/// table has no room for.
-pub fn key_text_as<P: Storage>(literal: &str) -> Result<KeyText<P>, KeyexprTooLong> {
-    let mut text = <KeyText<P> as TextBacking>::empty();
-    text.push_str(literal).map_err(|_| KeyexprTooLong)?;
-    Ok(text)
+/// `literal` as a table of policy `P` keeps it, made in `keys`, or why it is not kept: longer
+/// than a row holds, or no room where the policy keeps its keys. The caller drops the
+/// declaration, as it drops one the table has no room for.
+pub fn key_text_as<P: Storage>(keys: &P::Keys, literal: &str) -> Result<KeyText<P>, KeyUnkept> {
+    keys.key(literal)
 }
 
 /// [`key_text_as`] held to `quota`, the session's `MAX_KEYEXPR_BYTES`: a keyexpr
 /// longer than the quota admits is refused as one the table cannot hold, on every
-/// policy. Where the build fixes the bound to the rows' capacity the quota compares
-/// nothing and the rows refuse alone.
+/// policy, before any room is asked for. Where the build fixes the bound to the rows'
+/// capacity the quota compares nothing and the rows refuse alone.
 #[inline]
 pub fn key_text_within<P: Storage>(
+    keys: &P::Keys,
     literal: &str,
     quota: crate::limits::MaxKeyexprBytesHeld,
-) -> Result<KeyText<P>, KeyexprTooLong> {
+) -> Result<KeyText<P>, KeyUnkept> {
     if !quota.admits(literal.len()) {
-        return Err(KeyexprTooLong);
+        return Err(KeyUnkept::TooLong);
     }
-    key_text_as::<P>(literal)
+    key_text_as::<P>(keys, literal)
 }
 
-/// [`key_text_as`] in this build's storage profile.
+/// [`key_text_as`] in this build's storage profile, whose keys are their own text.
 pub fn key_text(literal: &str) -> Result<KeyText, KeyexprTooLong> {
-    key_text_as::<Profile>(literal)
+    key_text_as::<Profile>(&Default::default(), literal).map_err(|_| KeyexprTooLong)
 }
 
 /// The peer's keyexpr aliases: `DeclKexpr.id -> keyexpr`, at most

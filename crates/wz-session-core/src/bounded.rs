@@ -127,6 +127,18 @@ pub trait Storage {
     /// The UTF-8 text of a [`BoundedString<N, Self>`].
     type Text<const N: usize>: TextBacking;
 
+    /// The key a row of a table of this policy keeps: its own allocation on the growable policy,
+    /// a buffer of [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES) inline in the row on the
+    /// static one, and on the lent one the place of a block of the session's key arena
+    /// ([`KeyRef`](crate::key_arena::KeyRef)), a few words whatever the key's length.
+    type Key: KeyBacking;
+
+    /// Where a table of this policy makes the keys its rows keep ([`Self::Key`]): nothing to hand
+    /// a table where the key is its own text, and on the lent policy the session's key arena,
+    /// which the table is handed with its rows. One made by `Default` was handed none, and refuses
+    /// every key as a table at its limit refuses a row.
+    type Keys: KeyMaker<Self::Key>;
+
     /// The integer a table of this policy addresses its own bytes with (a span
     /// into an arena). A policy that fixes its capacity in the type needs only as
     /// many bits as the capacity, and its rows are that much smaller; one that
@@ -296,6 +308,63 @@ pub trait TextBacking: Sized + Clone + core::ops::Deref<Target = str> + AsRef<st
     fn clear(&mut self);
 }
 
+/// The operations a row needs of the key a [`Storage`] policy keeps ([`Storage::Key`]): it reads
+/// as its text, and a clone of it is the same key for another row.
+pub trait KeyBacking: Clone + fmt::Debug + Deref<Target = str> + AsRef<str> {
+    /// The key's text.
+    fn as_str(&self) -> &str;
+}
+
+/// Why a table kept no key ([`KeyMaker::key`]). Nothing was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyUnkept {
+    /// The key is longer than a row of the policy holds,
+    /// [`MAX_KEYEXPR_BYTES`](crate::caps::MAX_KEYEXPR_BYTES).
+    TooLong,
+    /// No room is left where the policy keeps its keys: the session's key arena has none, or the
+    /// table was handed no key arena.
+    NoRoom,
+}
+
+/// Where a table of a [`Storage`] policy makes the keys its rows keep ([`Storage::Keys`]).
+pub trait KeyMaker<K>: Clone + Default + fmt::Debug {
+    /// `text` as a row keeps it, or why it is not kept: a key is never cut short.
+    fn key(&self, text: &str) -> Result<K, KeyUnkept>;
+}
+
+/// The keys of the policies whose key is its own text ([`Heap`], [`Static`]): nothing to hand a
+/// table, and a key refused only when a row cannot hold it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InlineKeys;
+
+#[cfg(feature = "alloc")]
+impl KeyBacking for String {
+    fn as_str(&self) -> &str {
+        String::as_str(self)
+    }
+}
+
+impl<const N: usize> KeyBacking for heapless::String<N> {
+    fn as_str(&self) -> &str {
+        heapless::String::as_str(self)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl KeyMaker<String> for InlineKeys {
+    fn key(&self, text: &str) -> Result<String, KeyUnkept> {
+        Ok(String::from(text))
+    }
+}
+
+impl<const N: usize> KeyMaker<heapless::String<N>> for InlineKeys {
+    fn key(&self, text: &str) -> Result<heapless::String<N>, KeyUnkept> {
+        let mut key = heapless::String::new();
+        heapless::String::push_str(&mut key, text).map_err(|_| KeyUnkept::TooLong)?;
+        Ok(key)
+    }
+}
+
 /// The growable policy: the allocator. `N` is advisory; nothing is refused.
 #[cfg(feature = "alloc")]
 pub struct Heap;
@@ -307,6 +376,8 @@ impl Storage for Heap {
     type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
     type Text<const N: usize> = String;
+    type Key = String;
+    type Keys = InlineKeys;
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::GrowableIdMap<V>;
     #[cfg(target_has_atomic = "64")]
@@ -332,6 +403,8 @@ impl Storage for Static {
     type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Text<const N: usize> = heapless::String<N>;
+    type Key = heapless::String<{ crate::caps::MAX_KEYEXPR_BYTES }>;
+    type Keys = InlineKeys;
     type Offset = u16;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
     type Epoch = ();
@@ -349,12 +422,15 @@ impl Storage for Static {
 /// being their ceiling. The algorithm, the refusal and its error are [`Static`]'s; only where
 /// the rows lie differs.
 ///
-/// What a row holds is laid out as the static policy lays it out: a key's text inline in its row
-/// (a key is a part of the row that owns it, not a table of its own), and a table keyed by a peer's
-/// ids inline at its build capacity, as the peer-written tables are held until their storage is
-/// lent too (`docs/c-abi-no-heap-pools.md`, section 4.5). A sequence a row holds of its own is
-/// lent from the arena by the row's maker: one made by `Default` under this policy has no rows, as
-/// a table the arena lent nothing has none.
+/// A row keeps its key as the place of a block of the session's key arena
+/// ([`KeyRef`](crate::key_arena::KeyRef)), which the table is handed with its rows
+/// ([`LentKeys`](crate::key_arena::LentKeys)), and not a buffer of the longest key: a key takes
+/// the bytes it has, and gives them back when its row goes (`docs/c-abi-no-heap-pools.md`,
+/// section 9.4). A table keyed by a peer's ids is inline at its build capacity, each row a key's
+/// place, as the peer-written tables are held until their storage is lent too (section 4.5). A
+/// sequence a row holds of its own is lent from the arena by the row's maker: one made by
+/// `Default` under this policy has no rows and no key arena, as a table the arena lent nothing
+/// has none.
 pub struct Lent;
 
 impl Storage for Lent {
@@ -362,7 +438,10 @@ impl Storage for Lent {
     const LENT_AT_OPEN: bool = true;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
+    // A working text (a key being canonized) is on the stack; what a row keeps is its `Key`.
     type Text<const N: usize> = heapless::String<N>;
+    type Key = crate::key_arena::KeyRef;
+    type Keys = crate::key_arena::LentKeys;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
@@ -372,7 +451,7 @@ impl Storage for Lent {
     fn peer_space(
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
-        crate::wireexpr_resolve::PeerSpace::of_table(aliases)
+        crate::wireexpr_resolve::PeerSpace::of_lent_table(aliases)
     }
 }
 

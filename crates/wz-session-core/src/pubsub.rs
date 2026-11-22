@@ -445,6 +445,10 @@ struct PeerNaming<P: Storage = Profile> {
     /// session's tables resolved ([`SubscriberPeer::limit_keys_to`]), the build's value until it
     /// does. A `DeclKexpr` whose keyexpr is longer is dropped, as one a fixed row cannot hold is.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the alias rows keep their keys ([`Storage::Keys`]): the session's key arena on the
+    /// lent policy ([`SubscriberPeer::keep_keys_in`]). A `DeclKexpr` whose key finds no room
+    /// there is dropped and counted with the alias table's refusals.
+    keys: P::Keys,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
@@ -2954,6 +2958,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 aliases: PeerAliases::<P>::default(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+                keys: Default::default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2978,6 +2983,7 @@ impl SubscriberPeer<crate::bounded::Static> {
                 aliases: crate::id_map::FixedIdMap::new(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+                keys: crate::bounded::InlineKeys,
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2995,7 +3001,8 @@ impl SubscriberPeer<crate::bounded::Static> {
 impl SubscriberPeer<Lent> {
     /// An empty side whose interest table (`interests` rows) and staging (`staged` rows) are lent
     /// from `arena`. Refused when either is over the build's capacity or the arena has not the
-    /// room. The alias table is the policy's inline one.
+    /// room. The alias table is the policy's inline one, whose keys are kept in the key arena it is
+    /// handed ([`Self::keep_keys_in`]), and in none before.
     pub fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
         let mut side = Self::default();
         side.lend_rows(arena, interests, staged)?;
@@ -3218,6 +3225,13 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.key_quota
     }
 
+    /// Keep the keys of the aliases the peer declares from here on in `keys`: the session's key
+    /// arena, on the lent policy. The aliases already held keep theirs.
+    #[cfg(feature = "storage-profile")]
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.naming.keys = keys;
+    }
+
     /// The quota the peer's alias table is held to (`MAX_PEER_KEYEXPR_ALIASES`): what the
     /// creator of the session's tables stated ([`Self::limit_aliases_to`]), the build's value
     /// until it did.
@@ -3346,9 +3360,18 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
-                    return;
-                };
+                // Past the quota or a row's text the alias is dropped; with no room where the rows
+                // keep their keys it is dropped and counted with the alias table's refusals, as
+                // zenoh-pico drops one its heap cannot hold.
+                let text =
+                    match key_text_within::<P>(&self.naming.keys, literal, self.naming.key_quota) {
+                        Ok(text) => text,
+                        Err(crate::bounded::KeyUnkept::TooLong) => return,
+                        Err(crate::bounded::KeyUnkept::NoRoom) => {
+                            self.naming.aliases.count_refused();
+                            return;
+                        }
+                    };
                 // A refusal, for want of room or past the quota, is counted by the
                 // table itself; the declaration that did not fit is dropped here, with
                 // the peer none the wiser.
@@ -3423,9 +3446,18 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
-                    return;
-                };
+                // Past the quota or a row's text the alias is dropped; with no room where the rows
+                // keep their keys it is dropped and counted with the alias table's refusals, as
+                // zenoh-pico drops one its heap cannot hold.
+                let text =
+                    match key_text_within::<P>(&self.naming.keys, literal, self.naming.key_quota) {
+                        Ok(text) => text,
+                        Err(crate::bounded::KeyUnkept::TooLong) => return,
+                        Err(crate::bounded::KeyUnkept::NoRoom) => {
+                            self.naming.aliases.count_refused();
+                            return;
+                        }
+                    };
                 // A refusal is counted by the table itself, as for the owned form.
                 let quota = self.naming.alias_quota;
                 let _ = self.naming.aliases.bind_within(

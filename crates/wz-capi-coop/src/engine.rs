@@ -3346,6 +3346,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let registry = Registry::new(
             &resolve_limits(&config),
             arena.arena_mut(),
+            keys,
             ObserverRows {
                 subscribers: entities.subscribers,
                 queryables: entities.queryables,

@@ -49,6 +49,7 @@ use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 use crate::declare::liveliness_subscriber::PeerTokens;
 use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
 use core::mem::MaybeUninit;
@@ -198,30 +199,36 @@ pub struct PeerRows {
 
 impl PeerTables<Lent> {
     /// Empty tables, for a peer that has said nothing yet, the rows of each table `rows` states
-    /// lent from `arena`, held to `limits` as [`PeerTables::limit_to`] holds them. Refused when a
-    /// table is over the build's capacity or the arena has not the room, the rows lent so far
-    /// going back with the arena. The tables keyed by the peer's ids are the policy's inline ones.
+    /// lent from `arena` and the keys of every row kept in `keys`, the session's key arena, held
+    /// to `limits` as [`PeerTables::limit_to`] holds them. Refused when a table is over the
+    /// build's capacity or the arena has not the room, the rows lent so far going back with the
+    /// arena. The tables keyed by the peer's ids are the policy's inline ones, each row a key's
+    /// place.
     pub fn lent(
         arena: &mut Arena,
+        keys: KeySpace,
         rows: PeerRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
         let mut tables = Self::default();
-        tables.lend_rows(arena, rows, limits)?;
+        tables.lend_rows(arena, keys, rows, limits)?;
         Ok(tables)
     }
 
     /// Lend tables of no rows ([`PeerTables::init_in`]) the rows `rows` states from `arena`,
-    /// where they lie, and hold them to `limits`: what [`Self::lent`] makes, without the tables
-    /// being a value of their own. Each table is lent in the order `lent` lends them, so the arena
-    /// is laid out as its plan ([`Self::arena_bytes`]) counts it. Refused as `lent` is; the tables
-    /// stay whole, those lent before the refusal holding their rows, which go back with the arena.
+    /// where they lie, hand them `keys` to keep their rows' keys in, and hold them to `limits`:
+    /// what [`Self::lent`] makes, without the tables being a value of their own. Each table is
+    /// lent in the order `lent` lends them, so the arena is laid out as its plan
+    /// ([`Self::arena_bytes`]) counts it. Refused as `lent` is; the tables stay whole, those lent
+    /// before the refusal holding their rows, which go back with the arena.
     pub fn lend_rows(
         &mut self,
         arena: &mut Arena,
+        keys: KeySpace,
         rows: PeerRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<(), LendRefused> {
+        self.keep_keys_in(LentKeys::from(keys));
         self.subscribers
             .lend_rows(arena, rows.sub_interests, rows.pending_declares)?;
         self.replies = ReplyStage::lent(arena, rows.replies, rows.reply_bytes)?;
@@ -307,6 +314,16 @@ impl<P: Storage> PeerTables<P> {
         self.remote_subscribers.limit_keys_to(keys);
         self.remote_queryables.limit_keys_to(keys);
         self.tokens.limit_keys_to(keys);
+    }
+
+    /// Keep the keys of every row the peer writes from here on in `keys` ([`Storage::Keys`]):
+    /// the session's key arena, on the lent policy. A table of no key arena keeps no key, so what
+    /// the peer declares is dropped and counted until it is handed one.
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.subscribers.keep_keys_in(keys.clone());
+        self.remote_subscribers.keep_keys_in(keys.clone());
+        self.remote_queryables.keep_keys_in(keys.clone());
+        self.tokens.keep_keys_in(keys);
     }
 
     /// Forget everything the peer said and everything owed to it, in place: the
@@ -549,9 +566,22 @@ mod lent_tests {
         }
     }
 
+    /// A key arena of `bytes` bytes of blocks, lent from an arena of its own, so the arena the
+    /// tables' rows are lent from is laid out by their plan alone.
+    fn keys(bytes: usize) -> KeySpace {
+        arena(KeySpace::span_bytes(bytes).expect("a small key arena"))
+            .lend_keys(bytes)
+            .expect("the arena is the key arena's span")
+    }
+
     fn lent(rows: PeerRows) -> PeerTables<Lent> {
-        PeerTables::<Lent>::lent(&mut arena(1 << 16), rows, &SessionLimits::defaults())
-            .expect("the arena has the rows")
+        PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            keys(1024),
+            rows,
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows")
     }
 
     /// A one-byte Put on `"k"` for request `rid`, stamped by `responder` and `timestamp`.
@@ -582,8 +612,9 @@ mod lent_tests {
     fn lent_peer_tables_take_the_bytes_their_plan_states() {
         let rows = rows(2);
         let mut memory = arena(1 << 16);
-        let tables = PeerTables::<Lent>::lent(&mut memory, rows, &SessionLimits::defaults())
-            .expect("the arena has the rows");
+        let tables =
+            PeerTables::<Lent>::lent(&mut memory, keys(64), rows, &SessionLimits::defaults())
+                .expect("the arena has the rows");
         let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
         assert_eq!(memory.high_water(), planned);
         assert!(planned > 0, "a plan of two rows each lends something");
@@ -597,8 +628,8 @@ mod lent_tests {
         let rows = rows(1);
         let limits = SessionLimits::defaults();
         let mut by_value_memory = arena(1 << 16);
-        let mut by_value =
-            PeerTables::<Lent>::lent(&mut by_value_memory, rows, &limits).expect("the rows");
+        let mut by_value = PeerTables::<Lent>::lent(&mut by_value_memory, keys(64), rows, &limits)
+            .expect("the rows");
         let mut memory = arena(1 << 16);
         let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
         let in_place = PeerTables::init_in(&mut place);
@@ -607,7 +638,7 @@ mod lent_tests {
             "CONTROL: tables of no rows refuse a Final"
         );
         in_place
-            .lend_rows(&mut memory, rows, &limits)
+            .lend_rows(&mut memory, keys(64), rows, &limits)
             .expect("the arena has the rows");
         assert_eq!(
             memory.high_water(),
@@ -647,6 +678,7 @@ mod lent_tests {
         let mut place = MaybeUninit::<PeerTables<Lent>>::uninit();
         let refused = PeerTables::init_in(&mut place).lend_rows(
             &mut arena(planned - 1),
+            keys(64),
             rows,
             &SessionLimits::defaults(),
         );
@@ -661,8 +693,12 @@ mod lent_tests {
     fn lent_peer_tables_the_arena_cannot_hold_are_refused() {
         let rows = rows(1);
         let planned = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space");
-        let refused =
-            PeerTables::<Lent>::lent(&mut arena(planned - 1), rows, &SessionLimits::defaults());
+        let refused = PeerTables::<Lent>::lent(
+            &mut arena(planned - 1),
+            keys(64),
+            rows,
+            &SessionLimits::defaults(),
+        );
         assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
     }
 
@@ -673,8 +709,12 @@ mod lent_tests {
             finals: caps::MAX_PENDING_FINALS + 1,
             ..rows(1)
         };
-        let refused =
-            PeerTables::<Lent>::lent(&mut arena(1 << 20), over, &SessionLimits::defaults());
+        let refused = PeerTables::<Lent>::lent(
+            &mut arena(1 << 20),
+            keys(64),
+            over,
+            &SessionLimits::defaults(),
+        );
         assert!(matches!(
             refused,
             Err(LendRefused::OverCeiling { rows: asked, ceiling })
@@ -790,5 +830,191 @@ mod lent_tests {
             .pending_declares
             .push(DeclResponseItem::Final { interest_id: 2 })
             .is_err());
+    }
+
+    /// The table a peer's subscriber declarations are dispatched through.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    type RemoteSubscribers = crate::declare::subscriber::RemoteSubscriberTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >;
+
+    /// The peer declares a subscriber `id` on `key` into `tables`.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    fn declare_subscriber(
+        table: &mut RemoteSubscribers,
+        tables: &mut PeerTables<Lent>,
+        id: u64,
+        key: &str,
+    ) {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        table.dispatch_declare(
+            &mut tables.remote_subscribers,
+            &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(id, 0, Some(key))),
+            &none,
+        );
+    }
+
+    /// The peer aliases `key` under `id` in `tables`.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    fn declare_alias(tables: &mut PeerTables<Lent>, id: u64, key: &str) {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        tables
+            .subscribers
+            .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
+                id, key,
+            )));
+    }
+
+    /// What a peer declares is kept in the session's key arena, a block of each key's length,
+    /// and reads back as it was declared: an alias resolves to its literal and a subscriber
+    /// matches its key. Forgetting the peer gives every block back, and the next peer's key of
+    /// the same length takes the same bytes, the arena's peak unmoved.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    #[test]
+    fn a_lent_peers_keys_lie_in_the_key_arena_and_read_back_as_declared() {
+        use crate::key_arena::block_bytes;
+
+        let keys = keys(256);
+        let mut tables = PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            keys,
+            rows(1),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let mut table = RemoteSubscribers::default();
+        declare_alias(&mut tables, 3, "demo/alias");
+        declare_subscriber(&mut table, &mut tables, 1, "demo/sub/**");
+        assert_eq!(
+            tables.subscribers.resolve_inbound_mapping(3).as_deref(),
+            Some("demo/alias")
+        );
+        assert!(tables.remote_subscribers.has_matching("demo/sub/x"));
+        assert!(!tables.remote_subscribers.has_matching("demo/other"));
+        let blocks = block_bytes("demo/alias".len()).expect("short")
+            + block_bytes("demo/sub/**".len()).expect("short");
+        assert_eq!(keys.counts().used, blocks, "a block of each key's length");
+        let peak = keys.counts().peak;
+        tables.forget_peer();
+        assert_eq!(
+            keys.counts().used,
+            0,
+            "a forgotten peer gives every block back"
+        );
+        declare_alias(&mut tables, 4, "demo/again");
+        assert_eq!(
+            tables.subscribers.resolve_inbound_mapping(4).as_deref(),
+            Some("demo/again")
+        );
+        assert_eq!(
+            keys.counts().peak,
+            peak,
+            "the blocks given back are taken again"
+        );
+    }
+
+    /// A peer's declaration whose key finds no room in the session's key arena is dropped and
+    /// counted with its table's refusals, as one its table has no room for is, and the arena
+    /// counts the key it refused; the room a withdrawal gives back takes the next declaration.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    #[test]
+    fn a_peers_declaration_the_key_arena_cannot_hold_is_dropped_and_counted() {
+        use crate::key_arena::block_bytes;
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        if caps::MAX_REMOTE_DECLS < 2 {
+            // A table of one row refuses the second declaration by itself.
+            return;
+        }
+        let keys = keys(block_bytes("demo/k/1".len()).expect("short"));
+        let mut tables = PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            keys,
+            rows(1),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let mut table = RemoteSubscribers::default();
+        declare_subscriber(&mut table, &mut tables, 1, "demo/k/1");
+        declare_subscriber(&mut table, &mut tables, 2, "demo/k/2");
+        assert_eq!(
+            (
+                tables.remote_subscribers.declared_count(),
+                tables.remote_subscribers.refusals(),
+                keys.counts().refused,
+            ),
+            (1, 1, 1),
+            "(declarations held, refused by the table, keys the arena refused)"
+        );
+        assert!(!tables.remote_subscribers.has_matching("demo/k/2"));
+        declare_alias(&mut tables, 5, "demo/k/5");
+        assert_eq!(
+            (
+                tables.subscribers.alias_count(),
+                tables.subscribers.alias_refusals()
+            ),
+            (0, 1),
+            "an alias with no room for its key is dropped and counted too"
+        );
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        table.dispatch_declare(
+            &mut tables.remote_subscribers,
+            &DeclareOwnedVariant::CodecZenohUndeclSubscriber(fx::undecl_subscriber(1)),
+            &none,
+        );
+        declare_subscriber(&mut table, &mut tables, 2, "demo/k/2");
+        assert_eq!(tables.remote_subscribers.declared_count(), 1);
+        assert!(
+            tables.remote_subscribers.has_matching("demo/k/2"),
+            "the block the withdrawal gave back holds the next key"
+        );
+    }
+
+    /// Tables of the lent policy that were handed no key arena keep no key: what the peer
+    /// declares is dropped and counted, never held under a key of nowhere.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    #[test]
+    fn lent_tables_handed_no_key_arena_drop_and_count_what_the_peer_declares() {
+        let mut tables = PeerTables::<Lent>::default();
+        let mut table = RemoteSubscribers::default();
+        declare_subscriber(&mut table, &mut tables, 1, "demo/k/1");
+        assert_eq!(
+            (
+                tables.remote_subscribers.declared_count(),
+                tables.remote_subscribers.refusals()
+            ),
+            (0, 1)
+        );
     }
 }

@@ -87,6 +87,8 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 ))]
 use wz_codecs::lent::DeclareVariant;
 
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::bounded::KeyUnkept;
 use crate::bounded::{
     Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Static, Storage,
 };
@@ -245,6 +247,12 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
+    /// policy, handed over with the session's other tables ([`Self::keep_keys_in`]). A
+    /// `DeclToken` whose key finds no room there is dropped and counted with the table's
+    /// refusals, as one the table has no room for is.
+    #[cfg(feature = "storage-profile")]
+    keys: P::Keys,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -277,6 +285,8 @@ impl<P: Storage> Default for PeerTokens<P> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            keys: Default::default(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -295,6 +305,8 @@ impl PeerTokens<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            keys: crate::bounded::InlineKeys,
             _policy: core::marker::PhantomData,
         }
     }
@@ -349,6 +361,13 @@ impl<P: Storage> PeerTokens<P> {
     #[cfg(feature = "storage-profile")]
     pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
         self.key_quota
+    }
+
+    /// Keep the keys of the tokens the peer declares from here on in `keys`: the session's key
+    /// arena, on the lent policy. The tokens already held keep theirs.
+    #[cfg(feature = "storage-profile")]
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.keys = keys;
     }
 
     /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
@@ -1015,9 +1034,19 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // what they are told is what the table holds, so a later
         // `UndeclToken` can name it.
         // Of the peer's own policy: the row it is kept in is that peer's table's.
-        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
-            peer.oversize = peer.oversize.saturating_add(1);
-            return;
+        let text = match key_text_within::<Q>(&peer.keys, resolved, peer.key_quota) {
+            Ok(text) => text,
+            Err(KeyUnkept::TooLong) => {
+                peer.oversize = peer.oversize.saturating_add(1);
+                return;
+            }
+            // No room where the rows keep their keys: dropped and counted as a token the table
+            // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
+            // cannot hold.
+            Err(KeyUnkept::NoRoom) => {
+                peer.table.count_refused();
+                return;
+            }
         };
         let quota = peer.quota;
         if peer
