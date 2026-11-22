@@ -19,6 +19,11 @@
 //! A query the callback keeps ([`CoopHolder::hold_query`]) is one hold more, released when the C
 //! program drops it; until then it answers on its own link.
 //!
+//! The session's own get is the exception to the copy (`local-queryable`): the queryables it
+//! matched are noted ([`QueryPlane::take_asked`]) and the get hands each of them its own view
+//! ([`OwnGet`]) once the session's lock is let go, inside the call. Only a queryable whose callback
+//! the asking thread is inside of has the query copied, to be handed when that callback returns.
+//!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query that
 //! arrives when every row is taken is not handed to a callback: nothing holds its Final, so the
 //! dispatch sends it at once, and the query is counted. The asker hears the end of an answer with
@@ -49,6 +54,8 @@ use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 use wz_session_core::query::QueryResponder;
+#[cfg(feature = "local-queryable")]
+use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 use wz_session_core::reply_stage::ReplyStage;
@@ -81,21 +88,6 @@ impl OwnedQuery {
             qos: view.qos(),
         }
     }
-
-    pub(super) fn rid(&self) -> wz_session_core::wire_id::RequestId {
-        self.rid
-    }
-
-    /// A responder for this query's replies, staging them in `replies`.
-    pub(super) fn responder<'a>(&self, replies: &'a mut ReplyStage) -> QueryResponder<'a> {
-        responder_for(
-            self.rid,
-            &self.keyexpr,
-            self.parameters.as_deref(),
-            self.qos,
-            replies,
-        )
-    }
 }
 
 impl QueryView for OwnedQuery {
@@ -127,7 +119,7 @@ impl QueryView for OwnedQuery {
 
 /// The responder the dispatch would have built for a query: its key, the replies its parameters
 /// accept (`_anyke` admits any key), its QoS.
-fn responder_for<'a>(
+pub(super) fn responder_for<'a>(
     rid: wz_session_core::wire_id::RequestId,
     keyexpr: &str,
     parameters: Option<&[u8]>,
@@ -238,6 +230,134 @@ impl FinalHolds {
 #[cfg(feature = "local-queryable")]
 pub(super) const LOCAL_QUERY: u64 = 0;
 
+/// The row of the plane's held Finals a get of the session's own takes before any of its legs is
+/// issued, so the session's queryables are asked all or none: a session with no row free refuses
+/// the get before anything is sent. Let go of at drop unless [`Self::release`] lets go of it.
+#[cfg(feature = "local-queryable")]
+pub(super) struct OwnFinalHold<'a> {
+    holds: Option<&'a Mutex<FinalHolds>>,
+    rid: wz_session_core::wire_id::RequestId,
+}
+
+#[cfg(feature = "local-queryable")]
+impl<'a> OwnFinalHold<'a> {
+    /// The row for the get of the session's own whose request id is `rid`: `None` when every row
+    /// of `holds` is taken.
+    pub(super) fn take(
+        holds: &'a Mutex<FinalHolds>,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Option<Self> {
+        lock(holds).take(LOCAL_QUERY, rid).then_some(Self {
+            holds: Some(holds),
+            rid,
+        })
+    }
+
+    pub(super) fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.rid
+    }
+
+    /// Let go of the row's hold: the Final's QoS when it was owed and no queryable asked holds it.
+    pub(super) fn release(mut self) -> Option<QosLevel> {
+        let holds = self.holds.take()?;
+        lock(holds).release(LOCAL_QUERY, self.rid)
+    }
+}
+
+#[cfg(feature = "local-queryable")]
+impl Drop for OwnFinalHold<'_> {
+    fn drop(&mut self) {
+        if let Some(holds) = self.holds.take() {
+            // Owed nothing yet: the get it was taken for issued no leg to the session.
+            lock(holds).release(LOCAL_QUERY, self.rid);
+        }
+    }
+}
+
+/// The session's own get as each of its queryables is shown it: the get's own key and options,
+/// read where they lie. What it shows is what the loopback body the wire builder makes of the same
+/// options carries (`QueryOptions::loopback_query`): the parameters and the attachment when not
+/// empty, and the value when its payload is not empty or its encoding is not the default one.
+#[cfg(feature = "local-queryable")]
+pub(super) struct OwnGet<'a> {
+    keyexpr: &'a str,
+    opts: &'a QueryOptions,
+    /// The value's encoding when the get carries a value and states no encoding of its own.
+    default_encoding: Option<EncodingHint>,
+    carries_value: bool,
+    rid: wz_session_core::wire_id::RequestId,
+    qos: QosLevel,
+}
+
+#[cfg(feature = "local-queryable")]
+impl<'a> OwnGet<'a> {
+    pub(super) fn of(
+        keyexpr: &'a str,
+        opts: &'a QueryOptions,
+        rid: wz_session_core::wire_id::RequestId,
+    ) -> Self {
+        let payload = opts.payload.as_deref().unwrap_or_default();
+        let stated = opts
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| encoding.packed_id >> 1 != 0 || encoding.schema.is_some());
+        let carries_value = !payload.is_empty() || stated;
+        Self {
+            keyexpr,
+            opts,
+            default_encoding: (carries_value && opts.encoding.is_none())
+                .then(EncodingHint::default),
+            carries_value,
+            rid,
+            qos: opts.qos.unwrap_or(QosLevel::DEFAULT),
+        }
+    }
+}
+
+#[cfg(feature = "local-queryable")]
+impl QueryView for OwnGet<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.opts
+            .parameters
+            .as_deref()
+            .filter(|parameters| !parameters.is_empty())
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.opts
+            .attachment
+            .as_deref()
+            .filter(|attachment| !attachment.is_empty())
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.opts.source_info.as_ref()
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.carries_value
+            .then(|| self.opts.payload.as_deref().unwrap_or_default())
+    }
+    fn encoding(&self) -> Option<&EncodingHint> {
+        if !self.carries_value {
+            return None;
+        }
+        self.opts
+            .encoding
+            .as_ref()
+            .or(self.default_encoding.as_ref())
+    }
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.rid
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+    fn qos(&self) -> QosLevel {
+        self.qos
+    }
+}
+
 /// What the queryable plane shares between the session's state, its dispatch, the observer's
 /// queryables and the queries a C program keeps.
 pub(super) struct QueryPlane {
@@ -257,7 +377,16 @@ pub(super) struct QueryPlane {
     pub(super) queries: Mutex<VecDeque<(QblId, OwnedQuery, u64)>>,
     /// The queries that found no row to hold their Final and were answered with it at once.
     unheld: AtomicU64,
+    /// The queryables the session's own get matched while it was asked, in the order the
+    /// registry met them: the get hands them its own view once the session's lock is let go, so
+    /// nothing of the query is copied (`local-queryable`).
+    #[cfg(feature = "local-queryable")]
+    asked: Mutex<Asked>,
 }
+
+/// The queryables of the session one of its own gets reached, as many as the session can declare.
+#[cfg(feature = "local-queryable")]
+pub(super) type Asked = BoundedVec<QblId, { caps::MAX_QUERYABLES }, Static>;
 
 impl QueryPlane {
     /// A plane that holds the Finals of at most `rows` queries at once ([`FinalHolds`]).
@@ -270,6 +399,8 @@ impl QueryPlane {
             holds: Mutex::new(FinalHolds::holding(rows)),
             queries: Mutex::new(VecDeque::new()),
             unheld: AtomicU64::new(0),
+            #[cfg(feature = "local-queryable")]
+            asked: Mutex::new(BoundedVec::new_static()),
         }
     }
 
@@ -282,7 +413,19 @@ impl QueryPlane {
             self.unheld.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        // The session's own get is handed to the queryables it matched by the get itself, from its
+        // own view, so this notes only which; one past the list waits as a link's query does.
+        #[cfg(feature = "local-queryable")]
+        if generation == LOCAL_QUERY && lock(&self.asked).push(id).is_ok() {
+            return;
+        }
         lock(&self.queries).push_back((id, OwnedQuery::of(view), generation));
+    }
+
+    /// The queryables the session's own get matched while it was asked, the list left empty.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn take_asked(&self) -> Asked {
+        core::mem::replace(&mut *lock(&self.asked), BoundedVec::new_static())
     }
 
     /// The generation a query arriving now belongs to.
