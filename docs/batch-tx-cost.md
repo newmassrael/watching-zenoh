@@ -94,7 +94,7 @@ reference measured takes one lock a message.
   `tests::plain_put::a_write_filters_answer_is_kept_until_a_face_is_written`, which counts the
   searches through `CoopEngine::peer_looks`.
 * A publisher's put whose options carry nothing, NULL or default, builds no options and takes
-  the publisher's plain path (row 3). Test: `pubsub::tests::put_options_that_carry_nothing_fold_to_none`.
+  the publisher's plain path (row 3). Test: `pubsub::put_options_tests::put_options_that_carry_nothing_fold_to_none`.
 
 Together they take two lock round trips, a key-expression search and an options build and drop
 off each put: about 100-200 ns of the 830-990 ns a message the measurement shows, by the
