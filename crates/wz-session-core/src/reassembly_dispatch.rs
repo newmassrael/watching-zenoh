@@ -994,8 +994,11 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, ring, now_ms, false, |chain: ChainBytes<'_>| {
-            deliver(chain.as_slice())
+        let mut deliver = Some(deliver);
+        self.ingest_delivering(frag, ring, now_ms, false, &mut |chain: ChainBytes<'_>| {
+            if let Some(deliver) = deliver.take() {
+                deliver(chain.as_slice());
+            }
         })
     }
 
@@ -1012,18 +1015,34 @@ where
         now_ms: u64,
         deliver: F,
     ) -> IngestOutcome {
-        self.ingest_delivering(frag, SnRing::Known(sn_mask), now_ms, true, deliver)
+        let mut deliver = Some(deliver);
+        self.ingest_delivering(
+            frag,
+            SnRing::Known(sn_mask),
+            now_ms,
+            true,
+            &mut |chain: ChainBytes<'_>| {
+                if let Some(deliver) = deliver.take() {
+                    deliver(chain);
+                }
+            },
+        )
     }
 
     /// The one ingest walk. `lend` asks the arena to hand a completed chain up
     /// as shared storage; without it the chain is always delivered borrowed.
-    fn ingest_delivering<F: FnOnce(ChainBytes<'_>)>(
+    ///
+    /// The delivery is a trait object and the walk is out of line: one body of
+    /// the walk serves every reader, and a receive path that reassembles calls it
+    /// rather than carrying a copy of it inlined. `deliver` is called at most once.
+    #[inline(never)]
+    fn ingest_delivering(
         &mut self,
         frag: Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
         lend: bool,
-        deliver: F,
+        deliver: &mut dyn FnMut(ChainBytes<'_>),
     ) -> IngestOutcome {
         self.displaced = None;
         if self.config.fragmentation_markers {
@@ -1049,13 +1068,13 @@ where
     /// An arena that refuses the final payload ends the chain undelivered as
     /// [`AbortReason::CapacityOverflow`]; the release is raised all the same,
     /// since the machine is already in `Complete`.
-    fn finish<F: FnOnce(ChainBytes<'_>)>(
+    fn finish(
         &mut self,
         idx: usize,
         sn: u64,
         payload: &[u8],
         lend: bool,
-        deliver: F,
+        deliver: &mut dyn FnMut(ChainBytes<'_>),
     ) -> IngestOutcome {
         let staged = self.stage(idx, sn, payload);
         let Self { slots, staging, .. } = self;
@@ -1298,12 +1317,12 @@ where
             .count() as u16
     }
 
-    fn ingest_chain_start<F: FnOnce(ChainBytes<'_>)>(
+    fn ingest_chain_start(
         &mut self,
         frag: Fragment<'_>,
         now_ms: u64,
         lend: bool,
-        deliver: F,
+        deliver: &mut dyn FnMut(ChainBytes<'_>),
     ) -> IngestOutcome {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
@@ -1437,14 +1456,14 @@ where
         true
     }
 
-    fn ingest_continuation<F: FnOnce(ChainBytes<'_>)>(
+    fn ingest_continuation(
         &mut self,
         idx: usize,
         frag: Fragment<'_>,
         ring: SnRing,
         now_ms: u64,
         lend: bool,
-        deliver: F,
+        deliver: &mut dyn FnMut(ChainBytes<'_>),
     ) -> IngestOutcome {
         // The slot was found by its open chain; one that holds none has no
         // chain for this fragment to continue, which makes it a start.
@@ -1685,6 +1704,40 @@ mod tests {
         assert_eq!(r1, IngestOutcome::Reassembled);
         assert_eq!(out.as_deref(), Some(&b"hello world"[..]));
         // Slot reclaimed after completion.
+        assert_eq!(d.active_chains(), 0);
+    }
+
+    /// Each door hands a completed chain to a delivery that owns what it captured,
+    /// once: the walk behind them calls it through a trait object.
+    #[test]
+    fn every_door_delivers_a_completed_chain_once_to_a_delivery_it_owns() {
+        let mut d = dispatcher::<4, 64>();
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let owned = vec![1u8];
+        let into = &mut seen;
+        assert_eq!(
+            d.ingest_in_ring(
+                frag(PEER_A, true, 1, 0, b"one"),
+                SnRing::Known(MASK),
+                0,
+                move |msg| {
+                    let mut kept = owned;
+                    kept.extend_from_slice(msg);
+                    into.push(kept);
+                },
+            ),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(seen, [vec![1, b'o', b'n', b'e']]);
+        let mut lent = 0;
+        assert_eq!(
+            d.ingest_lending(frag(PEER_B, true, 1, 0, b"two"), MASK, 0, |chain| {
+                assert_eq!(chain.as_slice(), b"two");
+                lent += 1;
+            }),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(lent, 1);
         assert_eq!(d.active_chains(), 0);
     }
 
