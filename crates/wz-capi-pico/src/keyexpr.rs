@@ -1056,7 +1056,7 @@ unsafe fn owned_keyexpr_input<'a>(
     if name.is_null() {
         return None;
     }
-    let bytes = core::slice::from_raw_parts(name as *const u8, len);
+    let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
     core::str::from_utf8(bytes).ok()
 }
 
@@ -1152,7 +1152,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
         let tail: &str = if right.is_null() || len == 0 {
             ""
         } else {
-            match core::str::from_utf8(core::slice::from_raw_parts(right as *const u8, len)) {
+            match core::str::from_utf8(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
                 Ok(t) => t,
                 Err(_) => return Z_ERR_INVALID,
             }
@@ -1337,7 +1337,7 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start as *const u8, len))
+        let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(start.cast::<u8>(), len))
         else {
             return Z_ERR_INVALID;
         };
@@ -1396,7 +1396,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         if start.is_null() || len.is_null() {
             return Z_ERR_NULL;
         }
-        let text = core::slice::from_raw_parts_mut(start as *mut u8, *len);
+        let text = core::slice::from_raw_parts_mut(start.cast::<u8>(), *len);
         if core::str::from_utf8(text).is_err() {
             return Z_ERR_INVALID;
         }

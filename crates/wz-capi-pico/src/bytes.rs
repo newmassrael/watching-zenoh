@@ -1220,7 +1220,7 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
         let len = CStr::from_ptr(value).to_bytes().len();
         store_aliased_payload(
             bytes,
-            value as *const u8,
+            value.cast::<u8>(),
             len,
             Release::new(None, core::ptr::null_mut(), core::ptr::null_mut()),
         )
@@ -1368,7 +1368,7 @@ pub unsafe extern "C" fn z_string_data(string: *const z_loaned_string_t) -> *con
         if string.is_null() {
             core::ptr::null()
         } else {
-            (*string)._start as *const c_char
+            (*string)._start.cast::<c_char>()
         }
     })
 }
@@ -1969,7 +1969,7 @@ pub unsafe extern "C" fn z_string_copy_from_substr(
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
-            core::slice::from_raw_parts(value as *const u8, len)
+            core::slice::from_raw_parts(value.cast::<u8>(), len)
         };
         store_string(str_out, StringState::boxed(bytes))
     })
@@ -2035,7 +2035,7 @@ pub unsafe extern "C" fn z_view_string_from_substr(
             return Z_ERR_NULL;
         }
         *str_out = z_view_string_t {
-            _start: value as *const u8,
+            _start: value.cast::<u8>(),
             _len: len,
             _pad: [0usize; 2],
         };

@@ -360,7 +360,7 @@ pub unsafe extern "C" fn z_encoding_from_substr(
         if s.is_null() {
             return Z_OK;
         }
-        let bytes = core::slice::from_raw_parts(s as *const u8, len);
+        let bytes = core::slice::from_raw_parts(s.cast::<u8>(), len);
         store_encoding(
             encoding,
             wz_session_core::encoding_hint::hint_from_bytes(bytes),
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         let bytes: &[u8] = if schema.is_null() || len == 0 {
             &[]
         } else {
-            core::slice::from_raw_parts(schema as *const u8, len)
+            core::slice::from_raw_parts(schema.cast::<u8>(), len)
         };
         (*state).set_schema(bytes);
         Z_OK
