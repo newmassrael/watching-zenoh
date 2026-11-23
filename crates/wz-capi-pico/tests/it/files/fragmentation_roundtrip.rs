@@ -448,9 +448,12 @@ fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver
         "subscriber never declared"
     );
 
-    // Four MiB: past this door's receiving ceiling (pico's FRAG_MAX_SIZE) by three
-    // orders of magnitude, so only the receiver's drop can answer for it.
-    const TOO_BIG: usize = 4 * 1024 * 1024;
+    // Twice this door's receiving ceiling (pico's FRAG_MAX_SIZE): a chain only the receiver's
+    // drop can answer for, and a payload every build of this door holds. The release form keeps
+    // payloads in the process pools' bounded area, which refuses a copy of megabytes with pico's
+    // _Z_ERR_SYSTEM_OUT_OF_MEMORY, as zenoh-pico on a small heap does: the size of the put is not
+    // what this test asks about, the sender's answer past the ceiling is.
+    const TOO_BIG: usize = 2 * CEILING;
     let payload = payload_of(TOO_BIG);
     let rc = unsafe {
         let mut ke: z_view_keyexpr_t = std::mem::zeroed();
