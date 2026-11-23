@@ -729,8 +729,6 @@ pub mod sync;
 // clock: wz doors (`wz_ext.h`) of the unstable surface, over the time base of `wz-node-time`, for
 // whichever engine the build has.
 #[cfg(feature = "time-base")]
-// Totality debt TD-199 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod time_base;
 pub mod whatami;
 mod write_filter;
