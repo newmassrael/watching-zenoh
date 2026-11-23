@@ -38,7 +38,7 @@ use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_mcu::dial::McuActions;
 
-use super::{Core, Link};
+use super::{Core, Face, Link};
 use crate::prelude::*;
 
 /// The kinds of declaration a session holds, which is to say the lists the replay walks.
@@ -191,7 +191,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
             Kind::Keyexpr => self.keyexprs.borrow().len(),
-            Kind::Subscriber => self.subscribers.len(),
+            Kind::Subscriber => self.registry.borrow().app.subscribers.len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
             Kind::Queryable => self.queryables.len(),
@@ -209,6 +209,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .take_while(|&&earlier| earlier != kind)
             .map(|&earlier| self.len_of(earlier))
             .sum()
+    }
+
+    /// The place a declaration of `kind` stored next takes in the replay's order.
+    fn end_of(&self, kind: Kind) -> usize {
+        self.start_of(kind) + self.len_of(kind)
     }
 
     /// How many declarations the session holds, which is how many a replay owes.
@@ -233,7 +238,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         .send_declare_keyexpr(entry.id, &entry.keyexpr)
                         .is_ok()
                 }
-                Kind::Subscriber => self.subscribers[left].declare(actions),
+                Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
+                    Some((keyexpr, row)) => row.declare(keyexpr, actions),
+                    None => true,
+                },
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => self.queryables[left].declare(actions),
@@ -289,56 +297,52 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.faces[at].replay.settle(cursor, told, refused, now_ms)
     }
 
-    /// A declaration of `kind` is about to be stored at the end of its list: tell the peer of each
+    /// A declaration takes `place` in the replay's order: tell the peer of each
     /// face that is up of it with `send`, unless it is not to be told now, and say whether it was
     /// taken. It is not told to a face that is not up, which declares it when it comes up, and
     /// when that face's replay has not reached its place, which sends it in its turn; both count
     /// as taken. A refusal is answered as `on_refusal` says: [`OnRefusal::Forget`] counts what
     /// was refused as told, and [`OnRefusal::Undo`] makes the declaration over, putting every
     /// face's replay back as it was and taking back, with `undo`, what the faces that took it
-    /// were told. Call it once, before the push.
+    /// were told. Call it once for each declaration.
     fn announce_with(
         &mut self,
-        kind: Kind,
+        place: usize,
         on_refusal: OnRefusal,
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        let place = self.start_of(kind) + self.len_of(kind);
-        // What each face's replay was and what its link made of the declaration, so that a refusal
-        // that undoes the declaration can put every face back.
-        let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
-        for (at, face) in self.faces.iter_mut().enumerate() {
-            let Link::Up(wire) = &face.link else {
-                continue;
-            };
-            let before = face.replay.cursor;
-            let outcome = match face.replay.cursor.inserted(place) {
-                Insertion::Owed => Told::Owed,
-                Insertion::EmitNow if send(&wire.actions) => Told::Sent,
-                Insertion::EmitNow => Told::Refused,
-            };
-            told.push((at, before, outcome));
-        }
-        let refused = told.iter().any(|(_, _, outcome)| *outcome == Told::Refused);
-        if !refused || on_refusal == OnRefusal::Forget {
-            return true;
-        }
-        for (at, before, outcome) in told {
-            let face = &mut self.faces[at];
-            face.replay.cursor = before;
-            if let (Told::Sent, Link::Up(wire)) = (outcome, &face.link) {
-                undo(&wire.actions);
-            }
-        }
-        false
+        announce_on(&mut self.faces, place, on_refusal, send, undo)
     }
 
     /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
     /// that a link refused is counted as told, and the peer learns it when the session declares
     /// over a new link.
     pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
-        self.announce_with(kind, OnRefusal::Forget, send, |_| {});
+        let place = self.end_of(kind);
+        self.announce_with(place, OnRefusal::Forget, send, |_| {});
+    }
+
+    /// Tell each face that is up of the subscriber at `index` of the session core's table, as
+    /// [`Self::announce`] tells a declaration: the row is the declaration itself, so the table
+    /// stored it before any link is told of it, and each link is told from the row.
+    pub(super) fn announce_subscriber(&mut self, index: usize) {
+        let place = self.start_of(Kind::Subscriber) + index;
+        let registry = &self.registry;
+        announce_on(
+            &mut self.faces,
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                registry
+                    .borrow()
+                    .app
+                    .subscribers
+                    .row_at(index)
+                    .is_some_and(|(keyexpr, row)| row.declare(keyexpr, actions))
+            },
+            |_| {},
+        );
     }
 
     /// [`Self::announce_with`] for a declaration that is not made when a link refuses it: whether
@@ -349,7 +353,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        self.announce_with(kind, OnRefusal::Undo, send, undo)
+        let place = self.end_of(kind);
+        self.announce_with(place, OnRefusal::Undo, send, undo)
     }
 
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
@@ -368,6 +373,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         links
     }
+}
+
+/// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
+/// (a row of the session core's tables) in `send` while the faces are written.
+fn announce_on<C: ClockSource + 'static>(
+    faces: &mut [Face<C>],
+    place: usize,
+    on_refusal: OnRefusal,
+    send: impl Fn(&McuActions<C>) -> bool,
+    undo: impl Fn(&McuActions<C>),
+) -> bool {
+    // What each face's replay was and what its link made of the declaration, so that a refusal
+    // that undoes the declaration can put every face back.
+    let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
+    for (at, face) in faces.iter_mut().enumerate() {
+        let Link::Up(wire) = &face.link else {
+            continue;
+        };
+        let before = face.replay.cursor;
+        let outcome = match face.replay.cursor.inserted(place) {
+            Insertion::Owed => Told::Owed,
+            Insertion::EmitNow if send(&wire.actions) => Told::Sent,
+            Insertion::EmitNow => Told::Refused,
+        };
+        told.push((at, before, outcome));
+    }
+    let refused = told.iter().any(|(_, _, outcome)| *outcome == Told::Refused);
+    if !refused || on_refusal == OnRefusal::Forget {
+        return true;
+    }
+    for (at, before, outcome) in told {
+        let face = &mut faces[at];
+        face.replay.cursor = before;
+        if let (Told::Sent, Link::Up(wire)) = (outcome, &face.link) {
+            undo(&wire.actions);
+        }
+    }
+    false
 }
 
 /// What a face's link made of a declaration it was offered.

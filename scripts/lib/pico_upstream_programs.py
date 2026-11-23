@@ -103,11 +103,20 @@ HOST_SETS = {"linux": ("tests", "c11", "c99"), "windows": ("tests", "windows", "
 # The library a host without `std` is built with in the place of `engine-coop` (wz-capi-pico's
 # Cargo.toml); Windows has its own, `pico_windows_package.NOSTD_FEATURE`.
 POSIX_FEATURE = "os-posix"
-# The router's locator in a program's arguments, filled in when the router is up.
+# The router's locator in a program's arguments, and its port in a witness, filled in when the
+# router is up: a Hello is read as this router's by the port among its locators, since another
+# router on the same network answers a scout too.
 ROUTER = "{router}"
-# How long a router gets to accept, a process to say it is up, and the pause after it did before the
-# other side starts: a declaration crosses the router in well under it.
+PORT = "{port}"
+# How long a router gets to accept and to say its scout listener is up, a process to say it is up,
+# and the pause after it did before the other side starts: a declaration crosses the router in well
+# under it.
 ROUTER_READY_S = 30.0
+# The router's log level, and the line it logs once its group socket is bound and joined
+# (wz-integration-tests' ZENOHD_SCOUT_LINE): nothing sends a lost Scout again, so a scout must not
+# go out before it. The filter is a prefix of zenoh's targets.
+ROUTER_LOG = "z=debug"
+ROUTER_SCOUT_LINE = "Listening scout messages on 224.0.0.224:7446"
 READY_S = 30.0
 SETTLE_S = 2.0
 # What a side that prints nothing when it is up gets before the other starts.
@@ -273,7 +282,8 @@ class Scenario:
     """The subject, built against the library under test; its peer, always zenoh-pico's own build;
     which of a pair starts first (`subject`, or None for the peer; a lone subject names none); the
     lines that must be printed, by role (`subject` or `peer`), as regular expressions over the
-    output with its line ends made LF; whether a router is started; how many times the second
+    output with its line ends made LF (`PORT` the router's port); whether a router is started;
+    whether a program of it finds that router by multicast scouting, which then must be up; how many times the second
     process may be started; how long one start of it may take before it is started again; and the
     bound of the whole scenario."""
 
@@ -282,6 +292,7 @@ class Scenario:
     first: str | None = None
     witnesses: tuple[tuple[str, str], ...] = ()
     router: bool = True
+    scouts: bool = False
     attempts: int = 1
     attempt_s: float | None = None
     bound_s: float = 90.0
@@ -299,11 +310,13 @@ PONG_UP = "Pong app is running"
 SUB_GOT_PUB = r">> \[Subscriber\] Received \('demo/example/zenoh-pico-pub'"
 SUB_GOT_PUT = r">> \[Subscriber\] Received \('demo/example/zenoh-pico-put'"
 PULLED = r">> \[Subscriber\] Pulled \('demo/example/zenoh-pico-pub'"
-GOT_REPLY = r">> Received (PUT )?\('demo/example/zenoh-pico-queryable'"
+# A queryable replies on the key of the query it was asked (`z_query_keyexpr`), so a reply is read by
+# its form: a key under demo/example and a payload, not an error and not the final notification.
+GOT_REPLY = r"(?m)^>> Received (PUT )?\('demo/example/[^']*': '[^']*'\)$"
 GOT_QUERY = r">> \[Queryable handler\] Received Query 'demo/example/"
 ATTACHED = r"with attachment:"
 ROUTER_ID = r"Routers IDs:\n [0-9a-f]{2,}"
-HELLO_ROUTER = r"Hello \{ zid: Some\([0-9A-F]+\), whatami: \"router\""
+HELLO_ROUTER = r"Hello \{ zid: Some\([0-9A-F]+\), whatami: \"router\"[^\n]*:" + PORT + "\""
 NUMBERS = r"(?m)^[0-9]+$"
 RATES = r"(?m)^[0-9]+\.[0-9]{3}$"
 RTTS = r"[0-9]+ bytes: seq=[0-9]+ rtt=[0-9]+"
@@ -333,25 +346,36 @@ def scenarios_of(dialect, routed_by_argument: bool) -> list[Scenario]:
     pong_args = E if dialect is c11 else ()
     queryable_ends = dialect is c11
     queryable_args = e + ("-n", "1") if dialect is c11 else e
+    # A set whose programs take no locator finds the router by scouting, and so do the C99 ping and
+    # pong, which take none either.
+    scouting = not routed_by_argument
+    ping_scouts = dialect is not c11
+    # Both pings publish a moment after they open and then spin, for ever, on the echo they count; a
+    # publisher whose write filter has not yet seen the pong's subscriber sends nothing and reports
+    # success (the race `run_get_lat_with_restarts` of the integration lane describes for its
+    # querier), so a start that has not ended within a few seconds is made again.
+    ping_attempt_s = 10.0
     return [
         Scenario(p(dialect, "z_sub", sub_once, ends=sub_ends, ready=UP), p(dialect, "z_pub", e, ends=False),
-                 first="subject", witnesses=(("subject", SUB_GOT_PUB),)),
+                 first="subject", witnesses=(("subject", SUB_GOT_PUB),), scouts=scouting),
         Scenario(p(dialect, "z_pub", pub_n, ends=pub_ends), p(dialect, "z_sub", e, ends=False, ready=UP),
-                 witnesses=(("peer", SUB_GOT_PUB),)),
+                 witnesses=(("peer", SUB_GOT_PUB),), scouts=scouting),
         Scenario(p(dialect, "z_put", e), p(dialect, "z_sub", e, ends=False, ready=UP),
-                 witnesses=(("peer", SUB_GOT_PUT),), attempts=3),
+                 witnesses=(("peer", SUB_GOT_PUT),), attempts=3, scouts=scouting),
         Scenario(p(dialect, "z_get", e), p(dialect, "z_queryable", e, ends=False, ready=UP),
-                 witnesses=(("subject", GOT_REPLY),), attempts=3),
+                 witnesses=(("subject", GOT_REPLY),), attempts=3, scouts=scouting),
         Scenario(p(dialect, "z_queryable", queryable_args, ends=queryable_ends, ready=UP), p(dialect, "z_get", e),
-                 first="subject", witnesses=(("subject", GOT_QUERY), ("peer", GOT_REPLY)), attempts=3),
+                 first="subject", witnesses=(("subject", GOT_QUERY), ("peer", GOT_REPLY)), attempts=3,
+                 scouts=scouting),
         Scenario(p(dialect, "z_pull", e, ends=False, ready="Pulling data every"), p(dialect, "z_pub", e, ends=False),
-                 first="subject", witnesses=(("subject", PULLED),)),
-        Scenario(p(dialect, "z_info", e, ends=dialect is win), witnesses=(("subject", ROUTER_ID),)),
-        Scenario(p(dialect, "z_scout"), witnesses=(("subject", HELLO_ROUTER),)),
+                 first="subject", witnesses=(("subject", PULLED),), scouts=scouting),
+        Scenario(p(dialect, "z_info", e, ends=dialect is win), witnesses=(("subject", ROUTER_ID),), scouts=scouting),
+        Scenario(p(dialect, "z_scout"), witnesses=(("subject", HELLO_ROUTER),), scouts=True),
         Scenario(p(dialect, "z_ping", ping_args), p(dialect, "z_pong", pong_args, ends=False, ready=pong_ready),
-                 witnesses=(("subject", ping_witness),), attempts=3, attempt_s=30.0),
+                 witnesses=(("subject", ping_witness),), attempts=3, attempt_s=ping_attempt_s, scouts=ping_scouts),
         Scenario(p(dialect, "z_pong", pong_args, ends=False, ready=pong_ready), p(dialect, "z_ping", ping_args),
-                 first="subject", witnesses=(("peer", ping_witness),), attempts=3, attempt_s=30.0),
+                 first="subject", witnesses=(("peer", ping_witness),), attempts=3, attempt_s=ping_attempt_s,
+                 scouts=ping_scouts),
     ]
 
 
@@ -392,11 +416,13 @@ def c11_only_scenarios() -> list[Scenario]:
         Scenario(p(c11, "z_sub_thr", E), p(c11, "z_pub_thr", E), first="subject", witnesses=(("subject", RATES),),
                  bound_s=120.0),
         # The queryable of the latency pair answers for 20 s; the querier's 50 round trips end well
-        # inside them.
+        # inside them. The querier loses a start-up race by construction (the integration lane's
+        # `run_get_lat_with_restarts` says how), so a start that has not ended within 5 s is made
+        # again, three starts inside the queryable's 20 s.
         Scenario(p(c11, "z_get_lat", E + ("-n", "50", "-w", "500")), p(c11, "z_queryable_lat", E),
-                 witnesses=(("subject", NUMBERS),), bound_s=120.0),
+                 witnesses=(("subject", NUMBERS),), attempts=3, attempt_s=5.0, bound_s=120.0),
         Scenario(p(c11, "z_queryable_lat", E), p(c11, "z_get_lat", E + ("-n", "50", "-w", "500")), first="subject",
-                 witnesses=(("peer", NUMBERS),), bound_s=120.0),
+                 witnesses=(("peer", NUMBERS),), attempts=3, attempt_s=5.0, bound_s=120.0),
     ]
 
 
@@ -486,13 +512,18 @@ class Record:
     starts: int = 1
 
 
-def missing_witnesses(sc: Scenario, texts: dict[str, str]) -> list[tuple[str, str]]:
+def witness_pattern(pattern: str, port: int | None) -> str:
+    """A witness with the router's port in the place of `PORT` (no router: no port matches)."""
+    return pattern.replace(PORT, str(port) if port is not None else "(?!)")
+
+
+def missing_witnesses(sc: Scenario, texts: dict[str, str], port: int | None = None) -> list[tuple[str, str]]:
     """The witnesses of a scenario not yet printed by the process each names."""
     return [(role, pattern) for role, pattern in sc.witnesses
-            if not re.search(pattern, texts.get(role, ""), re.M)]
+            if not re.search(witness_pattern(pattern, port), texts.get(role, ""), re.M)]
 
 
-def judge(sc: Scenario, records: list[Record], bound_s: float) -> list[str]:
+def judge(sc: Scenario, records: list[Record], bound_s: float, port: int | None = None) -> list[str]:
     """Why a played scenario is not a pass; empty when it is."""
     why = []
     for rec in records:
@@ -506,13 +537,24 @@ def judge(sc: Scenario, records: list[Record], bound_s: float) -> list[str]:
         elif not rec.proc.ends and rec.status is not None:
             why.append(f"the {rec.role} exited {rec.status} before it was stopped")
     texts = {rec.role: rec.text for rec in records}
-    for role, pattern in missing_witnesses(sc, texts):
-        why.append(f"the {role} printed no line matching /{pattern}/")
+    for role, pattern in missing_witnesses(sc, texts, port):
+        why.append(f"the {role} printed no line matching /{witness_pattern(pattern, port)}/")
     return why
 
 
 def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(text.splitlines()[-lines:])
+
+
+def diagnostics(sc: Scenario, tag: str, records: list[Record], router: Router | None) -> str:
+    """What a line that is not a pass is read with: the last lines each process of the play printed
+    (its standard output and error, as one stream), and the router's."""
+    parts = [f"--- {rec.role} {rec.proc.program} ({sc.id}, {tag}, start {rec.starts}, "
+             f"{'stopped' if rec.status is None else f'exit {rec.status}'}): its last {TAIL_LINES} lines\n"
+             f"{tail(rec.text)}" for rec in records]
+    if router is not None:
+        parts.append(f"--- zenohd ({sc.id}, {tag}): its last {TAIL_LINES} lines\n{tail(router.text())}")
+    return "\n".join(parts)
 
 
 def selected(host: str, sets: list[str] | None, only: list[str] | None) -> list[Scenario]:
@@ -554,7 +596,7 @@ def scenario_findings(sc: Scenario) -> list[str]:
         if role not in roles:
             findings.append(f"{sc.id}: a witness of a {role} it does not have")
         try:
-            re.compile(pattern)
+            re.compile(witness_pattern(pattern, 0))
         except re.error as err:
             findings.append(f"{sc.id}: witness /{pattern}/ is no regular expression ({err})")
     if not sc.witnesses and not any(proc.ends for proc in procs):
@@ -562,6 +604,10 @@ def scenario_findings(sc: Scenario) -> list[str]:
                         "nothing")
     if sc.attempts < 1:
         findings.append(f"{sc.id}: attempts below one")
+    if sc.scouts and not sc.router:
+        findings.append(f"{sc.id}: scouts for a router the scenario does not start")
+    if any(PORT in pattern for _, pattern in sc.witnesses) and not sc.router:
+        findings.append(f"{sc.id}: a witness names the port of a router the scenario does not start")
     return findings
 
 
@@ -591,6 +637,11 @@ def table_findings(pico: pathlib.Path) -> list[str]:
 # ---------------------------------------------------------------------------
 # The libraries and the compilers
 # ---------------------------------------------------------------------------
+
+
+# The letters of the two arms: the library under test and zenoh-pico, the reference.
+LIBRARY = "W"
+REFERENCE = "P"
 
 
 @dataclass
@@ -836,27 +887,43 @@ def accepts(port: int) -> bool:
         return False
 
 
+class RouterDown(RuntimeError):
+    """The router of a scenario did not come up; `log` is what it printed."""
+
+    def __init__(self, why: str, log: str):
+        super().__init__(why)
+        self.log = log
+
+
 class Router:
     """A stock zenohd for one scenario, listening on every address so that the Hello it answers a
     scout with carries a locator a client can dial (on the loopback form alone it answers with
-    none), its multicast scouting as its defaults have it."""
+    none), its multicast scouting as its defaults have it. `scouting` says whether its scout
+    listener came up: a host whose group cannot be joined still routes, and only the scenarios that
+    scout are then not measured."""
 
-    def __init__(self, zenohd: pathlib.Path, work: pathlib.Path):
+    def __init__(self, zenohd: pathlib.Path, work: pathlib.Path, scouts: bool):
         self.port = free_port()
         self.log = work / "zenohd.log"
         self.out = open(self.log, "wb")
         self.proc = subprocess.Popen([str(zenohd), "-l", f"tcp/0.0.0.0:{self.port}", "--rest-http-port", "none"],
                                      stdout=self.out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                     env={**os.environ, "RUST_LOG": "info"})
+                                     env={**os.environ, "RUST_LOG": ROUTER_LOG})
         deadline = time.monotonic() + ROUTER_READY_S
         while time.monotonic() < deadline and self.proc.poll() is None and not accepts(self.port):
             time.sleep(POLL_S)
         if self.proc.poll() is not None or not accepts(self.port):
             self.stop()
-            raise RuntimeError(f"zenohd did not accept on {self.port} within {ROUTER_READY_S:.0f} s\n"
-                               + tail(normalized(self.log.read_bytes())))
-        # Its scouting socket opens beside its listener.
-        time.sleep(1.0)
+            raise RouterDown(f"zenohd did not accept on {self.port} within {ROUTER_READY_S:.0f} s", self.text())
+        # The scout listener is logged once the group socket is bound and joined; only a scenario
+        # that scouts waits for it.
+        while (scouts and time.monotonic() < deadline and self.proc.poll() is None
+               and ROUTER_SCOUT_LINE not in self.text()):
+            time.sleep(POLL_S)
+        self.scouting = ROUTER_SCOUT_LINE in self.text()
+
+    def text(self) -> str:
+        return normalized(self.log.read_bytes())
 
     @property
     def locator(self) -> str:
@@ -917,11 +984,14 @@ def wait_ready(run: Running, ready: str | None, deadline: float) -> None:
         time.sleep(POLL_S)
 
 
-def play(sc: Scenario, exes: dict[str, pathlib.Path], locator: str, work: pathlib.Path) -> list[Record]:
-    """Run a scenario once and return what each process did. The second process is started again
+def play(sc: Scenario, exes: dict[str, pathlib.Path], router: Router | None, work: pathlib.Path) -> list[Record]:
+    """Run a scenario once, beside `router` when it starts one, and return what each process did.
+    The second process is started again
     while its witnesses are missing, when it ended cleanly or outlived `attempt_s`, up to the
     scenario's attempts."""
     deadline = time.monotonic() + sc.bound_s
+    locator = router.locator if router is not None else ""
+    port = router.port if router is not None else None
     order = order_of(sc)
     running: dict[str, Running] = {}
     starts = {role: 1 for role, _ in order}
@@ -936,7 +1006,7 @@ def play(sc: Scenario, exes: dict[str, pathlib.Path], locator: str, work: pathli
                 running[second_role] = Running(second_role, second, exes[second_role], locator, work, 1)
         while time.monotonic() < deadline:
             texts = {role: run.text() for role, run in running.items()}
-            witnessed = not missing_witnesses(sc, texts)
+            witnessed = not missing_witnesses(sc, texts, port)
             if witnessed and all(run.poll() is not None for run in running.values() if run.proc.ends):
                 break
             if any(run.poll() is not None for run in running.values() if not run.proc.ends):
@@ -1011,56 +1081,56 @@ class Runner:
         self.built[key] = done
         return done
 
-    def attempt(self, sc: Scenario, letters: dict[str, str], tag: str) -> tuple[str, bool]:
+    def attempt(self, sc: Scenario, letters: dict[str, str], tag: str) -> tuple[str, bool, str]:
         """One play of the scenario with each role's program built against the library its letter
-        names: why it is not a pass (empty for a pass), and whether it measured the library at all. A
-        router that did not come up, or a program that did not build against zenoh-pico, measured
-        nothing."""
+        names: why it is not a pass (empty for a pass), whether it measured the library at all, and
+        the tail of what each process and the router printed, for a line that is not a pass. A router
+        that did not come up, a scouting scenario beside a router whose scout listener did not, and a
+        program that did not build against zenoh-pico measured nothing."""
         exes = {}
         for role, proc in order_of(sc):
             built = self.build(proc.program, letters[role])
             if built.exe is None:
-                return built.why, letters[role] == LIBRARY
+                return built.why, letters[role] == LIBRARY, ""
             exes[role] = built.exe
         work = self.scratch / "runs" / sc.id.replace("/", "-") / tag
         work.mkdir(parents=True, exist_ok=True)
         router = None
         try:
             if sc.router:
-                router = Router(self.zenohd, work)
-            records = play(sc, exes, router.locator if router else "", work)
-        except RuntimeError as err:
-            return str(err), False
+                router = Router(self.zenohd, work, sc.scouts)
+                if sc.scouts and not router.scouting:
+                    return (f"zenohd logged no '{ROUTER_SCOUT_LINE}' within {ROUTER_READY_S:.0f} s: multicast "
+                            "scouting is not up on this host, and a program of the scenario finds the router "
+                            "only by scouting", False, diagnostics(sc, tag, [], router))
+            records = play(sc, exes, router, work)
+        except RouterDown as err:
+            return str(err), False, f"--- zenohd ({sc.id}, {tag}): its last {TAIL_LINES} lines\n{tail(err.log)}"
         finally:
             if router is not None:
                 router.stop()
-        why = judge(sc, records, sc.bound_s)
-        if why and router is not None:
-            print(f"--- zenohd ({sc.id}, {tag})\n{tail(normalized(router.log.read_bytes()))}", flush=True)
-        if why:
-            for rec in records:
-                print(f"--- {rec.role} {rec.proc.program} ({sc.id}, {tag}, start {rec.starts}, "
-                      f"status {rec.status})\n{tail(rec.text)}", flush=True)
-        return "; ".join(why), True
+        why = judge(sc, records, sc.bound_s, router.port if router is not None else None)
+        return "; ".join(why), True, diagnostics(sc, tag, records, router) if why else ""
 
     def scenario(self, sc: Scenario) -> str:
-        """PASS, FAIL or NOT-MEASURED for the scenario on the library under test."""
+        """PASS, FAIL or NOT-MEASURED for the scenario on the library under test; under a line that is
+        not a pass, the tails of what its processes printed."""
         reference, subject = self.libs[REFERENCE], self.libs[LIBRARY]
         if self.control:
-            why, _ = self.attempt(sc, {"subject": REFERENCE, "peer": REFERENCE}, "control")
+            why, _, shown = self.attempt(sc, {"subject": REFERENCE, "peer": REFERENCE}, "control")
             self.line(sc, reference, "PASS" if not why else f"FAIL: {why}")
             if why:
                 self.line(sc, subject, f"NOT-MEASURED: the control did not pass, so the host cannot carry it ({why})")
+                print(shown, flush=True)
                 return "NOT-MEASURED"
-        why, measured = self.attempt(sc, {"subject": LIBRARY, "peer": REFERENCE}, "subject")
+        why, measured, shown = self.attempt(sc, {"subject": LIBRARY, "peer": REFERENCE}, "subject")
         if not why:
             self.line(sc, subject, "PASS")
             return "PASS"
-        if not measured:
-            self.line(sc, subject, f"NOT-MEASURED: {why}")
-            return "NOT-MEASURED"
-        self.line(sc, subject, f"FAIL: {why}")
-        return "FAIL"
+        verdict = "NOT-MEASURED" if not measured else "FAIL"
+        self.line(sc, subject, f"{verdict}: {why}")
+        print(shown, flush=True)
+        return verdict
 
     def run(self, scenarios: list[Scenario]) -> int:
         tally = {"PASS": 0, "FAIL": 0, "NOT-MEASURED": 0}
@@ -1131,6 +1201,10 @@ def selftest() -> int:
 
     findings = table_findings(PICO)
     expect("the table holds against the vendored tree", findings == [], findings)
+    arms = Runner(Linux(), Library(LIBRARY, "w", [], [], []), Library(REFERENCE, "p", [], [], []),
+                  pathlib.Path("zenohd"), pathlib.Path("."), True).libs
+    expect("a runner holds the library under test and the reference by their two letters",
+           sorted(arms) == sorted([LIBRARY, REFERENCE]) and LIBRARY != REFERENCE, sorted(arms))
     expect("the harness units exist", UNBUFFERED.is_file() and (MSVC_POSIX / "unistd.h").is_file())
     expect("every API test the integration lane runs is run here",
            {p.name for p in PROGRAM_LIST if p.set == "tests"} == set(ALONE_TESTS) | set(ROUTED_TESTS)
@@ -1242,6 +1316,33 @@ def selftest() -> int:
     expect("the router id is read across its line",
            not missing_witnesses(Scenario(Proc("examples/windows/z_info.c"), witnesses=(("subject", ROUTER_ID),)),
                                  {"subject": "Own ID: 01ab\nRouters IDs:\n 9f8e7d\nPeers IDs:\n"}))
+    hello = 'Hello { zid: Some(0A1B), whatami: "router", locators: , locators: ["tcp/10.0.0.5:7447"] }\n'
+    scout = Scenario(Proc("examples/unix/c11/z_scout.c"), witnesses=(("subject", HELLO_ROUTER),), scouts=True)
+    expect("a Hello is this router's by its port",
+           not missing_witnesses(scout, {"subject": hello}, 7447)
+           and missing_witnesses(scout, {"subject": hello}, 7448) != [])
+    expect("a witness of the router's port matches nothing without a router",
+           missing_witnesses(scout, {"subject": hello}, None) != [])
+    expect("a witness of the router's port in a scenario with no router is a finding",
+           any("names the port of a router" in f
+               for f in scenario_findings(Scenario(scout.subject, witnesses=scout.witnesses, router=False))))
+    expect("a scenario that scouts with no router is a finding",
+           any("scouts for a router" in f for f in scenario_findings(Scenario(Proc("examples/unix/c11/z_bytes.c"),
+                                                                              router=False, scouts=True))))
+    expect("a reply is read by its form, on the key the query asked",
+           re.search(GOT_REPLY, ">> Received PUT ('demo/example/**': 'Queryable from Pico!')\n", re.M) is not None
+           and re.search(GOT_REPLY, ">> Received ('demo/example/**': 'x')\n", re.M) is not None
+           and re.search(GOT_REPLY, ">> Received query final notification\n", re.M) is None
+           and re.search(GOT_REPLY, ">> Received an error: Demo error\n", re.M) is None)
+    expect("every program that takes no locator scouts for the router",
+           all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "windows")
+           and all(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].name == "z_scout")
+           and all(sc.scouts for sc in SCENARIOS if sc.id in ("c99/z_ping", "c99/z_pong"))
+           and not any(sc.scouts for sc in SCENARIOS if PROGRAMS[sc.subject.program].set == "tests"))
+    shown = diagnostics(sc, "t", good, None)
+    expect("a line that is not a pass is read with the tail of each process",
+           "--- peer examples/unix/c11/z_queryable.c" in shown and "--- subject examples/unix/c11/z_get.c" in shown
+           and "exit 0" in shown and "stopped" in shown and "Queryable handler" in shown, shown)
     expect("a rate of the throughput pair", re.search(RATES, "x\n1234.567\n", re.M) is not None
            and re.search(RATES, "0.5\n", re.M) is None)
     print(f"  pico-upstream selftest: {ok}/{ok + bad} arm(s) pass")

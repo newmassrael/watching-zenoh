@@ -79,7 +79,9 @@ fn a_subscribers_callback_is_dropped_once_on_undeclare() {
     let id = declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
     assert_eq!(counts.minted(), 1);
     assert_eq!(counts.callbacks_dropped(), 0, "a declared callback is held");
+    assert_eq!(engine.subscriber_rows(), 1, "the subscriber is one row");
     engine.undeclare_subscriber(id);
+    assert_eq!(engine.subscriber_rows(), 0, "its row is taken out");
     assert_eq!(counts.callbacks_dropped(), 1);
     engine.undeclare_subscriber(id);
     assert_eq!(
@@ -110,6 +112,32 @@ fn a_subscribers_callback_is_dropped_once_on_close() {
         "nothing more after the close"
     );
     assert_eq!(counts.factories_dropped(), 2);
+}
+
+/// The close takes the whole table of callbacks at once: after it the table holds none, whatever
+/// kind of declaration each was minted for, and each is let go of.
+#[test]
+fn the_close_leaves_no_callback_in_the_table() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let counts = Counts::default();
+    declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
+    let sink: MatchingSink = Arc::new(|_matching: bool| {});
+    let alive = Arc::downgrade(&sink);
+    assert_ne!(
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false),
+        0
+    );
+    assert_eq!(engine.callbacks_held(), 2, "one for each declaration");
+    assert_eq!(engine.subscriber_rows(), 1);
+    SessionDrive::close(&*engine);
+    assert_eq!(engine.callbacks_held(), 0, "the close took the table whole");
+    assert_eq!(engine.subscriber_rows(), 0, "and the subscribers' rows");
+    assert_eq!(counts.callbacks_dropped(), 1);
+    assert!(
+        alive.upgrade().is_none(),
+        "the listener's sink is let go of"
+    );
 }
 
 /// A declaration refused for want of a row mints no callback, and its factory is let go of with

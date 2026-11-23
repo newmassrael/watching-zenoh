@@ -113,7 +113,12 @@ fn the_plan_lends_each_declaration_table_its_limit() {
             .find(|row| row.part == part)
             .map(|row| row.count)
     };
-    assert_eq!(count("subscriber declarations"), Some(2));
+    assert_eq!(count("subscribers"), Some(2));
+    assert_eq!(
+        count("subscriber declarations"),
+        None,
+        "a subscriber is one row, the session core's"
+    );
     assert_eq!(count("key expressions"), Some(6));
     assert_eq!(count("write filters"), Some(7));
     assert_eq!(count("matching listeners"), Some(5));
@@ -489,9 +494,9 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
 fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
     use wz_session_core::key_arena::block_bytes;
 
-    // Room for exactly two subscribers of eight-byte keys: the engine's record of each and the
-    // application's table each keep the key in a block of its own.
-    let room = 2 * 2 * block_bytes("demo/k/1".len()).expect("a short key");
+    // Room for exactly two subscribers of eight-byte keys: each is one row of the session core's
+    // table, which keeps its key in one block.
+    let room = 2 * block_bytes("demo/k/1".len()).expect("a short key");
     let limits = lowered(|l| l.select_key_arena_bytes(room));
     let plan = ArenaPlan::of(&client_config(), &limits).expect("lays an arena out");
     assert_eq!(plan.key_bytes(), room);

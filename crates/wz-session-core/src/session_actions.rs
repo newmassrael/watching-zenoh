@@ -19141,3 +19141,17 @@ mod sender_inside_tests {
         assert!(!flag.load(Ordering::Relaxed), "lowered on the unwind");
     }
 }
+
+// The bundle over a runtime of this crate's own, reading what `action-trace` and
+// `reply-egress-gate` compile in. The bundle a test can build needs the heap profile and is not
+// the slot profile's (`new_generic`).
+#[cfg(all(
+    test,
+    feature = "alloc",
+    not(feature = "session-slot"),
+    any(
+        feature = "action-trace",
+        all(feature = "reply-egress-gate", feature = "codec-response")
+    )
+))]
+mod bundle_tests;

@@ -1103,6 +1103,11 @@ round_fed_gates=(
     # crate on the runtime and their manifests. A text read and one `cargo metadata`, no build.
     "coop_critical_section_gate.py --selftest"
     "coop_critical_section_gate.py --check"
+    # The core crates of the C ABI library deny the totality lints, and a module still allowed
+    # them is a row of the register in docs/c-abi-architecture.md, which only shrinks. Round-fed by
+    # the four crates' sources and the register. A text read, no build.
+    "totality_debt_gate.py --selftest"
+    "totality_debt_gate.py --check"
     "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own
@@ -1530,6 +1535,20 @@ round_fed_gates=(
     # captures/upstream/ holds real captures outside the calibration corpus, under
     # the same anonymiser and the same fixed-point rule.
     "capture_anonymise.py --verify-corpus captures/upstream"
+    # The verification lanes' plan and the coverage floor's table (Layers Vcov, Vtsan, Vasan,
+    # Vmiri). Round-fed: the plan names the C library's profile and the kit images' manifests,
+    # and the floor's table names the crates and modules it holds. What a round can make false
+    # without a build is read here: the plan's own rules (its selftest), and the table against
+    # the coverage lane's crates and their sources (--declared). The resolved feature sets and
+    # the measured figures need cargo over the shipped builds and an instrumented run, which the
+    # lanes own. ESTIMATED under a second: fixtures and a parse of one table, no build.
+    "verify_plan.py --selftest"
+    "coverage_floor_gate.py --selftest"
+    "coverage_floor_gate.py --declared"
+    # The runner of zenoh-pico's own programs on the release library (Layers L22, L23 of the
+    # release proof). Round-fed: its scenario table is held against the vendored tree's programs
+    # and the release ledger's rows. Its selftest reads both, with no build and no zenohd.
+    "pico_upstream_programs.py --selftest"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

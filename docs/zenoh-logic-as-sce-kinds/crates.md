@@ -53,7 +53,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-eth-mac-cyt4bf` | S9 | |
 | `wz-eth-mac-lan9118` | S9 | |
 | `wz-ext-pubsub` | S6, S10 | |
-| `wz-fuzz` | excluded: test | Fuzz targets over the C ABI. |
+| `wz-fuzz` | excluded: test | Fuzz targets over the C ABI and over the network ingress, with the packages of its own workspace (`coop-engine`, `ingress-common`, `pico-ext`, `session-heap`, `session-slot`): harnesses that drive the doors and the decoders, no logic of their own. |
 | `wz-host-interop-tests` | excluded: test | Router interop tests for macOS and Windows hosts. |
 | `wz-host-net` | S9 | |
 | `wz-host-sync` | S9 | |

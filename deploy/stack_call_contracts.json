@@ -111,14 +111,14 @@
   "rules": [
     {
       "id": "exec-poll",
-      "where": {"file": "static_executor.rs", "anchor": "(ops.poll)("},
-      "callees": "^wz_runtime_coop::executor_static::poll_erased$",
+      "where": {"file": "wz-runtime-coop/src/executor.rs", "anchor": "(ops.poll)("},
+      "callees": "^wz_runtime_coop::executor::poll_erased$",
       "why": "the task cell's poll"
     },
     {
       "id": "exec-drop",
-      "where": {"file": "static_executor.rs"},
-      "callees": "^wz_runtime_coop::executor_static::drop_erased$|^core::ptr::drop_glue$",
+      "where": {"file": "wz-runtime-coop/src/executor.rs"},
+      "callees": "^wz_runtime_coop::executor::drop_erased$|^core::ptr::drop_glue$",
       "why": "the task cell's drop_future and drop_output"
     },
     {

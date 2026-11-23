@@ -69,6 +69,7 @@ EXT_PREFIX = "wz_ext_"
 
 MARKER = re.compile(r"^<!-- release-proof: ([a-z]+) -->\s*$")
 TICKS = re.compile(r"\x60([^\x60]+)\x60")
+ANCHORED = re.compile(r"(\x60[^\x60]+\x60)\s*@\s*\x60[^\x60]*\x60")
 LANE_ID = re.compile(r"\bL\d{2}\b")
 WORK_ID = re.compile(r"\bW\d{2}\b")
 LANE_LIST = re.compile(r"L\d{2}(?:,\s*L\d{2})*")
@@ -105,6 +106,13 @@ def cells(line: str) -> list[str]:
 
 def ticks(cell: str) -> list[str]:
     return TICKS.findall(cell)
+
+
+def paths(cell: str) -> list[str]:
+    """The files a cell names: its tokens in backticks, each anchored citation (a path, an at sign
+    and a needle, the form upstream_citation_anchor_gate.py resolves against the submodule) read
+    as its path alone."""
+    return ticks(ANCHORED.sub(lambda m: m.group(1), cell))
 
 
 def tables(text: str) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
@@ -191,7 +199,7 @@ def read_lanes(rows: list[dict[str, str]], root: pathlib.Path, findings: list[st
                 findings.append(f"{where}: {rel} has no job {job}")
         files: set[str] = set()
         if row["programs"] != NOTHING:
-            patterns = ticks(row["programs"])
+            patterns = paths(row["programs"])
             if not patterns:
                 findings.append(f"{where}: programs are {NOTHING} or paths in backticks")
             for pattern in patterns:
@@ -267,7 +275,7 @@ def program_rows(rows: list[dict[str, str]], population: set[str], what: str, la
     seen: set[str] = set()
     cited_all: set[str] = set()
     for row in rows:
-        named = ticks(row["program"])
+        named = paths(row["program"])
         if len(named) != 1:
             findings.append(f"{what}: a row names {len(named)} programs, not one: {row['program']}")
             continue
@@ -602,6 +610,8 @@ def cmd_selftest() -> int:
                has(run(set_cell("lanes", 0, "source", "\x60src/nope.rs\x60")), "source src/nope.rs does not exist"))
         expect("a workflow job that does not exist",
                has(run(set_cell("lanes", 1, "source", "\x60wf.yml#job2\x60")), "has no job job2"))
+        expect("an anchored program reads as its path, its needle as no program",
+               paths("\x60t/a.c\x60 @ \x60int main(\x60 \x60t/b.c\x60") == ["t/a.c", "t/b.c"])
         expect("a program pattern that matches no file",
                has(run(set_cell("lanes", 2, "programs", "\x60t/none.c\x60")), "matches no file"))
         expect("a switch of zenoh-pico with no row",

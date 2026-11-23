@@ -2,6 +2,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 #![no_std]
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 
 //! wz-runtime-coop — Phase W MCU profile.
 //!
@@ -175,8 +191,12 @@ pub mod join_handle;
 // The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —
 // see the module doc.
 #[cfg(feature = "runtime")]
+// Totality debt TD-204 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::panic)]
 pub mod local;
 #[cfg(feature = "runtime")]
+// Totality debt TD-205 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::panic)]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
 mod static_tests;
@@ -213,6 +233,8 @@ pub use yield_now::{yield_now, YieldNow};
 // composes before the sync drive-loop consumer (`session_drive`) wires it
 // to live lwIP sockets.
 #[cfg(feature = "session-unicast")]
+// Totality debt TD-206 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::panic)]
 pub mod session_runtime;
 
 // R2915 — the cooperative unicast session drive loop, generic over the
@@ -220,6 +242,8 @@ pub mod session_runtime;
 // from `wz-session-lwip`, where it was typed on lwIP, so that a profile whose
 // network stack is not lwIP (Zephyr's own sockets) drives the same loop.
 #[cfg(feature = "session-unicast")]
+// Totality debt TD-203 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod session_drive;
 
 /// The items given, compiled exactly where this crate declares the heap profile's link seams
@@ -261,6 +285,8 @@ pub mod link_storage;
 // sockets under a cooperative loop, as the datagram link is: a platform supplies the socket
 // (`stream_link::StreamSocket`), and the batch framing and the driver are here.
 #[cfg(feature = "session-unicast")]
+// Totality debt TD-200 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stream_link;
 
 // The two links above as one network stack: a dial names its protocol, and the stack opens that
@@ -273,6 +299,8 @@ pub mod ip_stack;
 // as this engine's seams, and the session shell's links over them, so a session opens no socket
 // of the system's. Documented in its own `//!`.
 #[cfg(all(feature = "app-link", feature = "alloc", not(feature = "session-slot")))]
+// Totality debt TD-202 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod app_link;
 
 // The multicast group session's seam to the network stack, the twin of
@@ -348,6 +376,8 @@ pub use wz_session_core::switchboard::EventInjector;
 #[allow(unused_variables)]
 #[allow(unused_mut)]
 #[allow(clippy::all)]
+// Totality debt TD-201 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reassembly_pool_mcu {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

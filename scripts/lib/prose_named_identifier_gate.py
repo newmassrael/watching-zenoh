@@ -288,8 +288,11 @@ UPSTREAM_UNCARRIED = frozenset(
         # `deploy/wz-config.toml`, so the tree names each one in code; what wz does with it
         # (a PICO_* limit, a register item, or n/a) is that row's class, the record these
         # pins stood in for.
+        # Two left this set: pico's default multicast locator and its bound on the peers a
+        # listening transport holds. The tree names each outside prose now, in the rows of
+        # `deploy/wz-config.toml` that judge them (the config text's preset and the limit on a
+        # session's faces) and in the message of the test that holds the arena to that bound.
         "Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY",
-        "Z_CONFIG_MULTICAST_LOCATOR_DEFAULT",
         "Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT",
         "Z_CONFIG_SCOUTING_WHAT_DEFAULT",
         "Z_CONGESTION_CONTROL_DEFAULT",
@@ -310,7 +313,6 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_LINK_CAP_FLOW_DATAGRAM",
         "Z_LINK_CAP_TRANSPORT_RAWETH",
         "Z_LINK_CAP_TRANSPORT_UNICAST",
-        "Z_LISTEN_MAX_CONNECTION_NB",
         # ⚠ A COMMENT IN THIS SET CANNOT CODE-SPELL THE NAME IT EXPLAINS. A first draft
         # (R2534) explained an entry in backticks and the gate then reported the tree as
         # CARRYING the name — a classification defeated by its own justification. Describe,

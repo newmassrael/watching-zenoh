@@ -254,7 +254,7 @@ def load(elf: str, entry: str) -> Model:
 
     waker: set[int] = set()
     for fn in funcs.values():
-        if fn.norm == "wz_runtime_coop::executor_static::waker_clone":
+        if fn.norm == "wz_runtime_coop::executor::waker_clone":
             for addr, w in words.items():
                 if w == fn.start + 1:
                     for j in range(4):

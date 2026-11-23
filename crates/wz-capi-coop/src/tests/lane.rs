@@ -1347,3 +1347,101 @@ fn a_reply_is_handed_from_the_lane_as_it_came() {
     assert!(lane.is_idle());
     assert_eq!(lane.counts(), LaneCounts::default());
 }
+
+/// What [`noting`] callbacks write: the tag, the payload's first byte and where it lies.
+type Noted = std::sync::Arc<std::sync::Mutex<Vec<(u8, u8, usize)>>>;
+
+/// A callback the tests count the samples of: each is noted with `tag`, its payload's first
+/// byte and where its payload lies.
+fn noting(tag: u8, seen: &Noted) -> crate::engine::SubscriberCallback {
+    let seen = seen.clone();
+    alloc::sync::Arc::new(crate::engine::LiveCallback::new(Box::new(
+        move |sample: &dyn SampleView| {
+            let payload = sample.payload();
+            seen.lock().unwrap().push((
+                tag,
+                payload.first().copied().unwrap_or(0),
+                payload.as_ptr() as usize,
+            ));
+        },
+    )))
+}
+
+/// The samples of a datagram a link lends, offered while the lane holds nothing, are held in the
+/// pending table where they lie: one entry for a sample however many subscribers it reaches, the
+/// link held back from the next datagram until they are handed out, and each handed to its
+/// callbacks in the order it came, from the row's callback it carries. Nothing goes through the
+/// lane.
+#[test]
+fn the_pending_samples_of_a_lent_datagram_are_handed_where_they_lie() {
+    use crate::lane::{LaneGate, SharedLane};
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    // SAFETY (every call on the lane, the gate and the lending here): this thread is the lane's one
+    // writer, as a session's step is under its lock, and the datagram outlives every use below.
+    let gate = unsafe { LaneGate::new(Quiet, lane.clone(), room(32)) };
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (first, second) = (noting(1, &seen), noting(2, &seen));
+    let datagram = [1u8, 1, 2, 2];
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.offer_to(1, Some(&first), &borrowed(&datagram[..2])) };
+    unsafe { lane.offer_to(2, Some(&second), &borrowed(&datagram[..2])) };
+    unsafe { lane.offer_to(1, Some(&first), &borrowed(&datagram[2..])) };
+    assert!(
+        gate.takes_input(),
+        "the table takes the datagram's next record"
+    );
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
+    assert!(
+        lane.lends_a_datagram(),
+        "sealed, the table holds the link back"
+    );
+    assert!(!gate.takes_input(), "and no further record is read");
+    assert_eq!(lane.handed_on(), 0, "nothing went through the lane");
+    assert!(lane.deliver_pending(|_, callback, sample| callback.hand(sample)));
+    let at = datagram.as_ptr() as usize;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 1, at), (2, 1, at), (1, 2, at + 2)],
+        "each sample handed where it lies, to each of its subscribers, in the order they came"
+    );
+    assert!(
+        !lane.lends_a_datagram(),
+        "handed out, the link is read again"
+    );
+    assert_eq!(lane.pending_counts(), (1, 2), "one round of two samples");
+    assert!(
+        !lane.deliver_pending(|_, _, _| panic!("the table was emptied")),
+        "nothing is left to hand"
+    );
+}
+
+/// A sample of a lent datagram offered while the lane holds a record not handed out yet goes
+/// into the lane after it, and the pending table takes nothing: what came first is handed out
+/// first. The CONTROL is the previous test, where the lane holds nothing.
+#[test]
+fn a_sample_behind_what_the_lane_holds_goes_through_the_lane() {
+    use crate::lane::SharedLane;
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first = noting(1, &seen);
+    // SAFETY (every call on the lane and the lending here): as the previous test's.
+    unsafe { lane.held() }.offer_sample(9, &filled(4, 9));
+    let datagram = [1u8, 1];
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.offer_to(1, Some(&first), &borrowed(&datagram[..])) };
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
+    assert!(
+        !lane.deliver_pending(|_, _, _| panic!("the table took a sample behind the lane's")),
+        "the pending table holds nothing"
+    );
+    assert_eq!(
+        lane.handed_on(),
+        2,
+        "both went through the lane, in the order they came"
+    );
+}
