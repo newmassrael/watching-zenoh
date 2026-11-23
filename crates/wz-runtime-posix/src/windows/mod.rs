@@ -528,11 +528,17 @@ impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
         let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
         let mut count = 0;
         let mut look = false;
+        let mut wakes = false;
         for wait in on {
             match (wait.on, fds.get_mut(count)) {
                 (WaitOn::Socket(socket), Some(entry)) => {
                     *entry = wait_entry(socket, wait.room);
                     count += 1;
+                }
+                (WaitOn::Wake(socket), Some(entry)) => {
+                    *entry = wait_entry(socket, false);
+                    count += 1;
+                    wakes = true;
                 }
                 // A handle this cannot name to the system, or one past the set: the bounded look,
                 // so it is not starved behind a wait on the others.
@@ -550,6 +556,14 @@ impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
         // timeout bounds the wait. A failed wait is a quiet link: the step that follows reads and
         // reports the error.
         unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) };
+        // A wake found ready is made quiet, so the next wait waits for the next word.
+        if wakes {
+            for wait in on {
+                if let WaitOn::Wake(socket) = wait.on {
+                    net::drain_wake(socket);
+                }
+            }
+        }
     }
 
     fn wait_room(&self, on: wz_runtime_coop::session_drive::WaitOn, timeout_us: u64) -> bool {
@@ -558,9 +572,17 @@ impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
                 socket,
                 i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
             ),
-            // Not a socket of this platform's: the send that follows answers.
-            wz_runtime_coop::session_drive::WaitOn::AppLink(_) => true,
+            // Not a socket that takes bytes: the send that follows answers.
+            wz_runtime_coop::session_drive::WaitOn::AppLink(_)
+            | wz_runtime_coop::session_drive::WaitOn::Wake(_) => true,
         }
+    }
+
+    // A datagram socket on the loopback that sends itself a byte: `WSAPoll` waits on sockets
+    // alone. Made once for a session, and closed when the last waker of it goes.
+    #[cfg(feature = "alloc")]
+    fn wake(&self) -> Option<wz_runtime_coop::session_drive::StackWake> {
+        net::self_wake()
     }
 }
 }

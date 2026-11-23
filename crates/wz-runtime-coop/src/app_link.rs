@@ -66,7 +66,7 @@ use crate::link_cells::CellRc;
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     Dialled, LinkListener, LinkOpenError, LinkProto, LinkWait, LinkWaits, Locator, NoWaits,
-    OpenedLink, PendingDial, SessionLinks, WaitOn,
+    OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -112,6 +112,7 @@ mod wait_parked {
 
     use alloc::sync::Arc;
     use alloc::task::Wake;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use core::task::{Context, Waker};
     use core::time::Duration;
 
@@ -120,10 +121,28 @@ mod wait_parked {
     #[cfg(feature = "host-lock-sys")]
     use wz_host_sync::{Condvar, Mutex, MutexGuard};
 
-    /// The count of the wakes a link has had, and the condition variable its waiters wait on.
+    /// The count of the wakes a link has had, the condition variable its waiters wait on, and
+    /// whether the stack's wake was woken since a wait last took it.
     struct LinkWake {
         wakes: Mutex<u64>,
         changed: Condvar,
+        woken: AtomicBool,
+    }
+
+    /// The stack's wake ([`Waits::stack_waker`]): it marks itself woken before it wakes the
+    /// link's waiters, so a wait that begins after the wake still finds it, as a descriptor
+    /// stays readable until it is read.
+    struct StackWoken(Arc<LinkWake>);
+
+    impl Wake for StackWoken {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.woken.store(true, Ordering::Release);
+            Wake::wake_by_ref(&self.0);
+        }
     }
 
     impl Wake for LinkWake {
@@ -243,6 +262,7 @@ mod wait_parked {
             let wake = Arc::new(LinkWake {
                 wakes: Mutex::new(0),
                 changed: Condvar::new(),
+                woken: AtomicBool::new(false),
             });
             let waker = Waker::from(Arc::clone(&wake));
             Self { wake, waker }
@@ -250,6 +270,17 @@ mod wait_parked {
     }
 
     impl Waits {
+        /// The stack's wake of these: a waker of its own, made when asked, that ends a wait on
+        /// them from any thread, and is taken by the wait that finds it ([`Self::take_woken`]).
+        pub(super) fn stack_waker(&self) -> Option<Waker> {
+            Some(Waker::from(Arc::new(StackWoken(Arc::clone(&self.wake)))))
+        }
+
+        /// Whether the stack's wake was woken since a wait last took it; taking it makes it quiet.
+        pub(super) fn take_woken(&self) -> bool {
+            self.wake.woken.swap(false, Ordering::AcqRel)
+        }
+
         /// How many wakes the link has had: read before `pending` is asked, so a wake that comes
         /// between the answer and the wait ends the wait at once.
         fn seen(&self) -> u64 {
@@ -314,6 +345,16 @@ mod wait_turns {
         /// The waits of a new link: nothing to make.
         pub(super) const fn new() -> Self {
             Self
+        }
+
+        /// No wake: an image's wait looks and returns, and has no thread for one to wake.
+        pub(super) fn stack_waker(&self) -> Option<Waker> {
+            None
+        }
+
+        /// Never woken: an image makes no wake.
+        pub(super) fn take_woken(&self) -> bool {
+            false
         }
 
         /// Look while `pending` answers `true`, for a bounded number of turns: an image's loop
@@ -577,8 +618,11 @@ impl AppWaits {
     /// offers again and no call of the program's announces. A handle of another stack's is never
     /// ready here; [`LinkWaits::wait`] bounds the wait at a look for it.
     fn ready(&self, wait: LinkWait, waker: Option<&core::task::Waker>) -> bool {
-        let WaitOn::AppLink(handle) = wait.on else {
-            return false;
+        let handle = match wait.on {
+            WaitOn::AppLink(handle) => handle,
+            WaitOn::Wake(_) => return self.wake.take_woken(),
+            // A socket is not this transport's: [`LinkWaits::wait`] bounds the wait at a look.
+            WaitOn::Socket(_) => return false,
         };
         let interest = LinkInterest {
             input: true,
@@ -604,7 +648,7 @@ impl LinkWaits for AppWaits {
         if on.is_empty() {
             return;
         }
-        let foreign = on.iter().any(|wait| !matches!(wait.on, WaitOn::AppLink(_)));
+        let foreign = on.iter().any(|wait| matches!(wait.on, WaitOn::Socket(_)));
         let timeout_ms = if foreign {
             timeout_ms.min(1)
         } else {
@@ -628,6 +672,15 @@ impl LinkWaits for AppWaits {
             timeout_us.div_ceil(1_000),
             || {},
         )
+    }
+
+    // The transport's one wake, which a wait beside it takes when it finds it woken. An image
+    // has no thread to park, and no wake to give.
+    fn wake(&self) -> Option<StackWake> {
+        Some(StackWake {
+            on: WaitOn::Wake(0),
+            waker: self.wake.stack_waker()?,
+        })
     }
 }
 
@@ -2620,6 +2673,56 @@ mod tests {
         );
         let mut buf = [0u8; 8];
         assert_eq!(socket.try_recv(&mut buf), Err(AppLinkError::Closed));
+    }
+
+    /// The transport's wake ends a wait over its links once its waker is woken from another
+    /// thread, though no link has anything, and also when it was woken before the wait began; the
+    /// wait that finds it takes it. Before that, the wait sleeps its time. Turned red by a wait
+    /// that sleeps past the wake, loses one that came first, or leaves it woken.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn the_transports_wake_ends_the_wait_beside_its_links() {
+        use std::time::{Duration, Instant};
+        let (_script, transport) = transport();
+        let waits = AppWaits::new(Arc::clone(&transport));
+        let socket = AppDatagramSocket::dial(&session(&transport, 64), &waits, PEER).unwrap();
+        let wake = waits.wake().expect("a host's transport makes a wake");
+        let set = [
+            LinkWait::input(socket.input_wait().expect("a wait for the owner")),
+            LinkWait::input(wake.on),
+        ];
+        let started = Instant::now();
+        waits.wait(&set, 50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "CONTROL: nothing woke it"
+        );
+        let waker = wake.waker.clone();
+        let waking = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            waker.wake();
+        });
+        let started = Instant::now();
+        waits.wait(&set, 10_000);
+        let waited = started.elapsed();
+        waking.join().expect("the waking thread");
+        assert!(
+            waited < Duration::from_secs(5),
+            "the wake ended the wait: {waited:?}"
+        );
+        let started = Instant::now();
+        waits.wait(&set, 50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "the wait that found the wake took it"
+        );
+        wake.waker.wake_by_ref();
+        let started = Instant::now();
+        waits.wait(&set, 10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a wake that came before the wait began ends it"
+        );
     }
 
     /// A handle of another stack's is not this transport's to wait on: the wait ends within a

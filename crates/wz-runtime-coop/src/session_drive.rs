@@ -323,6 +323,20 @@ pub enum WaitOn {
     /// A link of the program's transport by its handle (`wz_session_core::app_link_table`'s
     /// `LinkHandle`), which is never reused: a wait on one whose link has gone answers at once.
     AppLink(u64),
+    /// A wake the stack made for a session ([`LinkWaits::wake`]): ready once its waker is woken
+    /// from any thread, and made quiet again by the wait that finds it so.
+    Wake(usize),
+}
+
+/// A wake a stack makes once for a session ([`LinkWaits::wake`]): what a wait names it by, and
+/// the waker that makes it ready from any thread. Whoever holds the waker ends the session's next
+/// wait over its links by waking it, as the program's word that its clock moved on does.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub struct StackWake {
+    /// What a wait names the wake by.
+    pub on: WaitOn,
+    /// What makes the wake ready.
+    pub waker: core::task::Waker,
 }
 
 /// One entry of a wait over several links ([`LinkWaits::wait`]): the link, and whether the wait
@@ -369,6 +383,14 @@ pub trait LinkWaits: Send + Sync {
     /// (or once it has failed or gone, which the send that follows reports), `false` when it
     /// still would not when the time is up.
     fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool;
+
+    /// A wake of this stack's, made once for a session at its open: a handle a wait over the
+    /// session's links names beside them ([`WaitOn::Wake`]), and the waker any thread makes it
+    /// ready with. `None` for a stack that has none, whose waits a wake beside them bounds at a
+    /// look instead. The provided form has none.
+    fn wake(&self) -> Option<StackWake> {
+        None
+    }
 }
 
 /// The waits of a stack whose links name nothing to wait on: each of them waits in its own loop,
