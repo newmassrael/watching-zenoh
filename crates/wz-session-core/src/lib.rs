@@ -186,8 +186,6 @@ pub mod bounded;
 /// The key arena of a session: one span of its arena that the rows of its tables keep their keys
 /// in, each row a [`key_arena::KeyRef`] of a few words rather than a buffer of the longest key.
 /// Unconditional, like [`bounded`].
-// Totality debt TD-015 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod key_arena;
 
 /// The pools of rows the faces of a session share: a slab of rows of one kind lent from the
