@@ -22,6 +22,12 @@
 //! row grades; a row locked at 0 grades the most, since it claims no window allocates at all.
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
+//!
+//! With `WZ_NO_HEAP_SITES` set, each family is counted in one window of a few rounds and every
+//! allocation of its counted rounds records its stack: one `no-heap-site:` line is printed per
+//! round and site, the site being the innermost frame of a wz crate and the door the calling
+//! thread entered, with the allocations a round made there. The family lines are not printed
+//! then, since the records' own allocations fall in the windows; the gate reads no site line.
 //! `scripts/lib/no_heap_ratchet_gate.py --check` holds those lines to `deploy/no_heap_ratchet.json`:
 //! the allocations of a round may only fall, and a family that reached 0 stays there. Layer C1nh
 //! builds and runs this file; its one test is `#[ignore]`d, so a default sweep does not count a
@@ -47,8 +53,13 @@
 
 #![cfg(not(feature = "engine-tokio"))]
 
+use std::alloc::{GlobalAlloc, Layout};
+use std::backtrace::Backtrace;
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::CStr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use wz_capi_pico::abi::z_owned_keyexpr_t;
@@ -67,7 +78,142 @@ use pipe_pair::{
 };
 
 #[global_allocator]
-static ALLOCATOR: Injecting = Injecting;
+static ALLOCATOR: Sited = Sited;
+
+// ---------------------------------------------------------------------------------------------
+// Where the allocations are made, recorded when `WZ_NO_HEAP_SITES` is set.
+
+/// The variable that asks where each counted allocation is made, as well as how many there are.
+const SITES_VARIABLE: &str = "WZ_NO_HEAP_SITES";
+/// The prefix of a line that says where a round's allocations are made; the gate reads none.
+const SITE_PREFIX: &str = "no-heap-site:";
+/// The rounds a family is counted in, in one window, when its sites are recorded: a record
+/// captures the stack of every allocation, which takes far longer than the allocation.
+const SITE_ROUNDS: usize = 3;
+/// No round's counted rounds are running.
+const NO_ROUND: usize = usize::MAX;
+
+/// Whether the sites are recorded.
+static SITES_ON: AtomicBool = AtomicBool::new(false);
+/// The round whose counted rounds are running, as its place in `Round::ALL`, or `NO_ROUND`.
+static SITE_ROUND: AtomicUsize = AtomicUsize::new(NO_ROUND);
+/// How many allocations each round made at each site: the round's place and the site.
+static SITES: Mutex<BTreeMap<(usize, String), u64>> = Mutex::new(BTreeMap::new());
+
+thread_local! {
+    /// Whether this thread is recording a site, whose own allocations are not recorded. A `const`
+    /// initialisation of a type with no destructor, so reading it inside the allocator does not
+    /// itself allocate.
+    static RECORDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The pair's counting allocator, which also records where each allocation of a counted round
+/// is made when the sites are asked for.
+struct Sited;
+
+// SAFETY: every call is forwarded to the pair's allocator unchanged; a record only reads the
+// stack and writes this file's own table.
+unsafe impl GlobalAlloc for Sited {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { Injecting.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// Record where the allocation being made is, when the sites are asked for and a round's counted
+/// rounds are running. The record's own allocations are not recorded.
+fn record_site() {
+    if !SITES_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    let round = SITE_ROUND.load(Ordering::Relaxed);
+    if round == NO_ROUND || RECORDING.with(Cell::get) {
+        return;
+    }
+    RECORDING.with(|recording| recording.set(true));
+    let site = site_of(&Backtrace::force_capture().to_string());
+    *SITES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry((round, site))
+        .or_insert(0) += 1;
+    RECORDING.with(|recording| recording.set(false));
+}
+
+/// A frame's symbol with the `<` of a trait implementation's path taken off.
+fn bare(symbol: &str) -> &str {
+    symbol.trim_start_matches('<')
+}
+
+/// Where an allocation was made, read off its stack: the innermost frame of a wz crate, with its
+/// place in the source where the stack has one, and the outermost frame of the library, which on
+/// the calling thread is the door the program called.
+fn site_of(stack: &str) -> String {
+    let mut frames: Vec<(&str, Option<&str>)> = Vec::new();
+    for line in stack.lines().map(str::trim) {
+        if let Some(at) = line.strip_prefix("at ") {
+            if let Some(last) = frames.last_mut() {
+                last.1.get_or_insert(at);
+            }
+        } else if let Some((index, symbol)) = line.split_once(": ") {
+            if !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()) {
+                frames.push((symbol, None));
+            }
+        }
+    }
+    let inner = frames
+        .iter()
+        .find(|(symbol, _)| bare(symbol).starts_with("wz_"));
+    let door = frames
+        .iter()
+        .rev()
+        .find(|(symbol, _)| bare(symbol).starts_with("wz_capi_pico::"));
+    let place = |at: &Option<&str>| {
+        at.map(|at| {
+            at.rsplit_once("crates/")
+                .map_or(at, |(_, rest)| rest)
+                .to_owned()
+        })
+        .unwrap_or_default()
+    };
+    match (inner, door) {
+        (Some((symbol, at)), Some((door, _))) => format!("{symbol} [{}] <- {door}", place(at)),
+        (Some((symbol, at)), None) => format!("{symbol} [{}]", place(at)),
+        (None, _) => String::from("(no wz frame)"),
+    }
+}
+
+/// The rounds of a window: fewer when the sites are recorded.
+fn rounds() -> usize {
+    if SITES_ON.load(Ordering::Relaxed) {
+        SITE_ROUNDS
+    } else {
+        ROUNDS
+    }
+}
+
+/// The windows of a family: one when the sites are recorded.
+fn windows() -> usize {
+    if SITES_ON.load(Ordering::Relaxed) {
+        1
+    } else {
+        WINDOWS
+    }
+}
 
 /// Rounds of each family run before the count, so that what the library makes on the first
 /// exchanges (a route, a buffer grown to its size) is made, and rounds counted.
@@ -1022,11 +1168,17 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
         bench.run(round);
     }
     std::thread::sleep(SETTLE);
+    let place = Round::ALL
+        .iter()
+        .position(|of| *of == round)
+        .unwrap_or(NO_ROUND);
     open_window(0);
-    for _ in 0..ROUNDS {
+    SITE_ROUND.store(place, Ordering::SeqCst);
+    for _ in 0..rounds() {
         bench.run(round);
     }
     std::thread::sleep(SETTLE);
+    SITE_ROUND.store(NO_ROUND, Ordering::SeqCst);
     let seen = close_window();
     assert!(
         !seen.fired,
@@ -1037,11 +1189,11 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
 
 /// Every window of `round`.
 unsafe fn measure(bench: &mut Bench, round: Round) -> Vec<Seen> {
-    let mut windows = Vec::with_capacity(WINDOWS);
-    for _ in 0..WINDOWS {
-        windows.push(window(bench, round));
+    let mut seen = Vec::with_capacity(windows());
+    for _ in 0..windows() {
+        seen.push(window(bench, round));
     }
-    windows
+    seen
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1065,6 +1217,7 @@ fn allocations_after_open_are_counted_per_operation_family() {
         );
     }
 
+    SITES_ON.store(std::env::var_os(SITES_VARIABLE).is_some(), Ordering::SeqCst);
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
@@ -1080,6 +1233,25 @@ fn allocations_after_open_are_counted_per_operation_family() {
     assert!(balanced, "every closure the library was handed is dropped");
     assert!(dropped, "both transports are let go");
     assert_eq!(PANICS.load(Ordering::SeqCst), 0, "a thread panicked");
+
+    // With the sites recorded, a window's count holds the records' own allocations too, so the
+    // reading is not printed: what is printed is each round's allocations a round, at each site.
+    if SITES_ON.load(Ordering::SeqCst) {
+        let sites = std::mem::take(&mut *SITES.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut lines: Vec<(usize, u64, String)> = sites
+            .into_iter()
+            .map(|((round, site), count)| (round, count, site))
+            .collect();
+        lines.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        for (round, count, site) in lines {
+            let name = Round::ALL
+                .get(round)
+                .map_or_else(|| String::from("?"), |round| format!("{round:?}"));
+            let per_round = count as f64 / SITE_ROUNDS as f64;
+            println!("{SITE_PREFIX} {name} per_round={per_round:.2} {site}");
+        }
+        return;
+    }
 
     let mut reading = String::new();
     for (name, round, part) in FAMILIES {
