@@ -343,8 +343,6 @@ pub mod pool_gauge;
 /// Frame boundaries over bytes that already arrived, for every length-prefixed stream link
 /// ([`stream_window::RxWindow`]): the host's reader and a node's reader run the same machine.
 /// Unconditional, no_std and no_alloc; the `Vec` carry exists with the `alloc` feature.
-// Totality debt TD-033 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stream_window;
 
 /// W3 bounded owned-mirror adapters (`owned_bytes` / `owned_string`) for
