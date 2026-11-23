@@ -242,7 +242,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// through and whose zid names a self-echo.
     pub(super) fn dispatch_in_place<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<Q>,
+        peer: &mut SubscriberPeer<Q>,
         record: &InPlaceRecord<'_, '_>,
     ) {
         // A lent Request or Response is the queryables' or the pending gets'.
@@ -358,7 +358,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
     fn dispatch_owned_projection<Q: Storage>(
         &mut self,
-        peer: &SubscriberPeer<Q>,
+        peer: &mut SubscriberPeer<Q>,
         push: &Push<'_>,
         reliability: Reliability,
     ) {
