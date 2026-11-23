@@ -119,6 +119,8 @@ pub mod arena;
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;
+// What an open reads its session's config from, and how the endpoints' texts reach its rows.
+pub mod open_source;
 // What the session hands its subscribers' callbacks after its lock, in a ring of its arena.
 // Totality debt TD-154 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]

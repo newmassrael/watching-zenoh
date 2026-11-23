@@ -121,6 +121,7 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
 use crate::engine::{EntryBytes, SubscriberRow};
+use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -331,19 +332,22 @@ pub struct ArenaPlan {
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
-    pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+    pub fn of<E: EndpointList>(
+        config: &CoopConfig<E>,
+        limits: &SessionLimits,
+    ) -> Result<Self, ArenaRefused> {
         hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
         hold(
             "MAX_STATIC_CONNECT",
-            config.endpoints.len(),
+            config.endpoints.count(),
             caps::MAX_STATIC_CONNECT,
         )?;
         hold(
             "MAX_ADMIN_LOCATORS",
-            config.listen.len(),
+            config.listen.count(),
             caps::MAX_ADMIN_LOCATORS,
         )?;
-        if !config.listen.is_empty() {
+        if config.listen.count() > 0 {
             hold(
                 "MAX_ACCEPT_PENDING",
                 config.accept_pending,
@@ -406,7 +410,7 @@ impl ArenaPlan {
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
             handle_bytes: 0,
-            endpoint_rows: (config.endpoints.len(), config.listen.len()),
+            endpoint_rows: (config.endpoints.count(), config.listen.count()),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -776,7 +780,7 @@ fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize
 /// advertises, which is the most a peer sends once the two have negotiated, held to the batch the
 /// session's `limits` state (`PICO_UNICAST_BATCH_BYTES`) under the build's. A batch over either
 /// is refused, as a stage after the build only lowers the memory the build fixes.
-fn link_batch(config: &CoopConfig, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+fn link_batch<E>(config: &CoopConfig<E>, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
     let ceiling = lent::<{ caps::PICO_UNICAST_BATCH_BYTES }>(
         "PICO_UNICAST_BATCH_BYTES",
         Quota::at_most(limits.pico_unicast_batch_bytes()),
@@ -1016,10 +1020,10 @@ fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaR
 /// join, whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks
 /// this). A session that only listens or only joins groups never dials from that face: a face it
 /// attaches later is one of `max_faces`.
-pub(crate) fn dials(config: &CoopConfig) -> bool {
+pub(crate) fn dials(config: &CoopConfig<impl EndpointList>) -> bool {
     dials_of(
-        config.endpoints.len(),
-        config.listen.len(),
+        config.endpoints.count(),
+        config.listen.count(),
         config.groups.len(),
     )
 }
@@ -1034,7 +1038,7 @@ pub(crate) fn dials_of(endpoints: usize, listens: usize, groups: usize) -> bool 
 /// The faces a session `config` opens may hold at once: the dial role's when it dials
 /// (`dials`), as many besides as `max_faces` admits, a link still in its handshake among them,
 /// and one for each group it joins. `None` past the address space.
-fn faces_of(config: &CoopConfig) -> Option<usize> {
+fn faces_of(config: &CoopConfig<impl EndpointList>) -> Option<usize> {
     usize::from(dials(config))
         .checked_add(config.max_faces)?
         .checked_add(config.groups.len())
@@ -1047,8 +1051,8 @@ fn faces_of(config: &CoopConfig) -> Option<usize> {
 /// of them: the plan's link rows are sized by it, and an ABI that reports the session's memory
 /// reads it here. A link in its handshake past the faces holds buffers only, to be taken off its
 /// port and closed; the runtime's task cells are reserved for the faces (`engine::RuntimeTables`).
-pub fn links_of(config: &CoopConfig) -> Option<usize> {
-    let handshakes = if config.listen.is_empty() {
+pub fn links_of(config: &CoopConfig<impl EndpointList>) -> Option<usize> {
+    let handshakes = if config.listen.count() == 0 {
         0
     } else {
         config.accept_pending

@@ -72,8 +72,8 @@ use wz_runtime_coop::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
-    Dial, DialEndpoint, EndpointTextRefused, EndpointTexts, FaceRecord, FaceSession, IdleWait,
-    Link, LinkSupervisor, Moved,
+    Dial, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
+    Moved,
 };
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
@@ -103,6 +103,8 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 use wz_session_core::locator_directory::LocatorText;
+
+use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(not(feature = "shared-key-ids"))]
@@ -225,14 +227,16 @@ use {
 };
 
 /// How a session is opened: what the ABI's config says, which the engine turns into the
-/// session's parameters.
-pub struct CoopConfig {
+/// session's parameters. Its lists of endpoints (`E`) hold their texts in the host's form, or only
+/// how many there are in a source's ([`crate::open_source::Counted`]), which writes the texts into
+/// the session's rows itself ([`crate::open_source::OpenSource`]).
+pub struct CoopConfig<E = Vec<String>> {
     /// The endpoints to dial (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`), in order: the session
     /// is opened to the first that answers, as zenoh-pico's client opens to the first of its
     /// `connect` locators that does. At most the build's `MAX_STATIC_CONNECT`, each at most
     /// `MAX_LOCATOR_LEN` bytes: the open writes each into a row of the session's arena and keeps
     /// no copy of the list.
-    pub endpoints: Vec<String>,
+    pub endpoints: E,
     /// The role the session announces.
     pub whatami: WhatAmI,
     /// The session's zid as the config states it, up to sixteen bytes; `None` mints sixteen
@@ -271,7 +275,7 @@ pub struct CoopConfig {
     /// listener, and is open as soon as it is bound (`listen`). At most the build's
     /// `MAX_ADMIN_LOCATORS`, each at most `MAX_LOCATOR_LEN` bytes, written into rows as the
     /// endpoints are.
-    pub listen: Vec<String>,
+    pub listen: E,
     /// How many inbound links may be in their handshake at once; one that arrives past it is
     /// closed unread. At most the session's `MAX_ACCEPT_PENDING` (zenoh's
     /// `transport/unicast/accept_pending`), which [`crate::arena::admitted_handshakes`] gives;
@@ -299,6 +303,55 @@ pub struct CoopConfig {
     /// The session limits the ABI resolved for the session, which its tables are held to:
     /// `SessionLimits::defaults()` for an ABI that states none.
     pub limits: SessionLimits,
+}
+
+impl CoopConfig {
+    /// The config in a source's form, its lists counted, and the lists, the host's texts.
+    pub(crate) fn counted(self) -> (CoopConfig<Counted>, Vec<String>, Vec<String>) {
+        let Self {
+            endpoints,
+            whatami,
+            zid,
+            batch_size,
+            lease_ms,
+            keep_alive,
+            sn_resolution,
+            link_rx,
+            tx_queue,
+            timeouts,
+            open_timeout_ms,
+            redial_ms,
+            idle_wait_ms,
+            listen,
+            accept_pending,
+            max_faces,
+            groups,
+            clock_moves,
+            limits,
+        } = self;
+        let config = CoopConfig {
+            endpoints: Counted(endpoints.len()),
+            whatami,
+            zid,
+            batch_size,
+            lease_ms,
+            keep_alive,
+            sn_resolution,
+            link_rx,
+            tx_queue,
+            timeouts,
+            open_timeout_ms,
+            redial_ms,
+            idle_wait_ms,
+            listen: Counted(listen.len()),
+            accept_pending,
+            max_faces,
+            groups,
+            clock_moves,
+            limits,
+        };
+        (config, endpoints, listen)
+    }
 }
 
 /// The program's word that a clock it moves has moved on, as a read of this engine waits on it
@@ -355,7 +408,7 @@ fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleW
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
 /// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
-fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
+fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
     SessionPolicy::defaults()
 }
 
@@ -363,7 +416,7 @@ fn resolve_policy(_config: &CoopConfig) -> SessionPolicy {
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
 /// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
 /// handed can put in it (`lane::holding_a_read`).
-fn resolve_limits(config: &CoopConfig) -> SessionLimits {
+fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     crate::lane::holding_a_read::<
         { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
@@ -401,22 +454,6 @@ impl EndpointRefusal {
             endpoint: kept,
             why,
         }
-    }
-}
-
-/// The open's refusal of the endpoint `text` that has no row: one longer than a row is refused as
-/// `as_open`'s endpoint, one to dial or one to listen on; one past the rows the plan laid out,
-/// which counted them, as an arena that does not hold the session.
-fn unwritten(
-    text: &str,
-    why: EndpointTextRefused,
-    as_open: fn(EndpointRefusal) -> OpenError,
-) -> OpenError {
-    match why {
-        EndpointTextRefused::TooLong { .. } => {
-            as_open(EndpointRefusal::new(text, Refusal::TextTooLong))
-        }
-        EndpointTextRefused::Full => OpenError::Arena(ArenaRefused::TooLarge),
     }
 }
 
@@ -642,8 +679,8 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
 
 /// The zid `zid-derivation = address-ports` derives from the `listen` endpoints and eight bytes
 /// of `entropy` (see `wz_session_core::zid_derivation`), in its wire form.
-pub(crate) fn derived_zid(
-    listen: &[String],
+pub(crate) fn derived_zid<T: AsRef<str>>(
+    listen: impl IntoIterator<Item = T>,
     entropy: &mut dyn EntropySource,
 ) -> Result<SessionZid, OpenError> {
     use wz_runtime_coop::session_drive::LinkProto;
@@ -658,7 +695,7 @@ pub(crate) fn derived_zid(
     // address or a port, and linking it put some thirty kilobytes into every cooperative build.
     let mut facts = ListenerFacts::new();
     for endpoint in listen {
-        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint) else {
+        let Ok(at) = wz_session_mcu::dial::parse_listen_locator(endpoint.as_ref()) else {
             continue;
         };
         let transport = match at.proto {
@@ -1440,7 +1477,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     groups: Vec<GroupFace>,
     /// Each handshake's cookie key and nonce come from here.
     entropy: SharedEntropy,
-    config: CoopConfig,
+    /// The config the session opened with, which counts its endpoints: their texts are the
+    /// session's rows (`endpoints`).
+    config: CoopConfig<Counted>,
     /// The policies the session runs under, as its open was handed them: every link's session
     /// is given them, and the replay and the admission of a second link follow them.
     policy: SessionPolicy,
@@ -2088,7 +2127,7 @@ impl RuntimeTables {
     /// The tables of a session `config` opens, its task cells together at most the build's
     /// `MAX_TASKS`: the groups' first, as a session that cannot join a group it was told to does
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
-    pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig) -> Self {
+    pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig<impl EndpointList>) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
         let links = usize::from(crate::arena::dials(config))
             .saturating_add(config.max_faces)
@@ -3496,9 +3535,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         )
     }
 
-    /// [`Self::open_in`], its config made by `make_config` inside the open, once, before anything
-    /// else: an ABI that builds the config from its own values hands the maker, so the config is
-    /// never a value of its frame, which the open's handshake runs under.
+    /// [`Self::open_in`], its config read from `source` inside the open, once, before anything
+    /// else: an ABI that builds the config from its own values hands the source (a maker of the
+    /// config is one), so the config is never a value of its frame, which the open's handshake runs
+    /// under. The source writes the endpoints' texts into the rows the open lends for them, and is
+    /// let go of before anything is bound or dialled ([`OpenSource`]).
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
     /// where it is kept (the session's state and its arena's tables, in the engine's own
@@ -3517,21 +3558,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
-        make_config: impl FnOnce() -> CoopConfig,
+        source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
         handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
         let engine = Self::assemble(
-            links,
-            clock,
-            entropy,
-            make_config,
-            policy,
-            key_ids,
-            memory,
-            handle,
+            links, clock, entropy, source, policy, key_ids, memory, handle,
         )?;
         engine.open_links()?;
         Ok(engine)
@@ -3548,13 +3582,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
-        make_config: impl FnOnce() -> CoopConfig,
+        source: impl OpenSource,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
         handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
-        let mut config = make_config();
+        let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
@@ -3569,6 +3603,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));
+        // The texts of the endpoints, each written once by the source into the row the plan laid
+        // out for it: the session names an endpoint by its row from here, and what the source
+        // held goes with its writer, here, before anything is bound or dialled.
+        let mut endpoints = arena.lend_endpoints(&plan).map_err(OpenError::Arena)?;
+        write_endpoints(&mut EndpointWriter::over(&mut endpoints))?;
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
         // and given back only when the session is let go, after its last delivery.
         let samples =
@@ -3577,9 +3616,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
             (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(&mut entropy)?,
-            (None, wz_session_core::policy::ZidDerivation::AddressPorts) => {
-                derived_zid(&config.listen, &mut entropy)?
-            }
+            (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zid(
+                (0..endpoints.listens()).map(|at| endpoints.listen_text(at)),
+                &mut entropy,
+            )?,
         };
         // The tables of the session's own declarations, lent from the arena as the plan counts
         // them. Declared after the arena, so a refusal before `core` holds them drops them first.
@@ -3649,22 +3689,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The dial role's link, each port, each group and the clock's word: what a session waits on
         // from its open. A face accepted or attached later grows the buffer once.
         let wait_room = 2usize
-            .saturating_add(config.listen.len())
+            .saturating_add(config.listen.count())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
-        // The texts of the endpoints, each written once into the row the plan laid out for it: the
-        // session names an endpoint by its row from here, and the config's copies go with the open.
-        let mut endpoints = arena.lend_endpoints(&plan).map_err(OpenError::Arena)?;
-        for text in core::mem::take(&mut config.endpoints) {
-            endpoints
-                .write_dial(&text)
-                .map_err(|why| unwritten(&text, why, OpenError::Unreachable))?;
-        }
-        for text in core::mem::take(&mut config.listen) {
-            endpoints
-                .write_listen(&text)
-                .map_err(|why| unwritten(&text, why, OpenError::Listen))?;
-        }
         let core = Core {
             local,
             endpoints,

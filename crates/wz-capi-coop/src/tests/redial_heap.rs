@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A session whose link is lost dials its endpoints again with no memory of the heap: the text of
-//! each endpoint is a row its open wrote, a dial names its row, and the refusal of a dial keeps
-//! the endpoint in a row's length. The allocations counted are the calling thread's, the thread a
-//! cooperative session's reads run on; the router stand-in's own are another thread's.
+//! What a session allocates for its endpoints: nothing once it is open, and at its open nothing
+//! for each endpoint when its source writes the texts into its rows itself. A session whose link
+//! is lost dials its endpoints again with no memory of the heap: the text of each endpoint is a
+//! row its open wrote, a dial names its row, and the refusal of a dial keeps the endpoint in a
+//! row's length. The allocations counted are the calling thread's, the thread a cooperative
+//! session's open and reads run on; the router stand-in's own are another thread's.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -18,9 +20,12 @@ use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, Session
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+use wz_session_core::policy::SessionPolicy;
 
-use super::{config, CatchAll, Command, Router, LOOPBACK};
-use crate::{CoopConfig, CoopEngine};
+use super::{client_config, config, CatchAll, Command, Router, LOOPBACK};
+use crate::arena::AllocatorMemory;
+use crate::open_source::{Counted, EndpointWriter, OpenSource};
+use crate::{CoopConfig, CoopEngine, OpenError, OpenKeyIds};
 
 thread_local! {
     /// Whether the thread's allocations are being counted.
@@ -163,5 +168,100 @@ fn a_session_that_dials_its_lost_link_again_allocates_nothing() {
     assert_eq!(
         allocations, 0,
         "a dial again of a lost link takes no memory of the heap"
+    );
+}
+
+/// A source whose config counts its endpoints and whose texts are `'static`: what an ABI that
+/// keeps its texts in a form of its own hands an open.
+struct Written {
+    config: CoopConfig<Counted>,
+    dial: &'static [&'static str],
+}
+
+impl OpenSource for Written {
+    fn into_parts(
+        self,
+    ) -> (
+        CoopConfig<Counted>,
+        impl FnOnce(&mut EndpointWriter<'_>) -> Result<(), OpenError>,
+    ) {
+        let dial = self.dial;
+        let write = move |writer: &mut EndpointWriter<'_>| -> Result<(), OpenError> {
+            for text in dial {
+                writer.dial(text)?;
+            }
+            Ok(())
+        };
+        (self.config, write)
+    }
+}
+
+/// Endpoints of the loopback no session here reaches: every dial of them is refused.
+const ONE: &[&str] = &["tcp/127.0.0.1:1"];
+const THREE: &[&str] = &["tcp/127.0.0.1:1", "tcp/127.0.0.1:2", "tcp/127.0.0.1:3"];
+
+/// Links whose every dial is refused at once.
+fn refusing() -> Refusals {
+    Refusals {
+        inner: PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        refusing: Arc::new(AtomicBool::new(true)),
+        dials: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+/// The allocations of an open from `source` whose dials are all refused, and that it was refused
+/// as unreachable.
+fn open_counted(source: impl OpenSource) -> u64 {
+    let mut refused = None;
+    let allocations = counted(|| {
+        refused = CoopEngine::open_made_in(
+            refusing(),
+            PosixClock,
+            PosixEntropy,
+            source,
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            &AllocatorMemory,
+            None,
+        )
+        .err();
+    });
+    assert!(
+        matches!(refused, Some(OpenError::Unreachable(_))),
+        "every dial is refused: {refused:?}"
+    );
+    allocations
+}
+
+/// An open whose source writes its endpoints' texts into the session's rows itself allocates as
+/// much for three endpoints as for one: no text of an endpoint is a value of the heap at the open.
+/// The CONTROL is the host's form, whose config holds a text of the heap for each endpoint: there
+/// three endpoints allocate more than one, so the count sees an endpoint's text where it is one.
+#[test]
+fn an_open_whose_source_writes_the_texts_allocates_nothing_for_each_endpoint() {
+    let written = |dial: &'static [&'static str]| Written {
+        config: CoopConfig {
+            endpoints: dial.iter().map(|text| (*text).to_owned()).collect(),
+            ..client_config()
+        }
+        .counted()
+        .0,
+        dial,
+    };
+    let (one, three) = (written(ONE), written(THREE));
+    assert_eq!(
+        open_counted(one),
+        open_counted(three),
+        "the source's texts take no memory of the heap at the open"
+    );
+    let host = |dial: &'static [&'static str]| {
+        move || CoopConfig {
+            endpoints: dial.iter().map(|text| (*text).to_owned()).collect(),
+            ..client_config()
+        }
+    };
+    assert!(
+        open_counted(host(ONE)) < open_counted(host(THREE)),
+        "CONTROL: a config that holds the texts allocates one for each endpoint"
     );
 }
