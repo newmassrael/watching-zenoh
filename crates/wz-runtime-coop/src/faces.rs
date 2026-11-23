@@ -19,12 +19,14 @@
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Deref;
 
+use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::caps;
 use wz_session_core::driver_loop::DriverOutcome;
+use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::zid_hex::same_zid;
 
 use crate::session_drive::{
@@ -208,21 +210,102 @@ impl<S, D> Link<S, D> {
     }
 }
 
-/// Which endpoint a dial reaches: one of the session's own list, by its place there, or one named
-/// by whoever asked for the dial. A dial of the list carries no copy of its text.
+/// The texts of the endpoints a session dials and listens on, each written once when the session
+/// opens into a row of the memory it reserved then (`docs/c-abi-architecture.md`, P1 and P3):
+/// a dial or a port names its endpoint by its row, and nothing copies the text after the open.
+/// The dial rows are at most the build's `MAX_STATIC_CONNECT`, and the listen rows at most its
+/// `MAX_ADMIN_LOCATORS`, the listening locators a node holds; each row at most
+/// `MAX_LOCATOR_LEN` bytes.
+pub struct EndpointTexts {
+    dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
+    listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
+}
+
+/// Why an endpoint's text has no row ([`EndpointTexts::write_dial`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointTextRefused {
+    /// The text is longer than a row, `MAX_LOCATOR_LEN` bytes; `len` is its length.
+    TooLong {
+        /// The text's length in bytes.
+        len: usize,
+    },
+    /// Every row the session reserved for its endpoints holds one already.
+    Full,
+}
+
+impl EndpointTexts {
+    /// The texts of a session whose open lent `dial` for its endpoints to dial and `listen` for
+    /// those to listen on, none written yet.
+    pub fn over(
+        dial: BoundedVec<LocatorText, { caps::MAX_STATIC_CONNECT }, Lent>,
+        listen: BoundedVec<LocatorText, { caps::MAX_ADMIN_LOCATORS }, Lent>,
+    ) -> Self {
+        Self { dial, listen }
+    }
+
+    /// Write the text of the next endpoint to dial, in the order the session dials them: its
+    /// place, which its dial names it by ([`DialEndpoint::Listed`]).
+    pub fn write_dial(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
+        write_row(&mut self.dial, text)
+    }
+
+    /// Write the text of the next endpoint to listen on: its place, which its port names it by.
+    pub fn write_listen(&mut self, text: &str) -> Result<usize, EndpointTextRefused> {
+        write_row(&mut self.listen, text)
+    }
+
+    /// The text of the endpoint to dial at `at`; empty past the last.
+    pub fn dial_text(&self, at: usize) -> &str {
+        self.dial.get(at).map_or("", LocatorText::as_str)
+    }
+
+    /// The text of the endpoint to listen on at `at`; empty past the last.
+    pub fn listen_text(&self, at: usize) -> &str {
+        self.listen.get(at).map_or("", LocatorText::as_str)
+    }
+
+    /// How many endpoints the session dials.
+    pub fn dials(&self) -> usize {
+        self.dial.len()
+    }
+
+    /// How many endpoints the session listens on.
+    pub fn listens(&self) -> usize {
+        self.listen.len()
+    }
+}
+
+/// Write `text` in the next row of `rows`: its place.
+fn write_row<const N: usize>(
+    rows: &mut BoundedVec<LocatorText, N, Lent>,
+    text: &str,
+) -> Result<usize, EndpointTextRefused> {
+    let row = LocatorText::try_from(text)
+        .map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
+    let at = rows.len();
+    rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
+    Ok(at)
+}
+
+/// Which endpoint a dial reaches: one of the session's own to dial, by its row; one of those it
+/// listens on, by its row, for a link taken off that port; or one named by whoever asked for the
+/// dial after the open, its text held by the dial alone. None allocates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialEndpoint {
-    /// The endpoint at this place of the session's list.
+    /// The endpoint to dial in this row of the session's texts.
     Listed(usize),
-    /// An endpoint named apart from the list.
-    Named(String),
+    /// The endpoint to listen on in this row of the session's texts.
+    Port(usize),
+    /// An endpoint named apart from the session's texts.
+    Named(LocatorText),
 }
 
 impl DialEndpoint {
-    /// The endpoint's text: `listed` is the session's list; a place past it reads empty.
-    pub fn text<'a>(&'a self, listed: &'a [String]) -> &'a str {
+    /// The endpoint's text, read in `texts`, the session's; a row past the last reads empty.
+    pub fn text<'a>(&'a self, texts: &'a EndpointTexts) -> &'a str {
         match self {
-            DialEndpoint::Listed(at) => listed.get(*at).map_or("", String::as_str),
+            DialEndpoint::Listed(at) => texts.dial_text(*at),
+            DialEndpoint::Port(at) => texts.listen_text(*at),
             DialEndpoint::Named(text) => text,
         }
     }
@@ -242,12 +325,12 @@ impl<D> Dial<D> {
     }
 }
 
-/// A port the session listens on, the wait for a connection on it, and the endpoint its links are
-/// stated for, when the session states one.
+/// A port the session listens on, the wait for a connection on it, and the row of the endpoint
+/// its links are stated for, when the session states one.
 struct Listening<P> {
     listener: Box<dyn LinkListener<P>>,
     readiness: Option<Arc<dyn LinkReadiness>>,
-    endpoint: Option<String>,
+    endpoint: Option<usize>,
 }
 
 /// What became of a face's link when it was moved on ([`LinkSupervisor::advance`]). The link stays
@@ -402,8 +485,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         self.links.begin_initiator(to)
     }
 
-    /// Listen on `at`, whose links are stated for `endpoint` when the session states one.
-    pub fn listen(&mut self, at: Locator, endpoint: Option<String>) -> Result<(), LinkOpenError> {
+    /// Listen on `at`, whose links are stated for the endpoint in row `endpoint` of the session's
+    /// texts when the session states one.
+    pub fn listen(&mut self, at: Locator, endpoint: Option<usize>) -> Result<(), LinkOpenError> {
         let listener = self.links.open_listener(at)?;
         let readiness = listener.readiness().map(Arc::from);
         self.listeners.push(Listening {
@@ -431,9 +515,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     pub fn accept_at(&mut self, at: usize) -> Option<Accepted<L::Pump>> {
         let listening = self.listeners.get(at)?;
         Some(match listening.listener.accept() {
-            Ok(Some(opened)) => {
-                Accepted::Link(opened, listening.endpoint.clone().map(DialEndpoint::Named))
-            }
+            Ok(Some(opened)) => Accepted::Link(opened, listening.endpoint.map(DialEndpoint::Port)),
             Ok(None) | Err(LinkOpenError::Exhausted) => Accepted::Idle,
             Err(_) => {
                 self.listeners.remove(at);
@@ -915,7 +997,7 @@ mod tests {
 
     #[test]
     fn a_refused_dial_is_answered_at_once_whatever_its_deadline() {
-        let named = DialEndpoint::Named(String::from("tcp/[::1]:7447"));
+        let named = DialEndpoint::Named(LocatorText::try_from("tcp/[::1]:7447").expect("a row"));
         let refused = Some(Err(LinkOpenError::Refused));
         let mut faces = supervisor(dialing(named, refused, 1, 1_000), 1);
         match faces.advance(0, 0) {
@@ -923,7 +1005,7 @@ mod tests {
                 answer: Some(Err(LinkOpenError::Refused)),
                 endpoint,
                 ..
-            } => assert_eq!(endpoint.text(&[]), "tcp/[::1]:7447"),
+            } => assert_eq!(endpoint.text(&texts(&[], &[])), "tcp/[::1]:7447"),
             _ => panic!("the refusal is the answer"),
         }
     }
@@ -1006,14 +1088,90 @@ mod tests {
         assert_eq!(faces.next_face_id(), 2);
     }
 
+    /// The texts of a session lent `dials` rows to dial and `listens` to listen on, in a test's
+    /// own memory, none written.
+    fn lent_texts(dials: usize, listens: usize) -> EndpointTexts {
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::Arena;
+
+        const BYTES: usize = 4096;
+        #[repr(C, align(16))]
+        struct Memory([u8; BYTES]);
+
+        let memory: &'static mut Memory = Box::leak(Box::new(Memory([0; BYTES])));
+        // SAFETY: the memory is leaked, so it outlives the arena and every row it lends; it is
+        // aligned as an arena's spans start, BYTES long, and used by nothing else.
+        let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), BYTES) };
+        EndpointTexts::over(
+            arena.lend(dials).expect("the memory holds the dial rows"),
+            arena
+                .lend(listens)
+                .expect("the memory holds the listen rows"),
+        )
+    }
+
+    /// The texts of a session that dials `dials` and listens on `listens`, as an open writes
+    /// them.
+    fn texts(dials: &[&str], listens: &[&str]) -> EndpointTexts {
+        let mut texts = lent_texts(dials.len(), listens.len());
+        for text in dials {
+            texts.write_dial(text).expect("a row for each");
+        }
+        for text in listens {
+            texts.write_listen(text).expect("a row for each");
+        }
+        texts
+    }
+
+    /// An endpoint reads as the row its dial or its port names, or as its own text; a row past
+    /// the last reads empty.
     #[test]
-    fn an_endpoint_reads_from_the_list_or_its_own_text() {
-        let listed = [String::from("udp/10.0.0.1:7447")];
-        assert_eq!(DialEndpoint::Listed(0).text(&listed), "udp/10.0.0.1:7447");
-        assert_eq!(DialEndpoint::Listed(1).text(&listed), "", "past the list");
+    fn an_endpoint_reads_from_its_row_or_its_own_text() {
+        let texts = texts(&["udp/10.0.0.1:7447"], &["tcp/0.0.0.0:7447"]);
+        assert_eq!(DialEndpoint::Listed(0).text(&texts), "udp/10.0.0.1:7447");
         assert_eq!(
-            DialEndpoint::Named(String::from("tcp/1.2.3.4:1")).text(&listed),
+            DialEndpoint::Listed(1).text(&texts),
+            "",
+            "past the dial rows"
+        );
+        assert_eq!(DialEndpoint::Port(0).text(&texts), "tcp/0.0.0.0:7447");
+        assert_eq!(
+            DialEndpoint::Port(1).text(&texts),
+            "",
+            "past the listen rows"
+        );
+        assert_eq!(
+            DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"))
+                .text(&texts),
             "tcp/1.2.3.4:1"
+        );
+    }
+
+    /// A text is written in the next row and answered with its place; one longer than a row is
+    /// refused by its length, and one past the rows the open lent as full, neither taking a row.
+    #[test]
+    fn an_endpoint_text_takes_the_next_row_or_is_refused() {
+        let mut texts = lent_texts(2, 1);
+        assert_eq!(texts.write_dial("udp/10.0.0.1:7447"), Ok(0));
+        assert_eq!(texts.write_dial("tcp/10.0.0.2:7447"), Ok(1));
+        assert_eq!(
+            texts.write_dial("tcp/10.0.0.3:7447"),
+            Err(EndpointTextRefused::Full),
+            "past the rows lent"
+        );
+        assert_eq!(texts.dials(), 2);
+        assert_eq!(texts.dial_text(1), "tcp/10.0.0.2:7447");
+        let long = "a".repeat(caps::MAX_LOCATOR_LEN + 1);
+        assert_eq!(
+            texts.write_listen(&long),
+            Err(EndpointTextRefused::TooLong { len: long.len() })
+        );
+        assert_eq!(texts.listens(), 0, "a refused text takes no row");
+        let exact = "a".repeat(caps::MAX_LOCATOR_LEN);
+        assert_eq!(
+            texts.write_listen(&exact),
+            Ok(0),
+            "a text of a row's length fits"
         );
     }
 

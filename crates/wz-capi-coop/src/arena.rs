@@ -104,6 +104,7 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
@@ -112,6 +113,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -322,6 +324,8 @@ pub struct ArenaPlan {
     /// The bytes of the place the ABI keeps its handle of the session in, none for no place
     /// ([`Self::holding`]).
     handle_bytes: usize,
+    /// The rows of the texts of the endpoints the session dials, and of those it listens on.
+    endpoint_rows: (usize, usize),
 }
 
 impl ArenaPlan {
@@ -329,6 +333,16 @@ impl ArenaPlan {
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
         hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
+        hold(
+            "MAX_STATIC_CONNECT",
+            config.endpoints.len(),
+            caps::MAX_STATIC_CONNECT,
+        )?;
+        hold(
+            "MAX_ADMIN_LOCATORS",
+            config.listen.len(),
+            caps::MAX_ADMIN_LOCATORS,
+        )?;
         if !config.listen.is_empty() {
             hold(
                 "MAX_ACCEPT_PENDING",
@@ -392,8 +406,22 @@ impl ArenaPlan {
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
             handle_bytes: 0,
+            endpoint_rows: (config.endpoints.len(), config.listen.len()),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
+        // The texts of the endpoints the session dials and listens on, a text a row of one table
+        // each, written once when it opens and named by place after
+        // (`SessionArena::lend_endpoints`): one row of the plan, the two tables' spans.
+        let (dials, listens) = plan.endpoint_rows;
+        plan.put(
+            "endpoint texts",
+            "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
+            1,
+            Arena::table_bytes::<LocatorText>(dials)
+                .zip(Arena::table_bytes::<LocatorText>(listens))
+                .and_then(|(dial, listen)| dial.checked_add(listen))
+                .ok_or(ArenaRefused::TooLarge)?,
+        )?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
         plan.put(
             "link receive flags",
@@ -989,7 +1017,18 @@ fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaR
 /// this). A session that only listens or only joins groups never dials from that face: a face it
 /// attaches later is one of `max_faces`.
 pub(crate) fn dials(config: &CoopConfig) -> bool {
-    !(config.endpoints.is_empty() && (!config.listen.is_empty() || !config.groups.is_empty()))
+    dials_of(
+        config.endpoints.len(),
+        config.listen.len(),
+        config.groups.len(),
+    )
+}
+
+/// [`dials`] of a session by its counts: the endpoints it dials, those it listens on and the
+/// groups it joins, which an open session reads from its endpoint texts once the config's are
+/// gone.
+pub(crate) fn dials_of(endpoints: usize, listens: usize, groups: usize) -> bool {
+    !(endpoints == 0 && (listens > 0 || groups > 0))
 }
 
 /// The faces a session `config` opens may hold at once: the dial role's when it dials
@@ -1191,6 +1230,17 @@ impl SessionArena {
             .map_err(ArenaRefused::Lend)
     }
 
+    /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
+    /// on, none written: the session writes each once as it opens. Refused only by an arena
+    /// reserved by another plan.
+    pub(crate) fn lend_endpoints(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<EndpointTexts, ArenaRefused> {
+        let (dials, listens) = plan.endpoint_rows;
+        Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
+    }
+
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
     /// in, for the session's life, each key at most `longest` bytes, the session's
     /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
@@ -1285,6 +1335,7 @@ mod tests {
             held_queries: 0,
             key_bytes: 0,
             handle_bytes: 0,
+            endpoint_rows: (0, 0),
         }
     }
 

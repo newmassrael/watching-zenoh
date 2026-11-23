@@ -72,7 +72,8 @@ use wz_runtime_coop::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
-    Dial, DialEndpoint, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor, Moved,
+    Dial, DialEndpoint, EndpointTextRefused, EndpointTexts, FaceRecord, FaceSession, IdleWait,
+    Link, LinkSupervisor, Moved,
 };
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
@@ -101,6 +102,7 @@ use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
+use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(not(feature = "shared-key-ids"))]
@@ -227,7 +229,9 @@ use {
 pub struct CoopConfig {
     /// The endpoints to dial (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`), in order: the session
     /// is opened to the first that answers, as zenoh-pico's client opens to the first of its
-    /// `connect` locators that does.
+    /// `connect` locators that does. At most the build's `MAX_STATIC_CONNECT`, each at most
+    /// `MAX_LOCATOR_LEN` bytes: the open writes each into a row of the session's arena and keeps
+    /// no copy of the list.
     pub endpoints: Vec<String>,
     /// The role the session announces.
     pub whatami: WhatAmI,
@@ -264,7 +268,9 @@ pub struct CoopConfig {
     /// choose one, read back with `CoopEngine::listening`), which the session takes inbound links
     /// from for as long as it lives, each as a face of its own. A session that lists none and
     /// dials at least one is the dial role alone; one that lists some and dials none is only a
-    /// listener, and is open as soon as it is bound (`listen`).
+    /// listener, and is open as soon as it is bound (`listen`). At most the build's
+    /// `MAX_ADMIN_LOCATORS`, each at most `MAX_LOCATOR_LEN` bytes, written into rows as the
+    /// endpoints are.
     pub listen: Vec<String>,
     /// How many inbound links may be in their handshake at once; one that arrives past it is
     /// closed unread. At most the session's `MAX_ACCEPT_PENDING` (zenoh's
@@ -373,19 +379,44 @@ fn resolve_limits(config: &CoopConfig) -> SessionLimits {
 // formatter is linked only into a program that prints one (`Display`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointRefusal {
-    /// The endpoint, as the config or the caller states it; empty when the refusal is the
-    /// session's and names no endpoint ([`Refusal::LinkLost`]).
-    pub endpoint: String,
+    /// The endpoint, as the config or the caller states it, at most `MAX_LOCATOR_LEN` bytes of
+    /// it; empty when the refusal is the session's and names no endpoint ([`Refusal::LinkLost`]).
+    pub endpoint: LocatorText,
     /// Why it could not be used.
     pub why: Refusal,
 }
 
 impl EndpointRefusal {
-    fn new(endpoint: &str, why: Refusal) -> Self {
+    /// The refusal of `endpoint` for `why`. A refusal is made after the open too (a dial again
+    /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
+    /// longer than that is kept up to the last whole character that fits.
+    pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
+        let mut kept = LocatorText::new();
+        for c in endpoint.chars() {
+            if kept.push(c).is_err() {
+                break;
+            }
+        }
         Self {
-            endpoint: endpoint.to_owned(),
+            endpoint: kept,
             why,
         }
+    }
+}
+
+/// The open's refusal of the endpoint `text` that has no row: one longer than a row is refused as
+/// `as_open`'s endpoint, one to dial or one to listen on; one past the rows the plan laid out,
+/// which counted them, as an arena that does not hold the session.
+fn unwritten(
+    text: &str,
+    why: EndpointTextRefused,
+    as_open: fn(EndpointRefusal) -> OpenError,
+) -> OpenError {
+    match why {
+        EndpointTextRefused::TooLong { .. } => {
+            as_open(EndpointRefusal::new(text, Refusal::TextTooLong))
+        }
+        EndpointTextRefused::Full => OpenError::Arena(ArenaRefused::TooLarge),
     }
 }
 
@@ -414,6 +445,9 @@ pub enum Refusal {
     SessionClosed,
     /// The session holds as many faces as `max_faces` admits.
     FacesFull,
+    /// The endpoint's text is longer than a row of the session's endpoints, `MAX_LOCATOR_LEN`
+    /// bytes.
+    TextTooLong,
 }
 
 impl core::fmt::Display for EndpointRefusal {
@@ -435,6 +469,7 @@ impl core::fmt::Display for EndpointRefusal {
             Refusal::FacesFull => {
                 f.write_str("the session holds as many faces as max_faces admits")
             }
+            Refusal::TextTooLong => f.write_str("the endpoint is longer than MAX_LOCATOR_LEN"),
         }
     }
 }
@@ -1396,6 +1431,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
     links: LinkSupervisor<L, Face<C, L>>,
+    /// The texts of the endpoints the session dials and listens on, written once when it opened
+    /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
+    /// copies went with the open.
+    endpoints: EndpointTexts,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     groups: Vec<GroupFace>,
@@ -2308,7 +2347,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             actions.install_link_keys(wz_session_core::shared_key_ids::LinkKeys::new(
                 self.key_ids.clone(),
                 self.key_forms
-                    .form_of(endpoint.map(|endpoint| endpoint.text(&self.config.endpoints))),
+                    .form_of(endpoint.map(|endpoint| endpoint.text(&self.endpoints))),
                 resolve_limits(&self.config).link_noted_requests(),
             ));
             if let Some(ids) = &self.key_ids {
@@ -2424,14 +2463,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// A dial the network has not answered yet is left under way (`Link::Dialing`), and the steps
     /// that follow ask it (`Self::dial_answered`), so no dial is waited for while the session is
     /// held; one answered at once runs its handshake here. The dial names its endpoint by its
-    /// place in the config, which holds the text.
+    /// row of the session's endpoint texts, which holds the text.
     fn dial_from(
         &mut self,
         from: usize,
         mut last: OpenError,
     ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
-        for at in from..self.config.endpoints.len() {
-            let mut pending = match self.begin_dial(DIAL_FACE, &self.config.endpoints[at]) {
+        for at in from..self.endpoints.dials() {
+            let mut pending = match self.begin_dial(DIAL_FACE, self.endpoints.dial_text(at)) {
                 Ok(pending) => pending,
                 Err(refused) => {
                     last = refused;
@@ -2491,10 +2530,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         })
     }
 
-    /// The text of the endpoint a dial reaches: the config's, by its place there, or the one the
-    /// dial named; empty for none.
+    /// The text of the endpoint a dial reaches: the session's, by its row, or the one the dial
+    /// named; empty for none.
     fn endpoint_text<'a>(&'a self, endpoint: Option<&'a DialEndpoint>) -> &'a str {
-        endpoint.map_or("", |endpoint| endpoint.text(&self.config.endpoints))
+        endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
     }
 
     /// Dial from endpoint `from` on; when none answers, wait `redial_ms` to dial them all again,
@@ -2650,7 +2689,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     return Ok(());
                 }
                 let last = OpenError::Unreachable(EndpointRefusal::new(
-                    &self.config.endpoints[next - 1],
+                    self.endpoints.dial_text(next - 1),
                     why,
                 ));
                 self.dial_or_wait(next, last, redial_ms)?
@@ -2788,14 +2827,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `listen` answers every endpoint so.
     fn listen_on_config(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "listen")]
-        for endpoint in self.config.listen.clone() {
-            let refused = |why| OpenError::Listen(EndpointRefusal::new(&endpoint, why));
+        for row in 0..self.endpoints.listens() {
+            let endpoint = self.endpoints.listen_text(row);
+            let refused = |why| OpenError::Listen(EndpointRefusal::new(endpoint, why));
             let at =
-                parse_listen_locator(&endpoint).map_err(|why| refused(Refusal::Locator(why)))?;
+                parse_listen_locator(endpoint).map_err(|why| refused(Refusal::Locator(why)))?;
             // The key-wire form of a link taken on the port is the one stated for its endpoint
-            // (`shared-key-ids`).
+            // (`shared-key-ids`), which the port names by its row.
             #[cfg(feature = "shared-key-ids")]
-            let named = Some(endpoint.clone());
+            let named = Some(row);
             #[cfg(not(feature = "shared-key-ids"))]
             let named = None;
             self.links
@@ -2803,9 +2843,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .map_err(|why| refused(Refusal::Link(why)))?;
         }
         #[cfg(not(feature = "listen"))]
-        if let Some(endpoint) = self.config.listen.first() {
+        if self.endpoints.listens() > 0 {
             return Err(OpenError::Listen(EndpointRefusal::new(
-                endpoint,
+                self.endpoints.listen_text(0),
                 Refusal::ListeningNotBuilt,
             )));
         }
@@ -3514,7 +3554,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         memory: &'static dyn ArenaMemory,
         handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
-        let config = make_config();
+        let mut config = make_config();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
@@ -3612,8 +3652,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .saturating_add(config.listen.len())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
+        // The texts of the endpoints, each written once into the row the plan laid out for it: the
+        // session names an endpoint by its row from here, and the config's copies go with the open.
+        let mut endpoints = arena.lend_endpoints(&plan).map_err(OpenError::Arena)?;
+        for text in core::mem::take(&mut config.endpoints) {
+            endpoints
+                .write_dial(&text)
+                .map_err(|why| unwritten(&text, why, OpenError::Unreachable))?;
+        }
+        for text in core::mem::take(&mut config.listen) {
+            endpoints
+                .write_listen(&text)
+                .map_err(|why| unwritten(&text, why, OpenError::Listen))?;
+        }
         let core = Core {
             local,
+            endpoints,
             clock,
             registry: Rc::new(RefCell::new(registry)),
             #[cfg(feature = "listen")]
@@ -3755,7 +3809,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.join_groups()?;
         // Asked as the arena asked it, so the dial role's face dials exactly when its plan lent
         // it a link.
-        if crate::arena::dials(&core.config) {
+        if crate::arena::dials_of(
+            core.endpoints.dials(),
+            core.endpoints.listens(),
+            core.config.groups.len(),
+        ) {
             let link = core.dial_from(0, OpenError::NoEndpoint)?;
             core.links.put_link(0, link);
             // Open once the dial's link is up, or once the node it reached is held by a face that
@@ -3801,7 +3859,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// publish and a get reach its peer, and what its peer declares counts with the others'. It
     /// is dialled once: a link that is lost or never completes takes the face with it, where the
     /// dial role's face is dialled again. [`OpenError::Unreachable`] when the session is closed,
-    /// holds as many faces as `max_faces` admits, or the endpoint is not reached.
+    /// the endpoint's text is longer than `MAX_LOCATOR_LEN`, the session holds as many faces as
+    /// `max_faces` admits, or the endpoint is not reached.
     pub fn attach_face(&self, endpoint: &str) -> Result<u64, OpenError> {
         let Some(mut guard) = self.live() else {
             return Err(OpenError::Unreachable(EndpointRefusal::new(
@@ -3810,6 +3869,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )));
         };
         let core = &mut guard.0;
+        // The dial keeps the endpoint's text as its own, in a row's length, as the open keeps the
+        // config's: no memory of the heap after the open.
+        let Ok(named) = LocatorText::try_from(endpoint) else {
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::TextTooLong,
+            )));
+        };
         // A face past `max_faces` would have no buffers: the arena holds the links of as many
         // faces as the config admits, and an accepted link past them is closed unread.
         if core.links.faces().len() > core.config.max_faces {
@@ -3829,7 +3896,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.push_face(
             id,
             Link::Dialing {
-                dial: Dial::new(DialEndpoint::Named(String::from(endpoint)), pending),
+                dial: Dial::new(DialEndpoint::Named(named), pending),
                 next: 0,
                 deadline_us,
             },
