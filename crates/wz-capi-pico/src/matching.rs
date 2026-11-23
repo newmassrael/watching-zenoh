@@ -535,8 +535,7 @@ pub(crate) unsafe fn declare_on_filter(
 ///
 /// Shared by the PUBLISHER and QUERIER declare forms so the ownership contract
 /// — the caller's `drop(context)` runs exactly once, on every path — has one
-/// implementation. The `Arc<MatchingCClosure>` is what carries it: the sink
-/// holds the only clone, so releasing the sink releases the C context.
+/// implementation. The sink owns the closure, so releasing the sink releases the C context.
 pub(crate) unsafe fn consume_matching_closure(
     callback: *mut z_moved_closure_matching_status_t,
 ) -> Result<(MatchingSink, Arc<ReleaseLatch>), ZResult> {
@@ -547,8 +546,7 @@ pub(crate) unsafe fn consume_matching_closure(
         &mut (*callback)._this,
         z_owned_closure_matching_status_t::null_value(),
     );
-    let owned: Arc<MatchingCClosure> =
-        Arc::new(CClosure::new(taken.context, taken.call, taken.drop));
+    let owned: MatchingCClosure = CClosure::new(taken.context, taken.call, taken.drop);
     let released = owned.release_latch();
     Ok((matching_sink(owned), released))
 }
@@ -558,7 +556,7 @@ pub(crate) unsafe fn consume_matching_closure(
 /// The call is marked as one of the program's callbacks: an undeclare the callback makes of its
 /// own listener, or a drop of the entity that holds it, then leaves the closure to be released as
 /// the callback returns instead of waiting on itself (`ReleaseLatch::wait`).
-fn matching_sink(owned: Arc<MatchingCClosure>) -> MatchingSink {
+fn matching_sink(owned: MatchingCClosure) -> MatchingSink {
     Arc::new(move |matching: bool| {
         let Some(call) = owned.call else {
             return;
