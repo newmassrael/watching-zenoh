@@ -508,7 +508,7 @@ mod tests {
             engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
-        use wz_capi_port::{EntityKind, PlaceLender};
+        use wz_capi_port::EntityKind;
 
         let open = || {
             let session = listening_on_loopback();

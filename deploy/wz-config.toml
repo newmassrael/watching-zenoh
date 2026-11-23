@@ -2342,8 +2342,8 @@ zenoh = "none"
 reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
 
 [limit.pico_preset]
-value = 4380
-reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 3 subscribers, 4380 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run."
+value = 4768
+reason = "zenoh-pico keeps no delivery lane: it hands each sample to its callback from its receive buffer. The preset is the least lane the build accepts at the preset's other values (crates/wz-capi-coop/src/lane.rs, holds_a_read): one record of the larger of the batch and the largest message rejoined (4096, FRAG_MAX_SIZE), with the most a sample adds to it, a key of MAX_KEYEXPR_BYTES (256), a clock id of 16 bytes and a 4-byte id for each of the 100 subscribers, 4768 bytes. A read takes a record only while the lane has that room, so at the preset a pass of the read hands on one record of a full lane before its callbacks run."
 
 [[limit]]
 id = "DELIVERY_LANE_CALLBACKS"
@@ -2568,7 +2568,7 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default is MAX_QUERYABLES's, the other side of the same traffic."
+reason = "No key of upstream's configuration bounds the queriers a session declares, and zenoh-pico has no constant for them; the default holds sixteen, more than any of zenoh-pico's own tests holds on one session at once."
 
 [limit.pico_preset]
 value = 2
@@ -2594,7 +2594,7 @@ and queriers. Declaring one more is refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default lets each publisher of the default MAX_PUBLISHERS hold one."
+reason = "No key of upstream's configuration bounds the matching listeners a session declares, and zenoh-pico has no constant for them; the default holds sixteen, more than any of zenoh-pico's own tests holds on one session at once."
 
 [limit.pico_preset]
 value = 1
@@ -2882,7 +2882,7 @@ which ends at the first Hello, takes one.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen, the build's default for the tables of one session's entities (MAX_SUBSCRIPTIONS), holds a scout on a segment of a dozen nodes with room."
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen holds a scout on a segment of a dozen nodes with room."
 
 [limit.pico_preset]
 value = 1
@@ -2993,7 +2993,7 @@ kconfig = "WZ_LIMIT_MAX_PENDING_DECLARES"
 kind = "bound"
 driven = "remote"
 on_heap = "advisory"
-default = 32
+default = 101
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -3011,11 +3011,7 @@ counted, never sent in part.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it."
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico answers an interest from the heap with no count; the answer to a match-all interest is a declaration for each subscriber and a final, so the preset is one more than its 3 subscribers, as the build requires of this limit over MAX_SUBSCRIPTIONS and MAX_LOCAL_TOKENS."
+reason = "No key of upstream's configuration bounds it: wz holds the answer to an interest of a peer whole before it sends it, and zenoh-pico answers one from the heap with no count. The answer to a match-all interest is a declaration for each subscriber and a final, so the default is one more than MAX_SUBSCRIPTIONS's 100, as the build requires of this limit over MAX_SUBSCRIPTIONS and MAX_LOCAL_TOKENS."
 
 [[limit]]
 id = "MAX_INBOUND_SUB_INTERESTS"
@@ -3353,7 +3349,7 @@ with no periodic jobs refuses it.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen is MAX_PUBLISHERS's default, a heartbeat for each publisher of a session."
+reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen holds a heartbeat for each of sixteen publishers of a session."
 
 [[limit]]
 id = "MAX_LOCATOR_LEN"

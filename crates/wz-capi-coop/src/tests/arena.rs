@@ -1228,6 +1228,31 @@ fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
         .map(|(_, value)| *value)
 }
 
+/// The value a session of the pico preset holds of `id`, as the generated Kconfig states it: the
+/// preset's where it states one, and the limit's default where it does not, as for a limit
+/// zenoh-pico's own tests need the whole default of.
+fn pico_value(id: &str) -> usize {
+    const KCONFIG: &str = include_str!("../../../../deploy/Kconfig.limits");
+    let mut within = false;
+    let mut default = None;
+    for line in KCONFIG.lines() {
+        if let Some(limit) = line.strip_prefix("config WZ_LIMIT_") {
+            if within {
+                break;
+            }
+            within = limit == id;
+        } else if within {
+            if let Some(value) = line.trim().strip_prefix("default ") {
+                match value.strip_suffix(" if WZ_LIMITS_ZENOH_PICO") {
+                    Some(preset) => return preset.parse().expect("a preset is a number"),
+                    None => default = default.or_else(|| value.parse().ok()),
+                }
+            }
+        }
+    }
+    default.unwrap_or_else(|| panic!("the generated Kconfig states {id}"))
+}
+
 /// A session at the pico preset's limits lends each table the preset sizes as many rows as the
 /// preset states, the tables that share a limit's rows as many as their limits add up to, and an
 /// arena that is the sum of its rows' spans and smaller than the build's.
@@ -1235,13 +1260,10 @@ fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
 fn the_pico_presets_arena_lends_the_presets_rows() {
     let presets = pico_preset();
     for id in [
-        "MAX_SUBSCRIPTIONS",
-        "MAX_PUBLISHERS",
         "MAX_QUERIERS",
         "MAX_MATCHING_LISTENERS",
         "MAX_DECLARED_KEYEXPRS",
         "MAX_PENDING_QUERIES",
-        "MAX_PENDING_DECLARES",
     ] {
         assert!(
             preset_of(&presets, id).is_some(),
@@ -1252,7 +1274,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
+    let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
         // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
@@ -1310,10 +1332,9 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
 /// answers holds every subscriber and every local token the preset admits, and a final.
 #[test]
 fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
-    let presets = pico_preset();
-    let declares = preset_of(&presets, "MAX_PENDING_DECLARES").expect("the preset states it");
-    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
-    let tokens = preset_of(&presets, "MAX_LOCAL_TOKENS").expect("the preset states it");
+    let declares = pico_value("MAX_PENDING_DECLARES");
+    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
+    let tokens = pico_value("MAX_LOCAL_TOKENS");
     assert!(declares > subscribers && declares > tokens);
 }
 
@@ -1376,9 +1397,8 @@ fn the_pico_presets_lane_holds_one_record() {
         .max_keyexpr_bytes()
         .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
         .expect("the preset's key is under the build's");
-    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
-    let liveliness =
-        preset_of(&presets, "MAX_LIVELINESS_SUBSCRIPTIONS").expect("the preset states it");
+    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
+    let liveliness = pico_value("MAX_LIVELINESS_SUBSCRIPTIONS");
     let most = if cfg!(feature = "liveliness") {
         subscribers.max(liveliness)
     } else {
