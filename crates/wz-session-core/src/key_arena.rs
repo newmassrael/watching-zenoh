@@ -409,11 +409,11 @@ impl KeySpace {
             return Err(refused(Some(need)));
         };
         let size = store.word(at, SIZE);
-        // `take` gave a block of at least `need` bytes.
+        // `take` gave a block of at least `need` bytes, so the slack does not wrap.
         store.set_word(
             at,
             SIZE,
-            held_word(text.len() as u32, size.saturating_sub(need as u32)),
+            held_word(text.len() as u32, size.wrapping_sub(need as u32)),
         );
         store.set_word(at, LINK, 1);
         // SAFETY: the block at `at` holds its header and at least `text.len()` bytes after it,
@@ -425,8 +425,8 @@ impl KeySpace {
                 text.len(),
             );
         }
-        // `used` counts held blocks, which lie inside the `u32` bytes of blocks.
-        let used = store.used.get().saturating_add(size);
+        // `used` counts held blocks, which lie inside the `u32` bytes of blocks: it does not wrap.
+        let used = store.used.get().wrapping_add(size);
         store.used.set(used);
         store.peak.set(store.peak.get().max(used));
         Ok(KeyRef {
@@ -446,24 +446,22 @@ impl KeySpace {
         let (mut at, mut free) = (0, store.free.get());
         while at < store.top.get() {
             let word = store.word(at, SIZE);
-            let next = if at == free {
+            // Every block lies inside the blocks, whose bytes are a `u32`, so the step to the next
+            // one does not wrap.
+            if at == free {
                 free = store.word(at, LINK);
-                at.checked_add(word)
-            } else {
-                if (word >> 2) as usize == text.len()
-                    && store.text(at, word >> 2) == text.as_bytes()
-                {
-                    store.set_word(at, LINK, store.word(at, LINK).saturating_add(1));
-                    return Some(KeyRef {
-                        store: self.store,
-                        at,
-                        len: word >> 2,
-                    });
-                }
-                at.checked_add(held_bytes(word))
-            };
-            // A block past the `u32` offsets is no block of the arena: the walk ends.
-            at = next?;
+                at = at.wrapping_add(word);
+                continue;
+            }
+            if (word >> 2) as usize == text.len() && store.text(at, word >> 2) == text.as_bytes() {
+                store.set_word(at, LINK, store.word(at, LINK).saturating_add(1));
+                return Some(KeyRef {
+                    store: self.store,
+                    at,
+                    len: word >> 2,
+                });
+            }
+            at = at.wrapping_add(held_bytes(word));
         }
         None
     }
@@ -635,13 +633,15 @@ impl Drop for KeyRef {
         // SAFETY: as `as_str`.
         let store = unsafe { self.store.as_ref() };
         store.assert_owner_lock();
-        let holders = store.word(self.at, LINK).saturating_sub(1);
+        // This key is one of the block's holders, so the count is one or more.
+        let holders = store.word(self.at, LINK).wrapping_sub(1);
         if holders > 0 {
             store.set_word(self.at, LINK, holders);
             return;
         }
         let size = held_bytes(store.word(self.at, SIZE));
-        store.used.set(store.used.get().saturating_sub(size));
+        // The block is one `used` counts.
+        store.used.set(store.used.get().wrapping_sub(size));
         store.give_back(self.at, size);
     }
 }
