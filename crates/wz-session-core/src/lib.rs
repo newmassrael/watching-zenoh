@@ -569,12 +569,6 @@ pub mod wrapping_ticks;
 // snapshot, a message-interval histogram, and the sampler that takes one on a period. Pure and
 // unconditional, in the way of `event_ring`: a build that instantiates no sampler carries no code of
 // it. Documented in its own `//!`; see the note at `event_ring`.
-// Totality debt TD-022 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
 pub mod resource_snapshot;
 
 // The bit each capability has in a snapshot's `features` word, generated from the declaration
