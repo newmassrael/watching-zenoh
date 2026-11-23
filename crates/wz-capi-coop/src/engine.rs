@@ -35,7 +35,6 @@ use alloc::sync::{Arc, Weak};
 use core::any::Any;
 use core::cell::{Cell, RefCell};
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -45,8 +44,8 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlaces, EntityRows,
-    HandlePlace, HeldPlaces, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlace, EntityPlaces,
+    EntityRows, HandlePlace, HeldPlaces, SessionArena,
 };
 use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SharedLane};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -3869,22 +3868,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// it: `None` when every one is lent, when the open was asked for none of the kind, or when
     /// the session is closed, which takes no entity. Lent under the session's lock, as every table
     /// of its arena is, and the ABI's until it gives it back ([`Self::give_back_place`]).
-    pub fn claim_place(&self, kind: EntityKind) -> Option<NonNull<u8>> {
+    pub fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
         let core = self.live()?;
         core.0.places.claim(kind)
     }
 
-    /// Give back the place of `kind` at `place`, closed or not: the arena it lies in is the
-    /// session's until the engine is let go, which the ABI's object of the entity holds off.
-    ///
-    /// # Safety
-    /// `place` is a place [`Self::claim_place`] lent for `kind` on this engine, nothing uses
-    /// its bytes from here, and it is given back once.
-    pub unsafe fn give_back_place(&self, kind: EntityKind, place: NonNull<u8>) {
-        let held = self.core.lock();
-        // SAFETY: the caller's; the table is reached under the session's lock.
-        let given = unsafe { held.0.places.give_back(kind, place) };
-        debug_assert!(given, "a place given back is one the session lent");
+    /// Give back `place`, closed or not: the arena it lies in is the session's until the engine
+    /// is let go, which the ABI's object of the entity holds off. A place another session lent is
+    /// handed back untouched. What the ABI kept at the place it lets go of first.
+    pub fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        self.core.lock().0.places.give_back(place)
     }
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena holds.

@@ -2039,15 +2039,16 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     );
     assert_eq!(one.claim_place(EntityKind::Publisher), None);
 
-    let lent: Vec<_> = (0..rows)
+    let mut lent: Vec<_> = (0..rows)
         .map(|_| {
             one.claim_place(EntityKind::Subscriber)
                 .expect("a place for each row")
         })
         .collect();
-    assert!(lent
-        .iter()
-        .all(|place| place.as_ptr() as usize % ARENA_ALIGN == 0));
+    assert!(lent.iter().all(|place| {
+        place.kind() == EntityKind::Subscriber
+            && place.as_ptr().as_ptr() as usize % ARENA_ALIGN == 0
+    }));
     assert_eq!(
         one.claim_place(EntityKind::Subscriber),
         None,
@@ -2057,21 +2058,23 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
         .claim_place(EntityKind::Subscriber)
         .expect("the other session's places are its own");
     assert_eq!(other.entity_places(EntityKind::Subscriber), (1, rows));
+    let theirs = one
+        .give_back_place(theirs)
+        .expect_err("a session takes back no place another lent");
+    assert_eq!(other.entity_places(EntityKind::Subscriber), (1, rows));
 
-    let first = lent.first().copied().expect("a lent place");
-    // SAFETY: each place was lent by its own engine for the kind, and nothing uses it after.
-    unsafe {
-        one.give_back_place(EntityKind::Subscriber, first);
-        assert_eq!(
-            one.claim_place(EntityKind::Subscriber),
-            Some(first),
-            "a place given back is lent again"
-        );
-        for place in lent {
-            one.give_back_place(EntityKind::Subscriber, place);
-        }
-        other.give_back_place(EntityKind::Subscriber, theirs);
+    let first = lent.pop().expect("a lent place");
+    let at = first.as_ptr();
+    assert_eq!(one.give_back_place(first), Ok(()));
+    let again = one
+        .claim_place(EntityKind::Subscriber)
+        .expect("a place given back is lent again");
+    assert_eq!(again.as_ptr(), at);
+    lent.push(again);
+    for place in lent {
+        assert_eq!(one.give_back_place(place), Ok(()));
     }
+    assert_eq!(other.give_back_place(theirs), Ok(()));
     assert_eq!(one.entity_places(EntityKind::Subscriber), (0, rows));
     assert_eq!(other.entity_places(EntityKind::Subscriber), (0, rows));
 }

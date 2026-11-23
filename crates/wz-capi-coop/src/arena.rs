@@ -1269,6 +1269,39 @@ impl HandlePlace {
     }
 }
 
+/// One place a session's arena lent the ABI for an entity of a kind ([`CoopEngine::claim_place`]),
+/// held by the ABI's object of the entity: its first byte, aligned to [`ARENA_ALIGN`] and holding
+/// the layout the open was given for the kind, and the kind. Neither copied nor cloned, so a place
+/// is given back once, and to the session and the kind that lent it, as giving it back consumes
+/// it ([`CoopEngine::give_back_place`]).
+///
+/// [`CoopEngine::claim_place`]: crate::CoopEngine::claim_place
+/// [`CoopEngine::give_back_place`]: crate::CoopEngine::give_back_place
+#[derive(Debug, PartialEq, Eq)]
+pub struct EntityPlace {
+    base: NonNull<u8>,
+    kind: EntityKind,
+}
+
+// SAFETY: a place is an address in a session's arena and its kind; the engine touches its bytes
+// never and its flag only under the session's lock, so handing the place to another thread shares
+// nothing.
+unsafe impl Send for EntityPlace {}
+// SAFETY: as for `Send`: a shared place is read only as an address.
+unsafe impl Sync for EntityPlace {}
+
+impl EntityPlace {
+    /// Where the place starts.
+    pub fn as_ptr(&self) -> NonNull<u8> {
+        self.base
+    }
+
+    /// The kind it was lent for.
+    pub fn kind(&self) -> EntityKind {
+        self.kind
+    }
+}
+
 /// The places a session's arena lent for the ABI's entities ([`HeldPlaces`]), a table of each kind
 /// it holds places of. A place is lent to the ABI by its address and given back by it, each under
 /// the session's lock, which every table of the arena is reached under.
@@ -1288,27 +1321,33 @@ impl EntityPlaces {
         self.cells.get(kind as usize).copied().flatten()
     }
 
-    /// A free place for an entity of `kind`, its first byte aligned to [`ARENA_ALIGN`], or `None`
-    /// when every one is lent or the arena holds none of the kind. The place is the ABI's until it
-    /// gives it back ([`Self::give_back`]).
-    pub(crate) fn claim(&self, kind: EntityKind) -> Option<NonNull<u8>> {
+    /// A free place for an entity of `kind`, or `None` when every one is lent or the arena holds
+    /// none of the kind. The place is the ABI's until it gives it back ([`Self::give_back`]).
+    pub(crate) fn claim(&self, kind: EntityKind) -> Option<EntityPlace> {
         let buffer = self.of(kind)?.claim()?;
         let (base, _) = buffer.raw();
-        // The claim is held by the ABI's object from here, by its address, and ended by
-        // `give_back`, not by the buffer's drop.
+        // The claim is held by the place from here and ended by `give_back`, not by the buffer's
+        // drop.
         core::mem::forget(buffer);
-        NonNull::new(base)
+        Some(EntityPlace {
+            base: NonNull::new(base)?,
+            kind,
+        })
     }
 
-    /// Give back the place of `kind` at `place`: `false`, changing nothing, when it is no place
-    /// of that kind lent now.
-    ///
-    /// # Safety
-    /// Nothing uses the place's bytes from here.
-    pub(crate) unsafe fn give_back(&self, kind: EntityKind, place: NonNull<u8>) -> bool {
-        // SAFETY: the caller's.
-        self.of(kind)
-            .is_some_and(|cells| unsafe { cells.release_at(place) })
+    /// Give back `place`, or hand it back when it is no place these tables lent: one of another
+    /// session, which only that session takes back.
+    pub(crate) fn give_back(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        // SAFETY: the place is consumed, so the claim it held ends here, once; what the ABI kept
+        // at its address it let go of before it gave the place up.
+        let taken = self
+            .of(place.kind)
+            .is_some_and(|cells| unsafe { cells.release_at(place.base) });
+        if taken {
+            Ok(())
+        } else {
+            Err(place)
+        }
     }
 
     /// How many places of `kind` are lent, and how many the arena holds.
