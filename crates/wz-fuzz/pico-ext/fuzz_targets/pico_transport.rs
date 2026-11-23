@@ -22,7 +22,8 @@
 //!
 //! - the far end's handshake opens the session (a failure here is the harness's, and every
 //!   input shows it);
-//! - each call of the program's answers a code its documentation states;
+//! - each call of the program's answers a code its documentation states, and names a link the
+//!   transport no longer holds only once the session has closed that link on the program;
 //! - every link the session opens on the program is closed on it exactly once, no call reaches
 //!   the program after its `drop(context)`, and that drop runs once, once the session and the
 //!   program have let the transport go;
@@ -31,6 +32,7 @@
 
 #![no_main]
 
+use std::collections::HashSet;
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -38,7 +40,9 @@ use std::time::{Duration, Instant};
 
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::app_transport::*;
-use wz_capi_pico::result::{WZ_EXT_ERR_LINK_CLOSED, WZ_EXT_ERR_LINK_FULL, Z_OK};
+use wz_capi_pico::result::{
+    WZ_EXT_ERR_LINK_CLOSED, WZ_EXT_ERR_LINK_FULL, WZ_EXT_ERR_LINK_UNKNOWN, Z_OK,
+};
 use wz_capi_pico::{
     z_close, z_closure_sample, z_closure_sample_move, z_config_default, z_config_loan_mut,
     z_config_move, z_declare_background_subscriber, z_loaned_sample_t, z_open,
@@ -72,6 +76,9 @@ struct Far {
     replies: Mutex<Vec<Vec<u8>>>,
     opens: AtomicUsize,
     closes: AtomicUsize,
+    /// The links the session closed on the program, each recorded before its close returns: the
+    /// transport answers `WZ_EXT_ERR_LINK_UNKNOWN` for a link only once its close has returned.
+    closed_links: Mutex<HashSet<wz_ext_link_t>>,
     drops: AtomicUsize,
     dropped: AtomicBool,
     samples: AtomicUsize,
@@ -168,10 +175,14 @@ unsafe extern "C" fn on_send(
     WZ_EXT_LINK_OK
 }
 
-unsafe extern "C" fn on_close(context: *mut c_void, _link: wz_ext_link_t) {
+unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
     let far = far(context);
     far.called("close");
     far.closes.fetch_add(1, Ordering::SeqCst);
+    far.closed_links
+        .lock()
+        .expect("the closed links' lock")
+        .insert(link);
 }
 
 unsafe extern "C" fn on_drop(context: *mut c_void) {
@@ -204,6 +215,7 @@ fuzz_target!(|data: &[u8]| {
         replies: Mutex::new(handshake_replies().to_vec()),
         opens: AtomicUsize::new(0),
         closes: AtomicUsize::new(0),
+        closed_links: Mutex::new(HashSet::new()),
         drops: AtomicUsize::new(0),
         dropped: AtomicBool::new(false),
         samples: AtomicUsize::new(0),
@@ -334,6 +346,14 @@ fuzz_target!(|data: &[u8]| {
         "the program's drop ran more than once"
     );
     assert_eq!(
+        far.closed_links
+            .lock()
+            .expect("the closed links' lock")
+            .len(),
+        far.closes.load(Ordering::SeqCst),
+        "the session closed a link on the program twice"
+    );
+    assert_eq!(
         far.closes.load(Ordering::SeqCst),
         far.opens.load(Ordering::SeqCst),
         "the links opened on the program are not each closed once"
@@ -343,7 +363,9 @@ fuzz_target!(|data: &[u8]| {
 });
 
 /// Hand `bytes` in on `link`: whether the link still takes bytes. A full link is given
-/// `DRAIN_WAIT` to be read down; a link the session has closed takes nothing more.
+/// `DRAIN_WAIT` to be read down; a link the session has closed takes nothing more: it answers
+/// `WZ_EXT_ERR_LINK_CLOSED` until the program's close of it returns, and `WZ_EXT_ERR_LINK_UNKNOWN`
+/// after, which this program's own thread meets when the session closes the link under it.
 fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
     let deadline = Instant::now() + DRAIN_WAIT;
     loop {
@@ -360,8 +382,22 @@ fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
         stated(
             "transport_received",
             rc,
-            &[Z_OK, WZ_EXT_ERR_LINK_FULL, WZ_EXT_ERR_LINK_CLOSED],
+            &[
+                Z_OK,
+                WZ_EXT_ERR_LINK_FULL,
+                WZ_EXT_ERR_LINK_CLOSED,
+                WZ_EXT_ERR_LINK_UNKNOWN,
+            ],
         );
+        if rc == WZ_EXT_ERR_LINK_UNKNOWN {
+            assert!(
+                far.closed_links
+                    .lock()
+                    .expect("the closed links' lock")
+                    .contains(&link),
+                "transport_received: link {link} is unknown and the session never closed it on the program"
+            );
+        }
         match rc {
             Z_OK => return true,
             WZ_EXT_ERR_LINK_FULL if Instant::now() < deadline => {
