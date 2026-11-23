@@ -19,11 +19,8 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-// The port a stack listens on is shared by its links; the tests share a channel's answer.
-#[cfg(all(
-    not(feature = "session-slot"),
-    any(feature = "udp-listen", all(test, feature = "alloc"))
-))]
+// The port a stack listens on is shared by its links.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
