@@ -142,8 +142,6 @@ pub mod latest;
 pub mod slot_publisher;
 // The client node as a replayer: a recorded sequence of puts compiled into the image, paced and
 // mutated as the replay tool does, played on each session from the session's application layer.
-// Totality debt TD-210 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_replay;
 // What the client node knows of a plane it holds beside its sessions (a group, today): two traits and
