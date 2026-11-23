@@ -312,6 +312,29 @@ fn iovecs(parts: &[&[u8]]) -> Result<([libc::iovec; MAX_PARTS], usize), PosixNet
     Ok((vecs, count))
 }
 
+/// One `sendmsg` of `vecs` on `fd` with `flags`, taken again when a signal interrupts it: the
+/// bytes the stack took, or the error it answered. The body both stream writes share, out of line
+/// so that the message header and the read of `errno` are one copy.
+#[inline(never)]
+fn send_vecs(fd: c_int, vecs: &mut [libc::iovec], flags: c_int) -> Result<usize, c_int> {
+    loop {
+        // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
+        let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+        msg.msg_iov = vecs.as_mut_ptr();
+        // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
+        msg.msg_iovlen = vecs.len() as _;
+        // SAFETY: every iovec names live bytes of the caller's parts for its length.
+        let sent = unsafe { libc::sendmsg(fd, &msg, flags) };
+        if sent >= 0 {
+            return Ok(sent as usize);
+        }
+        match errno() {
+            libc::EINTR => continue,
+            other => return Err(other),
+        }
+    }
+}
+
 impl StreamSocket for PosixTcpSocket {
     type Error = PosixNetError;
 
@@ -328,21 +351,9 @@ impl StreamSocket for PosixTcpSocket {
         let (mut vecs, count) = iovecs(parts)?;
         let mut first = 0;
         while first < count {
-            // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
-            let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
-            msg.msg_iov = vecs[first..count].as_mut_ptr();
-            // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
-            msg.msg_iovlen = (count - first) as _;
-            // SAFETY: every iovec names a live slice of `parts` for its length. MSG_NOSIGNAL: a
-            // peer that closed the stream is an error here, not a SIGPIPE.
-            let sent = unsafe { libc::sendmsg(self.fd, &msg, libc::MSG_NOSIGNAL) };
-            if sent < 0 {
-                match errno() {
-                    libc::EINTR => continue,
-                    other => return Err(PosixNetError::Write(other)),
-                }
-            }
-            let mut sent = sent as usize;
+            // MSG_NOSIGNAL: a peer that closed the stream is an error here, not a SIGPIPE.
+            let mut sent = send_vecs(self.fd, &mut vecs[first..count], libc::MSG_NOSIGNAL)
+                .map_err(PosixNetError::Write)?;
             while first < count && sent >= vecs[first].iov_len {
                 sent -= vecs[first].iov_len;
                 first += 1;
@@ -365,25 +376,17 @@ impl StreamSocket for PosixTcpSocket {
             Ok(built) => built,
             Err(refused) => return Some(Err(refused)),
         };
-        loop {
-            // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
-            let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
-            msg.msg_iov = vecs[..count].as_mut_ptr();
-            // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
-            msg.msg_iovlen = count as _;
-            // SAFETY: every iovec names a live slice of `parts` for its length. MSG_NOSIGNAL as
-            // in `send_parts`.
-            let sent =
-                unsafe { libc::sendmsg(self.fd, &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
-            if sent >= 0 {
-                return Some(Ok(sent as usize));
-            }
-            match errno() {
-                libc::EINTR => continue,
-                libc::EAGAIN => return Some(Ok(0)),
-                other => return Some(Err(PosixNetError::Write(other))),
-            }
-        }
+        Some(
+            match send_vecs(
+                self.fd,
+                &mut vecs[..count],
+                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+            ) {
+                Ok(sent) => Ok(sent),
+                Err(libc::EAGAIN) => Ok(0),
+                Err(other) => Err(PosixNetError::Write(other)),
+            },
+        )
     }
 
     // A connect under way reports room once it ends, made or refused, and `SO_ERROR` says which.
@@ -623,6 +626,31 @@ mod tests {
         let near = PosixTcpSocket::connect(at(port)).expect("a connection");
         let (far, _) = listener.accept().expect("the far end");
         (near, far)
+    }
+
+    /// Both stream writes go through one `sendmsg` body: a write and a write that does not wait
+    /// each deliver their parts in order, empty ones left out, and the body answers the error the
+    /// system gave for a socket that is not one.
+    #[test]
+    fn both_writes_send_their_parts_through_one_body() {
+        let (near, mut far) = pair();
+        near.send_parts(&[b"ab", b"", b"cde"]).expect("a write");
+        assert_eq!(
+            near.send_parts_now(&[b"fg", b"h"])
+                .map(|sent| sent.expect("taken")),
+            Some(3)
+        );
+        let mut got = [0u8; 8];
+        far.read_exact(&mut got).expect("the bytes");
+        assert_eq!(&got, b"abcdefgh");
+        let mut vecs = [libc::iovec {
+            iov_base: b"x".as_ptr().cast_mut().cast(),
+            iov_len: 1,
+        }];
+        assert_eq!(
+            send_vecs(-1, &mut vecs, libc::MSG_NOSIGNAL),
+            Err(libc::EBADF)
+        );
     }
 
     /// A connection to an IPv6 address is a socket of its family, both of whose ends the kernel
