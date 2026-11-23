@@ -197,15 +197,54 @@ transport sessions (L2); every row of section 2 has one owner.
 
 ## 7. The tokio engine on the same tables
 
-`SharedSession`'s lists (`SubEntry`, `QblEntry`, `KexprEntry`, `TokenEntry`) are a
-`SessionTables<ArcCallbacks, Heap>`, the callbacks shared `Fn`s. The faces' sessions keep only
-what their peer writes and the transport: a sample a face receives is delivered by
-`subscribers_for` over the one table, not by a subscriber registered on that face, so a face that
-comes up is replayed the tables (as the cooperative engine's links are) and registers nothing.
-Two of its fields the rows do not hold yet: the link restriction of a declaration
-(`LinkRestriction`, `entity-link-restriction`) and the declaration options of a token; each is a
-field of the row behind the feature that names it, added with the step that moves the tokio
-engine. The router's routing table is a further table of the same set behind its feature
+Each face of `wz-capi-core`'s `SharedSession` is a `TokioSession`, and each `TokioSession` holds
+an `ApplicationLayerObserver`: the application's tables (its subscribers, queryables, local tokens,
+liveliness subscribers, the listeners on what a peer declares) and the tables its peer writes (its
+key aliases, its declarations, its interests) in one value. A subscriber of the program is
+therefore registered once in `SharedSession`'s list and once more in every face's observer, and
+those rows are not only for delivery: the face's drive loop answers a peer's subscriber Interest
+from them (`observer.rs`, `sub_interest_reply`), the face re-judges its matching listeners from
+them, and a retraction is ordered against those answers (`subscriber.rs`, `teardown`). A face
+cannot simply stop registering.
+
+The split the cooperative engine already makes is the one the tokio engine takes:
+
+- the application half once per session, shared by every face: `slot_observer::SlotObserverOf`
+  of the heap profile, which is the same registries as the observer's, apart from any peer;
+- for each face, what its peer writes (`peer_tables::PeerTables`) and the session's gets
+  pending on it (`slot_observer::Requesters`), as the cooperative engine's `FaceTables` are.
+
+Every dispatch and every answer to a peer is made with both halves in hand: the slot observer's
+calls take the face's tables as an argument (`SlotObserverOf::dispatch`, `flush_pending`). The
+steps, each a unit that compiles and keeps every test:
+
+1. **The face observer.** `wz-runtime-tokio`'s `Session` holds, in place of its
+   `ApplicationLayerObserver`, a face observer: a shared handle to the application half and its
+   own peer tables and requesters. A session opened alone makes a handle of its own, so a session
+   that is not a face of `SharedSession` behaves as it does now.
+2. **One application half for the faces.** `TokioSession` gains the constructor that is handed
+   the handle; `SharedSession` opens every face with its one handle.
+3. **One registration.** `SharedSession` registers a subscriber once in the shared half and sends
+   its declaration on each face's link; `FaceEntry::subs` goes. Then queryables, tokens,
+   liveliness subscribers, matching listeners and write filters, in that order.
+4. **The table set.** The shared half's registries become the rows of `SessionTables`
+   (section 3), the step the cooperative engine takes too (section 6).
+
+### Lock order
+
+A face's observer is taken first, the shared application half second, and never the other way
+round: every path that reaches the application half today does it from inside its face's
+observer (a dispatch, an answer to an Interest, a matching re-judgement), and keeping that order
+changes none of them. A path that holds no face (a declaration of `SharedSession`) takes the
+application half alone and lets it go before it takes any face. Both locks are
+`wz_runtime_tokio::sync::PlainMutex`, whose debug build records the order every thread takes its
+locks in and stops at the first acquisition that inverts an order seen before (`sync::lock_order`).
+`SharedSession`'s own registry lock comes before both.
+
+Two fields `SharedSession` keeps that the rows do not hold yet: the link restriction of a
+declaration (`LinkRestriction`, `entity-link-restriction`) and the declaration options of a
+token; each becomes a field of the row behind the feature that names it, with the step that moves
+its kind. The router's routing table is a further table of the same set behind its feature
 (`docs/c-abi-architecture.md`, section 3).
 
 ## 8. Expected saving
