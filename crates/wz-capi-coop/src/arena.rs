@@ -758,19 +758,7 @@ impl ArenaPlan {
             return Ok(self);
         }
         self.link_cell_bytes = bytes;
-        self.put(
-            "link cell flags",
-            "MAX_FACES + MAX_ACCEPT_PENDING",
-            self.links,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        self.put(
-            "link cells",
-            "MAX_FACES + MAX_ACCEPT_PENDING",
-            self.links,
-            bytes,
-        )?;
-        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        self.put_cells(["link cell flags", "link cells"], bytes)?;
         Ok(self)
     }
 
@@ -783,20 +771,20 @@ impl ArenaPlan {
             return Ok(self);
         }
         self.gate_cell_bytes = bytes;
-        self.put(
-            "link gate flags",
-            "MAX_FACES + MAX_ACCEPT_PENDING",
-            self.links,
-            LentByteCells::FLAG_BYTES,
-        )?;
-        self.put(
-            "link gates",
-            "MAX_FACES + MAX_ACCEPT_PENDING",
-            self.links,
-            bytes,
-        )?;
-        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        self.put_cells(["link gate flags", "link gates"], bytes)?;
         Ok(self)
+    }
+
+    /// The two rows of a table of a cell for each link, `bytes` bytes each, named `parts`: its
+    /// flags, then its cells, as an arena lends a table of cells.
+    #[inline(never)]
+    fn put_cells(&mut self, parts: [&'static str; 2], bytes: usize) -> Result<(), ArenaRefused> {
+        let [flags, cells] = parts;
+        let basis = "MAX_FACES + MAX_ACCEPT_PENDING";
+        self.put(flags, basis, self.links, LentByteCells::FLAG_BYTES)?;
+        self.put(cells, basis, self.links, bytes)?;
+        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(())
     }
 
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.

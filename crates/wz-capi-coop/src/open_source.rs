@@ -61,19 +61,27 @@ impl<'a> EndpointWriter<'a> {
     /// Write the text of the next endpoint to dial. [`OpenError::Unreachable`] for a text longer
     /// than a row, `MAX_LOCATOR_LEN` bytes, naming it.
     pub fn dial(&mut self, text: &str) -> Result<(), OpenError> {
-        self.texts
-            .write_dial(text)
-            .map(drop)
-            .map_err(|why| unwritten(text, why, OpenError::Unreachable))
+        self.write(text, false)
     }
 
     /// Write the text of the next endpoint to listen on. [`OpenError::Listen`] for a text longer
     /// than a row, naming it.
     pub fn listen(&mut self, text: &str) -> Result<(), OpenError> {
-        self.texts
-            .write_listen(text)
+        self.write(text, true)
+    }
+
+    /// Write `text` in the next row to listen on when `listen`, to dial otherwise: the one body
+    /// of both.
+    #[inline(never)]
+    fn write(&mut self, text: &str, listen: bool) -> Result<(), OpenError> {
+        let (written, as_open): (_, fn(EndpointRefusal) -> OpenError) = if listen {
+            (self.texts.write_listen(text), OpenError::Listen)
+        } else {
+            (self.texts.write_dial(text), OpenError::Unreachable)
+        };
+        written
             .map(drop)
-            .map_err(|why| unwritten(text, why, OpenError::Listen))
+            .map_err(|why| unwritten(text, why, as_open))
     }
 }
 
