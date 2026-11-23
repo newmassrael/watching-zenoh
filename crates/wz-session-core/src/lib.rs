@@ -135,11 +135,7 @@ pub mod diag;
 // stays `alloc`-gated: it guards the outbound DECLARE *wire emit*
 // path, which is AP-retention per the Track 2 borrow boundary.
 // Totality debt TD-024 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr_canon;
 
 // R311dn / di-15-pre — keyexpr glob + intersection matchers
