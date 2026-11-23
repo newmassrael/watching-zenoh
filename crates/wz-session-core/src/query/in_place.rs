@@ -335,7 +335,7 @@ mod tests {
         Vec<(crate::wire_id::RequestId, QosLevel)>,
     );
 
-    type Registry = super::QueryableRegistry<crate::query_sink::BoxedQuerySink>;
+    type Registry = crate::query::QueryableRegistry<crate::query_sink::BoxedQuerySink>;
 
     fn recording() -> (Registry, Arc<Mutex<Vec<Seen>>>) {
         let mut registry = Registry::new();

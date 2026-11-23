@@ -4808,11 +4808,13 @@ mod tests {
         let mut peer: SubscriberPeer = SubscriberPeer::default();
         peer.dispatch(
             &mut tables,
+            &mut (),
             &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a"))),
             Reliability::Reliable,
         );
         peer.dispatch(
             &mut tables,
+            &mut (),
             &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/b"))),
             Reliability::Reliable,
         );
