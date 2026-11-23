@@ -25,7 +25,8 @@ use core::net::SocketAddr;
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
-    deliver_in_upstream_order, ScoutParams, ScoutWindowPlace, ScoutedHello,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutParams, ScoutWindowPlace,
+    ScoutedHello,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -37,13 +38,15 @@ use crate::prelude::*;
 const READ_WAIT_MS: c_int = 2;
 
 /// Scout `group` for `budget_ms` over a socket of `U`, reading each datagram into a buffer of
-/// `rx_capacity` bytes (zenoh-pico reads a scout into one of its multicast batch size), and hand
-/// each peer that answered to `on_hello` in the order upstream delivers them (after the window,
+/// `rx_capacity` bytes (zenoh-pico reads a scout into one of its multicast batch size), record each
+/// peer that answered in `table`, the caller's, where it keeps the scout's state, and lend each to
+/// `on_hello` as the table holds it, in the order upstream delivers them (after the window,
 /// last responder first). The number delivered; a socket that cannot be opened is a window nobody
 /// answers, `0`.
 ///
 /// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
 /// ABI's to refuse before it scouts.
+#[allow(clippy::too_many_arguments)]
 pub fn run_scout<U, C>(
     clock: &C,
     group: SocketAddr,
@@ -51,7 +54,8 @@ pub fn run_scout<U, C>(
     zid: Option<SessionZid>,
     budget_ms: u64,
     rx_capacity: usize,
-    on_hello: impl FnMut(&ScoutedHello),
+    table: &mut HelloTable,
+    on_hello: impl FnMut(&HelloRow),
 ) -> usize
 where
     U: DatagramSocket,
@@ -63,13 +67,13 @@ where
         timeout_ms: budget_ms,
         exit_on_first: false,
     };
-    let hellos = window::<U, C>(clock, group, params, rx_capacity);
-    deliver_in_upstream_order(&hellos, on_hello)
+    window::<U, C>(clock, group, params, rx_capacity, table);
+    deliver_rows_in_upstream_order(table, on_hello)
 }
 
 /// Scout `group` for `budget_ms` and answer the FIRST node that replies, or `None` when none does
 /// in the window: zenoh-pico's open-time lookup, which `_z_open` runs when its config names no
-/// locator.
+/// locator. `table` is where the window records it, as [`run_scout`]'s.
 pub fn scout_first<U, C>(
     clock: &C,
     group: SocketAddr,
@@ -77,6 +81,7 @@ pub fn scout_first<U, C>(
     zid: Option<SessionZid>,
     budget_ms: u64,
     rx_capacity: usize,
+    table: &mut HelloTable,
 ) -> Option<ScoutedHello>
 where
     U: DatagramSocket,
@@ -88,9 +93,8 @@ where
         timeout_ms: budget_ms,
         exit_on_first: true,
     };
-    window::<U, C>(clock, group, params, rx_capacity)
-        .into_iter()
-        .next()
+    window::<U, C>(clock, group, params, rx_capacity, table);
+    table.first().map(HelloRow::to_hello)
 }
 
 /// What the window's socket is bound to: the unspecified address of the group's family, on a port
@@ -101,25 +105,26 @@ fn scout_bind(group: SocketAddr) -> SocketAddr {
 }
 
 /// One window: the Scout sent once, every datagram that arrives read until the machine resolves,
-/// and the Hellos collected. A read that fails ends the window with what it has, as a lost member
-/// does in the host's window.
+/// and the Hellos recorded in `table`. A read that fails ends the window with what it has, as a
+/// lost member does in the host's window.
 fn window<U, C>(
     clock: &C,
     group: SocketAddr,
     params: ScoutParams,
     rx_capacity: usize,
-) -> Vec<ScoutedHello>
-where
+    table: &mut HelloTable,
+) where
     U: DatagramSocket,
     C: ClockSource + Clone + 'static,
 {
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
     let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
-    let window = place.build(params);
-    let actions = window.actions().clone();
+    // SAFETY: `table` outlives the place, which this frame drops before it returns, and nothing
+    // else reaches it while the window is pumped.
+    let window = unsafe { place.build_over(params, table) };
     let Ok(socket) = U::bind(scout_bind(group)) else {
-        return actions.scouted_hellos();
+        return;
     };
     let sent = window
         .open()
@@ -146,7 +151,6 @@ where
             break;
         }
     }
-    actions.scouted_hellos()
 }
 
 #[cfg(test)]

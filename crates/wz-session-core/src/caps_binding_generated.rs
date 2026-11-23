@@ -310,6 +310,42 @@ pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_SCOUT_HELLOS`] is bound.
+pub const MAX_SCOUT_HELLOS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::SCOUT_HELLO_LOCATORS`] is bound.
+pub const SCOUT_HELLO_LOCATORS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::CONFIG_DOCUMENT_DEPTH`] is bound.
+pub const CONFIG_DOCUMENT_DEPTH: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((3, 64)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::CONFIG_TEXT_BYTES`] is bound.
 pub const CONFIG_TEXT_BYTES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,

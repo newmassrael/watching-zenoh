@@ -65,6 +65,12 @@ void wz_os_condvar_wait(void *condvar, void *mutex)
 	(void)k_condvar_wait(condvar, mutex, K_FOREVER);
 }
 
+/* The same wait for at most ms: 0 when notified, otherwise the time ran out. */
+int wz_os_condvar_wait_ms(void *condvar, void *mutex, uint32_t ms)
+{
+	return k_condvar_wait(condvar, mutex, K_MSEC(ms)) == 0 ? 0 : 1;
+}
+
 void wz_os_condvar_notify_one(void *condvar)
 {
 	(void)k_condvar_signal(condvar);

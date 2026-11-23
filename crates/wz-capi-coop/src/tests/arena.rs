@@ -19,7 +19,7 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{LimitValue, Quota, UnlentRows};
-use wz_session_core::limits::{SessionLimits, SESSION_LIMITS};
+use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
@@ -940,14 +940,19 @@ fn pico_preset() -> Vec<(&'static str, usize)> {
 }
 
 /// The build's limits with the pico preset selected over them, through the lowering every build
-/// these tests run in allows (`lowered`).
+/// these tests run in allows (`lowered`). A preset of a capacity the build fixes and no snapshot
+/// holds (a config's table, a scouting window's) sizes storage outside a session and is the build's
+/// to apply, so it is passed over here; any other preset names a limit of the session.
 fn pico_preset_limits() -> SessionLimits {
     lowered(|limits| {
         for (id, value) in pico_preset() {
-            let entry = SESSION_LIMITS
-                .iter()
-                .find(|entry| entry.id() == id)
-                .expect("a preset names a limit of the session");
+            let Some(entry) = SESSION_LIMITS.iter().find(|entry| entry.id() == id) else {
+                assert!(
+                    CAPACITY_LIMITS.contains(&id),
+                    "{id}: a preset names a limit of the session, or a capacity of the build"
+                );
+                continue;
+            };
             entry
                 .select(limits, LimitValue::Integer(value))
                 .expect("the session reads the limit from its snapshot")?;

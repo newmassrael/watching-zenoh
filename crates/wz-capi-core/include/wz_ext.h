@@ -1083,6 +1083,10 @@ bool wz_ext_internal_instance_keyer_check(
 #define WZ_EXT_ERR_UNSUPPORTED (-3) /* the session's engine, or this build, does
                                        not do what the call asks; nothing was
                                        declared or sent */
+#define WZ_EXT_ERR_SCOUT_REENTERED (-25) /* z_scout, or a z_open that scouts,
+                                            asked from inside a scout's callback
+                                            on the cooperative engine: refused
+                                            at once, nothing was sent */
 
 /* The declaration watch: what the peers of a session declare and retract,
  * told to the program. Present only in a build with the

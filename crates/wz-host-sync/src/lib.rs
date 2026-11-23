@@ -229,6 +229,15 @@ impl RawCondvar {
         lock.lock();
     }
 
+    /// [`Self::wait`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
+    /// `deadline_ns`: whether a notification came (false: the deadline came first).
+    ///
+    /// # Safety
+    /// The calling thread holds `lock`.
+    pub unsafe fn wait_until(&self, lock: &RawLock, deadline_ns: u64) -> bool {
+        raw_wait_until(self, lock, deadline_ns)
+    }
+
     /// Wake a waiting thread. Every waiter is woken, which the waiters' loops allow.
     pub fn notify_one(&self) {
         self.notify_all();
