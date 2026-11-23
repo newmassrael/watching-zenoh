@@ -239,7 +239,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
 | TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
-| TD-037 | `wz-session-core` | `network_message` | `indexing_slicing`, `arithmetic_side_effects` | 23 | open |
 | TD-038 | `wz-session-core` | `lifecycle_wire` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 22 | open |
 | TD-039 | `wz-session-core` | `dissect_schema` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |
 | TD-040 | `wz-session-core` | `event_ring` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |

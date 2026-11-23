@@ -1074,7 +1074,12 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
 /// included, as one [`NetworkMessage::Unknown`]. The caller stops walking.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Result<(), CodecError> {
-    let mid = cursor.peek_slice(1)?[0] & 0x1F;
+    let mid = cursor
+        .peek_slice(1)?
+        .first()
+        .copied()
+        .ok_or(CodecError::NeedMoreBytes)?
+        & 0x1F;
     let rem = cursor.remaining();
     let body = cursor.peek_slice(rem)?.to_vec();
     cursor.advance(rem)?;
@@ -1600,7 +1605,8 @@ fn walk_records<'f>(
         if is_transport_mid(
             cursor
                 .peek_slice(1)
-                .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+                .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                .map_err(crate::parse_error::InboundParseError::Codec)?
                 & 0x1F,
         ) {
             break;
@@ -1649,7 +1655,11 @@ fn walk_records<'f>(
                 feature = "codec-response"
             ))]
             if form == RecordForm::Lent {
-                let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
+                let mid = cursor
+                    .peek_slice(1)
+                    .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                    .map_err(InboundParseError::Codec)?
+                    & 0x1F;
                 if lend_record(mid, &mut cursor, each)? {
                     continue;
                 }
@@ -1675,7 +1685,7 @@ fn walk_records<'f>(
     record.clear();
     // How much of the payload the walk read: all of it, or up to the transport message that
     // ended it, or up to the record `go_on` stopped it before.
-    Ok((payload.len() - cursor.remaining(), stopped))
+    Ok((payload.len().saturating_sub(cursor.remaining()), stopped))
 }
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
@@ -1949,7 +1959,8 @@ fn lend_any_record<'f>(
 ) -> Result<Walk, crate::parse_error::InboundParseError> {
     let mid = cursor
         .peek_slice(1)
-        .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+        .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+        .map_err(crate::parse_error::InboundParseError::Codec)?
         & 0x1F;
     match mid {
         // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
@@ -2337,8 +2348,11 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
     while cursor.remaining() > 0 {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
-        let offset = total - cursor.remaining();
-        if end == RecordsEnd::AtTransportMessage && is_transport_mid(bytes[offset] & 0x1F) {
+        // The cursor runs over `bytes`, so what it has left is at most their length.
+        let offset = total.saturating_sub(cursor.remaining());
+        let rest = bytes.get(offset..).unwrap_or_default();
+        let header = rest.first().copied().unwrap_or_default();
+        if end == RecordsEnd::AtTransportMessage && is_transport_mid(header & 0x1F) {
             next_message_at = Some(offset);
             break;
         }
@@ -2356,7 +2370,9 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
         let before = messages.len();
         match decode_one_record(&mut cursor, &mut messages, NO_ORIGIN) {
             Ok(true) => {
-                let len = (total - cursor.remaining()) - offset;
+                let len = total
+                    .saturating_sub(cursor.remaining())
+                    .saturating_sub(offset);
                 spans.resize(before, (0, 0));
                 for _ in before..messages.len() {
                     spans.push((offset, len));
@@ -2366,9 +2382,9 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
                 // An unknown MID: absorb the rest verbatim (the strict
                 // parse's own behaviour) and stop, since the record's
                 // length is unknowable and there is nothing to resync on.
-                let mid = bytes[offset] & 0x1F;
+                let mid = header & 0x1F;
                 let rem = cursor.remaining();
-                let body = bytes[offset..].to_vec();
+                let body = rest.to_vec();
                 // `advance` past a slice the cursor already reports as
                 // remaining cannot fail; the outcome is checked anyway so
                 // a future cursor change cannot silently desync the walk.
@@ -2396,7 +2412,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
     }
     let unparsed_bytes = match halt {
         Some(BatchHalt::UnknownMid { offset, .. }) | Some(BatchHalt::CodecError { offset, .. }) => {
-            total - offset
+            total.saturating_sub(offset)
         }
         None => 0,
     };
@@ -2441,7 +2457,11 @@ fn decode_one_record(
     out: &mut impl RecordOut,
     origin: Origin<'_>,
 ) -> Result<bool, CodecError> {
-    let header = cursor.peek_slice(1)?[0];
+    let header = cursor
+        .peek_slice(1)?
+        .first()
+        .copied()
+        .ok_or(CodecError::NeedMoreBytes)?;
     let mid = header & 0x1F;
     // The dispatch by the masked id stays here and not in a document: upstream
     // refuses an id it does not know (`commons/zenoh-codec/src/network/mod.rs` @
@@ -3796,7 +3816,10 @@ fn put_view_class(
         kind,
         message,
         space,
-        payload + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::PUT_ATTACHMENT),
+        payload.saturating_add(zbuf_ext_len_in(
+            entries(),
+            crate::ext_header::body_eid::PUT_ATTACHMENT,
+        )),
         entries(),
         DATA_SHM_MARKER,
     );
@@ -3975,7 +3998,10 @@ fn query_view_class(
         MessageLabel::Query,
         StatMessage::Query,
         space,
-        value + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::QUERY_ATTACHMENT),
+        value.saturating_add(zbuf_ext_len_in(
+            entries(),
+            crate::ext_header::body_eid::QUERY_ATTACHMENT,
+        )),
         entries(),
         crate::ext_header::body_ext_id::QUERY_SHM,
     )

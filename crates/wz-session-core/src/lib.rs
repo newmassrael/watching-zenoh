@@ -1138,8 +1138,6 @@ pub mod serde_codec;
 /// wz-runtime-tokio at `crate::session_glue::NetworkMessage` for
 /// callsite compatibility with the query / declare / tests modules.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-037 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod network_message;
 
 /// R3011 (open-debt item 850) — the data-plane owned wire types
