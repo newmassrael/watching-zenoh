@@ -512,7 +512,7 @@ fn memory_basis(
     let rx = pico_link_rx(limits);
     crate::session_memory::MemoryBasis {
         limits: *limits,
-        links: crate::session_memory::links_of(listen),
+        links: crate::session_memory::links_of(listen, limits),
         queue_batches: tx_queue.sizes.iter().sum(),
         batch_bytes: usize::from(pico_unicast_batch(limits)),
         rx_bytes: rx.buffer_size,
@@ -1464,12 +1464,22 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // negotiated, and a node pays its batch for each link and not the largest datagram.
     let links = crate::coop_host::links().with_rx_capacity(limits.pico_unicast_batch_bytes());
     // A session that listens on nothing holds the one link it dials, as pico's client holds its
-    // one transport, so its arena lays out the buffers and the gets of no other face; one that
-    // listens holds as many as upstream admits.
+    // one transport, so its arena lays out the buffers and the tables of no other face; one that
+    // listens holds as many as its limits admit, pico's `Z_LISTEN_MAX_CONNECTION_NB` at the pico
+    // preset. A limit over the build's is refused as the open's arena refuses one.
     let max_faces = if listen.is_empty() {
         0
     } else {
-        wz_capi_coop::DEFAULT_MAX_FACES
+        match wz_capi_coop::arena::admitted_faces(&limits) {
+            Ok(faces) => faces,
+            Err(refused) => {
+                return coop_open_refusal(&wz_capi_coop::OpenError::Arena(refused));
+            }
+        }
+    };
+    let accept_pending = match wz_capi_coop::arena::admitted_handshakes(&limits) {
+        Ok(handshakes) => handshakes,
+        Err(refused) => return coop_open_refusal(&wz_capi_coop::OpenError::Arena(refused)),
     };
     // The clock every timer of the session reads: the time base the config names, or the host's.
     #[cfg(feature = "time-base")]
@@ -1529,10 +1539,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // A read waits on the link as long as pico's socket receive times out, its
         // `Z_CONFIG_SOCKET_TIMEOUT` as the open's snapshot holds it.
         idle_wait_ms: pico_socket_timeout(&limits),
-        // The bounds of an accept are upstream's, as the tokio engine's are
-        // (`pico_accept`): pico bounds no count of pending accepts or of sessions.
+        // The bounds of an accept are the session's limits: the faces it holds besides its dial
+        // (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at the pico preset
+        // pico's own, ten peers and one handshake at a time.
         listen,
-        accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
+        accept_pending,
         max_faces,
         // The group the listen endpoint names, when it names one.
         groups,

@@ -752,8 +752,13 @@ fn client_config() -> CoopConfig {
         redial_ms: None,
         idle_wait_ms: 100,
         listen: Vec::new(),
-        accept_pending: crate::DEFAULT_ACCEPT_PENDING,
-        max_faces: crate::DEFAULT_MAX_FACES,
+        accept_pending: crate::arena::admitted_handshakes(
+            &wz_session_core::limits::SessionLimits::defaults(),
+        )
+        .expect("the build admits its own value"),
+        max_faces:
+            crate::arena::admitted_faces(&wz_session_core::limits::SessionLimits::defaults())
+                .expect("the build admits its own value"),
         groups: Vec::new(),
         clock_moves: None,
         limits: wz_session_core::limits::SessionLimits::defaults(),

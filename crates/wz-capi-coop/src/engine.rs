@@ -251,12 +251,16 @@ pub struct CoopConfig {
     /// listener, and is open as soon as it is bound (`listen`).
     pub listen: Vec<String>,
     /// How many inbound links may be in their handshake at once; one that arrives past it is
-    /// closed unread. `transport/unicast/accept_pending` of zenoh, [`DEFAULT_ACCEPT_PENDING`]
-    /// by default (`listen`). How long a handshake may take is `timeouts.accepting_inactivity_ms`.
+    /// closed unread. At most the session's `MAX_ACCEPT_PENDING` (zenoh's
+    /// `transport/unicast/accept_pending`), which [`crate::arena::admitted_handshakes`] gives;
+    /// the open of a session that listens refuses more (`listen`). How long a handshake may take
+    /// is `timeouts.accepting_inactivity_ms`.
     pub accept_pending: usize,
-    /// How many faces the session holds besides the dial role's; an inbound link that arrives
-    /// past it is closed unread. `transport/unicast/max_sessions` of zenoh,
-    /// [`DEFAULT_MAX_FACES`] by default (`listen`).
+    /// How many faces the session holds besides the dial role's, one still in its handshake among
+    /// them; an inbound link that arrives past it is closed unread. At most the session's
+    /// `MAX_FACES` (zenoh's `transport/unicast/max_sessions`), which
+    /// [`crate::arena::admitted_faces`] gives; the open refuses more. Each is lent a set of a
+    /// face's tables when the session opens (`listen`).
     pub max_faces: usize,
     /// The multicast groups the session joins, each a face of its own beside its links, joined
     /// before anything is dialled: what each advertises and what the session tells it of its
@@ -328,14 +332,6 @@ fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleW
 /// How long a read waits, at most, before it asks a dial under way again, in milliseconds: the
 /// stack gives no wait for a connection being made, so the dial is looked at on this tick.
 const DIAL_LOOK_MS: u64 = 1;
-
-/// Inbound links in their handshake at once, when the config states none: zenoh's
-/// `transport/unicast/accept_pending`.
-pub const DEFAULT_ACCEPT_PENDING: usize = 100;
-
-/// Faces the session holds besides the dial role's, when the config states none: zenoh's
-/// `transport/unicast/max_sessions`.
-pub const DEFAULT_MAX_FACES: usize = 1000;
 
 /// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and

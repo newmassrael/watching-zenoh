@@ -450,9 +450,10 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
     }
 }
 
-/// A listener lays out the gets and the link of a face for the dial role, each face it admits and
-/// each handshake it holds; the application's tables are the session's, once, however many faces
-/// it holds.
+/// A listener lays out the gets and the peer tables of a face for the dial role and each face it
+/// admits, a handshake among them, and no more; the buffers of a link for each of those and for
+/// each handshake it may take off its port besides; and the application's tables once, however many
+/// faces it holds.
 #[test]
 fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     let dial = ArenaPlan::of(
@@ -476,8 +477,8 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     // The gets pending on the session's own queryables are held apart from every face's.
     let own = usize::from(cfg!(feature = "local-queryable"));
     assert_eq!(row(&dial, "pending gets").count, 1 + own);
-    assert_eq!(row(&listening, "pending gets").count, 1 + 3 + 2 + own);
-    assert_eq!(listening.gets().tables, 1 + 3 + 2 + own);
+    assert_eq!(row(&listening, "pending gets").count, 1 + 3 + own);
+    assert_eq!(listening.gets().tables, 1 + 3 + own);
     assert_eq!(
         row(&listening, "pending gets").entry_bytes,
         row(&dial, "pending gets").entry_bytes,
@@ -486,8 +487,8 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     // What a face's peer writes is held once for each face, as its gets are, and never for the
     // session's own gets.
     assert_eq!(row(&dial, "peer tables").count, 1);
-    assert_eq!(row(&listening, "peer tables").count, 1 + 3 + 2);
-    assert_eq!(listening.peers().tables, 1 + 3 + 2);
+    assert_eq!(row(&listening, "peer tables").count, 1 + 3);
+    assert_eq!(listening.peers().tables, 1 + 3);
     assert_eq!(
         row(&listening, "peer tables").entry_bytes,
         row(&dial, "peer tables").entry_bytes,
@@ -625,18 +626,84 @@ fn the_plan_holds_the_queries_its_limit_resolves() {
     assert_eq!(at_one.held_queries(), 1);
 }
 
-/// An arena past the address space is refused before any memory is asked.
+/// A config that states more faces than the session's `MAX_FACES`, or a listener more handshakes
+/// than its `MAX_ACCEPT_PENDING`, is refused by the limit's name before any memory is asked, as is
+/// one past the build's value; a session that only dials is not held to the handshakes' bound, as
+/// it takes none. The CONTROL is the same config at the limit, which lays an arena out.
 #[test]
-fn an_arena_past_the_address_space_is_refused() {
-    let refused = ArenaPlan::of(
+fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
+    let listen = vec!["tcp/127.0.0.1:0".to_owned()];
+    let two_faces = lowered(|l| l.select_max_faces(Quota::at_most(2)));
+    assert_eq!(
+        ArenaPlan::of(
+            &CoopConfig {
+                listen: listen.clone(),
+                max_faces: 3,
+                ..client_config()
+            },
+            &two_faces,
+        ),
+        Err(ArenaRefused::Limit {
+            limit: "MAX_FACES",
+            why: UnlentRows::OverCeiling {
+                value: 3,
+                ceiling: 2,
+            },
+        })
+    );
+    let at_two = ArenaPlan::of(
         &CoopConfig {
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            max_faces: usize::MAX,
+            listen: listen.clone(),
+            max_faces: 2,
             ..client_config()
         },
-        &SessionLimits::defaults(),
+        &two_faces,
+    )
+    .expect("CONTROL: the faces the session admits lay an arena out");
+    assert_eq!(at_two.peers().tables, 1 + 2);
+
+    let one_handshake = lowered(|l| l.select_max_accept_pending(Quota::at_most(1)));
+    let listener = CoopConfig {
+        listen,
+        max_faces: 2,
+        accept_pending: 2,
+        ..client_config()
+    };
+    assert_eq!(
+        ArenaPlan::of(&listener, &one_handshake),
+        Err(ArenaRefused::Limit {
+            limit: "MAX_ACCEPT_PENDING",
+            why: UnlentRows::OverCeiling {
+                value: 2,
+                ceiling: 1,
+            },
+        })
     );
-    assert_eq!(refused, Err(ArenaRefused::TooLarge));
+    ArenaPlan::of(
+        &CoopConfig {
+            listen: Vec::new(),
+            ..listener
+        },
+        &one_handshake,
+    )
+    .expect("a session that only dials takes no handshake");
+
+    assert_eq!(
+        ArenaPlan::of(
+            &CoopConfig {
+                max_faces: usize::MAX,
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        ),
+        Err(ArenaRefused::Limit {
+            limit: "MAX_FACES",
+            why: UnlentRows::OverCeiling {
+                value: usize::MAX,
+                ceiling: caps::MAX_FACES,
+            },
+        })
+    );
 }
 
 /// The links' rows are what the open lends first: their tables take exactly the rows' spans, a
@@ -889,6 +956,15 @@ fn pico_preset_limits() -> SessionLimits {
     })
 }
 
+/// What the pico interface opens for a session that listens on nothing: the dial role's face and
+/// no other, as zenoh-pico's client holds its one transport.
+fn preset_client() -> CoopConfig {
+    CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    }
+}
+
 /// The value the pico preset gives `id`, if it gives one.
 fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
     presets
@@ -918,7 +994,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         );
     }
     let limits = pico_preset_limits();
-    let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
+    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
@@ -1004,7 +1080,126 @@ fn the_pico_presets_lane_holds_one_record() {
         crate::lane::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
         "the preset's lane is one record's room"
     );
-    let plan = ArenaPlan::of(&client_config(), &limits).expect("the preset is under the build");
+    let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
     assert_eq!(row(&plan, "delivery lane").entry_bytes, lane);
     assert!(lane < SessionLimits::defaults().delivery_lane_bytes());
+}
+
+/// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
+/// its table of pending gets and the ends of their legs.
+const FACE_PARTS: [&str; 3] = ["peer tables", "pending gets", "ended legs"];
+
+/// The parts of an arena held once for each link: its buffers and the flags that lend them.
+const LINK_PARTS: [&str; 4] = [
+    "link receive flags",
+    "link receive buffers",
+    "link transmit flags",
+    "link transmit slots",
+];
+
+/// The pico preset holds a session's faces to zenoh-pico's own bounds: ten peers on a listener
+/// (`Z_LISTEN_MAX_CONNECTION_NB`) and one handshake at a time, and a client its one transport. A
+/// client's arena lends one set of a face's tables and the buffers of one link; a peer's lends the
+/// same rows, with a set and a link for each of the ten faces it admits and a link for its one
+/// handshake: every other row is the client's, item for item, which is the sum
+/// `docs/c-abi-no-heap-pools.md` (section 9.6) states.
+#[test]
+fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    let presets = pico_preset();
+    let preset = |id: &str| {
+        preset_of(&presets, id).unwrap_or_else(|| panic!("the generated Kconfig states {id}"))
+    };
+    assert_eq!(
+        preset("MAX_FACES"),
+        10,
+        "zenoh-pico's Z_LISTEN_MAX_CONNECTION_NB"
+    );
+    assert_eq!(
+        preset("MAX_ACCEPT_PENDING"),
+        1,
+        "zenoh-pico accepts one link at a time"
+    );
+    for id in [
+        "MAX_REMOTE_DECLS",
+        "MAX_PEER_KEYEXPR_ALIASES",
+        "MAX_INBOUND_SUB_INTERESTS",
+    ] {
+        assert!(
+            preset_of(&presets, id).is_some(),
+            "the generated Kconfig states the pico preset of {id}"
+        );
+    }
+    let limits = pico_preset_limits();
+    let faces = admitted_faces(&limits).expect("the preset is under the build");
+    let handshakes = admitted_handshakes(&limits).expect("the preset is under the build");
+    assert_eq!((faces, handshakes), (10, 1));
+
+    let client = ArenaPlan::of(
+        &CoopConfig {
+            accept_pending: handshakes,
+            ..preset_client()
+        },
+        &limits,
+    )
+    .expect("the preset is under the build");
+    let peer = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            max_faces: faces,
+            accept_pending: handshakes,
+            ..client_config()
+        },
+        &limits,
+    )
+    .expect("the preset is under the build");
+
+    let own = usize::from(cfg!(feature = "local-queryable"));
+    assert_eq!(client.peers().tables, 1);
+    assert_eq!(client.gets().tables, 1 + own);
+    assert_eq!(row(&client, "link receive buffers").count, 1);
+    assert_eq!(peer.peers().tables, 1 + faces);
+    assert_eq!(peer.gets().tables, 1 + faces + own);
+    assert_eq!(
+        row(&peer, "link receive buffers").count,
+        1 + faces + handshakes
+    );
+
+    assert_eq!(peer.rows().len(), client.rows().len());
+    for (theirs, ours) in peer.rows().iter().zip(client.rows()) {
+        assert_eq!(
+            (theirs.part, theirs.basis, theirs.entry_bytes),
+            (ours.part, ours.basis, ours.entry_bytes),
+            "a face's and a link's items are the same size on either"
+        );
+        let count = if LINK_PARTS.contains(&theirs.part) {
+            ours.count * (1 + faces + handshakes)
+        } else if theirs.part == "peer tables" {
+            ours.count * (1 + faces)
+        } else if FACE_PARTS.contains(&theirs.part) {
+            // The gets' tables, and the ends of their legs, hold the session's own once.
+            ours.count / (1 + own) * (1 + faces + own)
+        } else {
+            ours.count
+        };
+        assert_eq!(
+            theirs.count, count,
+            "{} of a peer at the pico preset",
+            theirs.part
+        );
+    }
+    assert!(
+        peer.reserved_bytes()
+            < ArenaPlan::of(
+                &CoopConfig {
+                    listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                    ..client_config()
+                },
+                &SessionLimits::defaults(),
+            )
+            .expect("lays an arena out")
+            .reserved_bytes(),
+        "a peer at the preset reserves less than a listener at the build's defaults"
+    );
 }
