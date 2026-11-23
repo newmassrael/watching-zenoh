@@ -9,8 +9,9 @@
 //! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
 //! from the limits and the config the open was handed:
 //!
-//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`) are
-//!   rows of the session's one table set (below), with `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`) and,
+//!   with `queryable`, its queryables (`MAX_QUERYABLES`) are rows of the session's one table set
+//!   (below), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
 //!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
@@ -53,7 +54,7 @@
 //!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): its queryables, tokens and liveliness subscribers under
+//!   link ([`EntityRows`]): its liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
@@ -168,10 +169,9 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 const LANE_ROWS: usize = 5;
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
-/// The application's tables apart from the session's one table set: queryables (`queryable`),
-/// liveliness tokens and subscribers (`liveliness`), and the declaration watchers.
-const OBSERVER_ROWS: usize =
-    cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 1;
+/// The application's tables apart from the session's one table set: liveliness tokens and
+/// subscribers (`liveliness`), and the declaration watchers.
+const OBSERVER_ROWS: usize = 2 * cfg!(feature = "liveliness") as usize + 1;
 /// The pending gets, and the ends of their legs (`query`).
 const GET_ROWS: usize = 1 + cfg!(feature = "query") as usize;
 /// The faces' sets and the index of the held ones.
@@ -184,11 +184,10 @@ const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): queryables
-/// (`queryable`), liveliness subscribers (`liveliness`), the session's one table set, write
-/// filters, matching listeners, interests and the key arena.
-const ENTITY_ROWS: usize =
-    cfg!(feature = "queryable") as usize + cfg!(feature = "liveliness") as usize + 5;
+/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): liveliness
+/// subscribers (`liveliness`), the session's one table set, write filters, matching listeners,
+/// interests and the key arena.
+const ENTITY_ROWS: usize = cfg!(feature = "liveliness") as usize + 5;
 /// The links' cells, their gates' and their sessions' actions', each a table of flags and cells
 /// ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 6;
@@ -698,16 +697,6 @@ impl ArenaPlan {
             plan.reassembly_chains,
             plan.reassembly_bytes,
         )?;
-        #[cfg(feature = "queryable")]
-        plan.put(
-            "queryables",
-            "MAX_QUERYABLES",
-            lent::<{ caps::MAX_QUERYABLES }>("MAX_QUERYABLES", limits.max_queryables())?,
-            wz_session_core::query::QueryableRegistry::<
-                wz_session_core::query_sink::BoxedQuerySink,
-                Lent,
-            >::ROW_BYTES,
-        )?;
         #[cfg(feature = "liveliness")]
         {
             plan.put(
@@ -848,13 +837,6 @@ impl ArenaPlan {
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) -> Result<(), ArenaRefused> {
         let rows = self.entities;
-        #[cfg(feature = "queryable")]
-        self.put(
-            "queryable declarations",
-            "MAX_QUERYABLES",
-            rows.queryables,
-            EntryBytes::QUERYABLE,
-        )?;
         #[cfg(feature = "liveliness")]
         self.put(
             "liveliness subscriber declarations",
@@ -922,6 +904,7 @@ impl ArenaPlan {
         TableRows {
             keyexprs: self.entities.keyexprs,
             subscribers: self.entities.subscribers,
+            queryables: self.entities.queryables,
             tokens: self.entities.tokens,
             ..TableRows::default()
         }

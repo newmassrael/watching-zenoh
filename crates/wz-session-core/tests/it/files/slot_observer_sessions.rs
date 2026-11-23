@@ -66,6 +66,7 @@ fn observer() -> (SlotObserver, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let into = seen.clone();
     observer
+        .tables
         .subscribers
         .register_sink(
             "**",

@@ -163,6 +163,7 @@ fn slot() -> (SlotObserver, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let into = seen.clone();
     observer
+        .tables
         .subscribers
         .register_sink(
             "**",
@@ -175,6 +176,7 @@ fn slot() -> (SlotObserver, Arc<Mutex<Vec<String>>>) {
         )
         .expect("register the subscriber");
     observer
+        .tables
         .queryables
         .register_sink("demo/q/**", Locality::Any, false, two_replies())
         .expect("register the queryable");
@@ -485,6 +487,7 @@ fn a_lent_peers_interest_answers_drain_and_keep_their_rows() {
     let sent = Sent::default();
     for interest_id in [5u64, 6] {
         observer
+            .tables
             .subscribers
             .respond_to_subscriber_interest_borrowed(
                 &mut peers.subscribers,

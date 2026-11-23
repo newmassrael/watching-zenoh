@@ -35,6 +35,8 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+#[cfg(feature = "queryable")]
+use wz_session_core::session_tables::QueryableHandle;
 #[cfg(feature = "liveliness")]
 use wz_session_core::session_tables::TokenHandle;
 use wz_session_core::session_tables::{KeyexprHandle, SubscriberHandle};
@@ -198,7 +200,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Kind::Subscriber => super::tables(&self.registry).subscribers().len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
-            Kind::Queryable => self.queryables.len(),
+            Kind::Queryable => super::tables(&self.registry).queryables().len(),
             #[cfg(feature = "liveliness")]
             Kind::Token => super::tables(&self.registry).tokens().len(),
             #[cfg(feature = "liveliness")]
@@ -255,9 +257,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => {
-                    let entry = &self.queryables[left];
-                    let named = entry.named(&super::tables(&self.registry));
-                    named.is_some_and(|key| entry.declare(key, actions))
+                    let tables = super::tables(&self.registry);
+                    let row = tables.queryables().iter().nth(left);
+                    let told = row.map_or(true, |(_, row)| {
+                        tables
+                            .named(row.key())
+                            .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
+                    });
+                    told
                 }
                 #[cfg(feature = "liveliness")]
                 Kind::Token => {
@@ -377,6 +384,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     tables
                         .named(row.key())
                         .is_some_and(|key| row.callback().declare(key, actions))
+                });
+                told
+            },
+            |_| {},
+        );
+    }
+
+    /// The place in the replay's order of the queryable `handle` names, the one past the last for
+    /// a handle that names none: its rank in the table's slot order, which the replay tells them
+    /// in.
+    #[cfg(feature = "queryable")]
+    pub(super) fn queryable_place(&self, handle: QueryableHandle) -> usize {
+        let tables = super::tables(&self.registry);
+        let queryables = tables.queryables();
+        let rank = queryables
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(queryables.len());
+        self.start_of(Kind::Queryable) + rank
+    }
+
+    /// Tell each face that is up of the queryable `handle` names, as [`Self::announce`] tells a
+    /// declaration: the row is the declaration itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    #[cfg(feature = "queryable")]
+    pub(super) fn announce_queryable(&mut self, handle: QueryableHandle) {
+        let place = self.queryable_place(handle);
+        let registry = &self.registry;
+        announce_on(
+            self.links.faces_mut(),
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                let tables = super::tables(registry);
+                let told = tables.queryables().get(handle).is_some_and(|row| {
+                    tables
+                        .named(row.key())
+                        .is_some_and(|key| row.callback().declare(key, row.complete(), actions))
                 });
                 told
             },
