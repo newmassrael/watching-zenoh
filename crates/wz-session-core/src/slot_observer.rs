@@ -1194,7 +1194,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// builds the owned one it always did. A reply whose bounded field overflows cannot
     /// be wire-encoded and is skipped, as on the AP.
     #[inline(never)]
-    fn drain_query_replies<S: ResponseSink, T: Storage>(
+    pub(crate) fn drain_query_replies<S: ResponseSink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1209,7 +1209,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The `Final`s owed, through `send_response_final`.
     #[inline(never)]
-    fn drain_query_finals<S: ResponseSink, T: Storage>(
+    pub(crate) fn drain_query_finals<S: ResponseSink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1227,7 +1227,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// The answers to the peer's interests: the subscriber interest chains first,
     /// then the liveliness ones, each batch's items before its terminating `Final`.
     #[inline(never)]
-    fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
+    pub(crate) fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1296,7 +1296,12 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
     #[inline(never)]
-    fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink, Q: Storage>(
+    pub(crate) fn drain_get_prunes<
+        S: LivelinessGetPrune,
+        R: ReplySink,
+        G: ReplySink,
+        Q: Storage,
+    >(
         &mut self,
         requesters: &mut Requesters<R, G, Q>,
         sink: &S,
