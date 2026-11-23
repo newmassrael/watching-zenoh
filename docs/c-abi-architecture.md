@@ -343,7 +343,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-128 | `wz-session-core` | `vle` | `expect_used`, `arithmetic_side_effects` | 2 | open |
 | TD-129 | `wz-session-core` | `wire_bincode` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
 | TD-130 | `wz-session-core` | `zid_hex` | `indexing_slicing` | 2 | open |
-| TD-131 | `wz-session-core` | `admission_retry` | `arithmetic_side_effects` | 1 | open |
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-133 | `wz-session-core` | `byte_cells` | `arithmetic_side_effects` | 1 | open |
 | TD-134 | `wz-session-core` | `declaration_sync` | `arithmetic_side_effects` | 1 | open |

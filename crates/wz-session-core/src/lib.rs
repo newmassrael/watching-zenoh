@@ -504,8 +504,6 @@ pub mod peer_target;
 // Offering a publish again when no link had room (policy `publisher-admission-retry`): the
 // value a publish states and the refusal a build without the policy gives. no_std + no_alloc
 // clean; unconditional.
-// Totality debt TD-131 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod admission_retry;
 
 // Delivering a publish to all of the links it reaches or to none (policy
