@@ -110,6 +110,11 @@ the reference's, by its row in `deploy/pico_host_ceiling.json`:
 - POPULATION. Every pico case has exactly one row and every row a pico case, so a case cannot
   join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
   with the row this run reads, and `--measure` prints the rows of every case it builds.
+- ONE TABLE, TWO LANES. The release DLL of each width of Windows has its row in the same table
+  (`pico_windows_package.CEILING_CASES`), read and graded by the Windows package job, since only
+  a Windows host builds it. The rule of a row is `pico_host_ceiling.py`'s, which both lanes
+  import; this gate holds the table to the population of both (`ceiling_cases`), so a Windows
+  row is checked for its shape on every tree, wherever it is graded.
 
 ## The hosted shards
 
@@ -156,6 +161,7 @@ import census_shard_plan  # noqa: E402  (the one cost planner of the sharded hos
 import build_normalization  # noqa: E402  (the one rule that keeps paths and time out of bytes)
 import elf_facts  # noqa: E402  (the one reader of an ELF's version needs)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
+import pico_windows_package  # noqa: E402  (the Windows lane, whose cases share the ceiling table)
 from pico_host_ceiling import (  # noqa: E402  (the one rule of the ceiling table's rows)
     DEBT_PLACEHOLDER, HOST_CEILING, HOST_CEILING_SCHEMA, RATIO_TOLERANCE, ceil_ratio,
     ceiling_reading, ceiling_row, ceiling_rows, format_row, grade_ceiling, load_ceiling,
@@ -2250,14 +2256,17 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
 
 # ── the pico ceiling of the host libraries (docs/upstream-parity.md D9) ────────────────────────
 #
-# The table's rule is `pico_host_ceiling.py`'s; what is this gate's is the population of its
-# cases, how a case is read, and the command that reads one.
+# The table's rule is `pico_host_ceiling.py`'s, shared with the Windows package lane; what is this
+# gate's is the population of its own cases, how a case is read, and the command that reads one.
 
 
 def ceiling_cases() -> list[str]:
-    """The cases the ceiling holds: every pico case, the ones `report_reference` builds a
-    reference for."""
-    return [c.id for c in CASES if c.package == "wz-capi-pico"]
+    """The cases the ceiling holds: every pico case of this gate, the ones `report_reference`
+    builds a reference for, and the release DLL of each width of Windows, which the Windows package
+    lane builds and grades (`pico_windows_package.CEILING_CASES`). This gate holds the table to
+    all of them, so a row of either lane is checked on every tree whichever host builds it."""
+    return ([c.id for c in CASES if c.package == "wz-capi-pico"]
+            + list(pico_windows_package.CEILING_CASES))
 
 
 def measure_command(case_id: str) -> str:
@@ -2823,10 +2832,13 @@ def cmd_selftest() -> int:
     expect("each malformed row is a finding",
            all(row_findings("t", r) for r in bad_rows))
     committed = load_ceiling()
-    expect("the committed table holds every pico case of CASES, one well-formed row each",
+    expect("the committed table holds every pico case of CASES and the release DLL of each width "
+           "of Windows, one well-formed row each",
            table_findings(committed, ceiling_cases()) == []
-           and set(ceiling_rows(committed)) == {c.id for c in CASES if c.package == "wz-capi-pico"}
-           and len(ceiling_cases()) >= 1)
+           and set(ceiling_rows(committed)) == set(ceiling_cases())
+           and {c.id for c in CASES if c.package == "wz-capi-pico"} <= set(ceiling_cases())
+           and set(pico_windows_package.CEILING_CASES) <= set(ceiling_cases())
+           and len(pico_windows_package.CEILING_CASES) == len(pico_windows_package.ARCHES))
     expect("an unfilled row names no command when its lane gives none",
            "prints the same row" not in grade_ceiling("t", unfilled, set_from)[0][0])
     every = [c.id for c in CASES] + [c.id for c in STATEMENT_CASES]

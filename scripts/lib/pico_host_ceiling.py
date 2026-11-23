@@ -7,13 +7,17 @@
 The citation is the round that set the ceiling up and the open-debt item the table measures: every
 row that is no WIN is registered under it, and the table is how that debt is read.
 
-A lane that measures a library of the pico ABI against zenoh-pico built as the same build holds
-the ratio of their texts under a row of that table. The rule of a row (a lock at WIN, or a ratchet
-set from a stated reading under the open-debt item the case is registered with, moving only down)
-is written once, here, and a lane names its own cases and how it reads them; no lane's builds are
-this module's. `capability_cost_gate.py` (Layer C1cs) is such a lane, and its `ceiling_cases` is
-the population `table_findings` holds the table to (a case without a row, or a row for no case,
-fails).
+Two lanes measure a library of the pico ABI against zenoh-pico built as the same build and hold the
+ratio of their texts under a row of that table: `capability_cost_gate.py` (Layer C1cs), the Linux
+cdylib of each pico case, and `pico_windows_package.py --size-judge` (the Platform workflow's
+Windows package job), the DLL a release ships, for each width of Windows. A row means the same in
+both: a lock at WIN, or a ratchet set from a stated reading under the open-debt item the case is
+registered with, moving only down. So the rule of a row is written once, here, and each lane names
+its own cases and how it reads them; neither lane's builds are this module's.
+
+The population is the union of the lanes' cases: `capability_cost_gate.ceiling_cases` gives it, and
+`table_findings` holds the table to it (a case without a row, or a row for no case, fails), which
+Layer C1cs and that gate's selftest run on every tree.
 """
 
 from __future__ import annotations

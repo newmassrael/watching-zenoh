@@ -8,6 +8,8 @@ width of Windows: x64 and x86.
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
                             [--stdlib nostd|std]
     pico_windows_package.py --measure [--arch x64|x86]
+    pico_windows_package.py --size-plan ZIP PLAN
+    pico_windows_package.py --size-judge ZIP READING-DIR
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
     pico_windows_package.py --release DIR TAG
@@ -46,8 +48,28 @@ is a library with `std`. Each DLL's sizes are printed as it is packaged.
 `pico-client-coop` and `pico-client-coop-nostd`: the same features, profile and configuration) for
 each width `--arch` names, both when it names none, with and without `std`, and prints each DLL's
 sizes, read from its own section table as `size` reads a library on Linux, and the ratio of the
-two. That gate reads ELF libraries on Linux; a Windows DLL is measured only on Windows, so its
-cases are printed here and gate nothing yet.
+two. That gate reads ELF libraries on Linux; a Windows DLL is measured only on Windows, so these
+cases are printed here and gate nothing.
+
+`--size-plan` and `--size-judge` hold the DLL a release ships, of each width, under zenoh-pico built as
+the same build on Windows, by its row of `deploy/pico_host_ceiling.json` (`CEILING_CASES`,
+docs/upstream-parity.md D9), the table and the rule of a row the Linux size gate holds its pico cases
+by (`pico_host_ceiling.py`). Three steps, so that a host with no Python can build the reference:
+`--size-plan` derives, from a package zip, zenoh-pico's switches for the package's features (the
+derivation the size gate and the host performance matrix use) and the rest of the same build
+(`REFERENCE_CMAKE`, the width's CMake platform), and refuses a package of another form than the one a
+release ships or one built from a commit whose derivation inputs differ from this tree;
+`scripts/host-bench/windows/size_ceiling.ps1` builds zenoh-pico as the plan says with MSVC and leaves
+its DLL, its config.h, its CMake cache entries and the toolchain in a reading directory; and
+`--size-judge` reads the package's release DLL and the reference's, each from its own headers and
+section table, and grades the ratio of their texts. The text is `pe_sizes`' (the sections loaded
+read-only, the unwind data, import, export and debug directories among them; not the relocations,
+which a loaded image drops), as `size` reads a library on Linux. The two DLLs are compared only when
+they are of the width's machine, were written by one version of `link.exe`, both hold unwind data or
+neither does, and the reference's CMake cache holds every argument the plan asked; any other reading
+is a finding and no figure. A switch zenoh-pico built otherwise than asked is printed, as on Linux.
+The Platform workflow's package job runs the three steps for each width on the package it built;
+the header of the PowerShell script gives the same run on a Windows host by hand.
 
 `--verify` re-hashes a package (a directory, or a zip it extracts first) against its manifest: a
 file that differs, one the manifest names that is missing, and one it does not name are each a
@@ -112,6 +134,7 @@ import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402
+import pico_host_ceiling as ceiling  # noqa: E402  (the rule of a row of the ceiling table)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
@@ -161,6 +184,35 @@ SIZE_CASES = (
     ("pico-client-coop-nostd-windows", f"{NOSTD_FEATURE},link-udp",
      ["--profile", NOSTD_PROFILE, "--config", NOSTD_CONFIG]),
 )
+# The DLL a release ships, of each width, held under zenoh-pico by its row of
+# `deploy/pico_host_ceiling.json`: the case -> its width.
+CEILING_CASES = {f"pico-release-windows-{arch}": arch for arch in ARCHES}
+# The machine a DLL of each width states in its COFF header, and the platform CMake's Visual Studio
+# generator builds that width for (`-A`).
+MACHINES = {"x64": 0x8664, "x86": 0x014C}
+CMAKE_PLATFORMS = {"x64": "x64", "x86": "Win32"}
+# What `--size-plan` writes, what scripts/host-bench/windows/size_ceiling.ps1 leaves beside a copy
+# of it, and the names of the files of that reading directory.
+SIZE_PLAN_SCHEMA = "wz-pico-size-windows-plan/1"
+SIZE_READING_SCHEMA = "wz-pico-size-windows-reading/1"
+SIZE_PLAN = "plan.json"
+SIZE_READING = "reading.json"
+REFERENCE_DLL = "zenohpico.dll"
+REFERENCE_HEADER = "config.h"
+# zenoh-pico built as the same build, besides its switches: its own Release build (its CMake gives
+# an MSVC build of another type `/Od`), shared, without examples and tests, and linked as rustc links
+# every optimized DLL, unreferenced code and data removed and identical functions folded. Neither
+# side discards unwind data: on x64 it is the ABI's (`.pdata`, `.xdata`), which the system's own
+# exception dispatch reads, and both libraries link the C runtime's DLL.
+REFERENCE_CMAKE = ("-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON", "-DBUILD_EXAMPLES=OFF",
+                   "-DBUILD_TESTING=OFF",
+                   "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/INCREMENTAL:NO /OPT:REF /OPT:ICF")
+REFERENCE_CONFIG = "Release"
+# The files the reference's switches are derived from besides the package's feature list: a package
+# built from a commit where one of them differs from this tree would be paired with another build of
+# pico than its own.
+DERIVATION_INPUTS = ("deploy/wz-config.toml", "crates/wz-capi-pico/Cargo.toml", "vendor/zenoh-pico",
+                     "scripts/lib/wz_config.py")
 # A PE section's characteristics (the image format's section flags): stored nowhere in the file,
 # written at run time, and dropped once the image is loaded.
 SCN_CNT_UNINITIALIZED_DATA = 0x00000080
@@ -670,6 +722,99 @@ def size_line(image: bytes) -> str:
     return f"text={sizes['text']} data={sizes['data']} bss={sizes['bss']} ({sections})"
 
 
+def pe_header(image: bytes) -> tuple[int, str]:
+    """(machine, linker) of a PE image: the machine its COFF header states, and the version of the
+    linker that wrote it as its optional header records it (`major.minor`). Bytes that are no PE
+    image, and an image whose optional header is too short to say, are refused."""
+    pe_sections(image)
+    coff = int.from_bytes(image[0x3C:0x40], "little") + 4
+    if int.from_bytes(image[coff + 16:coff + 18], "little") < 4:
+        raise Refusal("not a PE image: its optional header records no linker")
+    return int.from_bytes(image[coff:coff + 2], "little"), f"{image[coff + 22]}.{image[coff + 23]}"
+
+
+def unwind_bytes(image: bytes) -> int:
+    """The bytes of a PE image's exception directory (`.pdata`), the table of every function's
+    unwind data that x64 requires and x86 has no form of."""
+    return sum(size for name, size, _ in pe_sections(image) if name == ".pdata")
+
+
+def ceiling_case(arch: str) -> str:
+    """The ceiling case of the release DLL of the width `arch`."""
+    return next(case for case, width in CEILING_CASES.items() if width == arch)
+
+
+def size_facts(manifest: dict, table: dict, decl: dict) -> dict:
+    """What a reading of the package whose manifest is `manifest` measures, as this tree derives it:
+    its ceiling case and width, and zenoh-pico built as the same build, every switch
+    `wz_config.pico_reference` derives from the package's features (the size gate's and the host
+    performance matrix's derivation) with the CMake platform of the width and `REFERENCE_CMAKE`.
+    `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another form
+    than the one a release ships, and one naming a feature the crate does not have, are refused."""
+    arch = arch_of_target(manifest.get("target", ""))
+    stdlib, form = stdlib_of(manifest), form_of(manifest)
+    if stdlib not in RELEASE_STDLIBS or form != "single":
+        raise Refusal(f"the ceiling holds the DLL a release ships ({', '.join(RELEASE_STDLIBS)}, single), "
+                      f"and this package is {stdlib} {form}")
+    features = manifest.get("features")
+    if not isinstance(features, list) or not features or not all(isinstance(f, str) for f in features):
+        raise Refusal("the package's manifest lists no features of its build")
+    try:
+        enabled = wz_config.enabled_features(table, features)
+    except KeyError as err:
+        raise Refusal(f"the package names a feature this tree's {CRATE} does not have: {err}") from None
+    return {"case": ceiling_case(arch), "arch": arch, "vcvars": ARCHES[arch][1],
+            "cmake_platform": CMAKE_PLATFORMS[arch], "features": sorted(features),
+            "reference_switches": wz_config.pico_reference(decl, enabled),
+            "reference_cmake": list(REFERENCE_CMAKE), "reference_config": REFERENCE_CONFIG}
+
+
+def plan_mismatch(plan: dict, facts: dict) -> list[str]:
+    """The entries of a plan that differ from what this tree derives for its package (`size_facts`)."""
+    return sorted(key for key, value in facts.items() if plan.get(key) != value)
+
+
+def size_findings(facts: dict, wz_image: bytes, pico_image: bytes, header: str,
+                  cache: dict) -> tuple[list[str], list[str]]:
+    """The findings and the notes of a reading of the release DLL `wz_image` against zenoh-pico's
+    `pico_image`, built as `facts` asks: both of the width's machine, both written by one version
+    of the linker, both holding unwind data or neither, and the reference configured with every
+    CMake argument it was asked (`cache`, the entries of its CMake cache). With a finding the two
+    texts are no figure a row is set from or graded by. A switch zenoh-pico built otherwise than
+    asked (`header`, the config.h it generated) is a note, as the size gate prints it on Linux: the
+    derivation's to answer, not the reading's."""
+    findings: list[str] = []
+    notes: list[str] = []
+    arch = facts["arch"]
+    sides = {"the release DLL": wz_image, "the zenoh-pico reference": pico_image}
+    linkers: dict[str, str] = {}
+    for side, image in sides.items():
+        machine, linkers[side] = pe_header(image)
+        if machine != MACHINES[arch]:
+            findings.append(f"{side} is built for the machine {machine:#06x}, not {arch}'s "
+                            f"{MACHINES[arch]:#06x}")
+    if len(set(linkers.values())) != 1:
+        findings.append("the two DLLs were written by two linkers ("
+                        + ", ".join(f"{side} by link.exe {version}" for side, version in linkers.items())
+                        + "): a ratio of two links is not a ratio of one build")
+    unwind = {side: unwind_bytes(image) for side, image in sides.items()}
+    if len({bool(size) for size in unwind.values()}) != 1:
+        findings.append("one DLL holds unwind data and the other none ("
+                        + ", ".join(f"{side} .pdata={size}" for side, size in unwind.items())
+                        + "): the two were not built under one rule")
+    for argument in facts["reference_cmake"]:
+        key, _, value = argument.removeprefix("-D").partition("=")
+        if cache.get(key) != value:
+            findings.append(f"the reference's CMake cache holds {key}={cache.get(key)!r} where it was "
+                            f"asked {value!r}")
+    on, _ = wz_config.pico_flag_states(header)
+    refused = sorted(s for s, v in facts["reference_switches"].items() if (s in on) != bool(v))
+    if refused:
+        notes.append(f"zenoh-pico built {', '.join(refused)} otherwise than asked, so the two builds "
+                     f"differ there")
+    return findings, notes
+
+
 # ---------------------------------------------------------------------------
 # The build (a Windows host with the MSVC toolchain)
 # ---------------------------------------------------------------------------
@@ -1016,6 +1161,126 @@ def measure(arch: str) -> list[tuple[str, dict[str, int]]]:
         say(f"pico-size on Windows {arch}: {nostd_case} text is {nostd_sizes['text'] / std_sizes['text']:.4f} "
             f"of {std_case}'s ({nostd_sizes['text'] - std_sizes['text']:+d} bytes)")
     return rows
+
+
+# ---------------------------------------------------------------------------
+# The size ceiling of the release DLL (any host with git; the reference is built on Windows)
+# ---------------------------------------------------------------------------
+
+
+def derivation_drift(commit: str) -> list[str]:
+    """The inputs of the reference's derivation (`DERIVATION_INPUTS`) that differ between `commit`,
+    the package's, and this tree as it is; a submodule is read at the commit it is checked out at,
+    since what a build leaves in its tree is no change of its pin. A commit git does not know is
+    refused."""
+    if not commit:
+        raise Refusal("the package's manifest names no commit it was built from")
+    known = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{commit}^{{commit}}"],
+                           capture_output=True)
+    if known.returncode != 0:
+        raise Refusal(f"this repository does not have the package's commit {commit[:12]}; fetch it first")
+    drift = []
+    for path in DERIVATION_INPUTS:
+        same = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "--ignore-submodules=dirty",
+                               commit, "--", path], capture_output=True)
+        if same.returncode != 0:
+            drift.append(path)
+    return drift
+
+
+def read_package(package: pathlib.Path) -> tuple[dict, bytes]:
+    """The manifest of a package zip and the bytes of its release DLL, the package held to its
+    manifest first."""
+    with tempfile.TemporaryDirectory() as scratch:
+        top = extract_zip(package, pathlib.Path(scratch))
+        findings = verify_findings(top)
+        if findings:
+            raise Refusal(f"{package.name} does not match its manifest: {'; '.join(findings)}")
+        manifest = json.loads((top / MANIFEST).read_text(encoding="utf-8"))
+        dll = top / "release" / "bin" / f"{LIBRARY}.dll"
+        if not dll.is_file():
+            raise Refusal(f"{package.name} carries no release/bin/{LIBRARY}.dll")
+        return manifest, dll.read_bytes()
+
+
+def package_facts(manifest: dict) -> dict:
+    """`size_facts` of a package, derived in this tree, which must not differ from the package's
+    commit in any input of the derivation."""
+    commit = (manifest.get("built_from") or {}).get("commit", "")
+    drift = derivation_drift(commit)
+    if drift:
+        raise Refusal(f"the package was built from {commit[:12]}, and this tree differs from it in "
+                      f"{', '.join(drift)}, from which the reference is derived: use a checkout of that "
+                      f"commit")
+    return size_facts(manifest, wz_config.manifest_features(wz_config.MANIFESTS["pico"]),
+                      wz_config.load_decl())
+
+
+def size_plan(package: pathlib.Path) -> dict:
+    """The plan of a reading of the reference for the package zip `package` (`--size-plan`)."""
+    manifest, _ = read_package(package)
+    facts = package_facts(manifest)
+    commit = manifest["built_from"]["commit"]
+    return {"schema": SIZE_PLAN_SCHEMA, **facts,
+            "package": {"name": manifest.get("name"), "zip": package.name,
+                        "sha256": hashlib.sha256(package.read_bytes()).hexdigest(), "commit": commit,
+                        "target": manifest.get("target")},
+            "reference_pin": git("rev-parse", f"{commit}:vendor/zenoh-pico")}
+
+
+def size_judge(package: pathlib.Path, reading_dir: pathlib.Path) -> int:
+    """Grade the release DLL of the package zip `package` against the reference a run of
+    scripts/host-bench/windows/size_ceiling.ps1 left in `reading_dir` (`--size-judge`), by the
+    case's row of the ceiling table: 0 when it holds, 1 on a finding."""
+    plan = json.loads((reading_dir / SIZE_PLAN).read_text(encoding="utf-8"))
+    reading = json.loads((reading_dir / SIZE_READING).read_text(encoding="utf-8"))
+    if plan.get("schema") != SIZE_PLAN_SCHEMA:
+        raise Refusal(f"{reading_dir.name}/{SIZE_PLAN} is not a plan of schema {SIZE_PLAN_SCHEMA}")
+    if reading.get("schema") != SIZE_READING_SCHEMA:
+        raise Refusal(f"{reading_dir.name}/{SIZE_READING} is not a reading of schema {SIZE_READING_SCHEMA}")
+    if hashlib.sha256(package.read_bytes()).hexdigest() != (plan.get("package") or {}).get("sha256"):
+        raise Refusal(f"{package.name} is not the package the plan was made from")
+    toolchain, date, cache = reading.get("toolchain"), reading.get("date"), reading.get("reference_cache")
+    if not (isinstance(toolchain, str) and toolchain and isinstance(date, str) and date
+            and isinstance(cache, dict)):
+        raise Refusal(f"{reading_dir.name}/{SIZE_READING} states no toolchain, date or CMake cache")
+    manifest, wz_image = read_package(package)
+    facts = package_facts(manifest)
+    differ = plan_mismatch(plan, facts)
+    if differ:
+        raise Refusal(f"the plan's {', '.join(differ)} differ from what this tree derives for the "
+                      f"package: judge a reading in the tree its plan was made in")
+    pico_image = (reading_dir / REFERENCE_DLL).read_bytes()
+    header = (reading_dir / REFERENCE_HEADER).read_text(encoding="utf-8")
+    case, arch = facts["case"], facts["arch"]
+    pin = str(plan.get("reference_pin", ""))[:12]
+    where = f"pico-size-ceiling on Windows {arch}: {case}"
+    findings, notes = size_findings(facts, wz_image, pico_image, header, cache)
+    wz_text, pico_text = pe_sizes(wz_image)["text"], pe_sizes(pico_image)["text"]
+    say(f"{where}: the release DLL {size_line(wz_image)}")
+    say(f"{where}: zenoh-pico {pin} as the same build {size_line(pico_image)}")
+    say(f"{where}: wz text {wz_text} against {pico_text}, {wz_text / pico_text:.4f} times it ({toolchain})")
+    if not findings:
+        point = ceiling.ceiling_reading(wz_text, pico_text, pin, toolchain, date)
+        row = ceiling.ceiling_rows(ceiling.load_ceiling()).get(case)
+        debt = row.get("debt") if isinstance(row, dict) else None
+        say(f"{where}: the row this reading sets: "
+            f"{ceiling.format_row(case, ceiling.ceiling_row(point, debt if isinstance(debt, str) else None))}")
+        if row is None:
+            findings.append(f"{case} has no row in {ceiling.HOST_CEILING.relative_to(ROOT).as_posix()}")
+        elif shape := ceiling.row_findings(case, row):
+            findings += shape
+        else:
+            graded, more = ceiling.grade_ceiling(
+                case, row, point, f"`pico_windows_package.py --size-judge` on a reading of {arch}")
+            findings += graded
+            notes += more
+    for note in notes:
+        say(f"{where}: {note}")
+    for finding in findings:
+        say(f"{where}: FAIL: {finding}")
+    say(f"{where}: {'FAIL' if findings else 'PASS'}")
+    return 1 if findings else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1543,13 +1808,18 @@ def selftest() -> int:
         except Refusal:
             pass
 
-    def pe_image(rows: list[tuple[bytes, int, int]], optional: int = 0) -> bytes:
+    def pe_image(rows: list[tuple[bytes, int, int]], optional: int = 0, machine: int = 0x8664,
+                 linker: tuple[int, int] = (14, 44)) -> bytes:
         """A PE image of the section rows (name, size in memory, characteristics), its header
-        where an MZ header points, as the linker lays one out."""
+        where an MZ header points, as the linker lays one out, the linker's version in its
+        optional header when that has room for it."""
         image = bytearray(b"MZ" + b"\0" * 0x3E)
         image[0x3C:0x40] = (0x40).to_bytes(4, "little")
-        image += b"PE\0\0" + (0x8664).to_bytes(2, "little") + len(rows).to_bytes(2, "little")
-        image += b"\0" * 12 + optional.to_bytes(2, "little") + b"\0" * 2 + b"\0" * optional
+        image += b"PE\0\0" + machine.to_bytes(2, "little") + len(rows).to_bytes(2, "little")
+        header = bytearray(optional)
+        if optional >= 4:
+            header[2:4] = bytes(linker)
+        image += b"\0" * 12 + optional.to_bytes(2, "little") + b"\0" * 2 + bytes(header)
         for name, size, flags in rows:
             image += name.ljust(8, b"\0") + size.to_bytes(4, "little") + b"\0" * 24 + flags.to_bytes(4, "little")
         return bytes(image)
@@ -1570,6 +1840,103 @@ def selftest() -> int:
             expect(f"bytes that are no PE image are refused ({len(bad)} bytes)", False)
         except Refusal:
             pass
+
+    # The size ceiling of the release DLL: its cases, the headers it reads, the derivation of the
+    # reference, and what keeps a reading from being a figure.
+    expect("one ceiling case per width, named by it, with its machine and CMake platform",
+           CEILING_CASES == {"pico-release-windows-x64": "x64", "pico-release-windows-x86": "x86"}
+           and ceiling_case("x86") == "pico-release-windows-x86"
+           and set(MACHINES) == set(ARCHES) == set(CMAKE_PLATFORMS)
+           and CMAKE_PLATFORMS["x86"] == "Win32" and MACHINES["x86"] == 0x014C)
+    expect("a PE image's machine and linker are read from its own headers",
+           pe_header(image) == (0x8664, "14.44")
+           and pe_header(pe_image([(b".text", 1, 0x60000020)], optional=240, machine=0x014C,
+                                  linker=(14, 38))) == (0x014C, "14.38"))
+    try:
+        pe_header(pe_image([(b".text", 1, 0x60000020)]))
+        expect("an image whose optional header cannot hold the linker's version is refused", False)
+    except Refusal:
+        pass
+    wz_dll = pe_image([(b".text", 5000, 0x60000020), (b".rdata", 1000, 0x40000040),
+                       (b".pdata", 120, 0x40000040), (b".reloc", 40, 0x42000040)], optional=240)
+    pico_dll = pe_image([(b".text", 4000, 0x60000020), (b".pdata", 100, 0x40000040)], optional=240)
+    expect("the unwind data is the exception directory's bytes, and an image without one has none",
+           unwind_bytes(wz_dll) == 120 and unwind_bytes(image) == 0)
+    expect("the text of a DLL counts its unwind data and not its relocations",
+           pe_sizes(wz_dll)["text"] == 6120 and pe_sizes(pico_dll)["text"] == 4100)
+
+    feature_table = {"os-windows": [], "query": [], "link-udp": [], "std": []}
+    drop_in = wz_config.PICO_DROP_IN
+    switch_rows = {"switches": [
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_QUERY", "class": "maps", "anchor": drop_in + "query"},
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_LINK_UDP_UNICAST", "class": "maps",
+         "anchor": drop_in + "link-udp"},
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_LIVELINESS", "class": "always"},
+        {"original": "zenoh-pico", "switch": "Z_FEATURE_RAWETH_TRANSPORT", "class": "never"},
+        {"original": "zenoh-pico", "switch": "FRAG_MAX_SIZE", "class": "maps", "anchor": drop_in + "query"},
+        {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
+    shipped = {"target": "x86_64-pc-windows-msvc", "stdlib": "nostd", "form": "single",
+               "features": ["query", "os-windows"]}
+    asked = {"Z_FEATURE_QUERY": 1, "Z_FEATURE_LINK_UDP_UNICAST": 0, "Z_FEATURE_LIVELINESS": 1,
+             "Z_FEATURE_RAWETH_TRANSPORT": 0}
+    facts = size_facts(shipped, feature_table, switch_rows)
+    expect("the reference of a release package is its width's, its switches derived from its features",
+           facts == {"case": "pico-release-windows-x64", "arch": "x64", "vcvars": "x64",
+                     "cmake_platform": "x64", "features": ["os-windows", "query"],
+                     "reference_switches": asked, "reference_cmake": list(REFERENCE_CMAKE),
+                     "reference_config": "Release"})
+    expect("the x86 package's reference is built for Win32 with the x86 compiler",
+           size_facts({**shipped, "target": "i686-pc-windows-msvc"}, feature_table, switch_rows)
+           ["cmake_platform"] == "Win32")
+    expect("the reference is pico's own Release build, linked as an optimized DLL is",
+           "-DCMAKE_BUILD_TYPE=Release" in REFERENCE_CMAKE and REFERENCE_CONFIG == "Release"
+           and "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/INCREMENTAL:NO /OPT:REF /OPT:ICF" in REFERENCE_CMAKE)
+    for manifest, word in (({**shipped, "stdlib": "std"}, "std"),
+                           ({**shipped, "form": "split"}, "split"),
+                           ({**shipped, "features": ["query", "absent"]}, "absent"),
+                           ({**shipped, "features": []}, "features"),
+                           ({**shipped, "target": "aarch64-pc-windows-msvc"}, "aarch64")):
+        try:
+            size_facts(manifest, feature_table, switch_rows)
+            expect(f"a package that is not the release's, or names {word}, is refused", False)
+        except Refusal as err:
+            expect(f"the refusal names {word} ({err})", word in str(err))
+    plan = {"schema": SIZE_PLAN_SCHEMA, **facts, "package": {"sha256": "0" * 64}, "reference_pin": "p"}
+    expect("a plan made by this tree's derivation differs from it nowhere", plan_mismatch(plan, facts) == [])
+    expect("a plan whose switches or width were changed is named by those entries",
+           plan_mismatch({**plan, "reference_switches": {**asked, "Z_FEATURE_QUERY": 0}, "arch": "x86"}, facts)
+           == ["arch", "reference_switches"])
+    built = "\n".join(f"#define {s} {v}" for s, v in asked.items()) + "\n"
+    asked_cache = dict(a.removeprefix("-D").split("=", 1) for a in REFERENCE_CMAKE)
+    expect("a reading of one machine, one linker, both unwind tables and the asked build is a figure",
+           size_findings(facts, wz_dll, pico_dll, built, asked_cache) == ([], []))
+    other_link = pe_image([(b".text", 4000, 0x60000020), (b".pdata", 100, 0x40000040)], optional=240,
+                          linker=(14, 38))
+    found, _ = size_findings(facts, wz_dll, other_link, built, asked_cache)
+    expect("two linkers are a finding naming both versions",
+           len(found) == 1 and "14.44" in found[0] and "14.38" in found[0])
+    found, _ = size_findings(facts, pe_image([(b".text", 5000, 0x60000020), (b".pdata", 1, 0x40000040)],
+                                             optional=240, machine=0x014C), pico_dll, built, asked_cache)
+    expect("a DLL of another machine than the width's is a finding naming its side",
+           len(found) == 1 and found[0].startswith("the release DLL") and "0x014c" in found[0])
+    found, _ = size_findings(facts, pe_image([(b".text", 5000, 0x60000020)], optional=240), pico_dll, built,
+                             asked_cache)
+    expect("unwind data on one side alone is a finding", len(found) == 1 and ".pdata=0" in found[0])
+    found, _ = size_findings(facts, wz_dll, pico_dll, built,
+                             {**asked_cache, "CMAKE_SHARED_LINKER_FLAGS_RELEASE": "/INCREMENTAL:NO"})
+    expect("a reference configured otherwise than asked is a finding naming the entry",
+           len(found) == 1 and "CMAKE_SHARED_LINKER_FLAGS_RELEASE" in found[0])
+    found, _ = size_findings(facts, wz_dll, pico_dll, built, {})
+    expect("a cache that holds none of the asked entries is a finding for each",
+           len(found) == len(REFERENCE_CMAKE))
+    found, said = size_findings(facts, wz_dll, pico_dll, built.replace("Z_FEATURE_QUERY 1", "Z_FEATURE_QUERY 0"),
+                                asked_cache)
+    expect("a switch pico built otherwise than asked is a note and no finding",
+           found == [] and len(said) == 1 and "Z_FEATURE_QUERY" in said[0])
+    committed_rows = ceiling.ceiling_rows(ceiling.load_ceiling())
+    expect("the committed ceiling table has a well-formed row for the release DLL of each width",
+           all(case in committed_rows and ceiling.row_findings(case, committed_rows[case]) == []
+               for case in CEILING_CASES))
     two = render_notices("p", "x86_64-pc-windows-msvc", [], [],
                          {"release": "rustc 1.0.0", "dir": "licenses/rust-std-1.0.0",
                           "notice": "COPYRIGHT-library.html"},
@@ -1710,6 +2077,16 @@ def main(argv: list[str]) -> int:
             for arch in measure_selection(argv[2:]):
                 measure(arch)
             return 0
+        if len(argv) == 4 and argv[1] == "--size-plan":
+            plan = size_plan(pathlib.Path(argv[2]))
+            out = pathlib.Path(argv[3])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(render_json(plan), encoding="utf-8", newline="\n")
+            print(f"  pico-size-plan: {plan['case']}: {len(plan['reference_switches'])} switches of "
+                  f"zenoh-pico {plan['reference_pin'][:12]}, written to {out}")
+            return 0
+        if len(argv) == 4 and argv[1] == "--size-judge":
+            return size_judge(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
         if len(argv) == 3 and argv[1] == "--verify":
             target = pathlib.Path(argv[2])
             with tempfile.TemporaryDirectory() as tmp:

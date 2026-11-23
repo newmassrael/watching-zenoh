@@ -437,6 +437,35 @@ derived from the declaration and never chosen by hand:
   7. **Unfilled rows do not land.** A row whose `ratio_at_most` is null fails `--check` with the
      row this run reads. `--measure` prints the rows of every pico case it builds, to paste, and
      so does `--check` after its findings.
+  8. **The DLL a Windows release ships has its rows too.** `pico-release-windows-x64` and
+     `pico-release-windows-x86` hold the release DLL of the Windows package (`--stdlib nostd`,
+     the single library, profile `host-peer-ext`) under zenoh-pico built as the same build on the
+     Windows runner, in the Platform workflow's package job, the job that builds the package: the
+     table and the rule of a row are the ones above (`scripts/lib/pico_host_ceiling.py`, which
+     both lanes import), and Layer C1cs holds the Windows rows to their shape and population on
+     every tree. The reading is `scripts/lib/pico_windows_package.py`'s, in three steps so that a
+     Windows host with no Python can build the reference by hand (the header of
+     `scripts/host-bench/windows/size_ceiling.ps1` gives that run): `--size-plan` derives the
+     reference from the package's own manifest, its switches by `wz_config.pico_reference` as on
+     Linux, and refuses a package of another form or one built from a commit whose derivation
+     inputs differ from the tree; the PowerShell script builds zenoh-pico with MSVC, CMake's Visual
+     Studio generator for the width's platform, pico's own Release build (its CMake compiles any
+     other build type with `/Od`), shared, linked with `/OPT:REF /OPT:ICF` as rustc links every
+     optimized DLL; `--size-judge` reads both DLLs. What is the same as on Linux: the ratio, the
+     tolerance, the rows, the derivation of the switches, a switch pico built otherwise than asked
+     printed. What differs, and why: the text is read from each DLL's own section table
+     (`pe_sizes`: every section loaded read-only, so the unwind data, the import, export and debug
+     directories, and not the base relocations, which a loaded image drops; on Linux the dynamic
+     relocations are in `size`'s text, which is why the Linux cases pack them); the linker is
+     MSVC's `link.exe` on both sides, held to one version read from each DLL's optional header,
+     where Linux holds both to GNU ld; and no unwind data is discarded, since on x64 it is the ABI's
+     own and the system's exception dispatch reads it, so the judge asks that both DLLs hold it or
+     neither does, where Linux discards it on both sides. The release DLL is measured as shipped,
+     with the debug directory its `/DEBUG` link writes, about a hundred bytes the reference has no
+     counterpart of and which count against wz. Until a reading fills them, both rows are unfilled
+     and the job's ceiling step fails with the row to paste; the rows then move only down, under
+     `debt-pico-host-size-ceiling`, until each reads WIN and is locked. The Linux client without
+     `std` (`pico-client-coop-nostd`, 1.4025) is the reading the size work starts from.
 - **D10. The host performance matrix of the pico ABI is a ratchet and a debt loop (owner,
   2026-11-21).** wz is to be faster than zenoh-pico and than a deployment's own build of a
   library of the pico API, and gates hold it, not a reading taken now and then. The matrix is
