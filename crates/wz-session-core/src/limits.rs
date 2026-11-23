@@ -2638,7 +2638,7 @@ mod enforcement {
             caps::MATCH_MEMO_SLOTS
         };
         assert_eq!(
-            observer.with_app(|app_half| app_half.subscribers.memo_slot_count()),
+            observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
             build
         );
     }
@@ -2661,7 +2661,7 @@ mod enforcement {
                 other
             };
             assert_eq!(
-                observer.with_app(|app_half| app_half.subscribers.memo_slot_count()),
+                observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
                 held
             );
         }

@@ -657,6 +657,34 @@ fn a_key_the_key_arena_has_no_room_for_is_refused_as_a_full_table() {
     );
 }
 
+/// Rows of one text take one block of the key arena between them, whoever made the first: a
+/// subscriber on a key the session declared shares the declaration's block. The CONTROL is a
+/// subscriber on another text, which takes a block of its own.
+#[test]
+fn rows_of_one_text_share_its_block() {
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let space = keys(256);
+    let mut tables = SessionTables::<Calls, Lent>::lent(&mut arena, space, &rows).unwrap();
+    tables.declare_keyexpr("a/shared").unwrap();
+    let one = space.counts().used;
+    tables
+        .declare_subscriber("a/shared", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert_eq!(
+        space.counts().used,
+        one,
+        "the subscriber shares the declaration's block"
+    );
+    tables
+        .declare_subscriber("a/other", Locality::Any, KeyForm::default(), 2)
+        .unwrap();
+    assert!(
+        space.counts().used > one,
+        "CONTROL: another text takes a block of its own"
+    );
+}
+
 #[test]
 fn lent_tables_past_a_build_bound_are_refused() {
     let rows = TableRows {

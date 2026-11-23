@@ -823,7 +823,7 @@ struct Declaring<'a, P: Storage> {
 impl<P: Storage> Declaring<'_, P> {
     /// `text` kept as a row keeps it, named on the wire as `form` asks where it can be.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let key = KeyMaker::key(self.keys, text).map_err(unkept)?;
+        let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
         let prefix = form.prefix.filter(|&prefix| {
             self.keyexprs.get(prefix).is_some_and(|row| {
                 row.holds < u16::MAX && text.starts_with(KeyBacking::as_str(&row.key))
@@ -966,7 +966,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.keyexprs.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
         let handle = self
             .keyexprs
@@ -1233,7 +1233,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if self.interests.is_full() {
             return Err(RegisterError::TableFull);
         }
-        let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
+        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.ok_or(RegisterError::IdsExhausted)?;
         self.next_entity = id.checked_add(1);
         let handle = self
@@ -1455,7 +1455,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 callback,
             });
         }
-        let key = match KeyMaker::key(&self.keys, key) {
+        let key = match KeyMaker::shared(&self.keys, key) {
             Ok(key) => key,
             Err(why) => {
                 return Err(Refused {

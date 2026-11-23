@@ -1164,11 +1164,12 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let mut held = 0;
     for row in plan.rows() {
         // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
-        // pool's one area of the rows its faces share, and the watchers' one row of the spans of
-        // their lists, not a row of each.
+        // pool's one area of the rows its faces share, the watchers' one row of the spans of
+        // their lists, and the session's table set one area of its tables, not a row of each.
         if row.basis == "DELIVERY_LANE_BYTES"
             || row.basis == "KEY_ARENA_BYTES"
             || row.basis == "MAX_DECL_OBSERVERS"
+            || row.part == "session tables"
             || POOL_PARTS.contains(&row.part)
         {
             continue;

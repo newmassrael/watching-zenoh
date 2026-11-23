@@ -533,6 +533,21 @@ impl KeyMaker<KeyRef> for LentKeys {
         }
         keys.key(text).map_err(|_| KeyUnkept::NoRoom)
     }
+
+    /// The block the arena keeps `text` in already, one holder more, whoever holds it
+    /// ([`KeySpace::kept`]); a new block otherwise, as [`Self::key`].
+    fn shared(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
+        let Some(keys) = &self.0 else {
+            return Err(KeyUnkept::NoRoom);
+        };
+        if !keys.holds_key(text.len()) {
+            return Err(KeyUnkept::TooLong);
+        }
+        match keys.kept(text) {
+            Some(kept) => Ok(kept),
+            None => keys.key(text).map_err(|_| KeyUnkept::NoRoom),
+        }
+    }
 }
 
 /// A key a row holds: where its block lies in its session's key arena and how long it is. It reads

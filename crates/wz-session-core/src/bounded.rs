@@ -336,6 +336,13 @@ pub enum KeyUnkept {
 pub trait KeyMaker<K>: Clone + Default + fmt::Debug {
     /// `text` as a row keeps it, or why it is not kept: a key is never cut short.
     fn key(&self, text: &str) -> Result<K, KeyUnkept>;
+
+    /// [`Self::key`], sharing the key a holder of the same text keeps already where the policy's
+    /// keys are shared ones: a row of the session's own declarations takes no second block for a
+    /// text its session holds. The policies whose key is its own text keep it again.
+    fn shared(&self, text: &str) -> Result<K, KeyUnkept> {
+        self.key(text)
+    }
 }
 
 /// The keys of the policies whose key is its own text ([`Heap`], [`Static`]): nothing to hand a
