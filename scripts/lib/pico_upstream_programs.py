@@ -273,8 +273,9 @@ class Scenario:
     """The subject, built against the library under test; its peer, always zenoh-pico's own build;
     which of a pair starts first (`subject`, or None for the peer; a lone subject names none); the
     lines that must be printed, by role (`subject` or `peer`), as regular expressions over the
-    output with its line ends made LF; whether a router is started; how many times the second process may be started; how long one start of it may take before it is
-    started again; and the bound of the whole scenario."""
+    output with its line ends made LF; whether a router is started; how many times the second
+    process may be started; how long one start of it may take before it is started again; and the
+    bound of the whole scenario."""
 
     subject: Proc
     peer: Proc | None = None
