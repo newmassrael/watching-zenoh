@@ -1687,20 +1687,11 @@ impl SessionArena {
     /// session's links claim as they open and give back as they go. Refused only by an arena
     /// reserved by another plan.
     pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
-        let rx = self
-            .arena
-            .lend_byte_cells(plan.link_bytes, plan.rx_buffers)
-            .map_err(ArenaRefused::Lend)?;
-        let tx = self
-            .arena
-            .lend_byte_cells(plan.link_bytes, plan.tx_slots)
-            .map_err(ArenaRefused::Lend)?;
+        let rx = self.cells(plan.link_bytes, plan.rx_buffers)?;
+        let tx = self.cells(plan.link_bytes, plan.tx_slots)?;
         #[cfg(feature = "listen")]
         {
-            let places = self
-                .arena
-                .lend_byte_cells(0, plan.links)
-                .map_err(ArenaRefused::Lend)?;
+            let places = self.cells(0, plan.links)?;
             Ok(LinkTables::pooled(rx, tx, places))
         }
         #[cfg(not(feature = "listen"))]
@@ -1714,20 +1705,7 @@ impl SessionArena {
         &mut self,
         plan: &ArenaPlan,
     ) -> Result<(NonNull<u8>, usize), ArenaRefused> {
-        let cells = self
-            .arena
-            .lend_byte_cells(plan.lane_bytes, 1)
-            .map_err(ArenaRefused::Lend)?;
-        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
-            asked: Some(plan.lane_bytes),
-            left: 0,
-        });
-        let buffer = cells.claim().ok_or(refused)?;
-        let (base, bytes) = buffer.raw();
-        // The claim is never given back: the lane holds the buffer until the session is let go, and
-        // a buffer dropped then would write its cell's flag into an arena given back before it.
-        core::mem::forget(buffer);
-        Ok((NonNull::new(base).ok_or(refused)?, bytes))
+        self.one_buffer(plan.lane_bytes)
     }
 
     /// Lend the session's reassembly buffers `plan` lays out, next after the lane: a table the
@@ -1738,9 +1716,7 @@ impl SessionArena {
         &mut self,
         plan: &ArenaPlan,
     ) -> Result<LentByteCells, ArenaRefused> {
-        self.arena
-            .lend_byte_cells(plan.reassembly_bytes, plan.reassembly_chains)
-            .map_err(ArenaRefused::Lend)
+        self.cells(plan.reassembly_bytes, plan.reassembly_chains)
     }
 
     /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
@@ -1764,11 +1740,7 @@ impl SessionArena {
         let mut lent = [None, None, None];
         for (bytes, cells) in plan.cell_bytes.into_array().into_iter().zip(&mut lent) {
             if bytes != 0 {
-                *cells = Some(
-                    self.arena
-                        .lend_byte_cells(bytes, plan.links)
-                        .map_err(ArenaRefused::Lend)?,
-                );
+                *cells = Some(self.cells(bytes, plan.links)?);
             }
         }
         Ok(LinkCells::from_array(lent))
@@ -1797,23 +1769,8 @@ impl SessionArena {
         if plan.handle_bytes == 0 {
             return Ok(None);
         }
-        let cells = self
-            .arena
-            .lend_byte_cells(plan.handle_bytes, 1)
-            .map_err(ArenaRefused::Lend)?;
-        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
-            asked: Some(plan.handle_bytes),
-            left: 0,
-        });
-        let buffer = cells.claim().ok_or(refused)?;
-        let (base, bytes) = buffer.raw();
-        // As the lane's: the claim is held for the session's life, and a buffer dropped then would
-        // write its cell's flag into an arena given back before it.
-        core::mem::forget(buffer);
-        Ok(Some(HandlePlace {
-            base: NonNull::new(base).ok_or(refused)?,
-            bytes,
-        }))
+        let (base, bytes) = self.one_buffer(plan.handle_bytes)?;
+        Ok(Some(HandlePlace { base, bytes }))
     }
 
     /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
@@ -1831,13 +1788,36 @@ impl SessionArena {
             if bytes == 0 {
                 continue;
             }
-            *cells = Some(
-                self.arena
-                    .lend_byte_cells(bytes, plan.entities.of_kind(kind))
-                    .map_err(ArenaRefused::Lend)?,
-            );
+            *cells = Some(self.cells(bytes, plan.entities.of_kind(kind))?);
         }
         Ok(places)
+    }
+
+    /// A table of `count` cells of `bytes` each, lent from the arena: the one body every table of
+    /// cells the session's arena lends goes through. Refused only by an arena reserved by another
+    /// plan.
+    #[inline(never)]
+    fn cells(&mut self, bytes: usize, count: usize) -> Result<LentByteCells, ArenaRefused> {
+        self.arena
+            .lend_byte_cells(bytes, count)
+            .map_err(ArenaRefused::Lend)
+    }
+
+    /// The one buffer of a table of one cell of `bytes`, claimed for the session's life: its place
+    /// and its length. The claim is never given back: what holds the buffer holds it until the
+    /// session is let go, and a buffer dropped then would write its cell's flag into an arena given
+    /// back before it.
+    #[inline(never)]
+    fn one_buffer(&mut self, bytes: usize) -> Result<(NonNull<u8>, usize), ArenaRefused> {
+        let cells = self.cells(bytes, 1)?;
+        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(bytes),
+            left: 0,
+        });
+        let buffer = cells.claim().ok_or(refused)?;
+        let (base, len) = buffer.raw();
+        core::mem::forget(buffer);
+        Ok((NonNull::new(base).ok_or(refused)?, len))
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
