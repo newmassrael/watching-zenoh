@@ -941,7 +941,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
 
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point; works on every profile). The `alloc`-only
-    /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
+    /// [`on_queryable_declared`](RemoteQueryableTable::on_queryable_declared)
     /// convenience wrapper funnels through here. Duplicate sinks allowed;
     /// dispatch fires them in registration order. R311lb — returns the
     /// registry-local observer id for
@@ -952,7 +952,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
-    /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
+    /// [`on_queryable_undeclared`](RemoteQueryableTable::on_queryable_undeclared)
     /// convenience wrapper funnels through here. R311lb — returns the
     /// registry-local observer id for
     /// [`remove_queryable_undeclared_sink`](Self::remove_queryable_undeclared_sink).
@@ -1456,7 +1456,12 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     pub fn new() -> Self {
         Self::with_sink_backing()
     }
+}
 
+/// The closure installers on the application's table, so a caller that holds the table alone (a
+/// session whose table is shared with other faces) installs as one that holds the registry does.
+#[cfg(feature = "alloc")]
+impl RemoteQueryableTable<BoxedDeclSink, BoxedUndeclSink> {
     /// Install a closure fired on every inbound `Declare(DeclQueryable)`
     /// whose keyexpr resolves. The closure receives `&dyn DeclView` (the
     /// peer-declared `id` + resolved keyexpr) — the R311gb-3d seam
