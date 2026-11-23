@@ -465,7 +465,7 @@ impl ArenaPlan {
             "ended legs",
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
-            core::mem::size_of::<u64>(),
+            core::mem::size_of::<crate::engine::Ended>(),
         )?;
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.

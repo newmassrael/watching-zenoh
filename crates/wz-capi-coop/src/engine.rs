@@ -210,7 +210,7 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]); a build that asks
 /// no query registers none, and its tables are sized for the closure pair a sink would be.
 #[cfg(feature = "query")]
-pub(crate) use get::LegSink;
+pub(crate) use get::{Ended, LegSink};
 #[cfg(not(feature = "query"))]
 pub(crate) type LegSink = wz_session_core::reply_sink::BoxedReplySink;
 #[cfg(feature = "query")]
@@ -220,7 +220,7 @@ use {
     wz_session_core::query_options::QueryOptions,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
-    wz_session_core::reply_sink::{ConsolidatingSink, ReplyView},
+    wz_session_core::reply_sink::{timeout_reply, ConsolidatingSink, ReplyView},
     wz_session_core::timestamp_visibility::HiddenReplyTimestamp,
 };
 
@@ -4328,29 +4328,35 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "query")]
         while self.gets.ended.is_pending() && self.samples.is_idle() {
             let next = self.gets.ended.lock().take();
-            let Some(leg) = next else {
+            let Some(ended) = next else {
                 break;
             };
             if let Some(mut core) = self.live() {
-                core.0.pending_gets.retain(|pending| pending.leg != leg);
+                core.0
+                    .pending_gets
+                    .retain(|pending| pending.leg != ended.leg);
             }
-            self.hand_held(leg);
-            drop(self.take_target(TargetKey::Reply(leg)));
+            self.hand_held(ended);
+            drop(self.take_target(TargetKey::Reply(ended.leg)));
         }
     }
 
-    /// Hand leg `leg`'s callback what its entry held to its end, one at a time, each taken out of
-    /// the plane's held table and handed with no lock held: the replies its consolidation kept,
-    /// then the timeout that ended it, as upstream's querier hands them.
+    /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
+    /// the replies its consolidation kept, each taken out of the plane's held table, then the
+    /// timeout that ended it, as upstream's querier hands them.
     #[cfg(feature = "query")]
-    fn hand_held(&self, leg: u64) {
+    fn hand_held(&self, ended: Ended) {
+        let leg = ended.leg;
         let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) else {
             // A leg whose callback is gone hands nothing; what it held goes with it.
             while self.gets.take_held(leg).is_some() {}
             return;
         };
-        while let Some(held) = self.gets.take_held(leg) {
-            held.hand(&callback);
+        while let Some(reply) = self.gets.take_held(leg) {
+            callback.call(&reply);
+        }
+        if let Some(rid) = ended.timed_out {
+            callback.call(&timeout_reply(rid));
         }
     }
 

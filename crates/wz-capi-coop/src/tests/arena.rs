@@ -762,7 +762,7 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     assert_eq!(row(&plan, "ended legs").count, legs);
     assert_eq!(
         row(&plan, "ended legs").entry_bytes,
-        core::mem::size_of::<u64>()
+        core::mem::size_of::<crate::engine::Ended>()
     );
 }
 

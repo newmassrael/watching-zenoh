@@ -15,10 +15,10 @@
 //! the lane's pending table, for a reply that lies in a datagram a link lends; to the session's
 //! delivery lane otherwise. What the entry's consolidation held to its end, and a timeout, wait in
 //! the plane's held table, given up whole, and the leg's END is said when the entry is dropped (its
-//! Final, its deadline, its cancellation, the loss of its link) by a guard the sink owns. The
-//! deliveries hand them out with no lock held, the end once the lane has handed every reply queued
-//! before it and the held table every reply held, as the drop of the leg's callback, which is how
-//! a C program learns its get is over.
+//! Final, its deadline, its cancellation, the loss of its link) by a guard the sink owns, with the
+//! request id of the timeout that ended it when one did. The deliveries hand them out with no lock
+//! held, the end once the lane has handed every reply queued before it and the held table every
+//! reply held, as the drop of the leg's callback, which is how a C program learns its get is over.
 //!
 //! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
 //! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
@@ -36,42 +36,51 @@ use alloc::collections::VecDeque;
 use wz_capi_port::sync::Lock;
 use wz_capi_port::ReplyCallback;
 use wz_session_core::reply::InboundReply;
-use wz_session_core::reply_sink::{timeout_reply, ReplySink, ReplyView};
+use wz_session_core::reply_sink::{ReplySink, ReplyView};
+use wz_session_core::wire_id::RequestId;
 
 use crate::lane::SharedLane;
 
 use super::queued::{Pending, Queued};
 use super::registry::{FaceId, Registry};
 
+/// The end of one leg: the leg, and the request id of the timeout that ended it, which its
+/// callback is handed after every reply held before it. A leg that did not time out holds none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ended {
+    pub(super) leg: u64,
+    pub(super) timed_out: Option<RequestId>,
+}
+
 /// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
 /// session's tables of pending gets hold (see the module).
 pub(super) struct EndedLegs {
-    legs: BoundedVec<u64, { usize::MAX }, Lent>,
+    legs: BoundedVec<Ended, { usize::MAX }, Lent>,
 }
 
 impl EndedLegs {
     /// A table over the rows `legs` an arena lent.
-    pub(super) fn over(legs: BoundedVec<u64, { usize::MAX }, Lent>) -> Self {
+    pub(super) fn over(legs: BoundedVec<Ended, { usize::MAX }, Lent>) -> Self {
         Self { legs }
     }
 
-    /// Leg `leg` ended: its callback is to be dropped.
-    fn note(&mut self, leg: u64) {
-        let kept = self.legs.push(leg);
+    /// A leg ended: its callback is to be dropped.
+    fn note(&mut self, ended: Ended) {
+        let kept = self.legs.push(ended);
         debug_assert!(
             kept.is_ok(),
             "the ends waiting outnumber the rows of the tables of pending gets"
         );
     }
 
-    /// A leg whose callback is still to be dropped, if any.
-    pub(super) fn take(&mut self) -> Option<u64> {
+    /// The end of a leg whose callback is still to be dropped, if any.
+    pub(super) fn take(&mut self) -> Option<Ended> {
         self.legs.pop()
     }
 
     /// Leg `leg`'s callback was dropped where its end was decided: nothing is left to do for it.
     pub(super) fn forget(&mut self, leg: u64) {
-        self.legs.retain(|ended| *ended != leg);
+        self.legs.retain(|ended| ended.leg != leg);
     }
 
     /// Drop every end still waiting: the session is closed, and its legs' callbacks with it.
@@ -91,9 +100,9 @@ impl Pending for EndedLegs {
 pub(super) struct GetPlane {
     /// The legs that ended, handed out after the replies queued before them.
     pub(super) ended: Queued<EndedLegs>,
-    /// What the entries of legs held to their ends, each with its leg, in the order they gave it
-    /// up: handed to the leg's callback before its end.
-    held: Queued<VecDeque<(u64, Held)>>,
+    /// The replies the entries of legs held to their ends, each with its leg, in the order they
+    /// gave them up: handed to the leg's callback before its end, and before its timeout.
+    held: Queued<VecDeque<(u64, InboundReply)>>,
     /// Whether a thread that holds the session's lock takes the callback the answer it makes
     /// reaches ([`Self::capture`]).
     #[cfg(feature = "local-queryable")]
@@ -144,14 +153,14 @@ impl GetPlane {
         })
     }
 
-    /// Hold `held` for leg `leg`, after what it holds already.
-    fn hold(&self, leg: u64, held: Held) {
-        self.held.lock().push_back((leg, held));
+    /// Hold `reply` for leg `leg`, after what it holds already.
+    fn hold(&self, leg: u64, reply: InboundReply) {
+        self.held.lock().push_back((leg, reply));
     }
 
-    /// What leg `leg`'s entry held to its end, the first of it, taken out; `None` once there is
+    /// The first reply leg `leg`'s entry held to its end, taken out; `None` once there is
     /// nothing. Read without the lock while nothing is held.
-    pub(super) fn take_held(&self, leg: u64) -> Option<Held> {
+    pub(super) fn take_held(&self, leg: u64) -> Option<InboundReply> {
         if !self.held.is_pending() {
             return None;
         }
@@ -161,7 +170,7 @@ impl GetPlane {
     }
 
     /// Everything held for every leg, taken out: the session is closed.
-    pub(super) fn take_all_held(&self) -> VecDeque<(u64, Held)> {
+    pub(super) fn take_all_held(&self) -> VecDeque<(u64, InboundReply)> {
         core::mem::take(&mut *self.held.lock())
     }
 }
@@ -204,33 +213,20 @@ impl PendingGet {
     }
 }
 
-/// The end of a leg, said once: when the pending entry that owns it is dropped.
+/// The end of a leg, said once: when the pending entry that owns it is dropped, with the timeout
+/// that ended it, which the entry's sink was told of before its drop.
 struct LegEnd {
     leg: u64,
+    timed_out: Option<RequestId>,
     plane: Arc<GetPlane>,
 }
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
-        self.plane.ended.lock().note(self.leg);
-    }
-}
-
-/// What a leg's entry held to its end and the deliveries hand its callback before they let it go:
-/// a reply its consolidation kept until the end, given up whole by the entry, or the timeout that
-/// ended it.
-pub(super) enum Held {
-    Reply(InboundReply),
-    Timeout(wz_session_core::wire_id::RequestId),
-}
-
-impl Held {
-    /// Hand this to `callback`, with no lock of the session held.
-    pub(super) fn hand(&self, callback: &ReplyCallback) {
-        match self {
-            Self::Reply(reply) => callback.call(reply),
-            Self::Timeout(rid) => callback.call(&timeout_reply(*rid)),
-        }
+        self.plane.ended.lock().note(Ended {
+            leg: self.leg,
+            timed_out: self.timed_out,
+        });
     }
 }
 
@@ -248,9 +244,9 @@ enum Capture {
 /// callback once it lets go of the session ([`GetPlane::capture`]); a reply of a datagram a link
 /// lends is held for the callback in the lane's pending table, and any other is queued in the
 /// session's delivery `lane` (`SharedLane::offer_reply_to`). What the entry's consolidation held
-/// to its end, and the timeout of a leg that timed out, wait in the plane's held table
-/// ([`GetPlane::take_held`]). The sink's drop is the leg's end: the Final says nothing more, as
-/// the registry drops the entry once its Finals are in. The table of callbacks holds the callback
+/// to its end waits in the plane's held table ([`GetPlane::take_held`]), and the timeout of a leg
+/// that timed out in the leg's end ([`Ended`]). The sink's drop is the leg's end: the Final says
+/// nothing more, as the registry drops the entry once its Finals are in. The table of callbacks holds the callback
 /// past the entry, so the entry's drop, under the session's lock, is never its last.
 pub(crate) struct LegSink {
     leg: u64,
@@ -273,6 +269,7 @@ impl LegSink {
             lane: Arc::clone(lane),
             end: LegEnd {
                 leg,
+                timed_out: None,
                 plane: Arc::clone(plane),
             },
         }
@@ -289,14 +286,14 @@ impl ReplySink for LegSink {
         unsafe { self.lane.offer_reply_to(self.leg, &self.callback, reply) };
     }
 
-    fn on_final(&mut self, _rid: wz_session_core::wire_id::RequestId) {}
+    fn on_final(&mut self, _rid: RequestId) {}
 
-    fn on_timeout(&mut self, rid: wz_session_core::wire_id::RequestId) {
-        self.end.plane.hold(self.leg, Held::Timeout(rid));
+    fn on_timeout(&mut self, rid: RequestId) {
+        self.end.timed_out = Some(rid);
     }
 
     fn on_reply_owned(&mut self, reply: InboundReply) {
-        self.end.plane.hold(self.leg, Held::Reply(reply));
+        self.end.plane.hold(self.leg, reply);
     }
 }
 
@@ -324,22 +321,51 @@ mod tests {
         }
     }
 
+    /// The end of leg `leg`, which no timeout ended.
+    fn end(leg: u64) -> Ended {
+        Ended {
+            leg,
+            timed_out: None,
+        }
+    }
+
     /// Each end noted is taken once, an end its leg's maker handled itself is not taken, and a
     /// closed session's ends are all let go.
     #[test]
     fn each_end_is_taken_once_and_a_forgotten_one_never() {
         let mut held = ended(3);
         let ends = &mut held.ends;
-        ends.note(1);
-        ends.note(2);
-        ends.note(3);
+        ends.note(end(1));
+        ends.note(end(2));
+        ends.note(end(3));
         ends.forget(2);
-        let mut taken = [ends.take(), ends.take(), ends.take()];
+        let mut taken = [ends.take(), ends.take(), ends.take()].map(|e| e.map(|e| e.leg));
         taken.sort();
         assert_eq!(taken, [None, Some(1), Some(3)]);
-        ends.note(4);
+        ends.note(end(4));
         ends.clear();
         assert_eq!(ends.take(), None, "a closed session hands out no end");
+    }
+
+    /// The end of a leg a timeout ended keeps the timeout's request id to its delivery, and one
+    /// that ended otherwise keeps none.
+    #[test]
+    fn an_end_keeps_the_timeout_that_ended_its_leg() {
+        let mut held = ended(2);
+        let ends = &mut held.ends;
+        ends.note(Ended {
+            leg: 5,
+            timed_out: Some(9),
+        });
+        assert_eq!(
+            ends.take(),
+            Some(Ended {
+                leg: 5,
+                timed_out: Some(9)
+            })
+        );
+        ends.note(end(6));
+        assert_eq!(ends.take(), Some(end(6)), "CONTROL: a final ends with none");
     }
 
     /// A table lent no rows is the defect the plan rules out: the end is not kept, and a debug
@@ -352,7 +378,7 @@ mod tests {
     fn an_end_past_the_rows_is_a_defect() {
         let mut held = ended(0);
         let ends = &mut held.ends;
-        ends.note(1);
+        ends.note(end(1));
         assert_eq!(ends.take(), None);
     }
 }
