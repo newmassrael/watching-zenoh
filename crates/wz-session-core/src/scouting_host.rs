@@ -50,6 +50,7 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt;
 use core::mem::MaybeUninit;
 
 use sce_forge_runtime::codec::{SceCursor, VecSink};
@@ -61,6 +62,7 @@ use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
 use wz_runtime_core::Runtime;
 
+use crate::caps;
 use crate::link::LostCause;
 pub use crate::scout_initiator::{
     classify_ignored_scout_rx, hello_advances_window, ScoutRxIgnored,
@@ -103,7 +105,7 @@ pub struct ScoutingActions<R: Runtime> {
     /// decoding inside the action would put that verdict AFTER the transition had been taken,
     /// which on the exit-on-first arm let one malformed datagram from anywhere on the untrusted
     /// group close the window with nothing discovered.
-    pub pending_hello: R::Mutex<Option<ScoutedHello>>,
+    pub pending_hello: R::Mutex<Option<HelloRow>>,
     /// The discovered peer locator (for example `"udp/127.0.0.1:7447"`), taken from the first
     /// Hello locator. `None` until a Hello with a locator arrives.
     ///
@@ -122,18 +124,20 @@ pub struct ScoutingActions<R: Runtime> {
     ///
     /// Holds ONE entry per window with [`ScoutParams::exit_on_first`] (the session-open implicit
     /// scout leaves `AwaitingHello` on the first Hello), and every responder in the window
-    /// without it: pico's `exit_on_first == false` survey arm, which the statechart's
-    /// self-transition carries.
-    pub hellos: R::Mutex<Vec<ScoutedHello>>,
+    /// without it, up to the table's `MAX_SCOUT_HELLOS` rows: pico's `exit_on_first == false`
+    /// survey arm, which the statechart's self-transition carries.
+    pub hellos: R::Mutex<HelloTable>,
+    /// The Hellos the window took and did not record, its table full ([`Self::hellos_refused`]).
+    pub refused_hellos: R::Mutex<usize>,
     /// Every datagram the window OBSERVED and did not take as a Hello, with the reason, in
     /// arrival order.
     ///
     /// A log line alone is the wrong instrument for "a datagram was dropped": a log needle dies
     /// two ways (the level is filtered, or the wording drifts) and a test that greps for one
     /// asserts on prose. So the verdict is recorded here as a value, and logged beside it.
-    /// Together with [`Self::hellos`] it makes the handling of inbound datagrams CONSERVATIVE:
-    /// every datagram the window receives lands in exactly one of the two, so a future silent
-    /// drop is a broken count and not a missing log line.
+    /// Together with [`Self::hellos`] and [`Self::refused_hellos`] it makes the handling of inbound
+    /// datagrams CONSERVATIVE: every datagram the window receives lands in exactly one of the
+    /// three, so a future silent drop is a broken count and not a missing log line.
     pub ignored: R::Mutex<Vec<ScoutRxIgnored>>,
 }
 
@@ -189,6 +193,236 @@ pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
     })
 }
 
+/// What a delivered Hello says, whichever form holds it: the [`ScoutedHello`] a host keeps, or
+/// the [`HelloRow`] of a window's table, which a scout lends its callback.
+pub trait HelloFacts {
+    /// The peer's role, `None` for bits no role maps to.
+    fn whatami(&self) -> Option<WhatAmI>;
+    /// The peer's zid.
+    fn zid(&self) -> &SessionZid;
+    /// How many locators the Hello holds.
+    fn locator_count(&self) -> usize;
+    /// The `k`th locator, in wire order.
+    fn locator(&self, k: usize) -> Option<&str>;
+}
+
+impl HelloFacts for ScoutedHello {
+    fn whatami(&self) -> Option<WhatAmI> {
+        self.whatami
+    }
+
+    fn zid(&self) -> &SessionZid {
+        &self.zid
+    }
+
+    fn locator_count(&self) -> usize {
+        self.locators.len()
+    }
+
+    fn locator(&self, k: usize) -> Option<&str> {
+        self.locators.get(k).map(String::as_str)
+    }
+}
+
+/// The bytes of locator text one row holds: each locator at most `MAX_LOCATOR_LEN`.
+const HELLO_LOCATOR_TEXT: usize = caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN;
+
+/// One Hello as a window keeps it: what [`ScoutedHello`] carries, its locators in a text of the
+/// row's own, so a window records its Hellos in a table of a size the build fixes and decodes none
+/// onto the heap. A locator longer than `MAX_LOCATOR_LEN` bytes, or one past
+/// `SCOUT_HELLO_LOCATORS`, is skipped, never cut short, and counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelloRow {
+    /// Protocol version byte, verbatim from the wire.
+    pub version: u8,
+    /// The peer's role, as [`ScoutedHello::whatami`].
+    pub whatami: Option<WhatAmI>,
+    /// The peer's zid, verbatim.
+    pub zid: SessionZid,
+    /// Where each kept locator ends in `text`.
+    ends: [usize; caps::SCOUT_HELLO_LOCATORS],
+    kept: usize,
+    skipped: usize,
+    text: [u8; HELLO_LOCATOR_TEXT],
+}
+
+/// A writer into a locator's room of a row, which refuses what does not fit.
+struct LocatorRoom<'r> {
+    room: &'r mut [u8],
+    len: usize,
+}
+
+impl fmt::Write for LocatorRoom<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len.checked_add(s.len()).ok_or(fmt::Error)?;
+        let place = self.room.get_mut(self.len..end).ok_or(fmt::Error)?;
+        place.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+impl HelloRow {
+    /// A row of no locator.
+    fn empty(version: u8, whatami: Option<WhatAmI>, zid: SessionZid) -> Self {
+        Self {
+            version,
+            whatami,
+            zid,
+            ends: [0; caps::SCOUT_HELLO_LOCATORS],
+            kept: 0,
+            skipped: 0,
+            text: [0; HELLO_LOCATOR_TEXT],
+        }
+    }
+
+    /// `locator` kept after the others, or skipped and counted when the row has no row for it
+    /// or it is longer than `MAX_LOCATOR_LEN` bytes.
+    fn keep(&mut self, locator: impl fmt::Display) {
+        if self.kept == caps::SCOUT_HELLO_LOCATORS {
+            self.skipped += 1;
+            return;
+        }
+        let start = self.start_of(self.kept);
+        let mut room = LocatorRoom {
+            room: &mut self.text[start..start + caps::MAX_LOCATOR_LEN],
+            len: 0,
+        };
+        if fmt::write(&mut room, format_args!("{locator}")).is_err() {
+            self.skipped += 1;
+            return;
+        }
+        self.ends[self.kept] = start + room.len;
+        self.kept += 1;
+    }
+
+    fn start_of(&self, k: usize) -> usize {
+        if k == 0 {
+            0
+        } else {
+            self.ends[k - 1]
+        }
+    }
+
+    /// The row of `hello`, its locators kept as a window keeps them.
+    pub fn of(hello: &ScoutedHello) -> Self {
+        let mut row = Self::empty(hello.version, hello.whatami, hello.zid);
+        for locator in &hello.locators {
+            row.keep(locator);
+        }
+        row
+    }
+
+    /// The locators kept, in wire order.
+    pub fn locators(&self) -> impl Iterator<Item = &str> + '_ {
+        (0..self.kept).filter_map(|k| HelloFacts::locator(self, k))
+    }
+
+    /// How many locators the Hello advertised and the row skipped.
+    pub fn skipped_locators(&self) -> usize {
+        self.skipped
+    }
+
+    /// How many locators the Hello advertised, kept or skipped.
+    pub fn advertised_locators(&self) -> usize {
+        self.kept + self.skipped
+    }
+
+    /// The Hello as a host keeps it, its kept locators copied.
+    pub fn to_hello(&self) -> ScoutedHello {
+        ScoutedHello {
+            version: self.version,
+            whatami: self.whatami,
+            zid: self.zid,
+            locators: self.locators().map(String::from).collect(),
+        }
+    }
+}
+
+impl HelloFacts for HelloRow {
+    fn whatami(&self) -> Option<WhatAmI> {
+        self.whatami
+    }
+
+    fn zid(&self) -> &SessionZid {
+        &self.zid
+    }
+
+    fn locator_count(&self) -> usize {
+        self.kept
+    }
+
+    fn locator(&self, k: usize) -> Option<&str> {
+        if k >= self.kept {
+            return None;
+        }
+        core::str::from_utf8(&self.text[self.start_of(k)..self.ends[k]]).ok()
+    }
+}
+
+/// Decode one inbound scouting datagram into a [`HelloRow`], as [`decode_scouted_hello`] decodes
+/// it, writing its locators into the row and nothing onto the heap.
+pub fn decode_hello_row(bytes: &[u8]) -> Option<HelloRow> {
+    let view = ScoutingHelloView::decode(&mut SceCursor::new(bytes)).ok()?;
+    let hello = view.body;
+    let zid = SessionZid::new(hello.zid.into_inner()).ok()?;
+    let mut row = HelloRow::empty(hello.version, WhatAmI::from_wire(hello.cbyte), zid);
+    if let Some(locators) = hello.locators.as_ref() {
+        for entry in locators.inner().iter() {
+            row.keep(&entry.locator);
+        }
+    }
+    Some(row)
+}
+
+/// The Hellos a window records, in arrival order, in a table of `MAX_SCOUT_HELLOS` rows.
+#[derive(Debug)]
+pub struct HelloTable {
+    rows: [Option<HelloRow>; caps::MAX_SCOUT_HELLOS],
+    held: usize,
+}
+
+impl Default for HelloTable {
+    fn default() -> Self {
+        Self {
+            rows: core::array::from_fn(|_| None),
+            held: 0,
+        }
+    }
+}
+
+impl HelloTable {
+    /// `row` recorded after the others; `false` when the table is full, and nothing recorded.
+    pub fn push(&mut self, row: HelloRow) -> bool {
+        let Some(place) = self.rows.get_mut(self.held) else {
+            return false;
+        };
+        *place = Some(row);
+        self.held += 1;
+        true
+    }
+
+    /// The rows, in arrival order.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &HelloRow> + '_ {
+        self.rows[..self.held].iter().flatten()
+    }
+
+    /// How many Hellos are recorded.
+    pub fn len(&self) -> usize {
+        self.held
+    }
+
+    /// Whether none is.
+    pub fn is_empty(&self) -> bool {
+        self.held == 0
+    }
+
+    /// The first Hello recorded.
+    pub fn first(&self) -> Option<&HelloRow> {
+        self.iter().next()
+    }
+}
+
 impl<R: Runtime> ScoutingActions<R> {
     /// The state bundle for one discovery window. `params` are captured by value; the staging
     /// slots start empty.
@@ -199,7 +433,8 @@ impl<R: Runtime> ScoutingActions<R> {
             pending_scout: R::new_mutex(None),
             pending_hello: R::new_mutex(None),
             discovered: R::new_mutex(None),
-            hellos: R::new_mutex(Vec::new()),
+            hellos: R::new_mutex(HelloTable::default()),
+            refused_hellos: R::new_mutex(0),
             ignored: R::new_mutex(Vec::new()),
         })
     }
@@ -221,7 +456,21 @@ impl<R: Runtime> ScoutingActions<R> {
     /// A non-empty result with an EMPTY `locators` is meaningful: a peer answered and advertised
     /// no address, which must not read as silence.
     pub fn scouted_hellos(&self) -> Vec<ScoutedHello> {
-        R::with_mutex_mut(&self.hellos, |hellos| hellos.clone())
+        R::with_mutex_mut(&self.hellos, |hellos| {
+            hellos.iter().map(HelloRow::to_hello).collect()
+        })
+    }
+
+    /// The window's table, taken whole and left empty: what a host whose window has resolved
+    /// delivers from, lending each row with no copy of its own.
+    pub fn take_hellos(&self) -> HelloTable {
+        R::with_mutex_mut(&self.hellos, core::mem::take)
+    }
+
+    /// How many Hellos the window took and did not record, its table of `MAX_SCOUT_HELLOS` rows
+    /// full.
+    pub fn hellos_refused(&self) -> usize {
+        R::with_mutex_mut(&self.refused_hellos, |refused| *refused)
     }
 
     /// Every datagram this window observed and did not take as a Hello, with the reason, in
@@ -326,12 +575,14 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
         // late answer would not even clear it.
         R::with_mutex_mut(&a.discovered, |discovered| {
             if discovered.is_none() {
-                if let Some(first) = scouted.locators.first() {
-                    *discovered = Some(first.clone());
+                if let Some(first) = HelloFacts::locator(&scouted, 0) {
+                    *discovered = Some(String::from(first));
                 }
             }
         });
-        R::with_mutex_mut(&a.hellos, |hellos| hellos.push(scouted));
+        if !R::with_mutex_mut(&a.hellos, |hellos| hellos.push(scouted)) {
+            R::with_mutex_mut(&a.refused_hellos, |refused| *refused += 1);
+        }
     }
 
     /// AwaitingHello -> Idle on scout.timer.elapsed: the window expired with no Hello.
@@ -418,6 +669,18 @@ pub fn deliver_in_upstream_order(
     hellos.len()
 }
 
+/// [`deliver_in_upstream_order`] over a window's own table: each row lent to `on_hello`, last
+/// responder first, and none copied.
+pub fn deliver_rows_in_upstream_order(
+    hellos: &HelloTable,
+    mut on_hello: impl FnMut(&HelloRow),
+) -> usize {
+    for hello in hellos.iter().rev() {
+        on_hello(hello);
+    }
+    hellos.len()
+}
+
 /// How a scouting window ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoutOutcome {
@@ -466,16 +729,19 @@ pub fn window_sent<R: Runtime>(engine: &mut ScoutEngine<R>, sent: bool) {
 ///
 /// The verdict is computed at ONE place on purpose: an `advanced` flag, and not a record call per
 /// drop site, so a future arm cannot forget to account for its datagram. Every datagram the
-/// window observes lands in exactly one of `hellos` and `ignored`.
+/// window observes lands in exactly one of `hellos`, `refused_hellos` and `ignored`.
 pub fn window_datagram<R: Runtime>(
     actions: &Arc<ScoutingActions<R>>,
     engine: &mut ScoutEngine<R>,
     bytes: &[u8],
 ) {
     let advanced = if bytes.first().map(|h| h & 0x1f) == Some(wire_const::S_MID_HELLO) {
-        match decode_scouted_hello(bytes) {
+        match decode_hello_row(bytes) {
             Some(hello)
-                if hello_advances_window(actions.params.exit_on_first, hello.locators.len()) =>
+                if hello_advances_window(
+                    actions.params.exit_on_first,
+                    hello.advertised_locators(),
+                ) =>
             {
                 R::with_mutex_mut(&actions.pending_hello, |slot| *slot = Some(hello));
                 // The window's mode rides the event: the generated machine has no datamodel, so

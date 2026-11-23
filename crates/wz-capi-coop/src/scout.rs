@@ -22,7 +22,7 @@ use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::scouting::ScoutMembers;
 use wz_session_core::scouting_host::{
-    deliver_in_upstream_order, ScoutWindowPlace, ScoutingActions,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutWindowPlace, ScoutingActions,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -87,8 +87,8 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     actions
 }
 
-/// Scout `group:port` for `budget_ms` over the host's sockets `S` and hand each peer that answered
-/// to `on_hello`, in the order upstream delivers them (after the window, last responder first), as
+/// Scout `group:port` for `budget_ms` over the host's sockets `S` and lend each peer that answered,
+/// as the window's table holds it, to `on_hello`, in the order upstream delivers them (after the window, last responder first), as
 /// both C ABIs' `z_scout` does. The number delivered.
 ///
 /// A socket that cannot be bound is a smaller window, and no window at all is a window nobody
@@ -103,10 +103,10 @@ pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
-    on_hello: impl FnMut(&ScoutedHello),
+    on_hello: impl FnMut(&HelloRow),
 ) -> usize {
     let hellos = window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, false);
-    deliver_in_upstream_order(&hellos, on_hello)
+    deliver_rows_in_upstream_order(&hellos, on_hello)
 }
 
 /// Scout for `budget_ms` and answer the FIRST node that replies, or `None` when none does in the
@@ -123,8 +123,8 @@ pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     budget_ms: u64,
 ) -> Option<ScoutedHello> {
     window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, true)
-        .into_iter()
-        .next()
+        .first()
+        .map(HelloRow::to_hello)
 }
 
 fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
@@ -135,7 +135,7 @@ fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     zid: Option<SessionZid>,
     budget_ms: u64,
     exit_on_first: bool,
-) -> Vec<ScoutedHello> {
+) -> HelloTable {
     let members = ScoutMembers::<S>::open(group, port, &interface_addresses());
     let params = ScoutParams {
         what,
@@ -145,7 +145,7 @@ fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
         timeout_ms: budget_ms,
         exit_on_first,
     };
-    run_window(clock, members, params).scouted_hellos()
+    run_window(clock, members, params).take_hellos()
 }
 
 // The tests run responders on threads of `std`.

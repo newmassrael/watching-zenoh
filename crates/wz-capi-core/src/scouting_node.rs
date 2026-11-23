@@ -757,6 +757,8 @@ mod tests {
     /// whose role was not asked for or that names no role; a caller that declines is told so.
     #[test]
     fn a_window_hands_each_hello_over_once_and_only_of_the_roles_asked_for() {
+        use wz_session_core::scouting_host::HelloRow;
+
         let actions: std::sync::Arc<ScoutingActions> = ScoutingActions::new(ScoutParams {
             what: 2,
             zid: Some([9].into()),
@@ -775,24 +777,26 @@ mod tests {
             got.push((delivery.hello.zid[0], delivery.window));
             true
         };
-        actions.hellos.lock().unwrap().extend([
+        for scouted in [
             hello(1, Some(WhatAmI::Peer)),
             hello(2, Some(WhatAmI::Router)),
             hello(3, None),
-        ]);
+        ] {
+            assert!(actions.hellos.lock().unwrap().push(HelloRow::of(&scouted)));
+        }
         assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
-        actions
+        assert!(actions
             .hellos
             .lock()
             .unwrap()
-            .push(hello(4, Some(WhatAmI::Peer)));
+            .push(HelloRow::of(&hello(4, Some(WhatAmI::Peer)))));
         assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
         assert_eq!(got, vec![(1, 7), (4, 7)], "once each, and the peers only");
-        actions
+        assert!(actions
             .hellos
             .lock()
             .unwrap()
-            .push(hello(5, Some(WhatAmI::Peer)));
+            .push(HelloRow::of(&hello(5, Some(WhatAmI::Peer)))));
         assert!(
             !hand_over(&actions, 2, 7, &mut handed, &mut |_: Delivery| false),
             "a caller that declines ends the window"

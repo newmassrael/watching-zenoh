@@ -203,7 +203,7 @@ pub(crate) use zephyr_host::*;
 mod scouting {
     use core::net::{IpAddr, SocketAddr};
 
-    use wz_session_core::scouting_host::ScoutedHello;
+    use wz_session_core::scouting_host::{HelloRow, ScoutedHello};
 
     use wz_session_core::session_zid::SessionZid;
 
@@ -222,7 +222,7 @@ mod scouting {
         zid: Option<SessionZid>,
         budget_ms: u64,
         rx_bytes: usize,
-        on_hello: impl FnMut(&ScoutedHello),
+        on_hello: impl FnMut(&HelloRow),
     ) -> usize {
         wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
             clock,

@@ -25,7 +25,8 @@ use core::net::SocketAddr;
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
-    deliver_in_upstream_order, ScoutParams, ScoutWindowPlace, ScoutedHello,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutParams, ScoutWindowPlace,
+    ScoutedHello,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -37,8 +38,8 @@ use crate::prelude::*;
 const READ_WAIT_MS: c_int = 2;
 
 /// Scout `group` for `budget_ms` over a socket of `U`, reading each datagram into a buffer of
-/// `rx_capacity` bytes (zenoh-pico reads a scout into one of its multicast batch size), and hand
-/// each peer that answered to `on_hello` in the order upstream delivers them (after the window,
+/// `rx_capacity` bytes (zenoh-pico reads a scout into one of its multicast batch size), and lend
+/// each peer that answered, as the window's table holds it, to `on_hello` in the order upstream delivers them (after the window,
 /// last responder first). The number delivered; a socket that cannot be opened is a window nobody
 /// answers, `0`.
 ///
@@ -51,7 +52,7 @@ pub fn run_scout<U, C>(
     zid: Option<SessionZid>,
     budget_ms: u64,
     rx_capacity: usize,
-    on_hello: impl FnMut(&ScoutedHello),
+    on_hello: impl FnMut(&HelloRow),
 ) -> usize
 where
     U: DatagramSocket,
@@ -64,7 +65,7 @@ where
         exit_on_first: false,
     };
     let hellos = window::<U, C>(clock, group, params, rx_capacity);
-    deliver_in_upstream_order(&hellos, on_hello)
+    deliver_rows_in_upstream_order(&hellos, on_hello)
 }
 
 /// Scout `group` for `budget_ms` and answer the FIRST node that replies, or `None` when none does
@@ -89,8 +90,8 @@ where
         exit_on_first: true,
     };
     window::<U, C>(clock, group, params, rx_capacity)
-        .into_iter()
-        .next()
+        .first()
+        .map(HelloRow::to_hello)
 }
 
 /// What the window's socket is bound to: the unspecified address of the group's family, on a port
@@ -103,12 +104,7 @@ fn scout_bind(group: SocketAddr) -> SocketAddr {
 /// One window: the Scout sent once, every datagram that arrives read until the machine resolves,
 /// and the Hellos collected. A read that fails ends the window with what it has, as a lost member
 /// does in the host's window.
-fn window<U, C>(
-    clock: &C,
-    group: SocketAddr,
-    params: ScoutParams,
-    rx_capacity: usize,
-) -> Vec<ScoutedHello>
+fn window<U, C>(clock: &C, group: SocketAddr, params: ScoutParams, rx_capacity: usize) -> HelloTable
 where
     U: DatagramSocket,
     C: ClockSource + Clone + 'static,
@@ -119,7 +115,7 @@ where
     let window = place.build(params);
     let actions = window.actions().clone();
     let Ok(socket) = U::bind(scout_bind(group)) else {
-        return actions.scouted_hellos();
+        return actions.take_hellos();
     };
     let sent = window
         .open()
@@ -146,7 +142,7 @@ where
             break;
         }
     }
-    actions.scouted_hellos()
+    actions.take_hellos()
 }
 
 #[cfg(test)]

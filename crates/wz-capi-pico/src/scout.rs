@@ -63,7 +63,7 @@ use crate::prelude::*;
 
 use wz_session_core::caps;
 use wz_session_core::scouting_host::{
-    parse_multicast_locator, ScoutedHello, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
+    parse_multicast_locator, HelloFacts, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
     SCOUTING_WHAT_DEFAULT,
 };
 
@@ -109,6 +109,8 @@ mod window {
 
     use wz_session_core::limits::SessionLimits;
     use wz_session_core::policy::SessionPolicy;
+    #[cfg(not(feature = "engine-tokio"))]
+    use wz_session_core::scouting_host::HelloRow;
     use wz_session_core::scouting_host::ScoutedHello;
     use wz_session_core::session_zid::SessionZid;
 
@@ -201,7 +203,7 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
-        on_hello: impl FnMut(&ScoutedHello),
+        on_hello: impl FnMut(&HelloRow),
     ) -> usize {
         wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
             clock, group, port, what, zid, budget_ms, on_hello,
@@ -238,7 +240,7 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
-        on_hello: impl FnMut(&ScoutedHello),
+        on_hello: impl FnMut(&HelloRow),
     ) -> usize {
         crate::coop_host::run_scout(
             clock,
@@ -337,17 +339,23 @@ fn loan_of(locators: &StringArrayState) -> z_loaned_string_array_t {
 }
 
 /// Hand `on_hello` the scouted `hello` as pico's callback reads it, its locators lent from the
-/// Hello's own strings, so a delivery copies none of them. A Hello with more locators than a table
-/// of views holds (`MAX_ADMIN_LOCATORS`) is handed through an array of its own copies.
-fn lend_hello(hello: &ScoutedHello, on_hello: &mut impl FnMut(&mut HelloState)) {
-    let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
-    let zid = z_id_t::from_wire(&hello.zid);
-    if hello.locators.len() > caps::MAX_ADMIN_LOCATORS {
-        on_hello(&mut HelloState::new(zid, whatami, hello.locators.clone()));
+/// Hello's own strings (the window's row, or the host's Hello), so a delivery copies none of them.
+/// A Hello with more locators than a table of views holds (`MAX_ADMIN_LOCATORS`) is handed through
+/// an array of its own copies.
+fn lend_hello(hello: &impl HelloFacts, on_hello: &mut impl FnMut(&mut HelloState)) {
+    let whatami = hello.whatami().map_or(0, |w| u32::from(w.to_api()));
+    let zid = z_id_t::from_wire(hello.zid());
+    let count = hello.locator_count();
+    if count > caps::MAX_ADMIN_LOCATORS {
+        let copies = (0..count)
+            .filter_map(|k| hello.locator(k))
+            .map(String::from)
+            .collect();
+        on_hello(&mut HelloState::new(zid, whatami, copies));
         return;
     }
     let views: [z_loaned_string_t; caps::MAX_ADMIN_LOCATORS] =
-        core::array::from_fn(|k| match hello.locators.get(k) {
+        core::array::from_fn(|k| match hello.locator(k) {
             Some(locator) => z_loaned_string_t {
                 _start: locator.as_ptr(),
                 _len: locator.len(),
@@ -358,7 +366,7 @@ fn lend_hello(hello: &ScoutedHello, on_hello: &mut impl FnMut(&mut HelloState)) 
             },
         });
     // SAFETY: `views` and the Hello's strings outlive the array, which this frame keeps.
-    let array = unsafe { StringArrayState::lent(&views[..hello.locators.len()]) };
+    let array = unsafe { StringArrayState::lent(&views[..count]) };
     on_hello(&mut HelloState::lent(zid, whatami, &array));
 }
 
@@ -1048,6 +1056,7 @@ pub unsafe extern "C" fn z_closure_hello(
 mod tests {
     use super::*;
     use crate::string_array::{z_string_array_get, z_string_array_len};
+    use wz_session_core::scouting_host::{HelloRow, ScoutedHello};
 
     /// The three C-allocated structs of this plane, pinned against the sizes
     /// MEASURED off the pinned zenoh-pico headers on a 64-bit host (56 / 32 / 24). A C
@@ -1296,5 +1305,32 @@ mod tests {
                 z_hello_drop(z_hello_move(&mut cloned));
             }
         }
+    }
+    /// A window's row is lent as a host's Hello is: each view points into the row's own text, so a
+    /// scout over the cooperative engine copies no locator either. Turned red by a delivery that
+    /// copies the row's locators.
+    #[test]
+    fn a_window_row_lends_its_own_text() {
+        let hello = scouted(caps::MAX_ADMIN_LOCATORS.min(2));
+        let row = HelloRow::of(&hello);
+        let start = (&row as *const HelloRow).cast::<u8>();
+        let span = start..start.wrapping_add(core::mem::size_of::<HelloRow>());
+        let mut seen = 0;
+        lend_hello(&row, &mut |state: &mut HelloState| {
+            let loaned = lent_to_callback(state);
+            // SAFETY: a live hello, lent for this call.
+            unsafe {
+                let locators = zp_hello_locators(&loaned);
+                assert_eq!(z_string_array_len(locators), hello.locators.len());
+                for (k, locator) in hello.locators.iter().enumerate() {
+                    let view = &*z_string_array_get(locators, k);
+                    assert!(span.contains(&view._start), "locator {k} is the row's");
+                    let bytes = core::slice::from_raw_parts(view._start, view._len);
+                    assert_eq!(bytes, locator.as_bytes());
+                }
+            }
+            seen += 1;
+        });
+        assert_eq!(seen, 1);
     }
 }

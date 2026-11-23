@@ -2772,6 +2772,53 @@ value = 8
 reason = "zenoh-pico's map of keys is bounded by no count; the preset holds the keys of its examples without TLS: the mode and the three scouting keys its default config inserts (`vendor/zenoh-pico/src/net/config.c` @ `_zp_config_insert(ps, Z_CONFIG_MULTICAST_LOCATOR_KEY, Z_CONFIG_MULTICAST_LOCATOR_DEFAULT),`), a connect and a listen locator, the session id and what to scout for, eight, as the text of CONFIG_TEXT_BYTES's preset does."
 
 [[limit]]
+id = "MAX_SCOUT_HELLOS"
+kconfig = "WZ_LIMIT_MAX_SCOUT_HELLOS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The Hellos one scouting window records: the rows of its table, each a node
+that answered with its locators. A Hello past them is not recorded and the
+window counts it; the window still runs its budget out. The open's lookup,
+which ends at the first Hello, takes one.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen, the build's default for the tables of one session's entities (MAX_SUBSCRIPTIONS), holds a scout on a segment of a dozen nodes with room."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico's list of Hellos is bounded by no count; its API test scouts the one router it runs against and asks for at least one Hello (`vendor/zenoh-pico/tests/z_api_alignment_test.c` @ `assert(hellos >= 1);`), and its open's lookup takes the first."
+
+[[limit]]
+id = "SCOUT_HELLO_LOCATORS"
+kconfig = "WZ_LIMIT_SCOUT_HELLO_LOCATORS"
+kind = "bound"
+driven = "remote"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The locators a scouting window keeps of one Hello, each at most
+MAX_LOCATOR_LEN bytes, in a text of the Hello's row. A locator past them, or
+a longer one, is skipped, never cut short, and counted with the Hello.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico keep a Hello's locators in a vector of their heap. Eight holds a node that listens on two endpoints on each of four interfaces."
+
+[[limit]]
 id = "CONFIG_DOCUMENT_DEPTH"
 kconfig = "WZ_LIMIT_CONFIG_DOCUMENT_DEPTH"
 kind = "parameter"
