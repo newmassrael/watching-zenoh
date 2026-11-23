@@ -1061,8 +1061,6 @@ pub mod sample;
 /// rule for the wire id. Moved down from `wz-capi-core` so a C ABI over the cooperative engine
 /// reaches it (see the module's own header).
 #[cfg(feature = "alloc")]
-// Totality debt TD-116 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod encoding_hint;
 
 /// What one publish asks for, independent of the engine that sends it (`PublishOptions`, the
