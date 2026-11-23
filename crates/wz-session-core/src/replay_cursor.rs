@@ -106,7 +106,8 @@ impl ReplayCursor {
 
     /// How many entries are still owed.
     pub const fn owed(&self) -> usize {
-        self.total.saturating_sub(self.next)
+        // The cursor never passes the end of the sequence.
+        self.total.wrapping_sub(self.next)
     }
 
     /// The entries to emit in this turn, at most `burst` of them from the cursor, which then moves
@@ -135,9 +136,10 @@ impl ReplayCursor {
         if !owed {
             // Everything the entry depends on precedes it and has been told, so the cursor moves
             // over it with the entries that follow, and it is not owed again.
-            self.next = self.next.saturating_add(1);
+            self.next = self.next.wrapping_add(1);
         }
-        self.total = self.total.saturating_add(1);
+        // `next` is at most `total`, which counts entries the host holds: neither count wraps.
+        self.total = self.total.wrapping_add(1);
         if owed {
             Insertion::Owed
         } else {
@@ -153,10 +155,10 @@ impl ReplayCursor {
             return Removal::Silent;
         }
         // `total` is not zero here, and `next` is above `place`.
-        let place = place.min(self.total.saturating_sub(1));
-        self.total = self.total.saturating_sub(1);
+        let place = place.min(self.total.wrapping_sub(1));
+        self.total = self.total.wrapping_sub(1);
         if place < self.next {
-            self.next = self.next.saturating_sub(1);
+            self.next = self.next.wrapping_sub(1);
             Removal::Retract
         } else {
             Removal::Silent

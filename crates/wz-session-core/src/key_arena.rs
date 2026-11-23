@@ -213,7 +213,7 @@ impl KeyStore {
             if let Some(rest) = size.checked_sub(need) {
                 if rest >= MIN_BLOCK {
                     // The block ends inside the blocks, so its first `need` bytes do too.
-                    let tail = at.checked_add(need)?;
+                    let tail = at.wrapping_add(need);
                     self.set_word(tail, SIZE, rest);
                     self.set_word(tail, LINK, next);
                     self.link(prev, tail);
@@ -228,10 +228,10 @@ impl KeyStore {
         }
         let top = self.top.get();
         // `top` is never past `bytes`, so the difference is exact and the sum fits.
-        if self.bytes.saturating_sub(top) < need {
+        if self.bytes.wrapping_sub(top) < need {
             return None;
         }
-        self.top.set(top.checked_add(need)?);
+        self.top.set(top.wrapping_add(need));
         self.set_word(top, SIZE, need);
         Some(top)
     }
@@ -248,18 +248,17 @@ impl KeyStore {
             after = self.word(after, LINK);
         }
         let (mut start, mut prev) = (at, before);
-        // Every sum below is of a block and the bytes after it inside the blocks, so none wraps;
-        // a checked one that did would only keep two neighbours apart.
-        if after != NIL && at.checked_add(size) == Some(after) {
-            size = size.saturating_add(self.word(after, SIZE));
+        // Every sum below is of a block and the bytes after it inside the blocks, so none wraps.
+        if after != NIL && at.wrapping_add(size) == after {
+            size = size.wrapping_add(self.word(after, SIZE));
             after = self.word(after, LINK);
         }
-        if before != NIL && before.checked_add(self.word(before, SIZE)) == Some(at) {
+        if before != NIL && before.wrapping_add(self.word(before, SIZE)) == at {
             start = before;
-            size = size.saturating_add(self.word(before, SIZE));
+            size = size.wrapping_add(self.word(before, SIZE));
             prev = before_prev;
         }
-        if start.checked_add(size) == Some(self.top.get()) {
+        if start.wrapping_add(size) == self.top.get() {
             // No free block lies above one that ends where the bump area starts.
             debug_assert_eq!(after, NIL, "a free block above the bump area's start");
             self.top.set(start);
