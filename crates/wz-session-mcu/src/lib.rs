@@ -177,8 +177,6 @@ pub mod slot_group;
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_schedule;
 // A querier of the client node: a query asked every period, whose latest reply the node keeps.
-// Totality debt TD-226 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",

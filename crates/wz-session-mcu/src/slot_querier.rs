@@ -292,7 +292,8 @@ impl<const Q: usize> ReplyTarget for QueryState<Q> {
         Self::bump(&self.replied, query);
         if let (Some(cells), Some(capacity)) = (self.cells.get(), self.capacity.get(query)) {
             cells.put(
-                self.first_cell.get() + query,
+                // A cell past the storage is no cell: `put` keeps nothing for it.
+                self.first_cell.get().saturating_add(query),
                 capacity.get(),
                 key,
                 payload,
