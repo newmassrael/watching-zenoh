@@ -267,34 +267,41 @@ pub(crate) fn session_clock(time_base: Option<TimeBaseHold>) -> SessionClock {
     }
 }
 
-/// A wait that ends at the program's word that its time moved on after the mark `seen`.
+/// The one wait of a session on the program's time base: it ends at the program's word that its
+/// time moved on after the mark `seen`, the count of words when the session last looked at its
+/// clock to decide how long to wait.
+///
+/// One for the session, made with its open, so a read borrows it and makes nothing. The mark is the
+/// session's and not each read's: a read decides its wait from the session's deadlines as its look
+/// at the clock found them, so a look taken later supersedes an earlier one, and the read that took
+/// it steps the session past every deadline the earlier look had not yet seen.
 #[cfg(not(feature = "engine-tokio"))]
 struct MovedSince {
     time_base: TimeBaseHold,
-    seen: u64,
+    seen: wz_capi_port::sync::Lock<u64>,
 }
 
 #[cfg(not(feature = "engine-tokio"))]
 impl wz_capi_coop::LinkReadiness for MovedSince {
     fn wait_readable(&self, timeout_ms: u32) {
-        let _ = self.time_base.wait_moved(
-            self.seen,
-            core::time::Duration::from_millis(timeout_ms.into()),
-        );
+        let seen = self.seen.with(|seen| *seen);
+        let _ = self
+            .time_base
+            .wait_moved(seen, core::time::Duration::from_millis(timeout_ms.into()));
     }
 }
 
-/// The program's word, as the cooperative engine's reads wait on it.
+/// The program's word, as the cooperative engine's reads wait on it: the session's one wait, its
+/// mark moved to the count of words at each look.
 #[cfg(not(feature = "engine-tokio"))]
-struct TimeBaseMoves(TimeBaseHold);
+struct TimeBaseMoves(alloc::sync::Arc<MovedSince>);
 
 #[cfg(not(feature = "engine-tokio"))]
 impl wz_capi_coop::ClockMoves for TimeBaseMoves {
-    fn moved(&self) -> std::sync::Arc<dyn wz_capi_coop::LinkReadiness> {
-        std::sync::Arc::new(MovedSince {
-            seen: self.0.moves(),
-            time_base: self.0.clone(),
-        })
+    fn moved(&self) -> alloc::sync::Arc<dyn wz_capi_coop::LinkReadiness> {
+        let moves = self.0.time_base.moves();
+        self.0.seen.with(|seen| *seen = moves);
+        self.0.clone()
     }
 }
 
@@ -323,9 +330,12 @@ pub(crate) fn clock_moves(
 ) -> Option<std::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
     match clock {
         SessionClock::Host(_) => None,
-        SessionClock::Program(time_base) => {
-            Some(std::sync::Arc::new(TimeBaseMoves(time_base.clone())))
-        }
+        SessionClock::Program(time_base) => Some(alloc::sync::Arc::new(TimeBaseMoves(
+            alloc::sync::Arc::new(MovedSince {
+                seen: wz_capi_port::sync::Lock::new(time_base.moves()),
+                time_base: time_base.clone(),
+            }),
+        ))),
     }
 }
 
@@ -599,6 +609,44 @@ mod tests {
         assert!(
             host.now_us() >= before + 20_000,
             "CONTROL: without a time base the host's clock runs"
+        );
+    }
+
+    /// Every wait of a cooperative session on a time base borrows the session's one wait: a look
+    /// at the clock makes nothing. A word after the latest look ends the wait at once; a look taken
+    /// after that word waits for the next one and runs to its bound without it.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn each_wait_of_a_session_on_a_time_base_borrows_its_one_wait() {
+        use std::time::{Duration, Instant};
+        use wz_capi_coop::LinkReadiness;
+        let program = Program::default();
+        let context = &program as *const Program as *mut c_void;
+        // SAFETY: `program` outlives the clock and every hold of its time base.
+        let time_base = unsafe { wz_capi_port::time_base::over_calls(context, read, None) };
+        let clock = session_clock(Some(time_base.clone()));
+        let moves = clock_moves(&clock).expect("a session on a time base has the program's word");
+        let first = moves.moved();
+        let second = moves.moved();
+        assert!(
+            alloc::sync::Arc::ptr_eq(&first, &second),
+            "a look at the clock made a wait of its own"
+        );
+
+        time_base.advanced();
+        let started = Instant::now();
+        second.wait_readable(5_000);
+        assert!(
+            started.elapsed() < Duration::from_millis(2_500),
+            "the word after the look did not end the wait"
+        );
+
+        let third = moves.moved();
+        let started = Instant::now();
+        third.wait_readable(50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "a look taken after the word was ended by it"
         );
     }
 }
