@@ -4903,7 +4903,14 @@ impl SharedSession {
     /// exhausted. The space is the WIRE's `ExprId`, as zenoh's
     /// `DeclareKeyExpr.id` and pico's `uint16_t _id` are: an id is handed out
     /// again only once its declaration is retracted, never while a peer may still
-    /// hold it as an alias of another key.
+    /// hold it as an alias of another key. A retracted id is free on the wire: a
+    /// peer drops its alias when it reads the `UndeclareKeyExpr`
+    /// (`vendor/zenoh-pico/src/session/rx.c` @
+    /// `_z_unregister_resource(zn, decl->_decl._body._undecl_kexpr._id, peer);`), and pico's own
+    /// counter wraps its `u16` without asking which ids are live
+    /// (`vendor/zenoh-pico/src/session/resource.c` @
+    /// `uint16_t _z_get_resource_id(_z_session_t *zn) { return zn->_resource_id++; }`), where
+    /// this skips every id still declared.
     pub fn declare_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut guard = self.lock();
         let declared = guard
@@ -5003,7 +5010,12 @@ impl SharedSession {
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
-    /// — the SSOT every new face is replayed from.
+    /// — the SSOT every new face is replayed from. In the order of their rows: a
+    /// row a retracted declaration left is taken by the next one, so this is the
+    /// order they were declared in only while none was retracted. A replay does not
+    /// depend on it: each declaration names its key whole, so the declarations of
+    /// key expressions may reach a peer in any order, as long as all of them come
+    /// before the entities that name them ([`Self::face_up`]).
     pub fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.lock()
             .tables
