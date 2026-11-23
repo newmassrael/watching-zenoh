@@ -82,6 +82,7 @@ fn rows() -> TableRows {
         write_filters: FILTER_ROWS,
         matching_listeners: caps::MAX_MATCHING_LISTENERS,
         pending_gets: caps::MAX_PENDING_QUERIES,
+        held_replies: caps::MAX_PENDING_REPLIES,
     }
 }
 
@@ -747,6 +748,52 @@ fn a_full_get_table_refuses_and_hands_the_callback_back() {
     assert_eq!(refused.callback, 5);
 }
 
+/// A `Latest` get holds its replies in the tables until its caller takes them out, and a get
+/// ended with replies still held lets them go with it.
+#[cfg(feature = "storage-profile")]
+#[test]
+fn a_latest_get_holds_its_replies_until_they_are_taken_and_ends_with_the_rest() {
+    use crate::query_mode::ConsolidationMode;
+    use crate::reply_hold::Consolidated;
+    use crate::reply_sink::{BorrowedReply, ReplyKind, ReplyView};
+    let reply = |keyexpr, payload| BorrowedReply {
+        rid: 0,
+        keyexpr,
+        kind: ReplyKind::Put,
+        payload,
+        err_encoding: None,
+        attachment: None,
+        put_encoding: None,
+    };
+    let mut tables = Tables::new();
+    let first = tables.begin_get(ReplyAcceptance::Any, 1, 0, 1).unwrap();
+    let second = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
+    let latest = ConsolidationMode::Latest;
+    assert_eq!(
+        tables.consolidate_reply(first.handle, latest, &reply("a", b"one")),
+        Consolidated::Held
+    );
+    assert_eq!(
+        tables.consolidate_reply(first.handle, latest, &reply("a", b"two")),
+        Consolidated::Held,
+        "two unstamped replies tie, and the later is held"
+    );
+    assert_eq!(
+        tables.consolidate_reply(second.handle, latest, &reply("b", b"other")),
+        Consolidated::Held
+    );
+    let taken = tables
+        .take_held(first.handle)
+        .expect("the first get holds a reply");
+    assert_eq!((taken.keyexpr(), taken.payload()), ("a", b"two".as_slice()));
+    assert!(tables.take_held(first.handle).is_none());
+    assert!(tables.end_get(second.handle).is_some());
+    assert!(
+        tables.take_held(second.handle).is_none(),
+        "what an ended get held went with it"
+    );
+}
+
 /// A get whose gate is longer than a fixed row keeps is refused before it spends a request id, and
 /// its callback is handed back.
 #[test]
@@ -793,6 +840,7 @@ fn small_rows() -> TableRows {
         write_filters: 1,
         matching_listeners: 1,
         pending_gets: 1,
+        held_replies: 1,
     }
 }
 

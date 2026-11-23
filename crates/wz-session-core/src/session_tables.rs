@@ -623,6 +623,8 @@ pub struct TableRows {
     pub matching_listeners: usize,
     /// `MAX_PENDING_QUERIES`.
     pub pending_gets: usize,
+    /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back, of all of them.
+    pub held_replies: usize,
 }
 
 impl TableRows {
@@ -705,6 +707,19 @@ pub enum LegEnded<R> {
     Over(Removal<R>),
 }
 
+/// The bytes the table of held replies takes of an arena for `rows`; none in a build that holds
+/// none (no `storage-profile`).
+#[cfg(feature = "storage-profile")]
+fn held_arena_bytes(rows: usize) -> Option<usize> {
+    crate::reply_hold::HeldReplies::<PendingGetHandle, Lent>::arena_bytes(rows)
+}
+
+/// See the `storage-profile` form.
+#[cfg(not(feature = "storage-profile"))]
+fn held_arena_bytes(_rows: usize) -> Option<usize> {
+    Some(0)
+}
+
 /// A get begun: its row and the request id its query carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetBegun {
@@ -735,6 +750,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     write_filters: WriteFilters<P>,
     matching: MatchingListeners<F, P>,
     pending_gets: PendingGets<F, P>,
+    /// What the consolidating gets hold back (`consolidate_reply`).
+    #[cfg(feature = "storage-profile")]
+    held: crate::reply_hold::HeldReplies<PendingGetHandle, P>,
 }
 
 /// The text of a key a row keeps.
@@ -976,6 +994,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             write_filters: SlotMap::new(),
             matching: SlotMap::new(),
             pending_gets: SlotMap::new(),
+            #[cfg(feature = "storage-profile")]
+            held: crate::reply_hold::HeldReplies::default(),
         }
     }
 
@@ -1639,10 +1659,45 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// cancelled it): no call of its callback begins after this. Its row is handed back at once
     /// when no call runs, else the call that ends last lets it go ([`Self::release_get`]).
     pub fn end_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
+        // What it held back goes with it: a get that delivers its held replies takes them out
+        // first (`take_held`).
+        #[cfg(feature = "storage-profile")]
+        self.held.forget(handle);
         if !self.pending_gets.get(handle)?.callback.retire() {
             let _held = self.pending_gets.pin(handle)?;
         }
         self.pending_gets.remove(handle)
+    }
+
+    #[cfg(feature = "storage-profile")]
+    /// Apply the get's consolidation `mode` to `reply`, one its gate admitted: hold it back, drop
+    /// it as stale, or let it through (`Consolidated::Forwarded`), for the caller to hand to the
+    /// get's callback once the tables are let go. The rule is [`crate::reply_hold::consolidate`]'s,
+    /// the one every consolidating get applies.
+    pub fn consolidate_reply(
+        &mut self,
+        handle: PendingGetHandle,
+        mode: crate::query_mode::ConsolidationMode,
+        reply: &dyn crate::reply_sink::ReplyView,
+    ) -> crate::reply_hold::Consolidated {
+        crate::reply_hold::consolidate(mode, &mut self.held.of(handle), reply, &mut |_| {})
+    }
+
+    #[cfg(feature = "storage-profile")]
+    /// Take out the next reply the get `handle` names held back, for its caller to hand to the
+    /// get's callback once the tables are let go: what a `Latest` get delivers at its end, before
+    /// [`Self::end_get`] lets go of what is left.
+    pub fn take_held(
+        &mut self,
+        handle: PendingGetHandle,
+    ) -> Option<crate::reply_hold::HeldReply<PendingGetHandle, P>> {
+        self.held.take(handle)
+    }
+
+    /// How many replies the consolidating gets could not hold back, for want of room.
+    #[cfg(feature = "storage-profile")]
+    pub fn held_refused(&self) -> u32 {
+        self.held.refused()
     }
 
     /// The next get at or after `cursor` whose deadline is at or before `now`.
@@ -1884,6 +1939,8 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             write_filters: SlotMap::lent(arena, rows.write_filters)?,
             matching: SlotMap::lent(arena, rows.matching_listeners)?,
             pending_gets: SlotMap::lent(arena, rows.pending_gets)?,
+            #[cfg(feature = "storage-profile")]
+            held: crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)?,
         })
     }
 
@@ -1899,6 +1956,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             <WriteFilters<Lent>>::arena_bytes(rows.write_filters),
             <MatchingListeners<F, Lent>>::arena_bytes(rows.matching_listeners),
             <PendingGets<F, Lent>>::arena_bytes(rows.pending_gets),
+            held_arena_bytes(rows.held_replies),
         ];
         parts
             .iter()
