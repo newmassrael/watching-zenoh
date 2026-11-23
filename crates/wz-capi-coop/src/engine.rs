@@ -1753,6 +1753,35 @@ const fn counts(plane: FilterPlane) -> bool {
     }
 }
 
+/// What a matching listener watches: the criterion of the plane it counts, made only for a plane
+/// the build holds ([`counts`]). A listener on any other plane is refused where this is made,
+/// before anything is taken, so the registry is never handed a plane it has no table for.
+enum Watched {
+    Publishers(PublisherCriterion),
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    Queriers(QuerierCriterion),
+}
+
+impl Watched {
+    /// The criterion a listener on `plane` over `keyexpr` counts with, the session's own
+    /// entities among it with `count_local` as its write filter's are (`counted`); `None` for a
+    /// plane this build does not hold.
+    fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Option<Self> {
+        let locality = counted(plane, count_local);
+        match plane {
+            FilterPlane::Subscribers => {
+                Some(Self::Publishers(PublisherCriterion::new(keyexpr, locality)))
+            }
+            #[cfg(any(feature = "query", feature = "queryable"))]
+            FilterPlane::Queryables { complete_required } => Some(Self::Queriers(
+                QuerierCriterion::new(keyexpr, locality, complete_required),
+            )),
+            #[cfg(not(any(feature = "query", feature = "queryable")))]
+            FilterPlane::Queryables { .. } => None,
+        }
+    }
+}
+
 /// The two planes' Interest kinds, an Interest held per plane and key.
 fn kinds(plane: FilterPlane) -> InterestKinds {
     match plane {
@@ -5717,9 +5746,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> MatchId {
-        if !counts(plane) {
+        // A plane the build does not hold is refused first, with nothing taken.
+        let Some(watched) = Watched::of(plane, keyexpr, count_local) else {
             return 0;
-        }
+        };
         let Some(mut guard) = self.live() else {
             return 0;
         };
@@ -5764,22 +5794,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // take the first back (`MatchFlips::flip`).
         let watch = {
             let mut registry = core.registry.borrow_mut();
-            match plane {
-                FilterPlane::Subscribers => registry.watch_publishers(
-                    PublisherCriterion::new(keyexpr, counted(plane, count_local)),
-                    local,
-                    report,
-                ),
-                #[cfg(any(feature = "query", feature = "queryable"))]
-                FilterPlane::Queryables { complete_required } => registry.watch_queriers(
-                    QuerierCriterion::new(keyexpr, counted(plane, count_local), complete_required),
-                    local,
-                    report,
-                ),
-                #[cfg(not(any(feature = "query", feature = "queryable")))]
-                FilterPlane::Queryables { .. } => {
-                    unreachable!("refused before its Interest was asked (`counts`)")
+            match watched {
+                Watched::Publishers(criterion) => {
+                    registry.watch_publishers(criterion, local, report)
                 }
+                #[cfg(any(feature = "query", feature = "queryable"))]
+                Watched::Queriers(criterion) => registry.watch_queriers(criterion, local, report),
             }
         };
         keep(
