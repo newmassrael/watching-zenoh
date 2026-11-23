@@ -1973,8 +1973,6 @@ pub mod ext_view;
 // messages (no new FSM state, OQ-W10/W2). Concrete methods (usrpwd / pubkey) +
 // the live handshake wiring are follow-on atoms.
 #[cfg(feature = "session-extauth")]
-// Totality debt TD-111 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod auth_dispatch;
 
 // SSOT for the Z_EXT_MULTILINK establishment ext (`transport-multilink`) — the
