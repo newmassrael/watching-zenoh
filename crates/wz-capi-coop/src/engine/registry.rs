@@ -266,6 +266,8 @@ pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
+    type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type Delivery = ();
     type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::pubsub::SubscriberTable<Self::Subscriber, P>;
     type Queryable = BoxedQuerySink;
@@ -698,7 +700,7 @@ impl Registry {
         #[cfg(feature = "declarations-synced-event")]
         let was_final = self.declarations_final(id);
         if let Some(Split { app, face, others }) = self.split(id) {
-            app.dispatch_event_among(&mut face.peer, &mut face.gets, event, &others);
+            app.dispatch_event_among(&mut (), &mut face.peer, &mut face.gets, event, &others);
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(id) {

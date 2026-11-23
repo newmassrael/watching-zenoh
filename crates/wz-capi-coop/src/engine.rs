@@ -5072,12 +5072,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let sample = opts.loopback_sample(keyexpr, payload);
         // SAFETY (each hold of the lane below): the session's lock is held (`core`).
         unsafe { self.samples.held() }.capture();
-        core.0
-            .registry
-            .borrow_mut()
-            .app
-            .subscribers
-            .local_publish(&sample);
+        wz_session_core::pubsub::LocalSubscribers::local_publish(
+            &mut core.0.registry.borrow_mut().app.subscribers,
+            &mut (),
+            &sample,
+        );
         let reached = unsafe { self.samples.held() }.captured();
         let inside = |id: &SubId| self.deliveries.runs_here(TargetKey::Subscriber(*id));
         let mut later: BoundedVec<

@@ -189,7 +189,13 @@ fn dispatch(
     messages: Vec<NetworkMessage>,
 ) {
     let outcome = frame(messages);
-    observer.dispatch(peers, requesters, IterationEvent::Poll(&outcome), sent);
+    observer.dispatch(
+        &mut (),
+        peers,
+        requesters,
+        IterationEvent::Poll(&outcome),
+        sent,
+    );
 }
 
 /// Two peers number their aliases from the same id; the one subscriber the application registered
@@ -288,7 +294,12 @@ fn the_replies_can_be_drained_with_the_final_held_back() {
     let held = Sent::default();
 
     let outcome = frame(vec![ask(7, "demo/q/a")]);
-    observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::Poll(&outcome));
+    observer.dispatch_event(
+        &mut (),
+        &mut peers,
+        &mut requesters,
+        IterationEvent::Poll(&outcome),
+    );
     observer.flush_pending_replies(&mut peers, &mut requesters, &held);
     let log = held.log();
     assert_eq!(log.len(), 2, "two replies and no Final: {log:?}");
@@ -448,6 +459,7 @@ fn a_peer_whose_tables_are_lent_is_answered_in_the_rows_it_was_lent() {
     for rid in [7, 8] {
         let outcome = frame(vec![ask(rid, "demo/q/a")]);
         observer.dispatch(
+            &mut (),
             &mut peers,
             &mut requesters,
             IterationEvent::Poll(&outcome),

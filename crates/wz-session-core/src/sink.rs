@@ -260,6 +260,50 @@ pub trait SampleSink {
     fn end_plain_frame(&mut self) {}
 }
 
+/// What a matched subscriber row is delivered through: the context the dispatch is handed with
+/// the sample, so a row holds its own facts and no reference to the state it is delivered into.
+/// Each call names the row by the id its table gives it (`Id`), so what the context records of a
+/// delivery names the row the table's own way and the row keeps no copy of its id.
+///
+/// `()` is the context of a row that delivers itself (`Row: SampleSink`): the heap profile's
+/// closures and a node's closed sinks.
+pub trait SampleDelivery<Row, Id> {
+    /// Deliver one matched sample to `row`, the row `id`. The view is borrowed for the call.
+    fn deliver(&mut self, id: Id, row: &mut Row, sample: &dyn SampleView);
+
+    /// Deliver one matched plain `Put` of a received frame ([`PlainSample`]); the default is
+    /// [`Self::deliver`]. A context that overrides it to gather a frame's samples also overrides
+    /// [`Self::end_plain_frame`].
+    #[cfg(feature = "alloc")]
+    fn deliver_plain(&mut self, id: Id, row: &mut Row, sample: &PlainSample<'_>) {
+        self.deliver(id, row, sample);
+    }
+
+    /// The frame whose plain `Put`s were just offered has no more records for the table of
+    /// `row`: called for every row after each such frame, matched or not, so it must cost nothing
+    /// when nothing was gathered.
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self, id: Id, row: &mut Row) {
+        let _ = (id, row);
+    }
+}
+
+impl<Row: SampleSink, Id> SampleDelivery<Row, Id> for () {
+    fn deliver(&mut self, _id: Id, row: &mut Row, sample: &dyn SampleView) {
+        row.deliver(sample);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn deliver_plain(&mut self, _id: Id, row: &mut Row, sample: &PlainSample<'_>) {
+        row.deliver_plain(sample);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self, _id: Id, row: &mut Row) {
+        row.end_plain_frame();
+    }
+}
+
 /// A plain `Put` of a received frame, as a [`SampleView`] over the frame it arrived in:
 /// the keyexpr resolved for it, and the payload a range of the frame. A subscriber
 /// that keeps the sample takes a second reference to the frame's storage

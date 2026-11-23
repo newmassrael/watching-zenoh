@@ -342,7 +342,7 @@ pub fn canonize_in_place(
 ) -> Result<usize, KeyexprCanonError> {
     let mut walk = CanonWalk::new(dialect, false);
     let mut len = 0usize;
-    while let Some(piece) = walk.next(text) {
+    while let Some(piece) = walk.next(&*text) {
         // A piece past the room the walk's property promises is refused rather than written
         // where the walk has still to read; no text reaches that arm.
         len = match piece? {
@@ -363,6 +363,42 @@ pub fn canonize_in_place(
                 end
             }
         };
+    }
+    Ok(len)
+}
+
+/// The canonical form of the text `parts` make, read in order as one text, written into `out`
+/// from its first byte, and its length: what [`canonize_into`] gives the text the parts would
+/// make joined, with no copy of that text made, so a key built of pieces (a key and a suffix, two
+/// keys and the `/` between them) is canonized where its pieces lie. A chunk may lie across a
+/// part's end and is judged as the one chunk it is. Refused as
+/// [`KeyexprCanonError::ExceedsCapacity`] only when the form is longer than `out`; no length of
+/// the parts is bounded and nothing is allocated, on any profile.
+pub fn canonize_parts_into(
+    parts: &[&[u8]],
+    out: &mut [u8],
+    dialect: KeyexprDialect,
+) -> Result<usize, KeyexprCanonError> {
+    let text = Parts(parts);
+    let mut walk = CanonWalk::new(dialect, false);
+    let mut len = 0usize;
+    while let Some(piece) = walk.next(&text) {
+        let piece = piece?;
+        let count = match piece {
+            Piece::Text { from, to } => to.saturating_sub(from),
+            Piece::Fixed(spelling) => spelling.len(),
+        };
+        let end = len
+            .checked_add(count)
+            .ok_or(KeyexprCanonError::ExceedsCapacity)?;
+        let dst = out
+            .get_mut(len..end)
+            .ok_or(KeyexprCanonError::ExceedsCapacity)?;
+        match piece {
+            Piece::Text { from, .. } => text.copy_into(from, dst),
+            Piece::Fixed(spelling) => dst.copy_from_slice(spelling.as_bytes()),
+        }
+        len = end;
     }
     Ok(len)
 }
@@ -405,16 +441,87 @@ fn collapsed_len(input: &str) -> usize {
     }
 }
 
-/// Whether a `$*` token starts at byte `i` of `bytes`.
-fn is_dollar_star_at(bytes: &[u8], i: usize) -> bool {
-    bytes.get(i..).is_some_and(|rest| rest.starts_with(b"$*"))
+/// A text the walk reads a byte at a time: one slice, or the parts of a text that lies in pieces
+/// ([`canonize_parts_into`]), read as one text with no copy of it made.
+trait CanonText {
+    /// How many bytes the text holds.
+    fn bytes_len(&self) -> usize;
+    /// The byte at `at`, `None` past the end.
+    fn byte(&self, at: usize) -> Option<u8>;
 }
 
-/// Whether `chunk` is one or more `$*` tokens and nothing else: the chunk whose collapsed
-/// form is a lone `$*`.
+impl CanonText for [u8] {
+    fn bytes_len(&self) -> usize {
+        self.len()
+    }
+
+    fn byte(&self, at: usize) -> Option<u8> {
+        self.get(at).copied()
+    }
+}
+
+/// The parts of a text, in order, read as the one text they make.
+struct Parts<'p, 'b>(&'p [&'b [u8]]);
+
+impl CanonText for Parts<'_, '_> {
+    fn bytes_len(&self) -> usize {
+        self.0
+            .iter()
+            .fold(0usize, |sum, part| sum.saturating_add(part.len()))
+    }
+
+    fn byte(&self, at: usize) -> Option<u8> {
+        let mut at = at;
+        for part in self.0 {
+            match part.get(at) {
+                Some(byte) => return Some(*byte),
+                None => at = at.saturating_sub(part.len()),
+            }
+        }
+        None
+    }
+}
+
+impl Parts<'_, '_> {
+    /// Fill `dst` with the bytes of the text from `from`, as many as `dst` holds; what lies
+    /// past the end of the text leaves the rest of `dst` as it was.
+    fn copy_into(&self, from: usize, dst: &mut [u8]) {
+        let mut skip = from;
+        let mut rest = dst;
+        for part in self.0 {
+            if rest.is_empty() {
+                return;
+            }
+            let Some(here) = part.get(skip..) else {
+                skip = skip.saturating_sub(part.len());
+                continue;
+            };
+            skip = 0;
+            let n = here.len().min(rest.len());
+            // `n` is at most the length of both, so the cut is inside each.
+            let (head, tail) = core::mem::take(&mut rest).split_at_mut(n);
+            head.copy_from_slice(here.get(..n).unwrap_or_default());
+            rest = tail;
+        }
+    }
+}
+
+/// Whether a `$*` token starts at byte `i` of `text`.
+fn is_dollar_star_at<T: CanonText + ?Sized>(text: &T, i: usize) -> bool {
+    text.byte(i) == Some(b'$') && text.byte(i.saturating_add(1)) == Some(b'*')
+}
+
+/// Whether the bytes `start..end` of `text` are one or more `$*` tokens and nothing else: the
+/// chunk whose collapsed form is a lone `$*`.
+fn is_dollar_star_run_in<T: CanonText + ?Sized>(text: &T, start: usize, end: usize) -> bool {
+    let len = end.saturating_sub(start);
+    len > 0 && len & 1 == 0 && (start..end).step_by(2).all(|i| is_dollar_star_at(text, i))
+}
+
+/// Whether `chunk` is one or more `$*` tokens and nothing else.
+#[cfg(feature = "storage-profile")]
 fn is_dollar_star_run(chunk: &[u8]) -> bool {
-    let mut pairs = chunk.chunks_exact(2);
-    !chunk.is_empty() && pairs.remainder().is_empty() && pairs.all(|pair| pair == b"$*")
+    is_dollar_star_run_in(chunk, 0, chunk.len())
 }
 
 /// One piece of the canonical form: a span of the text, where it lies, or a spelling the walk
@@ -520,7 +627,10 @@ impl CanonWalk {
     /// form is all handed out or a refusal was. `text` is the same text at every step, but for
     /// the bytes before the start of the last span handed out, which the caller may have
     /// written the form over.
-    fn next(&mut self, text: &[u8]) -> Option<Result<Piece, KeyexprCanonError>> {
+    fn next<T: CanonText + ?Sized>(
+        &mut self,
+        text: &T,
+    ) -> Option<Result<Piece, KeyexprCanonError>> {
         let stepped = self.step_on(text);
         if matches!(stepped, Some(Err(_))) {
             self.step = Step::Done;
@@ -528,7 +638,11 @@ impl CanonWalk {
         stepped
     }
 
-    fn step_on(&mut self, text: &[u8]) -> Option<Result<Piece, KeyexprCanonError>> {
+    fn step_on<T: CanonText + ?Sized>(
+        &mut self,
+        text: &T,
+    ) -> Option<Result<Piece, KeyexprCanonError>> {
+        let text_len = text.bytes_len();
         loop {
             match self.step {
                 Step::Done => return None,
@@ -538,18 +652,16 @@ impl CanonWalk {
                         self.step = Step::Run(AfterRun::End);
                         continue;
                     };
-                    let end = text
-                        .get(start..)
-                        .unwrap_or_default()
-                        .iter()
-                        .position(|byte| *byte == b'/')
-                        .map_or(text.len(), |at| start.saturating_add(at));
-                    self.next_chunk = if end < text.len() {
+                    let mut end = start;
+                    while text.byte(end).is_some_and(|byte| byte != b'/') {
+                        end = end.saturating_add(1);
+                    }
+                    self.next_chunk = if end < text_len {
                         Some(end.saturating_add(1))
                     } else {
                         None
                     };
-                    let shape = match analyze_chunk(text.get(start..end).unwrap_or_default()) {
+                    let shape = match analyze_span(text, start, end) {
                         Ok(shape) => shape,
                         Err(refused) => return Some(Err(refused)),
                     };
@@ -682,29 +794,37 @@ fn walk_canonical(
 /// encoding (0 = normal, 1 = after `$`, 3 = after `$*`); the
 /// non-contiguous 2-skip keeps the cross-reference mechanical
 /// instead of having to mentally re-encode states.
-fn analyze_chunk(chunk: &[u8]) -> Result<ChunkShape, KeyexprCanonError> {
-    if chunk.is_empty() {
+fn analyze_span<T: CanonText + ?Sized>(
+    text: &T,
+    start: usize,
+    end: usize,
+) -> Result<ChunkShape, KeyexprCanonError> {
+    let len = end.saturating_sub(start);
+    if len == 0 {
         return Err(KeyexprCanonError::EmptyChunk);
     }
-    match chunk {
-        b"*" => return Ok(ChunkShape::SingleStar),
-        b"**" => return Ok(ChunkShape::DoubleStar),
-        _ => {}
+    let first = text.byte(start);
+    if len == 1 && first == Some(b'*') {
+        return Ok(ChunkShape::SingleStar);
     }
-    if is_dollar_star_run(chunk) {
+    if len == 2 && first == Some(b'*') && text.byte(start.saturating_add(1)) == Some(b'*') {
+        return Ok(ChunkShape::DoubleStar);
+    }
+    if is_dollar_star_run_in(text, start, end) {
         return Ok(ChunkShape::LoneDollarStar);
     }
-    let mut rest = chunk;
+    let mut at = start;
     let mut state: u8 = 0;
-    while let [byte, tail @ ..] = rest {
+    while at < end {
+        let Some(byte) = text.byte(at) else {
+            break;
+        };
         // The rest of a `$*` run, which the canonical form writes once.
-        if state == 3 {
-            if let [b'$', b'*', after @ ..] = rest {
-                rest = after;
-                continue;
-            }
+        if state == 3 && at.saturating_add(1) < end && is_dollar_star_at(text, at) {
+            at = at.saturating_add(2);
+            continue;
         }
-        match *byte {
+        match byte {
             b'#' | b'?' => return Err(KeyexprCanonError::ContainsSharpOrQmark),
             b'$' => {
                 if state != 0 {
@@ -725,12 +845,18 @@ fn analyze_chunk(chunk: &[u8]) -> Result<ChunkShape, KeyexprCanonError> {
                 state = 0;
             }
         }
-        rest = tail;
+        at = at.saturating_add(1);
     }
     if state == 1 {
         return Err(KeyexprCanonError::ContainsUnboundDollar);
     }
     Ok(ChunkShape::Mixed)
+}
+
+/// [`analyze_span`] of a whole chunk.
+#[cfg(test)]
+fn analyze_chunk(chunk: &[u8]) -> Result<ChunkShape, KeyexprCanonError> {
+    analyze_span(chunk, 0, chunk.len())
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1357,6 +1483,38 @@ mod tests {
         }
     }
 
+    /// A key in pieces canonizes as the key the pieces make: a chunk that lies across a piece's
+    /// end, a `$*` run cut between two pieces, and a wild run joined across a `/` of its own
+    /// piece; an empty piece is read as nothing, and a refusal is the joined key's.
+    #[test]
+    fn a_key_in_pieces_canonizes_as_the_key_they_make() {
+        let cases: [(&[&str], Result<&str, KeyexprCanonError>); 6] = [
+            (&["home/te", "mp/$", "*$*x"], Ok("home/temp/$*x")),
+            (&["a/$", "*", "/b"], Ok("a/*/b")),
+            (&["a/**", "/", "*/b"], Ok("a/*/**/b")),
+            (&["", "a", ""], Ok("a")),
+            (&["a/", "/b"], Err(KeyexprCanonError::EmptyChunk)),
+            (&["a?", "b"], Err(KeyexprCanonError::ContainsSharpOrQmark)),
+        ];
+        for (pieces, expected) in cases {
+            let mut parts: [&[u8]; 3] = [&[]; 3];
+            for (slot, piece) in parts.iter_mut().zip(pieces) {
+                *slot = piece.as_bytes();
+            }
+            let mut out = [0u8; 32];
+            let written =
+                canonize_parts_into(&parts[..pieces.len()], &mut out, KeyexprDialect::Pico)
+                    .map(|len| &out[..len]);
+            assert_eq!(written, expected.map(str::as_bytes), "{pieces:?}");
+        }
+        let mut short = [0u8; 4];
+        let parts: [&[u8]; 2] = [b"home", b"/temp"];
+        assert_eq!(
+            canonize_parts_into(&parts, &mut short, KeyexprDialect::Pico),
+            Err(KeyexprCanonError::ExceedsCapacity)
+        );
+    }
+
     /// A text longer than any key a bounded profile holds is taken when its form is short: the
     /// writers bound the form, not the text.
     #[test]
@@ -1656,6 +1814,44 @@ mod tests {
             let in_place = canonize_in_place(&mut over, dialect).map(|len| over[..len].to_vec());
             assert_eq!(into, formed, "{text:?} {dialect:?}");
             assert_eq!(in_place, formed, "{text:?} {dialect:?}");
+        }
+    }
+
+    /// The writer of a key in pieces gives what the writer into a buffer gives the whole key, on
+    /// `text` cut into two and three pieces at the given places, in both dialects.
+    #[cfg(feature = "alloc")]
+    fn pieces_agree_on(text: &str, cuts: &[usize]) {
+        let bytes = text.as_bytes();
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            let mut whole = vec![0u8; bytes.len()];
+            let expected =
+                canonize_into(text, &mut whole, dialect).map(|len| whole[..len].to_vec());
+            for &first in cuts {
+                for &second in cuts.iter().filter(|&&second| second >= first) {
+                    let parts = [&bytes[..first], &bytes[first..second], &bytes[second..]];
+                    let mut out = vec![0u8; bytes.len()];
+                    let got = canonize_parts_into(&parts, &mut out, dialect)
+                        .map(|len| out[..len].to_vec());
+                    assert_eq!(
+                        got, expected,
+                        "{text:?} cut at {first}, {second} {dialect:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_key_in_pieces_agrees_with_the_whole_key_on_every_text() {
+        walk_alphabet(|text| {
+            let cuts: Vec<usize> = (0..=text.len()).collect();
+            pieces_agree_on(text, &cuts);
+        });
+        for text in canon_corpus() {
+            let len = text.len();
+            let cuts = [0, 1.min(len), len / 2, len.saturating_sub(1), len];
+            pieces_agree_on(&text, &cuts);
         }
     }
 
