@@ -127,12 +127,13 @@ run API in is written in `wz_ext.h`, in the section "the periodic run API", and
 `examples\periodic.c` runs it.
 
 A build on the cooperative engine (`engine-coop`) hands a put to the session's own subscribers
-inside the put, as zenoh-pico does, with one difference. A put made inside a subscriber's callback
-that reaches that same subscriber is handed to it once its callback has returned, where zenoh-pico
-calls the callback again from inside itself; every other subscriber is handed it inside the put,
-and each subscriber is handed the samples of the session's puts in the order they were made. When
-the session's delivery lane has no room to hold the sample until the callback returns, the put
-answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and no subscriber of the session is handed it.
+inside the put, as zenoh-pico does, with one difference: a callback is entered at depth 1. The
+library calls a callback once for each delivery and holds nothing for it to be handed after it
+returns, so a callback is never called again from inside itself. A put made inside a subscriber's
+callback that reaches that same subscriber answers `_Z_ERR_INVALID` (-75), the code a read task
+stopped from inside itself answers, and no subscriber of the session is handed it, where zenoh-pico
+calls the callback again from inside itself. A put made inside a callback that reaches only other
+subscribers is handed to them inside the put.
 
 A liveliness subscriber declared with history is handed the tokens the session already knows by
 the end of the declaration, as zenoh-pico's is; declared inside a callback, once that callback has

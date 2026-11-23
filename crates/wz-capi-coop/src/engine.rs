@@ -4784,11 +4784,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
     /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
-    /// it here, with no lock of the session held, inside the put as zenoh-pico's does. A callback
-    /// another thread is running is waited for, as pico's lock is. One the putting thread is
-    /// inside of cannot be called again from inside itself, where pico's would be: it is handed
-    /// the sample from the delivery lane once it returns, and when the lane has no room for it
-    /// the put is refused before any subscriber is handed it. The number of subscribers reached.
+    /// it here, with no lock of the session held, inside the put as zenoh-pico's does, by the
+    /// callback each one's row holds, copied out under the session's lock. A callback another
+    /// thread is running is waited for, as pico's lock is. A callback is entered at depth 1: one
+    /// the putting thread is inside of is not called again from inside itself, where pico's would
+    /// be, and nothing is held for it until it returns, so a put that reaches it is refused before
+    /// any subscriber is handed it ([`FanoutError::InsideItsCallback`]). The number of subscribers
+    /// reached.
     #[cfg(feature = "local-subscriber")]
     fn publish_to_subscribers(
         &self,
@@ -4803,48 +4805,38 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Ok(0);
         };
         let sample = opts.loopback_sample(keyexpr, payload);
-        // SAFETY (each hold of the lane below): the session's lock is held (`core`).
-        unsafe { self.samples.held() }.capture();
+        // SAFETY: the session's lock is held (`core`).
+        unsafe { self.samples.capture() };
         core.0
             .registry
             .borrow_mut()
             .app
             .subscribers
             .local_publish(&sample);
-        let reached = unsafe { self.samples.held() }.captured();
-        let inside = |id: &SubId| self.deliveries.runs_here(TargetKey::Subscriber(*id));
-        let mut later: BoundedVec<
-            SubId,
-            { caps::MAX_SUBSCRIPTIONS },
-            wz_session_core::bounded::Static,
-        > = BoundedVec::new_static();
-        for id in reached.iter().filter(|id| inside(id)) {
-            let kept = later.push(*id);
-            debug_assert!(kept.is_ok(), "no more subscribers than were reached");
-        }
-        // What waits for a callback running on this thread is queued while the session is held,
-        // as every writer of the lane queues.
-        if !later.is_empty() {
-            let mut lane = unsafe { self.samples.held() };
-            if !lane.takes_sample(&sample, later.len()) {
-                return Err(FanoutError::LocalNoRoom);
-            }
-            lane.offer_to(&later, &sample);
-        }
+        // SAFETY: as above.
+        let reached = unsafe { self.samples.captured() };
+        // The callbacks copied out are let go of with no lock of the session held, the last of
+        // them perhaps the program's own drop of its closure.
         drop(core);
+        if reached
+            .iter()
+            .any(|(id, _)| self.deliveries.runs_here(TargetKey::Subscriber(*id)))
+        {
+            return Err(FanoutError::InsideItsCallback);
+        }
         {
             // A callback that steps the session from inside the put hands out nothing itself, as
-            // one inside a delivery does: what the lane holds may be for a callback running here.
+            // one inside a delivery does.
             let _delivering = self.deliveries.enter();
-            for id in reached.iter().filter(|id| !inside(id)) {
-                if let Some(callback) = self.subscriber_callback(*id) {
-                    let _running = self.deliveries.run(TargetKey::Subscriber(*id));
-                    callback.hand(&sample);
-                }
+            for (id, callback) in reached.iter() {
+                let _running = self.deliveries.run(TargetKey::Subscriber(*id));
+                callback.hand(&sample);
             }
         }
+        let count = reached.len();
+        drop(reached);
         self.deliver();
-        Ok(reached.len())
+        Ok(count)
     }
 
     /// Tell `fan`, when the get can be cancelled, how to undo leg `leg`: a token cancelled while

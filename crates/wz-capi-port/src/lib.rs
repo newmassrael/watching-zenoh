@@ -233,11 +233,12 @@ pub enum FanoutError {
     /// zenoh-pico's put fails. Nothing was sent on that face. Under zenoh's profile a congestion
     /// drop is the publish's success, and this is never answered.
     HeldConduit,
-    /// The session's own subscribers it reaches could not all be handed it: one whose callback
-    /// runs on the putting thread is handed it once that callback returns, from the session's
-    /// delivery lane, and the lane had no room for it. No subscriber of the session was handed
-    /// it; what the links were given went.
-    LocalNoRoom,
+    /// The publish reaches one of the session's own subscribers whose callback runs on the
+    /// publishing thread now: it was made from inside that callback. A callback is entered at depth
+    /// 1, as a session hands a delivery to it once and holds nothing for it to be handed after it
+    /// returns, so it is not called again from inside itself; the publish is refused before any
+    /// subscriber of the session is handed it. What the links were given went.
+    InsideItsCallback,
 }
 
 impl From<StatementNotHonoured> for FanoutError {

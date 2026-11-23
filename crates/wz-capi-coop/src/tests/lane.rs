@@ -1218,26 +1218,40 @@ fn a_gated_record_that_finds_no_room_is_a_defect() {
     assert_eq!(lane.counts().held_over, 1);
 }
 
-/// While the lane captures, an offer notes its subscriber and queues nothing; a sample queued for
-/// several subscribers at once is written once, and the room for it is asked first.
+/// While the lane captures, an offer copies out its subscriber and the callback that subscriber's
+/// row holds, in the order they came, and queues nothing; a row with no callback is passed over.
+/// Once the capture is taken, what is offered is queued again.
 #[cfg(feature = "local-subscriber")]
 #[test]
-fn a_captured_offer_queues_nothing_and_a_sample_for_several_is_written_once() {
-    let mut lane = lane(64, 4);
-    lane.capture();
-    lane.offer(3, &filled(8, 1));
-    lane.offer(1, &filled(8, 1));
-    assert_eq!(lane.captured().to_vec(), [3, 1]);
-    assert!(lane.take_front().is_none(), "nothing was queued");
-    let sample = filled(40, 2);
-    assert!(lane.takes_sample(&sample, 2), "9 + 40 + 8 bytes of 64");
+fn a_captured_offer_copies_the_rows_callback_and_queues_nothing() {
+    use crate::engine::LiveCallback;
+    use crate::lane::SharedLane;
+    use alloc::sync::Arc;
+
+    let lane = SharedLane::new(lane(64, 4));
+    let callback = Arc::new(LiveCallback::new(Box::new(|_: &dyn SampleView| {})));
+    // SAFETY (each call): this thread is the lane's one writer.
+    unsafe { lane.capture() };
+    unsafe { lane.offer_to(3, Some(&callback), &filled(8, 1)) };
+    unsafe { lane.offer_to(2, None, &filled(8, 1)) };
+    unsafe { lane.offer_to(1, Some(&callback), &filled(8, 1)) };
+    let captured = unsafe { lane.captured() };
+    let ids: Vec<SubId> = captured.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [3, 1]);
     assert!(
-        !lane.takes_sample(&sample, 5),
-        "9 + 40 + 20 bytes are past 64"
+        captured
+            .iter()
+            .all(|(_, held)| Arc::ptr_eq(held, &callback)),
+        "each the callback its row holds"
     );
-    lane.offer_to(&[3, 1], &sample);
-    assert_eq!(drain(&mut lane), [(vec![3, 1], 2)]);
-    assert_eq!(lane.counts(), LaneCounts::default());
+    assert_eq!(lane.handed_on(), 0, "nothing was queued");
+    unsafe { lane.offer_to(1, Some(&callback), &filled(8, 1)) };
+    unsafe { lane.held() }.seal_all();
+    assert_eq!(
+        lane.handed_on(),
+        1,
+        "CONTROL: once taken, an offer is queued"
+    );
 }
 
 /// Tokens offered while the lane rehearses are placed on a copy of its bookkeeping and not queued:

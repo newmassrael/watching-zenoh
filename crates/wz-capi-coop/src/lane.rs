@@ -864,10 +864,6 @@ pub(crate) struct SampleLane {
     /// ([`Self::rehearse`]).
     #[cfg(feature = "liveliness")]
     rehearsal: Option<Rehearsal>,
-    /// The subscribers the samples offered now are for, noted instead of queued
-    /// ([`Self::capture`]).
-    #[cfg(feature = "local-subscriber")]
-    capturing: Option<BoundedVec<SubId, { caps::MAX_SUBSCRIPTIONS }, Static>>,
     counts: LaneCounts,
 }
 
@@ -940,8 +936,6 @@ impl SampleLane {
             ptr::write(addr_of_mut!((*at).gated), false);
             #[cfg(feature = "liveliness")]
             ptr::write(addr_of_mut!((*at).rehearsal), None);
-            #[cfg(feature = "local-subscriber")]
-            ptr::write(addr_of_mut!((*at).capturing), None);
             ptr::write(addr_of_mut!((*at).counts), LaneCounts::default());
             &mut *at
         }
@@ -965,8 +959,6 @@ impl SampleLane {
                 gated: _,
             #[cfg(feature = "liveliness")]
                 rehearsal: _,
-            #[cfg(feature = "local-subscriber")]
-                capturing: _,
             counts: _,
         } = lane;
     }
@@ -975,10 +967,6 @@ impl SampleLane {
     /// for it. The sample the lane holds open, offered again for a subscriber it is not for yet,
     /// is not written again: the subscriber's id joins the ones that follow it.
     pub(crate) fn offer(&mut self, subscriber: SubId, sample: &dyn SampleView) {
-        #[cfg(feature = "local-subscriber")]
-        if self.captures(subscriber) {
-            return;
-        }
         let (record, parts) = Record::of(sample);
         let same =
             |event: &Event| matches!(event, Event::Sample { record: held, .. } if *held == record);
@@ -986,21 +974,6 @@ impl SampleLane {
             return;
         }
         self.open_sample(&[subscriber], record, &parts);
-    }
-
-    /// Note `subscriber` instead of queueing while the lane captures ([`Self::capture`]):
-    /// whether it does.
-    #[cfg(feature = "local-subscriber")]
-    fn captures(&mut self, subscriber: SubId) -> bool {
-        let Some(found) = &mut self.capturing else {
-            return false;
-        };
-        let kept = found.push(subscriber);
-        debug_assert!(
-            kept.is_ok(),
-            "a session's subscribers fit the table of them"
-        );
-        true
     }
 
     /// [`Self::offer`] for a sample of the datagram a link lends the step, `datagram` its first
@@ -1292,46 +1265,6 @@ impl SampleLane {
             }),
         );
         self.open = Some(reservation);
-    }
-
-    /// Note, instead of queueing, the subscribers the samples offered from here on are for, until
-    /// [`Self::captured`]: how the session's own put learns which of its subscribers it reaches,
-    /// to hand it to them itself.
-    #[cfg(feature = "local-subscriber")]
-    pub(crate) fn capture(&mut self) {
-        self.capturing = Some(BoundedVec::new_static());
-    }
-
-    /// The subscribers noted since [`Self::capture`], in the order the session reached them; the
-    /// lane queues what is offered again.
-    #[cfg(feature = "local-subscriber")]
-    pub(crate) fn captured(&mut self) -> BoundedVec<SubId, { caps::MAX_SUBSCRIPTIONS }, Static> {
-        self.capturing.take().unwrap_or_else(BoundedVec::new_static)
-    }
-
-    /// Whether the lane has room now for `sample` written once for `subscribers` subscribers.
-    #[cfg(feature = "local-subscriber")]
-    pub(crate) fn takes_sample(&self, sample: &dyn SampleView, subscribers: usize) -> bool {
-        let (_, parts) = Record::of(sample);
-        let ids = subscribers.saturating_mul(SUBSCRIBER_ID_BYTES);
-        let bytes = parts
-            .iter()
-            .fold(ids, |sum, part| sum.saturating_add(part.len()));
-        self.lane.can_ever_fit(bytes)
-            && self.takes_a_read(ReadRoom {
-                bytes,
-                callbacks: subscribers,
-            })
-    }
-
-    /// Queue `sample` once for `subscribers`, published at once: what the session's own put
-    /// leaves for the subscribers whose callbacks are running on its thread, having found the room
-    /// first ([`Self::takes_sample`]).
-    #[cfg(feature = "local-subscriber")]
-    pub(crate) fn offer_to(&mut self, subscribers: &[SubId], sample: &dyn SampleView) {
-        let (record, parts) = Record::of(sample);
-        self.open_sample(subscribers, record, &parts);
-        self.seal();
     }
 
     /// Add `subscriber` to the event held open when `same` says it is the one offered, `parts`
@@ -2163,7 +2096,18 @@ pub(crate) struct SharedLane {
     /// The samples of the datagram a link lends the step that the lane holds nothing ahead of,
     /// handed to their callbacks before anything the lane holds ([`Pending`]).
     pending: Pending,
+    /// The callbacks of the subscribers the samples offered now reach, copied out of their rows
+    /// instead of queued, while the session's own put asks for them ([`Self::capture`]). Written
+    /// under the session's lock.
+    #[cfg(feature = "local-subscriber")]
+    capturing: UnsafeCell<Option<Captured>>,
 }
+
+/// The subscribers a put of the session's own reaches, in the order the session's table reached
+/// them, each with the callback its row holds ([`SharedLane::captured`]).
+#[cfg(feature = "local-subscriber")]
+pub(crate) type Captured =
+    BoundedVec<(SubId, SubscriberCallback), { caps::MAX_SUBSCRIPTIONS }, Static>;
 
 // SAFETY: the lane is reached by the holder of the session's lock alone (`Self::held`), the
 // deliveries' side by the holder of `delivering` alone, and a slot's record and bytes by the one
@@ -2213,6 +2157,8 @@ impl SharedLane {
             #[cfg(all(test, feature = "std"))]
             holds: AtomicUsize::new(0),
             pending: Pending::new(),
+            #[cfg(feature = "local-subscriber")]
+            capturing: UnsafeCell::new(None),
         }
     }
 
@@ -2287,6 +2233,8 @@ impl SharedLane {
             #[cfg(all(test, feature = "std"))]
             ptr::write(addr_of_mut!((*at).holds), AtomicUsize::new(0));
             Pending::write_in(addr_of_mut!((*at).pending));
+            #[cfg(feature = "local-subscriber")]
+            ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
         }
     }
 
@@ -2318,7 +2266,32 @@ impl SharedLane {
             #[cfg(all(test, feature = "std"))]
                 holds: _,
             pending: _,
+            #[cfg(feature = "local-subscriber")]
+                capturing: _,
         } = shared;
+    }
+
+    /// Copy out, instead of queueing, the callbacks of the subscribers the samples offered from
+    /// here on reach, until [`Self::captured`]: how the session's own put learns which of its
+    /// subscribers it reaches and what to call, to hand the sample to them itself.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) unsafe fn capture(&self) {
+        // SAFETY: the caller's contract: written under the session's lock alone.
+        unsafe { *self.capturing.get() = Some(BoundedVec::new_static()) };
+    }
+
+    /// The subscribers reached since [`Self::capture`] and their callbacks; what is offered after
+    /// this is queued again.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    #[cfg(feature = "local-subscriber")]
+    pub(crate) unsafe fn captured(&self) -> Captured {
+        // SAFETY: the caller's contract: written under the session's lock alone.
+        unsafe { (*self.capturing.get()).take() }.unwrap_or_else(BoundedVec::new_static)
     }
 
     /// The datagram a link lends the session's step now, whose samples may be handed to their
@@ -2409,6 +2382,20 @@ impl SharedLane {
         callback: Option<&SubscriberCallback>,
         sample: &dyn SampleView,
     ) {
+        // The session's own put copies the callbacks out and queues nothing.
+        #[cfg(feature = "local-subscriber")]
+        // SAFETY: the caller's contract: written under the session's lock, which is held.
+        if let Some(found) = unsafe { &mut *self.capturing.get() } {
+            // A row whose registration was refused mints no callback, and is handed nothing.
+            if let Some(callback) = callback {
+                let kept = found.push((subscriber, Arc::clone(callback)));
+                debug_assert!(
+                    kept.is_ok(),
+                    "a session's subscribers fit the table of them"
+                );
+            }
+            return;
+        }
         // SAFETY: the caller's contract: written under the session's lock, which is held.
         let lending = unsafe { *self.lending.get() };
         if let (Some(datagram), Some(callback)) = (lending, callback) {

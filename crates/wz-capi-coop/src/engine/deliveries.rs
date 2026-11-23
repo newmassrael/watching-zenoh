@@ -5,9 +5,10 @@
 //!
 //! A callback that steps its session again hands out nothing itself: the delivery it is inside of
 //! goes on to hand out what the inner step queued, in order ([`Deliveries::enter`]). A put or a
-//! get of the session's own hands what it reaches to each callback at once, except to one that
-//! runs on the putting thread now, which would wait on itself: that one is handed it once it
-//! returns ([`Deliveries::runs_here`]).
+//! get of the session's own hands what it reaches to each callback at once. A callback is entered
+//! at depth 1: one that runs on the putting thread now would wait on itself, so a put that reaches
+//! it is refused ([`Deliveries::runs_here`]); a get's query for such a queryable waits for it to
+//! return.
 //!
 //! Both are asked on every delivery and around every callback, so the case of one thread
 //! delivering, which is a read task's or a program's that steps its session itself, is answered
