@@ -28,6 +28,9 @@ use crate::CoopConfig;
 const PAYLOAD: usize = 60 * 1024;
 /// The most droppable publishes the slow stream is given to fill.
 const FILL_AT_MOST: usize = 4_096;
+/// How long the slow peer's link owes a frame, its stream taking nothing more, before the stream
+/// is taken as full.
+const STILL: Duration = Duration::from_millis(300);
 /// How long a droppable publish waits for a stream that takes nothing: zenoh's default
 /// `wait_before_drop`, where the pico profile's waits as long as a blocking one.
 const DROP_WAIT_US: u64 = 1_000;
@@ -116,7 +119,12 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     eventually("the slow peer's face", || publisher.faces_up() == 2);
     SessionDrive::stop_read_task(&*slow).expect("the slow peer's read task stops");
 
+    // The slow stream is full once its link has owed a frame for a while with nothing more of it
+    // taken: the kernel may take a little more of a stream that has just begun to back up (its
+    // buffers grow as it fills), which writes the rest and gives the slot back. So the stream is
+    // filled until the link has owed for `STILL` without a break.
     let payload = vec![0x5a; PAYLOAD];
+    let mut owing_since: Option<Instant> = None;
     for _ in 0..FILL_AT_MOST {
         let _ = publisher.publish_on_wire_all(
             "demo/pool/fill",
@@ -124,13 +132,19 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
             &payload,
             &publish(CongestionControl::Drop),
         );
-        if publisher.links_owing() > 0 {
+        if publisher.links_owing() == 0 {
+            owing_since = None;
+            continue;
+        }
+        let since = *owing_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= STILL {
             break;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        publisher.links_owing() > 0,
-        "the slow peer's link never held a frame its stream had not finished"
+        owing_since.is_some_and(|since| since.elapsed() >= STILL),
+        "the slow peer's link never held a frame its stream had not finished for {STILL:?}"
     );
 
     let started = Instant::now();
