@@ -379,7 +379,9 @@ impl ByteBuf {
         }
     }
 
-    /// A payload holding a copy of `bytes` in a block of its own.
+    /// A payload holding a copy of `bytes` in a block of its own. Never inlined: every door that
+    /// copies the caller's bytes into a payload, a slice or a string calls this one body.
+    #[inline(never)]
     pub(crate) fn copy_of(bytes: &[u8]) -> Result<Self, NoRoom> {
         if bytes.is_empty() {
             return Ok(Self::new());
@@ -396,9 +398,13 @@ impl ByteBuf {
     /// `release` return them when the last holder is dropped. Refused, the release runs at once,
     /// as pico's transfer of the caller's buffer is unconditional once the call is made.
     ///
+    /// Never inlined, as [`Self::copy_of`]: every door that takes over the caller's buffer calls
+    /// this one body.
+    ///
     /// # Safety
     /// `start` must be null with `len == 0`, or point at `len` readable bytes
     /// that stay valid and unchanged until `release` has run.
+    #[inline(never)]
     pub(crate) unsafe fn aliased(
         start: *const u8,
         len: usize,

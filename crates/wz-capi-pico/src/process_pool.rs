@@ -329,14 +329,20 @@ impl Origin {
     }
 }
 
-/// The pool of one kind: where its slots start, their bytes, and its free slots linked through
-/// their first word.
+/// The pool of one kind: where its slots start, their bytes, how many of them were ever handed
+/// out, and the slots given back, linked through their first word.
+///
+/// A slot never handed out is not on the list: the pool hands out its untouched slots in order
+/// after the list is empty, so laying the pools out writes nothing into their slots and the
+/// reservation is not a pass over every slot of every kind.
 #[derive(Clone, Copy, Debug)]
 struct Pool {
     /// The offset of its first slot from the start of the memory.
     start: usize,
     slots: usize,
     size: usize,
+    /// The slots handed out at least once: the next untouched slot is this one.
+    fresh: usize,
     free: Option<NonNull<u8>>,
 }
 
@@ -578,7 +584,7 @@ pub(crate) struct Pools {
 }
 
 impl Pools {
-    /// Lay `plan` out over the memory at `base`, every slot free.
+    /// Lay `plan` out over the memory at `base`, every slot free and none of them written.
     ///
     /// # Safety
     /// `base` is aligned to `SLOT_ALIGN`, the `plan.bytes()` bytes from it are writable and used
@@ -588,6 +594,7 @@ impl Pools {
             start: 0,
             slots: 0,
             size: 0,
+            fresh: 0,
             free: None,
         }; KINDS];
         let mut at = 0;
@@ -595,12 +602,6 @@ impl Pools {
             pool.size = plan.sizes[kind];
             pool.start = at;
             pool.slots = plan.slots[kind];
-            // Linked from the last slot to the first, so the lowest is taken first.
-            for index in (0..pool.slots).rev() {
-                let slot = base.as_ptr().add(at + index * pool.size);
-                slot.cast::<Option<NonNull<u8>>>().write(pool.free);
-                pool.free = Some(NonNull::new_unchecked(slot));
-            }
             at += pool.slots * pool.size;
         }
         Self {
@@ -615,21 +616,33 @@ impl Pools {
 
     /// A free slot of the pool of `kind` for an object whose slot takes `size` bytes, or `None`,
     /// counted, when it has none. Only that pool is asked: a slot of another kind's pool is never
-    /// taken, so each kind holds what was stated for it and no more.
+    /// taken, so each kind holds what was stated for it and no more. A slot given back is taken
+    /// before an untouched one, and the untouched ones go lowest first.
     fn take(&mut self, kind: Kind, size: usize) -> Option<NonNull<u8>> {
+        let base = self.base;
         let pool = &mut self.pools[kind as usize];
         debug_assert!(
             pool.slots == 0 || size <= pool.size,
             "an object is taken from the pool of its own kind, whose slots hold it"
         );
         let count = &mut self.counts[count_of(pool.size)];
-        let Some(slot) = pool.free else {
+        let slot = if let Some(slot) = pool.free {
+            // SAFETY: the first word of a slot on the list is the link to the next one, written
+            // when it was given back.
+            pool.free = unsafe { slot.as_ptr().cast::<Option<NonNull<u8>>>().read() };
+            slot
+        } else if pool.fresh < pool.slots {
+            // SAFETY: an untouched slot lies within the pool's slots, inside the memory the pools
+            // were laid over, which is not null.
+            let slot = unsafe {
+                NonNull::new_unchecked(base.as_ptr().add(pool.start + pool.fresh * pool.size))
+            };
+            pool.fresh += 1;
+            slot
+        } else {
             count.refused = count.refused.saturating_add(1);
             return None;
         };
-        // SAFETY: the first word of a free slot is the link to the next free one, written when it
-        // was laid out or given back.
-        pool.free = unsafe { slot.as_ptr().cast::<Option<NonNull<u8>>>().read() };
         count.in_use += 1;
         count.high_water = count.high_water.max(count.in_use);
         Some(slot)
@@ -659,8 +672,8 @@ impl Pools {
             0,
             "a place given back is the start of a slot"
         );
-        // SAFETY: the slot lies in this pool and its value is gone, so its first word may hold
-        // the link.
+        // SAFETY: the slot lies in this pool and was handed out, and its value is gone, so its
+        // first word may hold the link.
         unsafe {
             place
                 .as_ptr()
@@ -717,7 +730,13 @@ static RESERVED: Lock<Reserved> = Lock::new(Reserved(None));
 /// object a program makes reserves the build's pools when it reserved none ([`reserve_built`]);
 /// when they cannot be reserved either, every object is refused and the next asks again.
 pub(crate) fn take<T>(kind: Kind) -> Option<NonNull<u8>> {
-    let size = const { slot_size::<T>() };
+    take_slot(kind, const { slot_size::<T>() })
+}
+
+/// [`take`] for a slot of `size` bytes. Not generic and never inlined: every door that places an
+/// object calls this one body, which holds the lock, the first reservation and the pool's count.
+#[inline(never)]
+fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
     RESERVED.with(|reserved| {
         if reserved.0.is_none() {
             reserved.0 = reserve_built();
@@ -1233,6 +1252,48 @@ mod tests {
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
         assert_eq!(pools.report(2).high_water, 3);
+    }
+
+    /// Laying the pools writes nothing into their slots; a pool hands out its untouched slots lowest
+    /// first, a slot given back before any untouched one, and refuses, counted, once all are held.
+    #[test]
+    fn a_pool_hands_out_untouched_slots_in_order_and_lays_none() {
+        let mut memory = Memory([0xA5; 512]);
+        let plan = plan_of(&[(Kind::Publisher, 3, 16)]);
+        let bytes = plan.bytes().expect("small");
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        // SAFETY: the pools' memory, read through the pointer they were laid over.
+        let laid = unsafe { core::slice::from_raw_parts(base.as_ptr(), bytes) };
+        assert!(
+            laid.iter().all(|&byte| byte == 0xA5),
+            "laying the pools writes into no slot"
+        );
+        let slot = |index: usize| {
+            // SAFETY: the slots lie within the memory.
+            NonNull::new(unsafe { base.as_ptr().add(index * 16) }).expect("in the array")
+        };
+        let first = pools.take(Kind::Publisher, 16).expect("an untouched slot");
+        assert_eq!(first, slot(0), "the lowest untouched slot first");
+        assert_eq!(pools.take(Kind::Publisher, 16), Some(slot(1)));
+        assert!(pools.give_back(first));
+        assert_eq!(
+            pools.take(Kind::Publisher, 16),
+            Some(first),
+            "a slot given back is taken before an untouched one"
+        );
+        assert_eq!(pools.take(Kind::Publisher, 16), Some(slot(2)));
+        assert_eq!(
+            pools.take(Kind::Publisher, 16),
+            None,
+            "three slots, all held"
+        );
+        assert_eq!(pools.report(0).refused, 1);
+        for index in 0..3 {
+            assert!(pools.give_back(slot(index)));
+        }
+        assert_eq!(pools.held(), 0);
     }
 
     /// A pool of slots past the largest class lays and takes them as any other, is counted after
