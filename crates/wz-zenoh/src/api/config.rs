@@ -173,11 +173,13 @@ impl Config {
     /// have, a value the build leaves out of the policy's domain, a policy only the build decides.
     /// A refused statement changes nothing.
     pub fn state_policy(&mut self, policy: &str, value: &str) -> ZResult<()> {
-        use wz_session_core::policy_document::{Origin, Overrides, Refusal, Stated, Statement};
+        use wz_session_core::policy_document::{
+            Origin, Overrides, Refusal, Stated as LayerStated, Statement,
+        };
 
         let statement = Statement::new(policy, value);
         judge_alone(Overrides {
-            statements: Stated::Read(&[statement]),
+            statements: LayerStated::Read(&[statement]),
             ..Overrides::default()
         })?;
         self.1.policies.state(statement).map_err(|reason| {
@@ -360,13 +362,13 @@ impl WzStatements {
     fn resolve(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         use wz_session_core::{
             policy::SessionPolicy,
-            policy_document::{resolve_document_under, Overrides, Stated},
+            policy_document::{resolve_document_under, Overrides, Stated as LayerStated},
         };
 
         let tree = self.tree();
         let overrides = Overrides {
             profile: self.profile.as_deref(),
-            statements: Stated::Set(&self.policies),
+            statements: LayerStated::Set(&self.policies),
             ..Overrides::default()
         };
         resolve_document_under(SessionPolicy::defaults(), &tree, overrides)
