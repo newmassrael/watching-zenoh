@@ -108,6 +108,8 @@ pub fn peer_patch(extensions: &[ExtEntryOwned]) -> PatchLevel {
 /// [`peer_patch`] over the entries a chain yields, held or read where its message lies
 /// (`crate::inbound::ExtChainRead`), so a handshake read in place is answered without its chain
 /// being made owned.
+// Out of line: a handshake step's, which the receive of every message would carry inlined.
+#[inline(never)]
 pub fn peer_patch_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> PatchLevel {
