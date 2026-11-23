@@ -522,8 +522,8 @@ impl QueryMarshal {
     /// returns, inside its borrow.
     fn answer_with(&self, out: &mut dyn ReplyOut, call: impl FnOnce(&Self)) {
         let lent = NonNull::from(out);
-        // SAFETY: only the lifetime is erased: the pointer is used only while `call` runs, inside
-        // the borrow of `out`, and cleared below before that borrow ends (`Self::responder`).
+        // SAFETY: only the lifetime is erased. The borrow of `out` ends only after the Cell is
+        // emptied below, and the pointer is read only from the Cell, so it is never used past it.
         let lent = unsafe {
             core::mem::transmute::<NonNull<dyn ReplyOut + '_>, NonNull<dyn ReplyOut>>(lent)
         };
@@ -2336,5 +2336,161 @@ mod tests {
         // SAFETY: a query this crate marshalled and bound.
         let carried = unsafe { z_query_encoding(none_query) };
         assert!(carried.is_null(), "no encoding carried, none handed out");
+    }
+
+    /// A loaned query answered outside the callback it was handed to has no responder: the reply
+    /// is refused with a generic failure and nothing is answered. Turned red by a responder left
+    /// lent past the callback.
+    #[test]
+    fn a_reply_outside_the_callback_is_refused() {
+        let view = FakeQuery {
+            keyexpr: "demo/q".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { QueryMarshal::new(&view) };
+        marshal.bind();
+        let mut tap = QosTap::default();
+        marshal.answer_with(&mut tap, |_| {});
+        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: a query this crate marshalled and bound, and live keys and payloads.
+        unsafe {
+            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+            assert_eq!(
+                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()),
+                Z_OK
+            );
+            let mut payload = core::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"late".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                z_query_reply(
+                    query,
+                    crate::keyexpr::z_view_keyexpr_loan(&ke),
+                    crate::bytes::z_bytes_move(&mut payload),
+                    core::ptr::null()
+                ),
+                crate::result::Z_ERR_GENERIC
+            );
+        }
+        assert!(tap.seen.is_empty(), "nothing reached the responder");
+    }
+
+    /// What a kept query's replies reach: the replies' keys, in order.
+    #[derive(Default)]
+    struct Kept {
+        keys: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// A hold that records each reply's key into `Kept`.
+    struct KeptHold(Arc<Kept>);
+
+    impl HeldQuery for KeptHold {
+        fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+            let mut out = KeyTap(self.0.clone());
+            answer(&mut out);
+        }
+    }
+
+    /// A responder that records the key of each keyed reply.
+    struct KeyTap(Arc<Kept>);
+
+    impl ReplyOut for KeyTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            keyexpr: &str,
+            _payload: &[u8],
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            self.0
+                .keys
+                .lock()
+                .expect("a held lock")
+                .push(keyexpr.to_owned());
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            _keyexpr: &str,
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            Ok(())
+        }
+    }
+
+    /// What a dispatch's queries are held through, here a hold that records into `Kept`.
+    struct KeptHolder(Arc<Kept>);
+
+    impl QueryHolder for KeptHolder {
+        fn hold_query(&self, _view: &dyn QueryView) -> Box<dyn HeldQuery> {
+            Box::new(KeptHold(self.0.clone()))
+        }
+        fn session_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// A query cloned inside its callback is answered after the callback returned, as pico lets a
+    /// program answer one it kept: the reply goes through the hold, not the dispatch's responder,
+    /// which is no longer lent. Turned red by a kept query that answers through the responder.
+    #[test]
+    fn a_query_cloned_in_its_callback_answers_after_it() {
+        let view = FakeQuery {
+            keyexpr: "demo/kept".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        let kept = Arc::new(Kept::default());
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal =
+            unsafe { QueryMarshal::new(&view) }.with_holder(Arc::new(KeptHolder(kept.clone())));
+        marshal.bind();
+        let mut owned = z_owned_query_t::null_value();
+        let mut tap = QosTap::default();
+        marshal.answer_with(&mut tap, |marshal| {
+            let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
+            // SAFETY: the callback's own loaned query, and a live destination.
+            assert_eq!(unsafe { z_query_clone(&mut owned, query) }, Z_OK);
+        });
+        drop(marshal);
+        // SAFETY: the kept query is live, and the keys and payloads are this frame's.
+        unsafe {
+            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+            assert_eq!(
+                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/kept".as_ptr()),
+                Z_OK
+            );
+            let mut payload = core::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"later".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                z_query_reply(
+                    z_query_loan(&owned),
+                    crate::keyexpr::z_view_keyexpr_loan(&ke),
+                    crate::bytes::z_bytes_move(&mut payload),
+                    core::ptr::null()
+                ),
+                Z_OK
+            );
+            z_query_drop(z_query_move(&mut owned));
+        }
+        assert!(tap.seen.is_empty(), "the dispatch's responder is not used");
+        assert_eq!(
+            *kept.keys.lock().expect("a held lock"),
+            vec!["demo/kept".to_owned()]
+        );
     }
 }
