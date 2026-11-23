@@ -1178,7 +1178,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for LiveCore<'_, 
     }
 }
 
-/// Where a delivery goes.
+/// Where a delivery goes. Each kind is a shared handle, cloned out of the table so a delivery runs
+/// it with the table's lock let go (`CoopEngine::target`).
+#[derive(Clone)]
 enum Target {
     Subscriber(SubscriberCallback),
     Matching(MatchingSink),
@@ -3918,6 +3920,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
+    /// How many callbacks the table of callbacks holds: what a test of the close reads.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn callbacks_held(&self) -> usize {
+        lock(&self.targets).len()
+    }
+
     /// How many samples the session's delivery lane handed on to the deliveries since the open:
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
@@ -4186,13 +4194,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 break;
             };
             handed = true;
-            let sink = lock(&self.targets)
-                .iter()
-                .find_map(|(t, target)| match target {
-                    Target::Matching(sink) if *t == TargetKey::Matching(id) => Some(sink.clone()),
-                    _ => None,
-                });
-            if let Some(sink) = sink {
+            if let Some(Target::Matching(sink)) = self.target(TargetKey::Matching(id)) {
                 sink(matching);
             }
         }
@@ -4238,34 +4240,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     #[cfg(feature = "query")]
                     LaneItem::Reply(reply) => {
                         let leg = reply.leg();
-                        let callback =
-                            lock(&self.targets)
-                                .iter()
-                                .find_map(|(t, target)| match target {
-                                    Target::Reply(cb) if *t == TargetKey::Reply(leg) => {
-                                        Some(cb.clone())
-                                    }
-                                    _ => None,
-                                });
-                        if let Some(callback) = callback {
+                        if let Some(Target::Reply(callback)) = self.target(TargetKey::Reply(leg)) {
                             (lock(&callback))(&reply);
                         }
                     }
                     #[cfg(feature = "liveliness")]
                     LaneItem::Liveliness(sample) => {
                         for id in sample.subscribers() {
-                            let callback =
-                                lock(&self.targets)
-                                    .iter()
-                                    .find_map(|(t, target)| match target {
-                                        Target::Liveliness(cb)
-                                            if *t == TargetKey::Liveliness(id) =>
-                                        {
-                                            Some(cb.clone())
-                                        }
-                                        _ => None,
-                                    });
-                            if let Some(callback) = callback {
+                            if let Some(Target::Liveliness(callback)) =
+                                self.target(TargetKey::Liveliness(id))
+                            {
                                 let _running = self.deliveries.run(TargetKey::Liveliness(id));
                                 (lock(&callback))(sample.as_sample());
                             }
@@ -4331,10 +4315,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// go. A queryable undeclared since lets go of the hold all the same.
     #[cfg(feature = "queryable")]
     fn run_queryable(&self, id: QblId, query: &dyn QueryView, generation: u64) {
-        let callback = lock(&self.targets)
-            .iter()
-            .find_map(|(t, target)| match target {
-                Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
+        let callback = self
+            .target(TargetKey::Queryable(id))
+            .and_then(|target| match target {
+                Target::Queryable(callback) => Some(callback),
                 _ => None,
             });
         let mut onward = Onward::to(self, generation);
@@ -4627,12 +4611,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn subscriber_callback(&self, id: SubId) -> Option<SubscriberCallback> {
         #[cfg(test)]
         self.takes.callbacks.fetch_add(1, Ordering::Relaxed);
-        lock(&self.targets)
-            .iter()
-            .find_map(|(t, target)| match target {
-                Target::Subscriber(cb) if *t == TargetKey::Subscriber(id) => Some(cb.clone()),
-                _ => None,
-            })
+        match self.target(TargetKey::Subscriber(id))? {
+            Target::Subscriber(callback) => Some(callback),
+            _ => None,
+        }
     }
 
     /// The callback of subscriber `id`, the `at`th of the sample a delivery hands, `at` under
@@ -4835,6 +4817,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // otherwise leave when the read task's wait ends, up to the group's tick a leg.
         #[cfg(feature = "group")]
         core.0.write_answers(generation);
+    }
+
+    /// The callback `key` names, while its owner holds it: the one look in the table every
+    /// delivery makes, the handle cloned out so the callback runs with the table's lock let go.
+    fn target(&self, key: TargetKey) -> Option<Target> {
+        lock(&self.targets)
+            .iter()
+            .find(|(t, _)| *t == key)
+            .map(|(_, target)| target.clone())
     }
 
     /// Take the callback `key` names out of the targets; the caller drops it with no lock held.
@@ -6741,57 +6732,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let core = &mut guard.0;
         core.end_links();
         // The rows go back to their tables with the session: a table lent from its arena keeps
-        // its rows, so each is emptied after its ids are read.
-        let subscribers: Vec<TargetKey> = core
-            .subscribers
-            .iter()
-            .map(|s| TargetKey::Subscriber(s.id))
-            .collect();
+        // its rows. Their callbacks are the table of callbacks', taken whole below.
         core.subscribers.clear();
-        let matches: Vec<TargetKey> = core
-            .matches
-            .iter()
-            .map(|m| TargetKey::Matching(m.id))
-            .collect();
         core.matches.clear();
         #[cfg(feature = "queryable")]
-        let queryables: Vec<TargetKey> = core
-            .queryables
-            .iter()
-            .map(|q| TargetKey::Queryable(q.id))
-            .collect();
-        #[cfg(feature = "queryable")]
         core.queryables.clear();
-        #[cfg(not(feature = "queryable"))]
-        let queryables: Vec<TargetKey> = Vec::new();
-        // A get still pending ends with its session: its entry and its leg's callback go.
+        // A get still pending ends with its session: its entry goes here, its leg's callback with
+        // the table.
         #[cfg(feature = "query")]
-        let gets: Vec<TargetKey> = {
+        {
             let mut registry = core.registry.borrow_mut();
-            core.pending_gets
-                .drain(..)
-                .map(|pending| {
-                    pending.unregister(&mut registry);
-                    TargetKey::Reply(pending.leg)
-                })
-                .collect()
-        };
-        #[cfg(not(feature = "query"))]
-        let gets: Vec<TargetKey> = Vec::new();
-        // The session's tokens end with its link; its liveliness subscribers' callbacks go.
+            for pending in core.pending_gets.drain(..) {
+                pending.unregister(&mut registry);
+            }
+        }
+        // The session's tokens end with its link, and its liveliness subscribers with it.
         #[cfg(feature = "liveliness")]
-        let live_subs: Vec<TargetKey> = {
+        {
             core.tokens.clear();
-            let ids: Vec<TargetKey> = core
-                .live_subs
-                .iter()
-                .map(|s| TargetKey::Liveliness(s.id))
-                .collect();
             core.live_subs.clear();
-            ids
-        };
-        #[cfg(not(feature = "liveliness"))]
-        let live_subs: Vec<TargetKey> = Vec::new();
+        }
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
         // of with no lock held.
         #[cfg(any(
@@ -6819,14 +6779,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // with no lock held.
         #[cfg(feature = "queryable")]
         drop(core::mem::take(&mut *self.plane.queries.lock()));
-        let taken: Vec<_> = subscribers
-            .into_iter()
-            .chain(matches)
-            .chain(queryables)
-            .chain(gets)
-            .chain(live_subs)
-            .filter_map(|id| self.take_target(id))
-            .collect();
+        // Every callback the session held goes with it, in one take of the table: the ones of the
+        // rows emptied above, and one whose row went before its callback (a get's leg whose link
+        // was lost, its end not handed out yet). The removal is counted under the table's lock,
+        // so what the deliveries kept is let go of first, and the rest with no lock held.
+        let taken = {
+            let mut targets = lock(&self.targets);
+            self.removed.fetch_add(1, Ordering::SeqCst);
+            core::mem::take(&mut *targets)
+        };
+        self.forget_resolved();
         drop(taken);
     }
 
