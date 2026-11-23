@@ -134,15 +134,19 @@ pub fn hint_from_str_in(s: &str, dialect: EncodingDialect) -> EncodingHint {
             None => hint_from_parts(ENCODING_ID_UNKNOWN, s),
         };
     }
-    if let Some(pos) = s.find(SCHEMA_SEPARATOR) {
-        let (prefix, rest) = s.split_at(pos);
-        // Skip the separator itself.
-        let schema = &rest[SCHEMA_SEPARATOR.len_utf8()..];
-        if let Some(id) = lookup_id(prefix) {
-            return hint_from_parts(id, schema);
+    // Split on the first separator by `split_once`, which hands back both sides without slicing
+    // the text at an offset and so has no failure to format.
+    match s.split_once(SCHEMA_SEPARATOR) {
+        Some((prefix, schema)) => {
+            if let Some(id) = lookup_id(prefix) {
+                return hint_from_parts(id, schema);
+            }
         }
-    } else if let Some(id) = lookup_id(s) {
-        return hint_from_parts(id, "");
+        None => {
+            if let Some(id) = lookup_id(s) {
+                return hint_from_parts(id, "");
+            }
+        }
     }
     hint_from_parts(ENCODING_ID_DEFAULT, s)
 }
@@ -242,6 +246,19 @@ mod tests {
         assert_eq!(hint.packed_id, (4 << 1) | 1);
         assert_eq!(hint.schema.as_deref(), Some(&b"utf8"[..]));
         assert_eq!(hint_to_string(&hint), "text/plain;utf8");
+    }
+
+    /// A schema or a prefix of characters of more than one byte is split on the first `;` as
+    /// an ASCII one is: the schema keeps its characters whole, and an unknown prefix leaves the
+    /// whole text as the schema.
+    #[test]
+    fn a_multibyte_schema_or_prefix_splits_on_the_first_separator() {
+        let hint = hint_from_str("text/plain;\u{e9};x");
+        assert_eq!(hint.packed_id, (4 << 1) | 1);
+        assert_eq!(hint.schema.as_deref(), Some("\u{e9};x".as_bytes()));
+        let unknown = hint_from_str("\u{e9}/plain;x");
+        assert_eq!(unknown.packed_id, 1);
+        assert_eq!(unknown.schema.as_deref(), Some("\u{e9}/plain;x".as_bytes()));
     }
 
     /// A schema that is not UTF-8 is held as its bytes, renders byte for byte

@@ -288,22 +288,26 @@ fn collapse_dsl_runs<P: Storage>(
 ) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
     const DSL: &str = "$*";
     let mut out = BoundedString::default();
-    let mut cursor = 0;
-    while cursor < input.len() {
-        let rest = &input[cursor..];
-        if rest.starts_with(DSL) {
+    // The walk holds the unread text itself rather than an offset into it, so no step slices the
+    // input at a computed position and none can panic on a character boundary.
+    let mut rest = input;
+    loop {
+        if let Some(after) = rest.strip_prefix(DSL) {
             out.push_str(DSL)
                 .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-            cursor += DSL.len();
-            while input[cursor..].starts_with(DSL) {
-                cursor += DSL.len();
+            rest = after;
+            while let Some(after) = rest.strip_prefix(DSL) {
+                rest = after;
             }
-        } else {
-            let next_char = rest.chars().next().expect("non-empty remainder");
-            out.push(next_char)
-                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
-            cursor += next_char.len_utf8();
+            continue;
         }
+        let mut chars = rest.chars();
+        let Some(next_char) = chars.next() else {
+            break;
+        };
+        out.push(next_char)
+            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        rest = chars.as_str();
     }
     Ok(out)
 }
@@ -1153,6 +1157,18 @@ mod tests {
             "home/foo$*bar"
         );
         assert_eq!(canonize_keyexpr("home/$*$*").unwrap(), "home/*");
+    }
+
+    /// The collapse walks characters, not bytes: a run beside a character of two bytes collapses
+    /// as one beside an ASCII byte does, and the character is copied whole.
+    #[test]
+    fn canon_singleify_keeps_a_multibyte_character_beside_a_run() {
+        assert_eq!(
+            canonize_keyexpr("home/\u{e9}$*$*\u{fc}").unwrap(),
+            "home/\u{e9}$*\u{fc}"
+        );
+        assert_eq!(canonize_keyexpr("$*$*\u{e9}/a").unwrap(), "$*\u{e9}/a");
+        assert_eq!(canonize_keyexpr("a/\u{e9}$*$*").unwrap(), "a/\u{e9}$*");
     }
 
     // ── Lone $* chunk → * chunk ──
