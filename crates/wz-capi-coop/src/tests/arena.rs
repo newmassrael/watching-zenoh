@@ -142,6 +142,7 @@ fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
 
 /// An open reserves the arena its plan lays out for the config and the limits it was handed.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_reserves_the_arena_its_plan_lays_out() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
@@ -154,6 +155,7 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
 /// is dialled. The CONTROL is the same open with memory, which dials the probe (and fails, as
 /// nothing answers it).
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
     let probe = Probe::bind();
     let plan = ArenaPlan::of(
@@ -180,6 +182,7 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
 /// A session limit the open is handed over the build's value refuses the open, naming the limit
 /// and both values, before anything is dialled: a stage after the build only lowers it.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_limit_is_over_the_builds_value_dials_nothing() {
     let over = caps::MAX_SUBSCRIPTIONS + 1;
     let mut limits = SessionLimits::defaults();
@@ -695,6 +698,7 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
 /// A link over the buffers its session's arena lent reads a datagram where the arena holds its
 /// receive buffer, and nowhere else.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
     let config = CoopConfig {
         max_faces: 0,
@@ -739,6 +743,7 @@ fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
 /// none is built on the heap. The counts are read before and after the put, so the slot frame is
 /// the put's.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_put_is_encoded_into_a_slot_the_arena_lent() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
@@ -771,6 +776,7 @@ fn a_put_is_encoded_into_a_slot_the_arena_lent() {
 /// sent before the next takes the slot, none built on the heap and none refused for want of a
 /// slot, and every put reaches the router.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn one_slot_a_link_carries_a_run_of_puts() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
@@ -810,6 +816,7 @@ fn one_slot_a_link_carries_a_run_of_puts() {
 /// A session whose arena holds one link dials again, after its link is lost, over the buffers the
 /// lost link held: the lost link lets them go before the next is opened.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_redial_takes_the_buffers_the_lost_link_held() {
     let router = Router::start(CatchAll::None);
     let port = router.port;
@@ -833,6 +840,7 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
 /// A session whose config admits no face besides the dial role's attaches none, as its arena holds
 /// the buffers of one link; the CONTROL is the plan of the same config.
 #[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_face_past_max_faces_is_not_attached() {
     let router = Router::start(CatchAll::None);
     let second = Router::start_as(0xc4, CatchAll::None);
