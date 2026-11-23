@@ -43,7 +43,7 @@
 //! What IS reproduced, and is what a peer's mode changes on the wire: whether it
 //! asks at all (above), and that its subscriber and queryable retractions name
 //! the key they were held on, which a client's do not
-//! (`DeclaredKeyexpr::retraction_naming`).
+//! (`DeclaredKeyexpr::retraction_naming_in`).
 
 use alloc::sync::Arc;
 
@@ -144,6 +144,10 @@ impl WriteFilter {
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
     ///
+    /// `wire` is `key` as the entity names it on the wire (`DeclaredKeyexpr::wire`): its own
+    /// declaration's id and the rest of the key, or the literal when nothing covers it. The
+    /// entity makes it once and keeps it for what it sends.
+    ///
     /// Refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as pico refuses an entity it cannot hold, when
     /// the session holds no more: its table of the entity's filters is at the limit it opened
     /// under, or it has no entity id left for the filter's Interest. Nothing was sent.
@@ -151,16 +155,14 @@ impl WriteFilter {
         session: &PicoSession,
         plane: FilterPlane,
         key: &DeclaredKeyexpr,
+        wire: &WireKey,
         count_local: bool,
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
-        // The key goes on the wire as the entity's own declaration: its id and the rest of
-        // the key, or the literal when nothing covers it.
-        let wire = key.wire(Arc::as_ref(&shared));
-        let ask = interest_form(&shared, session.mode, key, &wire);
+        let ask = interest_form(&shared, session.mode, key, wire);
         let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, keyexpr.as_str(), &wire, ask, count_local)
+            .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
             .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
         Ok(Self {
             shared,
