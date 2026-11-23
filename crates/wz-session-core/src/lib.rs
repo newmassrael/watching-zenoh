@@ -1240,11 +1240,7 @@ pub mod tx_lease;
 /// `network_message`.
 #[cfg(feature = "storage-profile")]
 // Totality debt TD-017 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used)]
 pub mod frame_encode;
 
 /// Outbound transport-handshake / close / keepalive frame encoders

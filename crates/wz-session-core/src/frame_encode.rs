@@ -225,7 +225,7 @@ pub(crate) fn begin_frame(
     #[cfg(feature = "transport-qos")]
     let extensions = chain
         .as_ref()
-        .and_then(|entries| Bounded::new(&entries[..]));
+        .and_then(|entries| Bounded::new(entries.as_slice()));
     #[cfg(not(feature = "transport-qos"))]
     let extensions = {
         let _ = ext_qos;
@@ -294,7 +294,7 @@ where
     P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
 {
     // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
-    let mut wire = Vec::with_capacity(1 + 10 + 2 + worst_case_payload);
+    let mut wire = Vec::with_capacity(worst_case_payload.saturating_add(13));
     encode_frame_envelope_into(&mut wire, sn, parent_flags, ext_qos, payload_encode)
         .expect("a Vec grows, so its sink is infallible");
     wire
@@ -746,7 +746,7 @@ fn vle_width(sn: u64) -> usize {
     let (mut width, mut v) = (1usize, sn);
     while v >= 0x80 {
         v >>= 7;
-        width += 1;
+        width = width.saturating_add(1);
     }
     width
 }
@@ -768,11 +768,13 @@ fn vle_width(sn: u64) -> usize {
 /// non-QoS / DEFAULT path passes `None` and slices exactly as before.
 #[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub(crate) fn frame_wire_body(frame: &[u8], sn: u64, ext_qos: Option<Priority>) -> &[u8] {
-    let mut off = 1 + vle_width(sn);
-    if ext_qos.is_some() {
-        off += QOS_EXT_WIRE_BYTES;
-    }
-    &frame[off..]
+    let qos = if ext_qos.is_some() {
+        QOS_EXT_WIRE_BYTES
+    } else {
+        0
+    };
+    let off = vle_width(sn).saturating_add(1).saturating_add(qos);
+    frame.get(off..).unwrap_or_default()
 }
 
 /// Conservative per-fragment header budget: 1 flags byte + the maximum u64
@@ -845,7 +847,7 @@ const FRAGMENT_DROP_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_DROP_EXT_ID;
 /// pre-QoS budget, so its chunking — and its byte layout — is unchanged.
 #[cfg(feature = "transport-fragmentation")]
 fn fragment_chunk_size(mtu: usize, qos: bool) -> usize {
-    let budget = FRAG_HEADER_BUDGET + if qos { QOS_EXT_WIRE_BYTES } else { 0 };
+    let budget = FRAG_HEADER_BUDGET.saturating_add(if qos { QOS_EXT_WIRE_BYTES } else { 0 });
     mtu.saturating_sub(budget).max(1)
 }
 
@@ -991,7 +993,7 @@ impl Iterator for FragmentChain<'_> {
         let span = self.plan.next_span()?;
         Some(build_fragment_wire(
             span.sn,
-            &self.body[span.start..span.end],
+            self.body.get(span.start..span.end)?,
             self.reliable,
             span.more,
             span.first,
@@ -1066,7 +1068,9 @@ impl FragmentSpan {
     /// header budget, the two one-byte markers, a possible `ext_qos`, and the
     /// chunk. What a slot is asked for before the fragment is written into it.
     pub fn wire_bound(&self) -> usize {
-        FRAG_HEADER_BUDGET + 2 + QOS_EXT_WIRE_BYTES + (self.end - self.start)
+        // A span's end is at or past its start.
+        (FRAG_HEADER_BUDGET + 2 + QOS_EXT_WIRE_BYTES)
+            .saturating_add(self.end.saturating_sub(self.start))
     }
 }
 
@@ -1107,7 +1111,11 @@ impl FragmentPlan {
         if self.done {
             return 0;
         }
-        (self.len - self.off).div_ceil(self.chunk).max(1)
+        // `off` never passes `len`, and `chunk` is at least one.
+        self.len
+            .saturating_sub(self.off)
+            .div_ceil(self.chunk.max(1))
+            .max(1)
     }
 
     /// The SN the next transport message on this conduit carries (see
@@ -1121,7 +1129,7 @@ impl FragmentPlan {
         if self.done {
             return None;
         }
-        let end = core::cmp::min(self.off + self.chunk, self.len);
+        let end = core::cmp::min(self.off.saturating_add(self.chunk), self.len);
         let more = end < self.len;
         let span = FragmentSpan {
             sn: self.sn,
@@ -1187,7 +1195,12 @@ pub fn write_fragment(
         ext_qos,
     )?;
     match body {
-        FragmentBody::Bytes(bytes) => TxBuf::append(buf, &bytes[span.start..span.end]),
+        FragmentBody::Bytes(bytes) => TxBuf::append(
+            buf,
+            bytes
+                .get(span.start..span.end)
+                .ok_or(CodecError::BufferOverflow)?,
+        ),
         #[cfg(feature = "transport-tx-lend")]
         FragmentBody::Encoded(encode) => {
             if span.start == span.end {
@@ -1272,7 +1285,10 @@ impl TxBuf for BodyWindow<'_, '_> {
     }
 
     fn as_slice(&self) -> &[u8] {
-        &self.inner.as_slice()[self.inner_at..]
+        self.inner
+            .as_slice()
+            .get(self.inner_at..)
+            .unwrap_or_default()
     }
 
     fn truncate(&mut self, _len: usize) {}
@@ -1285,7 +1301,11 @@ impl TxBuf for BodyWindow<'_, '_> {
         let lo = core::cmp::max(from, self.start);
         let hi = core::cmp::min(to, self.end);
         if lo < hi {
-            self.inner.append(&bytes[lo - from..hi - from])?;
+            // `from <= lo < hi <= to`: the window's part of `bytes`.
+            let part = bytes
+                .get(lo.saturating_sub(from)..hi.saturating_sub(from))
+                .ok_or(CodecError::BufferOverflow)?;
+            self.inner.append(part)?;
         }
         self.pos = to;
         Ok(())
@@ -1400,10 +1420,10 @@ pub fn build_fragment_wire(
     let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
     let mut wire = Vec::with_capacity(
         FRAG_HEADER_BUDGET
-            + payload.len()
-            + usize::from(first)
-            + usize::from(drop_marker)
-            + qos_reserve,
+            .saturating_add(payload.len())
+            .saturating_add(usize::from(first))
+            .saturating_add(usize::from(drop_marker))
+            .saturating_add(qos_reserve),
     );
     write_fragment_head(&mut wire, sn, reliable, more, first, drop_marker, ext_qos)
         .expect("a Vec grows, so its sink is infallible");
@@ -1453,26 +1473,28 @@ pub fn write_fragment_head(
         body: ExtEntryPartsBody::CodecZenohExtUnit(&marker),
     };
     let mut chain = [unit_entry(FRAGMENT_FIRST_EXT_HEADER); 3];
-    let mut len = 0;
     #[cfg(feature = "transport-qos")]
-    if let Some(value) = &qos {
-        chain[len] = qos_entry(value);
-        len += 1;
-    }
+    let qos_entry = qos.as_ref().map(qos_entry);
     #[cfg(not(feature = "transport-qos"))]
-    let _ = ext_qos;
-    if first {
-        chain[len] = unit_entry(FRAGMENT_FIRST_EXT_HEADER);
-        len += 1;
-    }
-    if drop_marker {
-        chain[len] = unit_entry(FRAGMENT_DROP_EXT_HEADER);
-        len += 1;
+    let qos_entry = {
+        let _ = ext_qos;
+        None
+    };
+    let wanted = [
+        qos_entry,
+        first.then(|| unit_entry(FRAGMENT_FIRST_EXT_HEADER)),
+        drop_marker.then(|| unit_entry(FRAGMENT_DROP_EXT_HEADER)),
+    ];
+    // At most the three entries the chain has room for.
+    let mut len = 0usize;
+    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+        *slot = entry;
+        len = len.saturating_add(1);
     }
     let head = wz_codecs::transport_fragment_header::TransportFragmentHeaderParts {
         header,
         sn,
-        extensions: Bounded::new(&chain[..len]),
+        extensions: Bounded::new(chain.get(..len).unwrap_or_default()),
     };
     wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(
         &head,
@@ -1503,7 +1525,7 @@ pub fn build_frame_wire(
 ) -> Vec<u8> {
     // header + the widest VLE + a possible `[0x31][VLE(priority)]`, as
     // `encode_frame_envelope` reserves.
-    let mut wire = Vec::with_capacity(1 + 9 + 2 + payload.len());
+    let mut wire = Vec::with_capacity(payload.len().saturating_add(12));
     begin_frame(&mut wire, sn, frame_flags(reliable), ext_qos)
         .expect("a Vec grows, so its sink is infallible");
     wire.extend_from_slice(payload);
