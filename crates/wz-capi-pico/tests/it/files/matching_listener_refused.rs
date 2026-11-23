@@ -9,7 +9,8 @@
 //! - Past the session's `MAX_MATCHING_LISTENERS`, lowered by the config's document, a listener is
 //!   refused with `Z_ERR_SYSTEM_OUT_OF_MEMORY`, with a handle and in the background alike, as
 //!   zenoh-pico refuses one it has no room for.
-//! - On a session that is closed, a listener is refused with `Z_ERR_SESSION_CLOSED`.
+//! - On a session that is closed, a listener is refused with the generic error, as zenoh-pico's
+//!   door answers a session whose weak reference no longer upgrades.
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
@@ -27,13 +28,12 @@ use wz_capi_pico::matching::{
     z_matching_status_t, z_owned_closure_matching_status_t, z_owned_matching_listener_t,
     z_publisher_declare_matching_listener,
 };
-use wz_capi_pico::result::Z_ERR_SESSION_CLOSED;
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_declare_publisher, z_open,
     z_owned_config_t, z_owned_publisher_t, z_owned_session_t, z_publisher_drop, z_publisher_loan,
     z_publisher_move, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
     z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t, zp_config_insert,
-    Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY, Z_OK,
+    Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY, Z_ERR_GENERIC, Z_OK,
 };
 use wz_runtime_tokio_test_support::free_port;
 
@@ -207,8 +207,9 @@ fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
     assert_eq!(drops.load(Ordering::SeqCst), 4, "each closure dropped once");
 }
 
-/// A listener declared on the publisher of a session that is closed is refused as a closed
-/// session's, its slot null and its closure's drop run as the door returns.
+/// A listener declared on the publisher of a session that is closed is refused with the generic
+/// error zenoh-pico's door answers there, its slot null and its closure's drop run as the door
+/// returns.
 #[test]
 fn a_listener_on_a_closed_session_is_refused_and_its_slot_null() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -219,7 +220,7 @@ fn a_listener_on_a_closed_session_is_refused_and_its_slot_null() {
         z_close(z_session_loan_mut(&mut session), std::ptr::null());
 
         let (code, refused) = declare(&publisher, &drops);
-        assert_eq!(code, Z_ERR_SESSION_CLOSED);
+        assert_eq!(code, Z_ERR_GENERIC);
         assert!(
             !z_internal_matching_listener_check(&refused),
             "the refused listener's slot is null"

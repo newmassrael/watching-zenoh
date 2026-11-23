@@ -217,19 +217,35 @@ pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
 /// [`WZ_EXT_ERR_POLICY_OFF`] is.
 pub const WZ_EXT_ERR_SCOUT_REENTERED: ZResult = -25;
 
-/// The code of a declaration the engine refused: this ABI's one table for the port's [`Refusal`].
-/// zenoh-pico answers an entity it has no room for, of its table, its key or its id, with
-/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` (`vendor/zenoh-pico/src/net/filtering.c` @
-/// `_z_write_filter_ctx_add_callback`), and one asked of a session that is closed with
-/// `_Z_ERR_SESSION_CLOSED`. A plane the build does not hold has no pico code, as its door has no
-/// pico symbol to be declared through; it is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
-pub(crate) fn refusal_code(refusal: Refusal) -> ZResult {
-    match refusal {
-        Refusal::TableFull | Refusal::KeyTooLong | Refusal::NoEntityId => {
-            Z_ERR_SYSTEM_OUT_OF_MEMORY
-        }
-        Refusal::Closed => Z_ERR_SESSION_CLOSED,
-        Refusal::NotBuilt => WZ_EXT_ERR_UNSUPPORTED,
+/// The door of the C library a declaration was refused at. zenoh-pico answers one cause
+/// differently at different doors, so the code [`refusal_code`] answers is the pair's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Door {
+    /// A publisher's or a querier's matching listener, with a handle or in the background
+    /// (`z_publisher_declare_matching_listener`, `z_querier_declare_matching_listener` and their
+    /// `_background_` forms).
+    MatchingListener,
+}
+
+/// The code of a declaration the engine refused at `door`: this ABI's one table for the port's
+/// [`Refusal`], each door's row the code zenoh-pico's own door answers for the cause. A plane the
+/// build does not hold has no pico code at any door, as the door has no pico symbol to be declared
+/// through in such a build; it is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
+pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
+    if refusal == Refusal::NotBuilt {
+        return WZ_EXT_ERR_UNSUPPORTED;
+    }
+    match door {
+        // A listener pico has no room for is `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`), and one
+        // asked of a session that is not open is the generic error: the door reads it as a weak
+        // reference that did not upgrade (`vendor/zenoh-pico/src/api/api.c` @
+        // `z_result_t z_publisher_declare_matching_listener(const z_loaned_publisher_t *publisher,`,
+        // and the querier's twin).
+        Door::MatchingListener => match refusal {
+            Refusal::Closed => Z_ERR_GENERIC,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
     }
 }
 
@@ -237,21 +253,17 @@ pub(crate) fn refusal_code(refusal: Refusal) -> ZResult {
 mod tests {
     use super::*;
 
-    /// Each refusal answers pico's code for it, and every code is a failure to a caller's `< 0`
-    /// test: none reads as the `Z_OK` of a declaration that was never made.
+    /// Each refusal at a matching listener's door answers the code pico's door answers, and every
+    /// code is a failure to a caller's `< 0` test: none reads as the `Z_OK` of a declaration
+    /// that was never made.
     #[test]
-    fn each_refusal_answers_its_code() {
-        assert_eq!(refusal_code(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        assert_eq!(
-            refusal_code(Refusal::KeyTooLong),
-            Z_ERR_SYSTEM_OUT_OF_MEMORY
-        );
-        assert_eq!(
-            refusal_code(Refusal::NoEntityId),
-            Z_ERR_SYSTEM_OUT_OF_MEMORY
-        );
-        assert_eq!(refusal_code(Refusal::Closed), Z_ERR_SESSION_CLOSED);
-        assert_eq!(refusal_code(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+    fn each_refusal_of_a_matching_listener_answers_picos_code() {
+        let at = |refusal| refusal_code(refusal, Door::MatchingListener);
+        assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::KeyTooLong), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::NoEntityId), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::Closed), Z_ERR_GENERIC);
+        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
     }
 
     /// The wz codes are errors to a caller's `< 0` test, differ from each other and from every

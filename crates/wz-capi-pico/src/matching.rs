@@ -46,7 +46,7 @@ use crate::abi::handle_ref;
 use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
 use crate::prelude::*;
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
-use crate::result::{refusal_code, ZResult, Z_ERR_NULL, Z_OK};
+use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_OK};
 use crate::write_filter::WriteFilter;
 use alloc::sync::Arc;
 
@@ -485,10 +485,9 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
 /// adaptation cannot drift between them — the sibling asymmetry this crate has already
 /// paid for once.
 ///
-/// A listener the engine refuses leaves the slot null and answers pico's code for the refusal
-/// ([`refusal_code`]): zenoh-pico answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for a listener it has no
-/// room for (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`),
-/// where a listener that would never be called must not read as `Z_OK`.
+/// A listener the engine refuses leaves the slot null and answers the code pico's door answers
+/// for the refusal ([`refusal_code`]): a listener that would never be called must not read as
+/// `Z_OK`.
 ///
 /// # Safety
 /// `listener`'s slot must be null or valid and writable; `callback` must be null or a
@@ -514,7 +513,7 @@ pub(crate) unsafe fn declare_on_filter(
     let (shared, id) = match filter.declare_matching_listener(sink, released.clone()) {
         Ok(declared) => declared,
         // `sink` went with the refusal, running the caller's `drop(context)`.
-        Err(refused) => return refusal_code(refused),
+        Err(refused) => return refusal_code(refused, Door::MatchingListener),
     };
     match (listener, slot) {
         (None, _) => Z_OK,
