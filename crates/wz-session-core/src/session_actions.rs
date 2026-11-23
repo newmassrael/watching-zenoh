@@ -3735,8 +3735,53 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
         feature = "declare-subscriber"
     )
 ))]
-pub type ReplyEgressGate =
-    alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
+pub type ReplyEgressGate = alloc::boxed::Box<dyn Fn(ReplyEgress<'_>) -> bool + Send + Sync>;
+
+/// A reply the egress gate ([`ReplyEgressGate`]) is asked of, borrowed from the sender, which
+/// still holds it: the gate reads it and the sender sends it or drops it.
+#[cfg(all(
+    feature = "reply-egress-gate",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+#[derive(Clone, Copy, Debug)]
+pub enum ReplyEgress<'a> {
+    /// A `Response` to a peer's query.
+    #[cfg(feature = "codec-response")]
+    Response(&'a crate::wire::ResponseOwned),
+    /// The `Declare` that answers a peer's Interest.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    Declare(&'a crate::transport_profile::owned::DeclareOwned),
+}
+
+#[cfg(all(
+    feature = "reply-egress-gate",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+impl ReplyEgress<'_> {
+    /// The reply as an owned network message, copied: what a policy that reads network messages
+    /// is handed.
+    #[must_use]
+    pub fn to_message(self) -> crate::network_message::NetworkMessage {
+        match self {
+            #[cfg(feature = "codec-response")]
+            Self::Response(response) => crate::network_message::NetworkMessage::Response(
+                alloc::boxed::Box::new(response.clone()),
+            ),
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::Declare(declare) => crate::network_message::NetworkMessage::Declare(
+                alloc::boxed::Box::new(declare.clone()),
+            ),
+        }
+    }
+}
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
@@ -15654,22 +15699,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // governs, still ends the peer's Interest. A build with no egress gate
         // (`reply-egress-gate`) asks nothing.
         #[cfg(feature = "reply-egress-gate")]
-        let declare = if self
+        if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
+            && !self.reply_gate_admits(ReplyEgress::Declare(&declare))
         {
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
-                return;
-            }
-            match message {
-                crate::network_message::NetworkMessage::Declare(declare) => *declare,
-                _ => return,
-            }
-        } else {
-            declare
-        };
+            return;
+        }
         // §5.21 routing-namespace — the answer to an interest is a `Declare` like any other
         // the node makes, and upstream's decorator gives it the prefix whatever the interest id
         // (`handle_declare_egress` reads none). This dispatch is below the egress arm, so it is
@@ -15715,9 +15751,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let Some(declare) = owned() else {
                 return;
             };
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(ReplyEgress::Declare(&declare)) {
                 return;
             }
         }
@@ -17247,15 +17281,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 return Some(response);
             }
-            let message =
-                crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(ReplyEgress::Response(&response)) {
                 return None;
             }
-            match message {
-                crate::network_message::NetworkMessage::Response(response) => Some(*response),
-                _ => None,
-            }
+            Some(response)
         }
         // A build with no egress gate admits every reply.
         #[cfg(not(feature = "reply-egress-gate"))]
@@ -17313,9 +17342,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber"
         )
     ))]
-    fn reply_gate_admits(&self, message: &crate::network_message::NetworkMessage) -> bool {
+    fn reply_gate_admits(&self, reply: ReplyEgress<'_>) -> bool {
         R::with_mutex_mut(&self.egress_reply_gate, |slot| {
-            slot.as_ref().map_or(true, |gate| gate(message))
+            slot.as_ref().map_or(true, |gate| gate(reply))
         })
     }
 
