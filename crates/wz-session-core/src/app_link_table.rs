@@ -1395,6 +1395,22 @@ impl AppLinkTable {
             .map_or(&[][..], |link| link.remainder.as_slice())
     }
 
+    /// Copy the front of the remainder of `handle` into `out`, as much of it as fits: how many
+    /// bytes were copied. What a writer offers the program from: the program is called with no
+    /// lock of the transport held ([`crate::app_transport::AppPort`]), so the bytes it is offered
+    /// cannot be the table's own, and a window of the writer's takes them, with nothing allocated.
+    pub fn copy_remainder(&self, handle: LinkHandle, out: &mut [u8]) -> usize {
+        let held = self.remainder(handle);
+        let len = held.len().min(out.len());
+        match (out.get_mut(..len), held.get(..len)) {
+            (Some(to), Some(from)) => {
+                to.copy_from_slice(from);
+                len
+            }
+            _ => 0,
+        }
+    }
+
     /// The program took the first `taken` bytes of the remainder of `handle`. A remainder that
     /// this leaves empty on an open link is room again, with no call of the program's to say so:
     /// the writer waiting for it is woken (a writer may wait while another task drains the link).
@@ -1693,6 +1709,26 @@ mod tests {
         assert_eq!(wakes(&mut table, |table| table.drop_remainder(link, 2)), 1);
         assert_eq!(count.0.load(Ordering::SeqCst), 1, "the writer is woken");
         assert!(table.wait_link(link, room, &waker), "room again");
+    }
+
+    /// A remainder is copied out from its front, as much as the window holds, and copying takes
+    /// nothing from it. Turned red by a copy that reads past the window or from past the front.
+    #[test]
+    fn a_remainder_is_copied_from_its_front_into_a_window() {
+        let mut table = AppLinkTable::new();
+        let link = open_stream(&mut table);
+        table
+            .hold_remainder(link, b"abcdef")
+            .expect("an open link holds a remainder");
+        let mut window = [0u8; 4];
+        assert_eq!(table.copy_remainder(link, &mut window), 4);
+        assert_eq!(&window, b"abcd");
+        assert_eq!(table.remainder(link), b"abcdef", "a copy takes nothing");
+        let _ = table.drop_remainder(link, 4);
+        assert_eq!(table.copy_remainder(link, &mut window), 2);
+        assert_eq!(&window[..2], b"ef");
+        let mut none = [0u8; 4];
+        assert_eq!(table.copy_remainder(0, &mut none), 0, "no link, nothing");
     }
 
     #[test]
