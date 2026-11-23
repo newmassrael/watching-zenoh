@@ -461,12 +461,42 @@ mod tests {
     use crate::qos::Priority;
     use crate::reliability::Reliability;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     fn key() -> SigningKey {
-        SigningKey::new(vec![7u8; 32]).expect("32 bytes is the RFC §5.M minimum")
+        SigningKey::from_slice(&[7u8; 32]).expect("32 bytes is the RFC §5.M minimum")
+    }
+
+    /// The cookie for `s`, minted by the view form every profile has into a
+    /// buffer wide enough for a multilink key. On the heap profile the owned
+    /// form must mint the same bytes.
+    fn mint(k: &SigningKey, s: &AcceptCookieState) -> Option<Vec<u8>> {
+        let view = AcceptCookieView {
+            peer_zid: s.peer_zid.as_slice(),
+            peer_whatami: s.peer_whatami,
+            sn_res: s.sn_res,
+            batch_size: s.batch_size,
+            nonce: s.nonce,
+            negotiated: s.negotiated,
+            multilink: s.multilink.0.as_ref().map(|(c, ml)| (*c, ml.as_slice())),
+        };
+        let mut out = [0u8; 256];
+        let minted = encode_accept_cookie_into(k, &view, &mut out).map(<[u8]>::to_vec);
+        #[cfg(feature = "alloc")]
+        assert_eq!(minted, encode_accept_cookie(k, s), "the two forms differ");
+        minted
     }
 
     fn state() -> AcceptCookieState {
+        // A challenge and a key the length of an encoded RSA-512 public key, the
+        // size wz's multilink identity uses, so the variable member is exercised
+        // at the width it really has.
+        #[cfg(feature = "alloc")]
+        let multilink = MultilinkAcceptState(Some((0x9999_AAAA_BBBB_CCCC, vec![0x5A; 69])));
+        // A build with no allocator holds no multilink key, so `None` is the one
+        // member it can carry.
+        #[cfg(not(feature = "alloc"))]
+        let multilink = MultilinkAcceptState(None);
         AcceptCookieState {
             peer_zid: SessionZid::from([0xAB; 4]),
             peer_whatami: 1,
@@ -506,10 +536,7 @@ mod tests {
                     &RegionName::new("eu-west").expect("a valid region name"),
                 )),
             },
-            // A challenge and a key the length of an encoded RSA-512 public
-            // key, the size wz's multilink identity uses, so the variable
-            // member is exercised at the width it really has.
-            multilink: MultilinkAcceptState(Some((0x9999_AAAA_BBBB_CCCC, vec![0x5A; 69]))),
+            multilink,
         }
     }
 
@@ -523,7 +550,7 @@ mod tests {
     #[test]
     fn every_field_survives_the_round_trip() {
         let k = key();
-        let wire = encode_accept_cookie(&k, &state()).expect("a 4-byte zid encodes");
+        let wire = mint(&k, &state()).expect("a 4-byte zid encodes");
         let back = decode_accept_cookie(&k, &wire).expect("our own cookie verifies");
         assert_eq!(back, state());
     }
@@ -550,7 +577,7 @@ mod tests {
         let mut s = state();
         s.peer_zid = SessionZid::from([0xFF; MAX_ZID_BYTES]);
         s.multilink = MultilinkAcceptState(None);
-        let wire = encode_accept_cookie(&k, &s).expect("a 16-byte zid encodes");
+        let wire = mint(&k, &s).expect("a 16-byte zid encodes");
         assert_eq!(
             wire.len(),
             COOKIE_HEAD_BYTES + MAX_ZID_BYTES + COOKIE_EXT_BYTES + 1 + COOKIE_TAG_BYTES
@@ -581,7 +608,7 @@ mod tests {
     #[test]
     fn a_flipped_byte_anywhere_in_the_payload_is_refused() {
         let k = key();
-        let wire = encode_accept_cookie(&k, &state()).expect("encodes");
+        let wire = mint(&k, &state()).expect("encodes");
         let payload_len = wire.len() - COOKIE_TAG_BYTES;
         for i in 0..payload_len {
             let mut bad = wire.clone();
@@ -597,8 +624,8 @@ mod tests {
     /// A cookie minted under one key does not verify under another.
     #[test]
     fn another_key_does_not_verify() {
-        let wire = encode_accept_cookie(&key(), &state()).expect("encodes");
-        let other = SigningKey::new(vec![9u8; 32]).expect("32 bytes");
+        let wire = mint(&key(), &state()).expect("encodes");
+        let other = SigningKey::from_slice(&[9u8; 32]).expect("32 bytes");
         assert_eq!(
             decode_accept_cookie(&other, &wire),
             Err(CookieError::Tampered)
@@ -662,8 +689,8 @@ mod tests {
         let mut zero = state();
         zero.negotiated.patch = PatchAcceptState(Some(0));
 
-        let wire_absent = encode_accept_cookie(&k, &absent).expect("encodes");
-        let wire_zero = encode_accept_cookie(&k, &zero).expect("encodes");
+        let wire_absent = mint(&k, &absent).expect("encodes");
+        let wire_zero = mint(&k, &zero).expect("encodes");
         assert_ne!(
             wire_absent, wire_zero,
             "an absent patch level and a negotiated level 0 must not mint the \
@@ -698,8 +725,8 @@ mod tests {
     fn each_extension_moves_on_its_own() {
         let k = key();
         let base = state();
-        let mut seen = alloc::vec::Vec::new();
-        for flipped in [
+        let mut seen = Vec::new();
+        let flips = [
             AcceptCookieState {
                 negotiated: NegotiatedExtensions {
                     // The fixture negotiates QoS with a band, so the flip is
@@ -754,6 +781,9 @@ mod tests {
                 },
                 ..state()
             },
+        ];
+        #[cfg(feature = "alloc")]
+        let multilink_flips = [
             AcceptCookieState {
                 multilink: MultilinkAcceptState(None),
                 ..state()
@@ -762,8 +792,13 @@ mod tests {
                 multilink: MultilinkAcceptState(Some((0x9999_AAAA_BBBB_CCCC, vec![0xA5; 69]))),
                 ..state()
             },
-        ] {
-            let wire = encode_accept_cookie(&k, &flipped).expect("encodes");
+        ];
+        // A build with no allocator has one multilink member, `None`, which the
+        // base already holds, so there is no other to flip it to.
+        #[cfg(not(feature = "alloc"))]
+        let multilink_flips: [AcceptCookieState; 0] = [];
+        for flipped in flips.into_iter().chain(multilink_flips) {
+            let wire = mint(&k, &flipped).expect("encodes");
             let back = decode_accept_cookie(&k, &wire).expect("verifies");
             assert_eq!(back, flipped, "the flipped member did not survive");
             assert_ne!(back, base, "flipping a member changed nothing");
@@ -785,7 +820,7 @@ mod tests {
     #[test]
     fn a_correctly_signed_cookie_of_the_wrong_length_is_malformed() {
         let k = key();
-        let wire = encode_accept_cookie(&k, &state()).expect("encodes");
+        let wire = mint(&k, &state()).expect("encodes");
         let payload = &wire[..wire.len() - COOKIE_TAG_BYTES];
         for len in [payload.len() - 1, payload.len() + 1] {
             let mut short = payload.to_vec();
@@ -810,7 +845,7 @@ mod tests {
         let k = key();
         let mut none = state();
         none.multilink = MultilinkAcceptState(None);
-        let wire = encode_accept_cookie(&k, &none).expect("encodes");
+        let wire = mint(&k, &none).expect("encodes");
         let head = &wire[..wire.len() - COOKIE_TAG_BYTES - 1];
         let signed = |tail: &[u8]| {
             let mut p = head.to_vec();
@@ -842,9 +877,17 @@ mod tests {
         some.extend_from_slice(&7u64.to_le_bytes());
         some.extend_from_slice(&2u16.to_le_bytes());
         some.extend_from_slice(&[4, 5]);
+        #[cfg(feature = "alloc")]
         assert_eq!(
             decode_accept_cookie(&k, &signed(&some)).map(|s| s.multilink),
             Ok(MultilinkAcceptState(Some((7, vec![4, 5]))))
+        );
+        // A build with no allocator mints no key, so a key in a cookie it reads
+        // is not one it wrote.
+        #[cfg(not(feature = "alloc"))]
+        assert_eq!(
+            decode_accept_cookie(&k, &signed(&some)).map(|s| s.multilink),
+            Err(CookieError::Malformed)
         );
     }
 }

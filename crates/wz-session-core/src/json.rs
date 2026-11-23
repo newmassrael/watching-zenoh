@@ -160,6 +160,7 @@ pub fn u64_into<W: TextOut + ?Sized>(v: u64, out: &mut W) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_out::FixedText;
 
     /// The boundary is 2^53 - 1, spelled out as the number a JavaScript reader
     /// calls `Number.MAX_SAFE_INTEGER`, not read back from [`MAX_EXACT_INTEGER`]:
@@ -179,9 +180,9 @@ mod tests {
             (i64::MAX as u64 + 1, "\"9223372036854775808\""),
             (u64::MAX, "\"18446744073709551615\""),
         ] {
-            let mut got = String::new();
+            let mut got: FixedText<32> = FixedText::new();
             u64_into(v, &mut got);
-            assert_eq!(got, expected, "writing {v}");
+            assert_eq!(got.finish(), Ok(expected), "writing {v}");
         }
     }
 
@@ -213,51 +214,52 @@ mod tests {
             ("공간/온도", "\"공간/온도\""),
             ("space here", "\"space here\""),
         ] {
-            let mut got = String::new();
+            let mut got: FixedText<64> = FixedText::new();
             escape_into(input, &mut got);
-            assert_eq!(got, expected, "escaping {input:?}");
+            assert_eq!(got.finish(), Ok(expected), "escaping {input:?}");
         }
     }
 
     #[test]
     fn str_array_emits_escaped_comma_joined_brackets() {
-        let mut out = String::new();
+        let mut out: FixedText<64> = FixedText::new();
         push_str_array(["a/b", "c\"d"], &mut out);
-        assert_eq!(out, r#"["a/b","c\"d"]"#);
+        assert_eq!(out.finish(), Ok(r#"["a/b","c\"d"]"#));
     }
 
     #[test]
     fn str_array_empty_is_brackets() {
-        let mut out = String::new();
+        let mut out: FixedText<16> = FixedText::new();
         push_str_array(core::iter::empty::<&str>(), &mut out);
-        assert_eq!(out, "[]");
+        assert_eq!(out.finish(), Ok("[]"));
         // Works over owned String items too (the deny_key_exprs / config shape).
-        let mut owned = String::new();
+        let mut owned: FixedText<16> = FixedText::new();
         push_str_array([String::from("x")], &mut owned);
-        assert_eq!(owned, r#"["x"]"#);
+        assert_eq!(owned.finish(), Ok(r#"["x"]"#));
     }
 
     #[test]
     fn escapes_quote_backslash_newline_and_control_chars() {
         // Quote, backslash, the named whitespace escapes, and a raw control char
         // (U+0001 -> ) all become valid JSON escapes; plain chars pass.
-        let mut out = String::new();
+        let mut out: FixedText<64> = FixedText::new();
         escape_into("q\"b\\n\nt\tc\u{0001}z", &mut out);
-        assert_eq!(out, "\"q\\\"b\\\\n\\nt\\tc\\u0001z\"");
+        assert_eq!(out.finish(), Ok("\"q\\\"b\\\\n\\nt\\tc\\u0001z\""));
     }
 
     #[test]
     fn a_plain_keyexpr_round_trips_unescaped() {
-        let mut out = String::new();
+        let mut out: FixedText<64> = FixedText::new();
         escape_into("mesh/data/**", &mut out);
-        assert_eq!(out, "\"mesh/data/**\"");
+        assert_eq!(out.finish(), Ok("\"mesh/data/**\""));
     }
 
     /// The same bytes go into either sink, so the fixed one is the AP's document
-    /// and not a second encoder that could drift from it.
+    /// and not a second encoder that could drift from it. The `String` sink is
+    /// the heap profile's.
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_fixed_sink_receives_the_bytes_the_string_does() {
-        use crate::text_out::FixedText;
         let mut heap = String::new();
         let mut fixed: FixedText<128> = FixedText::new();
         for out in [
@@ -277,7 +279,7 @@ mod tests {
     /// string between the caller's quotes, no buffer in between.
     #[test]
     fn a_string_written_in_pieces_is_escaped_as_one() {
-        let mut out = String::new();
+        let mut out: FixedText<64> = FixedText::new();
         out.push('"');
         {
             let mut body = JsonStringBody(&mut out);
@@ -287,16 +289,17 @@ mod tests {
             body.push_str("peer");
         }
         out.push('"');
-        let mut whole = String::new();
+        let mut whole: FixedText<64> = FixedText::new();
         escape_into("@/a\"b/peer", &mut whole);
-        assert_eq!(out, whole);
+        assert!(whole.finish().is_ok());
+        assert_eq!(out.finish(), whole.finish());
     }
 
     /// A refusal while writing an escape sequence is the sink's refusal, counted
     /// by it, and the JSON the sink holds is not delivered as complete.
     #[test]
     fn a_fixed_sink_too_small_for_the_escaped_text_refuses_it() {
-        use crate::text_out::{FixedText, Overflow};
+        use crate::text_out::Overflow;
         let mut fixed: FixedText<4> = FixedText::new();
         escape_into("ab", &mut fixed); // 4 bytes: fits exactly
         assert_eq!(fixed.finish(), Ok("\"ab\""));

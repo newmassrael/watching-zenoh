@@ -2954,6 +2954,7 @@ mod tests {
         );
         assert!(!LinkKind::QuicDatagram.is_streamed());
         assert!(!LinkKind::QuicDatagram.is_reliable());
+        #[cfg(feature = "alloc")]
         assert_eq!(
             LinkKind::QuicDatagram.locator_for("127.0.0.1:7447"),
             "quic/127.0.0.1:7447?rel=0",
@@ -2976,6 +2977,7 @@ mod tests {
         );
         assert!(LinkKind::UdpReliable.is_streamed());
         assert!(LinkKind::UdpReliable.is_reliable());
+        #[cfg(feature = "alloc")]
         assert_eq!(
             LinkKind::UdpReliable.locator_for("127.0.0.1:7447"),
             "udp/127.0.0.1:7447?rel=1",
@@ -2983,21 +2985,27 @@ mod tests {
         );
         assert!(!LinkKind::Udp.is_streamed());
         assert!(!LinkKind::Udp.is_reliable());
-        let reliable_udp = LinkSubject {
-            kind: Some(LinkKind::UdpReliable),
-            ..LinkSubject::UNKNOWN
-        };
-        assert!(reliable_udp.matches_protocols(&[InterceptorLink::Udp]));
-        assert!(!reliable_udp.matches_protocols(&[InterceptorLink::Quic]));
 
-        // And a subject derives its protocol from its kind, never alongside it.
-        let subject = LinkSubject {
-            kind: Some(LinkKind::QuicDatagram),
-            ..LinkSubject::UNKNOWN
-        };
-        assert_eq!(subject.protocol(), Some(InterceptorLink::Quic));
-        assert!(subject.matches_protocols(&[InterceptorLink::Quic]));
-        assert!(!subject.matches_protocols(&[InterceptorLink::Udp]));
+        // A rule reads a link through its subject, which the heap profile alone
+        // builds: it matches by the kind's protocol, and it derives that protocol
+        // from its kind, never alongside it.
+        #[cfg(feature = "alloc")]
+        {
+            let reliable_udp = LinkSubject {
+                kind: Some(LinkKind::UdpReliable),
+                ..LinkSubject::UNKNOWN
+            };
+            assert!(reliable_udp.matches_protocols(&[InterceptorLink::Udp]));
+            assert!(!reliable_udp.matches_protocols(&[InterceptorLink::Quic]));
+
+            let subject = LinkSubject {
+                kind: Some(LinkKind::QuicDatagram),
+                ..LinkSubject::UNKNOWN
+            };
+            assert_eq!(subject.protocol(), Some(InterceptorLink::Quic));
+            assert!(subject.matches_protocols(&[InterceptorLink::Quic]));
+            assert!(!subject.matches_protocols(&[InterceptorLink::Udp]));
+        }
     }
 
     /// A home of two slots that counts their references and records which slot

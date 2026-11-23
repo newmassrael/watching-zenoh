@@ -1072,24 +1072,24 @@ pub fn absorb_keyexpr_into(table: &mut HashMap<u64, String>, declare: &DeclareOw
     }
 }
 
+/// The rule of the mapping bit as the forms that compose into a bounded buffer
+/// read it, over the static policy's table: what a build with no allocator
+/// resolves with, and the same tables in every build.
 #[cfg(test)]
-mod mapping_bit_tests {
+mod bounded_space_tests {
     use super::*;
+    use crate::bounded::InlineKeys;
     use crate::codec_owned::owned_string;
+    use crate::id_map::key_text_as;
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 
-    /// The peer's space, with ONE entry. Every test below asks about id `7`,
-    /// which this table HAS — so a wrong-space read cannot fail by accident.
-    fn peer_space() -> HashMap<u64, String> {
-        let mut t = HashMap::new();
-        t.insert(7, "peers/space/temp".to_string());
-        t
-    }
-
     /// `M=1` — the id names the SENDER's space, which on an inbound message is
-    /// the peer's. This is the arm that was always correct.
-    fn sender_mapped(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
+    /// the peer's.
+    pub(super) fn sender_mapped(
+        id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> WireexprOwnedVariant {
         WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id,
             suffix_len: suffix.map(|s| s.len() as u64),
@@ -1098,12 +1098,132 @@ mod mapping_bit_tests {
     }
 
     /// `M=0` — the id names the RECEIVER's space, i.e. ours.
-    fn receiver_mapped(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireexprOwnedVariant {
+    pub(super) fn receiver_mapped(
+        id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+    ) -> WireexprOwnedVariant {
         WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
             id,
             suffix_len: suffix.map(|s| s.len() as u64),
             suffix: suffix.map(owned_string).transpose().expect("suffix fits"),
         })
+    }
+
+    /// A static table holding `literal` under id `7`, the id every test here
+    /// asks about, so a read out of the wrong table finds the other literal.
+    fn table_of(literal: &str) -> PeerAliases<Static> {
+        let mut table: PeerAliases<Static> = FixedIdMap::new();
+        let key = key_text_as::<Static>(&InlineKeys, literal).expect("the key fits a row");
+        table
+            .bind(crate::wire_id::peer_key(7), key)
+            .expect("the table has room");
+        table
+    }
+
+    #[test]
+    fn each_mapping_bit_resolves_in_its_own_space() {
+        let (peer, ours) = (table_of("peers/space/temp"), table_of("ours/space/temp"));
+        let own = MappingSpaces::from(&ours).peer();
+        let spaces = MappingSpaces::from(&peer).with_own_space(&own);
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolve_wireexpr_into(&sender_mapped(7, None), spaces, &mut out),
+            Ok(Some("peers/space/temp"))
+        );
+        assert_eq!(
+            resolve_wireexpr_into(&receiver_mapped(7, None), spaces, &mut out),
+            Ok(Some("ours/space/temp")),
+            "M=0 names OUR space; the peer's literal here is the wrong-space read"
+        );
+        assert_eq!(
+            resolve_wireexpr_into(&sender_mapped(7, Some("/in")), spaces, &mut out),
+            Ok(Some("peers/space/temp/in"))
+        );
+        assert_eq!(
+            resolve_wireexpr_into(&receiver_mapped(7, Some("/in")), spaces, &mut out),
+            Ok(Some("ours/space/temp/in"))
+        );
+    }
+
+    #[test]
+    fn without_an_own_space_m0_refuses_and_a_literal_reads_no_space() {
+        let peer = table_of("peers/space/temp");
+        let spaces = MappingSpaces::from(&peer);
+        assert!(!spaces.has_own());
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolve_wireexpr_into(&receiver_mapped(7, None), spaces, &mut out),
+            Ok(None),
+            "id 7 IS in the peer's table; reading it for M=0 is the defect"
+        );
+        assert_eq!(
+            resolve_wireexpr_into(&sender_mapped(7, None), spaces, &mut out),
+            Ok(Some("peers/space/temp"))
+        );
+        assert_eq!(
+            resolve_wireexpr_into(&sender_mapped(9, None), spaces, &mut out),
+            Ok(None),
+            "an id the peer never declared"
+        );
+        for literal in [
+            sender_mapped(0, Some("home/temp")),
+            receiver_mapped(0, Some("home/temp")),
+        ] {
+            assert_eq!(
+                resolve_wireexpr_into(&literal, spaces, &mut out),
+                Ok(Some("home/temp"))
+            );
+        }
+    }
+
+    /// The declared scope, whose space the wire does not name: it binds where
+    /// one space knows it or both agree, and nothing where they disagree.
+    #[test]
+    fn a_declared_scope_binds_only_where_the_spaces_cannot_disagree() {
+        let (peer, ours) = (table_of("peers/space/temp"), table_of("ours/space/temp"));
+        let agreeing = table_of("peers/space/temp");
+        let empty: PeerAliases<Static> = FixedIdMap::new();
+        let (own, same) = (
+            MappingSpaces::from(&ours).peer(),
+            MappingSpaces::from(&agreeing).peer(),
+        );
+        let mut out = KeyexprBuf::new();
+
+        let only_ours = MappingSpaces::from(&empty).with_own_space(&own);
+        assert_eq!(
+            resolve_declared_keyexpr_into(&sender_mapped(7, Some("/inner")), only_ours, &mut out),
+            Ok(Some("ours/space/temp/inner"))
+        );
+        let only_theirs = MappingSpaces::from(&peer);
+        assert_eq!(
+            resolve_declared_keyexpr_into(&receiver_mapped(7, None), only_theirs, &mut out),
+            Ok(Some("peers/space/temp"))
+        );
+        let disagreeing = MappingSpaces::from(&peer).with_own_space(&own);
+        assert_eq!(
+            resolve_declared_keyexpr_into(&sender_mapped(7, None), disagreeing, &mut out),
+            Ok(None)
+        );
+        let both_agree = MappingSpaces::from(&peer).with_own_space(&same);
+        assert_eq!(
+            resolve_declared_keyexpr_into(&sender_mapped(7, Some("/x")), both_agree, &mut out),
+            Ok(Some("peers/space/temp/x"))
+        );
+    }
+}
+
+/// The heap profile's forms, which answer a `String` out of `HashMap` tables.
+#[cfg(all(test, feature = "alloc"))]
+mod mapping_bit_tests {
+    use super::bounded_space_tests::{receiver_mapped, sender_mapped};
+    use super::*;
+
+    /// The peer's space, with ONE entry. Every test below asks about id `7`,
+    /// which this table HAS — so a wrong-space read cannot fail by accident.
+    fn peer_space() -> HashMap<u64, String> {
+        let mut t = HashMap::new();
+        t.insert(7, "peers/space/temp".to_string());
+        t
     }
 
     /// THE DISCRIMINATOR. Id `7` is present in the peer's table, so the only

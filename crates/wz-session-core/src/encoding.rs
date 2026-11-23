@@ -269,6 +269,7 @@ mod tests {
 
     /// The named constants pack the right wire id (`id << 1`, no schema) — the
     /// six the §5.19 atoms name.
+    #[cfg(feature = "alloc")]
     #[test]
     fn named_constants_pack_the_predefined_id() {
         assert_eq!(EncodingHint::ZENOH_BYTES.packed_id, 0); // id 0 << 1
@@ -297,6 +298,7 @@ mod tests {
 
     /// A known MIME parses to its predefined id (no schema); the `to_mime` inverse
     /// reproduces the string.
+    #[cfg(feature = "alloc")]
     #[test]
     fn from_to_mime_known() {
         let e = encoding_from_mime("application/json");
@@ -305,6 +307,7 @@ mod tests {
     }
 
     /// A known MIME WITH a schema suffix splits the schema off and sets the bit.
+    #[cfg(feature = "alloc")]
     #[test]
     fn from_to_mime_known_with_schema() {
         let e = encoding_from_mime("application/json;utf-8");
@@ -316,11 +319,44 @@ mod tests {
 
     /// An UNKNOWN MIME falls back to the custom id carrying the whole string as
     /// the schema, and round-trips verbatim.
+    #[cfg(feature = "alloc")]
     #[test]
     fn from_to_mime_unknown_is_custom() {
         let e = encoding_from_mime("custom/format;v1");
         assert_eq!(e.id(), ID_CUSTOM);
         assert_eq!(e.schema_text(), Some("custom/format;v1"));
         assert_eq!(encoding_to_mime(&e), "custom/format;v1");
+    }
+
+    /// The borrowed parts every profile parses and renders with: a known MIME
+    /// is its packed id, a schema suffix sets the bit and is split off, an
+    /// unknown MIME is the custom id carrying the whole string, and each one
+    /// renders back to the text it was parsed from.
+    #[test]
+    fn the_borrowed_parts_parse_and_render_back_to_the_mime() {
+        use crate::text_out::FixedText;
+        let cases: [(&str, u32, Option<&str>); 3] = [
+            ("application/json", PACKED_APPLICATION_JSON, None),
+            (
+                "application/json;utf-8",
+                PACKED_APPLICATION_JSON | 1,
+                Some("utf-8"),
+            ),
+            (
+                "custom/format;v1",
+                packed_no_schema(ID_CUSTOM) | 1,
+                Some("custom/format;v1"),
+            ),
+        ];
+        for (mime, packed_id, schema) in cases {
+            assert_eq!(
+                encoding_parts_from_mime(mime),
+                (packed_id, schema),
+                "{mime}"
+            );
+            let mut out: FixedText<64> = FixedText::new();
+            write_encoding_mime_parts(packed_id, schema, &mut out);
+            assert_eq!(out.finish(), Ok(mime));
+        }
     }
 }

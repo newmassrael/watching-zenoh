@@ -1056,6 +1056,7 @@ fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     /// A session's zid makes the same identity the checked constructor does, at both ends
     /// of the range, and a shorter zid with the same leading bytes is another identity.
@@ -1107,6 +1108,7 @@ mod tests {
         assert_eq!(SampleKind::Del as u8, 1);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn new_put_carries_keyexpr_and_payload_and_defaults() {
         let sample = Sample::new_put("home/temp", b"23.5".to_vec());
@@ -1121,6 +1123,7 @@ mod tests {
         assert_eq!(sample.reliability, Reliability::Reliable);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn new_del_carries_empty_payload_and_defaults() {
         let sample = Sample::new_del("home/temp");
@@ -1143,6 +1146,7 @@ mod tests {
         assert_eq!(Reliability::BestEffort as u8, 0);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn with_setters_chain_through_metadata_fields() {
         let sample = Sample::new_put("topic/a", b"data".to_vec())
@@ -1247,6 +1251,7 @@ mod tests {
         assert_eq!(info.sn, 7);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn timestamp_hint_from_codec_round_trips_fields() {
         let codec: wz_codecs::timestamp::TimestampOwned = wz_codecs::timestamp::TimestampOwned {
@@ -1259,6 +1264,7 @@ mod tests {
         assert_eq!(hint.zid, vec![1, 2, 3, 4]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn encoding_hint_from_codec_round_trips_fields() {
         let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
@@ -1271,6 +1277,7 @@ mod tests {
         assert_eq!(hint.schema.as_deref(), Some(&b"text"[..]));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn encoding_hint_from_codec_preserves_absent_schema() {
         let codec: wz_codecs::encoding::EncodingOwned = wz_codecs::encoding::EncodingOwned {
@@ -1449,6 +1456,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn sample_priority_derives_from_qos_ext_else_default() {
         let s = Sample::new_put("k", b"v".to_vec()).with_qos(QosLevel::from_parts(
@@ -1464,6 +1472,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn sample_clone_preserves_all_metadata() {
         let original = Sample::new_put("topic/b", b"v1".to_vec())
@@ -1658,8 +1667,10 @@ mod tests {
 
     /// A view that borrows its attachment and holds nothing shareable, as a view
     /// over loose bytes does.
+    #[cfg(feature = "alloc")]
     struct LooseAttachment<'a>(&'a [u8]);
 
+    #[cfg(feature = "alloc")]
     impl crate::sink::SampleView for LooseAttachment<'_> {
         fn keyexpr(&self) -> &str {
             "k"
@@ -1701,6 +1712,7 @@ mod tests {
 
     /// A view that only borrows its attachment has nothing to share, so retaining
     /// it copies, as every retention did before the attachment could be shared.
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_kept_sample_copies_the_attachment_a_loose_view_borrows() {
         let bytes = b"loose".to_vec();

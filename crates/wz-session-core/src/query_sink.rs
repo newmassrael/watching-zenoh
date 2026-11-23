@@ -1114,14 +1114,14 @@ mod tests {
                 keyexpr: "robot/**",
                 parameters: Some(b"p=1"),
                 attachment: None,
-                #[cfg(feature = "alloc")]
+                #[cfg(feature = "storage-profile")]
                 source_info: None,
                 payload: None,
                 #[cfg(feature = "alloc")]
                 encoding: None,
                 rid: 42,
                 is_local: false,
-                #[cfg(feature = "alloc")]
+                #[cfg(feature = "storage-profile")]
                 qos: crate::sample::QosLevel::DEFAULT,
             },
             &mut out,
@@ -1150,14 +1150,14 @@ mod tests {
             keyexpr: "robot/**",
             parameters: None,
             attachment: None,
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             source_info: None,
             payload: None,
             #[cfg(feature = "alloc")]
             encoding: None,
             rid: 7,
             is_local: false,
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             qos: crate::sample::QosLevel::DEFAULT,
         };
         let mut sink = Who([None; 2], 0);
@@ -1222,14 +1222,14 @@ mod tests {
             keyexpr: "robot/arm",
             parameters: None,
             attachment: None,
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             source_info: None,
             payload: None,
             #[cfg(feature = "alloc")]
             encoding: None,
             rid: 9,
             is_local: false,
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "storage-profile")]
             qos: crate::sample::QosLevel::DEFAULT,
         };
         let mut out = CountingReplyOut::default();
