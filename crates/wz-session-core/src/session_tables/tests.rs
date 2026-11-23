@@ -747,7 +747,7 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert_eq!(tables.epoch(), 0);
     assert_eq!(tables.next_subscription_id(), 1);
     let any = tables
-        .declare_subscriber("a/*", Locality::Any, KeyForm::default(), Counted::default())
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
     let remote = tables
         .declare_subscriber(
@@ -768,11 +768,11 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert_eq!(
         seen,
         std::vec![
-            (u64::from(any.id), "a/*".into(), Locality::Any),
+            (u64::from(any.id), "a/b".into(), Locality::Any),
             (u64::from(remote.id), "a/b".into(), Locality::Remote),
         ]
     );
-    assert!(tables.has_local_matching("a/c"));
+    assert!(tables.has_local_matching("a/b"));
     assert!(!tables.has_local_matching("b"));
     let count = |sink: &mut Counted| sink.0 += 1;
     assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
@@ -787,7 +787,10 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     let _ = tables.undeclare_subscriber(any.handle);
     assert_eq!(tables.epoch(), 3);
-    assert!(!tables.has_local_matching("a/c"));
+    assert!(
+        !tables.has_local_matching("a/b"),
+        "the subscriber of peers only is no local match"
+    );
 }
 
 /// How many samples the subscriber `handle` names was handed.
