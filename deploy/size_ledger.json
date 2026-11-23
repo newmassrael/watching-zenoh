@@ -13,13 +13,13 @@
     {"id": "language", "title": "language support (Rust core, alloc and drop glue; zenoh-pico's collections, buffers and utilities)"}
   ],
   "rows": {
-    "sessions": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "doors": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "transport": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "driver": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "keyexpr": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "codec": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null},
-    "language": {"ratio_at_most": null, "debt": "debt-pico-host-size-ceiling", "reading": null}
+    "sessions": {"ratio_at_most": 3.3655, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 106679, "pico_text": 31698, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "doors": {"ratio_at_most": 3.8994, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 81938, "pico_text": 21013, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "transport": {"ratio_at_most": 4.0684, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 59976, "pico_text": 14742, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "driver": {"ratio_at_most": 2.0604, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 38659, "pico_text": 18763, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "keyexpr": {"ratio_at_most": 1.1583, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 15003, "pico_text": 12953, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "codec": {"ratio_at_most": 1.0967, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 39908, "pico_text": 36390, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+    "language": {"ratio_at_most": 1.0575, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-23", "wz_text": 36949, "pico_text": 34941, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
   },
   "rules": {
     "wz": {
