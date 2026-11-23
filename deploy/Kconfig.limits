@@ -520,6 +520,21 @@ config WZ_LIMIT_MAX_ACCEPT_PENDING
 	  memory when it opens, so that a link past either bound can be taken off its
 	  port and closed, and a session may lower this and never raise it.
 
+config WZ_LIMIT_RX_POOL_BUFFERS
+	int "RX_POOL_BUFFERS"
+	range 1 4294967295
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  How many receive buffers, each of the batch a session advertises, the links of a
+	  session share when its engine lends their buffers from the session's memory at
+	  open. A link holds one only while it holds part of a batch the stream has not
+	  finished, or a batch or datagram it was asked to keep; it reads into a free one
+	  otherwise. A link that finds none free reads nothing until one is: what its peer
+	  sent waits in the network stack, and nothing is lost. A pool larger than the
+	  links a session may hold is held to them. At least 1; a session may lower it and
+	  never raise it.
+
 config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
 	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 	default 32 if WZ_LIMITS_ZENOH_PICO

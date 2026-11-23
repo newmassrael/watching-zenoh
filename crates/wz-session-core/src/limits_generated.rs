@@ -706,6 +706,28 @@ const _: LimitDomain = MaxAcceptPending::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxAcceptPendingHeld = Limited<MaxAcceptPending, { MaxAcceptPending::HELD }>;
 
+/// `RX_POOL_BUFFERS`: How many receive buffers, each of the batch a session advertises, the
+/// links of a session share when its engine lends their buffers from the session's memory
+/// at open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RxPoolBuffers;
+
+impl LimitSpec for RxPoolBuffers {
+    type Value = usize;
+    const LIMIT: &'static str = "RX_POOL_BUFFERS";
+    const DRIVEN: Option<Driven> = None;
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = lent_capacity(caps::RX_POOL_BUFFERS);
+    const DOMAIN: LimitDomain =
+        LimitDomain::of_parameter(1, 4294967295, Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: usize = caps::RX_POOL_BUFFERS;
+}
+
+const _: LimitDomain = RxPoolBuffers::DOMAIN;
+
+/// How `RX_POOL_BUFFERS` is held: in no byte when its domain is one value.
+pub type RxPoolBuffersHeld = Limited<RxPoolBuffers, { RxPoolBuffers::HELD }>;
+
 /// `SESSION_MAX_PEER_KEYEXPR_ALIASES`: The key expressions all the peers of a session may
 /// have declared to it at a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1612,6 +1634,8 @@ pub struct SessionLimits {
     max_faces: MaxFacesHeld,
     /// `MAX_ACCEPT_PENDING`.
     max_accept_pending: MaxAcceptPendingHeld,
+    /// `RX_POOL_BUFFERS`.
+    rx_pool_buffers: RxPoolBuffersHeld,
     /// `SESSION_MAX_PEER_KEYEXPR_ALIASES`.
     session_max_peer_keyexpr_aliases: SessionMaxPeerKeyexprAliasesHeld,
     /// `SESSION_MAX_REMOTE_DECLS`.
@@ -1707,6 +1731,7 @@ impl SessionLimits {
             max_multicast_replies: Limited::build_default(),
             max_faces: Limited::build_default(),
             max_accept_pending: Limited::build_default(),
+            rx_pool_buffers: Limited::build_default(),
             session_max_peer_keyexpr_aliases: Limited::build_default(),
             session_max_remote_decls: Limited::build_default(),
             session_max_inbound_sub_interests: Limited::build_default(),
@@ -2261,6 +2286,23 @@ impl SessionLimits {
     /// Selects `MAX_ACCEPT_PENDING`, when the build's domain holds `value`.
     pub fn select_max_accept_pending(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_accept_pending = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `RX_POOL_BUFFERS` as this snapshot holds it.
+    pub const fn rx_pool_buffers(&self) -> usize {
+        self.rx_pool_buffers.get()
+    }
+
+    /// `RX_POOL_BUFFERS` as the snapshot keeps it, for a machine that keeps the value beside
+    /// its own state: in no byte where the build allows one value.
+    pub const fn rx_pool_buffers_held(&self) -> RxPoolBuffersHeld {
+        self.rx_pool_buffers
+    }
+
+    /// Selects `RX_POOL_BUFFERS`, when the build's domain holds `value`.
+    pub fn select_rx_pool_buffers(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
+        self.rx_pool_buffers = Limited::select(value)?;
         Ok(())
     }
 
@@ -3144,6 +3186,16 @@ impl LimitField<SessionLimits> for MaxAcceptPending {
     }
 }
 
+impl LimitField<SessionLimits> for RxPoolBuffers {
+    fn select_in(snapshot: &mut SessionLimits, value: usize) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_rx_pool_buffers(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> usize {
+        snapshot.rx_pool_buffers()
+    }
+}
+
 impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_session_max_peer_keyexpr_aliases(value)
@@ -3445,7 +3497,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 59;
+pub const SESSION_LIMIT_COUNT: usize = 60;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -3479,6 +3531,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxMulticastReplies>(),
     LimitEntry::of::<MaxFaces>(),
     LimitEntry::of::<MaxAcceptPending>(),
+    LimitEntry::of::<RxPoolBuffers>(),
     LimitEntry::of::<SessionMaxPeerKeyexprAliases>(),
     LimitEntry::of::<SessionMaxRemoteDecls>(),
     LimitEntry::of::<SessionMaxInboundSubInterests>(),
