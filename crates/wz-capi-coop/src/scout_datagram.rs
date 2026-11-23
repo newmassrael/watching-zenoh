@@ -30,19 +30,16 @@ use wz_session_core::scouting_host::{
 };
 use wz_session_core::session_zid::SessionZid;
 
-use crate::prelude::*;
-
 /// How long one wait for a Hello lasts before the window reads its clock again: a few
 /// milliseconds, so the window answers a Hello at once and ends close to its budget without
 /// spinning, as the host's window sleeps between reads.
 const READ_WAIT_MS: c_int = 2;
 
-/// Scout `group` for `budget_ms` over a socket of `U`, reading each datagram into a buffer of
-/// `rx_capacity` bytes (zenoh-pico reads a scout into one of its multicast batch size), record each
-/// peer that answered in `table`, the caller's, where it keeps the scout's state, and lend each to
-/// `on_hello` as the table holds it, in the order upstream delivers them (after the window,
-/// last responder first). The number delivered; a socket that cannot be opened is a window nobody
-/// answers, `0`.
+/// Scout `group` for `budget_ms` over a socket of `U`, reading each datagram into `buffer`
+/// (zenoh-pico reads a scout into one of its multicast batch size), record each peer that answered
+/// in `table`, both the caller's, where it keeps the scout's state, and lend each to `on_hello` as
+/// the table holds it, in the order upstream delivers them (after the window, last responder
+/// first). The number delivered; a socket that cannot be opened is a window nobody answers, `0`.
 ///
 /// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
 /// ABI's to refuse before it scouts.
@@ -53,8 +50,8 @@ pub fn run_scout<U, C>(
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
-    rx_capacity: usize,
     table: &mut HelloTable,
+    buffer: &mut [u8],
     on_hello: impl FnMut(&HelloRow),
 ) -> usize
 where
@@ -67,21 +64,22 @@ where
         timeout_ms: budget_ms,
         exit_on_first: false,
     };
-    window::<U, C>(clock, group, params, rx_capacity, table);
+    window::<U, C>(clock, group, params, table, buffer);
     deliver_rows_in_upstream_order(table, on_hello)
 }
 
 /// Scout `group` for `budget_ms` and answer the FIRST node that replies, or `None` when none does
 /// in the window: zenoh-pico's open-time lookup, which `_z_open` runs when its config names no
-/// locator. `table` is where the window records it, as [`run_scout`]'s.
+/// locator. `table` is where the window records it and `buffer` what it reads into, as
+/// [`run_scout`]'s.
 pub fn scout_first<U, C>(
     clock: &C,
     group: SocketAddr,
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
-    rx_capacity: usize,
     table: &mut HelloTable,
+    buffer: &mut [u8],
 ) -> Option<ScoutedHello>
 where
     U: DatagramSocket,
@@ -93,7 +91,7 @@ where
         timeout_ms: budget_ms,
         exit_on_first: true,
     };
-    window::<U, C>(clock, group, params, rx_capacity, table);
+    window::<U, C>(clock, group, params, table, buffer);
     table.first().map(HelloRow::to_hello)
 }
 
@@ -104,15 +102,16 @@ fn scout_bind(group: SocketAddr) -> SocketAddr {
     SocketAddr::new(unspecified_like(group.ip()), 0)
 }
 
-/// One window: the Scout sent once, every datagram that arrives read until the machine resolves,
-/// and the Hellos recorded in `table`. A read that fails ends the window with what it has, as a
-/// lost member does in the host's window.
+/// One window: the Scout sent once, every datagram that arrives read into `buffer` until the
+/// machine resolves, and the Hellos recorded in `table`. A read that fails ends the window with
+/// what it has, as a lost member does in the host's window. Its own state lies in this frame's
+/// place: the window makes no allocation.
 fn window<U, C>(
     clock: &C,
     group: SocketAddr,
     params: ScoutParams,
-    rx_capacity: usize,
     table: &mut HelloTable,
+    buffer: &mut [u8],
 ) where
     U: DatagramSocket,
     C: ClockSource + Clone + 'static,
@@ -120,8 +119,8 @@ fn window<U, C>(
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
     let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
-    // SAFETY: `table` outlives the place, which this frame drops before it returns, and nothing
-    // else reaches it while the window is pumped.
+    // SAFETY: `table` outlives the place, which this frame drops before it returns, nothing else
+    // reaches it while the window is pumped, and the window is pumped where the place holds it.
     let window = unsafe { place.build_over(params, table) };
     let Ok(socket) = U::bind(scout_bind(group)) else {
         return;
@@ -132,12 +131,11 @@ fn window<U, C>(
     // The start is read rounded UP to the millisecond, as the host's window reads it, so the
     // window stays open for at least its budget.
     window.sent(clock.now_us().div_ceil(1000), sent);
-    let mut buffer = vec![0u8; rx_capacity.max(1)];
     while !window.resolved() {
         socket.wait_readable(READ_WAIT_MS);
         let mut lost = false;
         while !window.resolved() {
-            match socket.try_recv(&mut buffer) {
+            match socket.try_recv(buffer) {
                 Ok(Some((len, _from))) => window.datagram(&buffer[..len]),
                 Ok(None) => break,
                 Err(_) => {
@@ -192,7 +190,11 @@ mod tests {
         assert!(in_place.resolved() && by_value.resolved());
         assert_eq!(in_place.outcome(), ScoutOutcome::TimedOut);
         assert_eq!(by_value.outcome(), ScoutOutcome::TimedOut);
-        let actions = Arc::clone(in_place.actions());
+        let actions = Arc::clone(
+            in_place
+                .shared_actions()
+                .expect("a window built over its params shares its state"),
+        );
         let held = Arc::strong_count(&actions);
         drop(place);
         assert!(
