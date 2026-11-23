@@ -383,6 +383,17 @@ cannot fail. That is a change to SCE, reviewed by an SCE session, and a pin move
 leaves with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
+TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
+whose error is fixed to `CodecError` whatever buffer is under it, so a `Vec` that cannot refuse
+still answers a `Result` its type does not rule out. The fix is that the buffer names its error:
+`TxBuf` gets an associated `Error` and `TxSink<B>` answers `B::Error`, so a `Vec` sink is
+`Infallible` and a lent slot's stays `CodecError`. The lending build's `dyn TxBuf` becomes
+`dyn TxBuf<Error = CodecError>`, with an adapter for the `Vec` it is sometimes given. It moves
+`tx_buf`, `tx_lease`, `frame_encode`, `encoded_push`, `ext_chain`, `handshake_encode`,
+`multicast_tx` and `session_actions`, and the slot buffers of the cooperative crates, so it is
+made after the branches restructuring those land; the same `expect` in `encoded_push` leaves
+with it.
+
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
 which guards the unsafe move). Its value form, `Option<T>`, moves the callers in the cooperative
