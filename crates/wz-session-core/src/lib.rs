@@ -200,6 +200,17 @@ pub mod key_arena;
 #[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod row_pool;
 
+/// Fixed-capacity slot maps: rows named by generation-checked handles, pinned while a call of
+/// what they own runs, kept as the storage policy keeps a table. Unconditional, like [`bounded`];
+/// a build that holds no slot map links none of it.
+pub mod slot_map;
+
+/// The session's one table set (`docs/c-abi-l3-tables.md`): its key expression declarations,
+/// entities, Interests, write filters, matching listeners and pending gets, each in one row of one
+/// [`slot_map::SlotMap`]. Unconditional, like [`slot_map`]; no engine drives it yet, so no build
+/// links it.
+pub mod session_tables;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.

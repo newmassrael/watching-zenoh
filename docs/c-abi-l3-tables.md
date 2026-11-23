@@ -106,8 +106,9 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   shared Rust `Fn`, chosen once per build by `RowCallbacks`). A delivery pins the row it calls
   (`pin_subscriber`); undeclaring a pinned row retires it: the row leaves every lookup and
   iteration at once, keeps its slot and its generation, and is handed back by the last
-  `unpin_*`, which is where its `drop` runs, after the last call. The undeclaring caller waits
-  for that hand-back, as zenoh-pico's undeclare waits for the entity's lock.
+  `unpin_*`, which is where its `drop` runs, after the last call. The undeclaring caller returns
+  only once `holds_slot(handle)` of the row's table is false, so after the last call and the
+  drop, as zenoh-pico's undeclare waits for the entity's lock.
 
 ## 4. The API
 
@@ -143,6 +144,7 @@ fn liveliness_subscribers_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
 fn tokens_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
 fn pin_subscriber(&mut self, h: SubscriberHandle) -> Option<Pinned<kind::Subscriber>>;
 fn unpin_subscriber(&mut self, p: Pinned<kind::Subscriber>) -> Option<Subscriber<F, P>>;
+fn holds_slot(&self, h: Handle<K>) -> bool; // on each table: the undeclare's wait
 ```
 
 `PeerDeclarations` is what the tables ask of the faces: whether any face's peer declared an
