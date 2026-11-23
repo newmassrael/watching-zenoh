@@ -33,7 +33,7 @@
 
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, LendRefused, Lent};
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
@@ -180,6 +180,18 @@ impl FaceTables {
     }
 }
 
+/// The most sets of face tables a session holds: one for each face the build admits besides the
+/// dial role's, the dial role's, and one for each group a session's tasks can hold.
+const MAX_SETS: usize = wz_session_core::caps::MAX_FACES + 1 + wz_session_core::caps::MAX_TASKS;
+
+/// The bytes of one set of face tables, a row of the arena's table of them
+/// (`crate::arena::ArenaPlan`).
+pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
+
+/// A face past the sets the open lent: the session refuses it as one past `max_faces`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FacesFull;
+
 /// A set a face holds: where it lies among the registry's sets, and the face. An entry is two
 /// words, so a walk over the faces reads one line of the index for every few faces and then the
 /// held sets alone, where a test of each set would read a line of every set the open lent.
@@ -317,16 +329,12 @@ pub(super) struct Registry {
     /// The session's pools of what its peers write by their own choice, which every face's tables
     /// keep those rows in: a face past the sets the open lent is handed them as a lent set's is.
     pools: PeerPools,
-    /// Every set of face tables, each where it was built and never moved from: the sets the arena
-    /// lent at the open, the dial role's face's first and always held by it, then any set of no
-    /// rows made for a face that came when every lent set was held, which refuses every get and
-    /// everything the peer would have it stage, and holds what the peer declares as any set does,
-    /// each row in the session's pools and each key in its key arena. The arena lends a set for each
-    /// face the config
-    /// admits and a face past those is refused before it comes, so no face is expected in a set
-    /// of no rows; the session's memory is the arena alone either way. A set no face holds is
-    /// kept, emptied, for the next face.
-    sets: Vec<FaceTables>,
+    /// Every set of face tables, each where it was built and never moved from, in a table the arena
+    /// lent at the open with a row for each face the config admits: the dial role's face's first
+    /// and always held by it, then the faces to come. A face past them is refused
+    /// ([`FacesFull`]), so the session's memory is the arena alone. A set no face holds is kept,
+    /// emptied, for the next face.
+    sets: BoundedVec<FaceTables, MAX_SETS, Lent>,
     /// The sets faces hold, each with its face, in the order of `sets`, which is the order of the
     /// faces: the dial role's face first. Every walk over the faces and every lookup of one reads
     /// this and the held sets alone; the open lends a set for each face the config admits, most of
@@ -340,11 +348,7 @@ pub(super) struct Registry {
     /// of one face, whose one face never goes. A session of no face besides the dial role's (a
     /// build without `listen` and `group`) removes none, and keeps no table of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    owed: wz_session_core::bounded::BoundedVec<
-        OwedTokens,
-        { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS },
-        Lent,
-    >,
+    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, Lent>,
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
@@ -408,8 +412,8 @@ impl Registry {
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
-        let mut sets = Vec::with_capacity(peers.tables.max(1));
-        let mut held = Vec::with_capacity(sets.capacity());
+        let mut sets = arena.lend(peers.tables.max(1))?;
+        let mut held = Vec::with_capacity(peers.tables.max(1));
         lend_set(
             &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
         )?;
@@ -572,24 +576,22 @@ impl Registry {
         self.face_mut(id).map(|face| &mut face.gets)
     }
 
-    /// Tables for a face that has come: empty, as its peer has said nothing yet, a set the arena
-    /// lent that no face holds where there is one, or else a set of no rows (one a face past the
-    /// plan left, or a new one).
-    pub(super) fn add_face(&mut self, id: FaceId) {
-        self.writing();
+    /// Tables for a face that has come: a set the arena lent that no face holds, empty, as its
+    /// peer has said nothing yet. [`FacesFull`] when every set is held: the open lent one for each
+    /// face the config admits, so the session refuses such a face before it comes.
+    pub(super) fn add_face(&mut self, id: FaceId) -> Result<(), FacesFull> {
         let at = self.free_set();
-        if at == self.sets.len() {
-            // A face past the plan shares the pools of a session of many faces; one face's own
-            // spans went to the dial face's tables, so a face past it is handed nothing and holds
-            // what its peer writes in nothing.
-            push_rowless(&mut self.sets, self.keys, &mut self.pools, &self.limits);
+        if at >= self.sets.len() {
+            return Err(FacesFull);
         }
+        self.writing();
         let place = self
             .held
             .iter()
             .position(|held| held.at > at)
             .unwrap_or(self.held.len());
         self.held.insert(place, HeldSet { at, id });
+        Ok(())
     }
 
     /// The first set no face holds, or the place past the last set. The lent sets lie first, so
@@ -1074,38 +1076,32 @@ impl Registry {
     }
 }
 
-/// Write a set of no rows at the end of `sets`, in the storage the vector keeps it in, held to
-/// `limits`, its peer's keys kept in `keys`, the session's key arena, and what its peer writes in
-/// the rows `pools`, the session's, hands it, and hand it back: a set is never a value of its own
-/// in this frame. No set is without the key arena, whatever its rows (a lent one, or one of no rows
-/// for a face past the plan). A set `pools` hands nothing, a face past a session of one face whose
-/// own spans went to the dial face, drops and counts every declaration of its peer.
+/// Write a set of no rows in the next row of `sets`, held to `limits`, its peer's keys kept in
+/// `keys`, the session's key arena, and what its peer writes in the rows `pools`, the session's,
+/// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
+/// `sets` holds every row it was lent.
 fn push_rowless<'s>(
-    sets: &'s mut Vec<FaceTables>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_SETS, Lent>,
     keys: KeySpace,
     pools: &mut PeerPools,
     limits: &SessionLimits,
-) -> &'s mut FaceTables {
-    sets.reserve(1);
-    let at = sets.len();
-    // SAFETY: `reserve` left room for at least one set past the length, which is the first cell of
-    // the spare capacity; `rowless_in` writes a whole set there and cannot unwind, so the length may
-    // count it.
-    unsafe {
-        FaceTables::rowless_in(&mut sets.spare_capacity_mut()[0], limits);
-        sets.set_len(at + 1);
-    }
-    let set = &mut sets[at];
+) -> Option<&'s mut FaceTables> {
+    // SAFETY: `rowless_in` writes a whole set into the row it is handed and cannot unwind.
+    let set = unsafe {
+        sets.push_in_place(|place| {
+            FaceTables::rowless_in(place, limits);
+        })
+    }?;
     set.peer.keep_keys_in(LentKeys::from(keys));
     set.peer.keep_rows_in(pools);
-    set
+    Some(set)
 }
 
 /// Write a set at the end of `sets` and lend it its rows there, `gets` and `peer` of them from
 /// `arena`, the peer's keys kept in `keys` and what it writes in `pools`, held to `limits`. A
 /// refused set stays in `sets`, whole, and goes with it.
 fn lend_set(
-    sets: &mut Vec<FaceTables>,
+    sets: &mut BoundedVec<FaceTables, MAX_SETS, Lent>,
     arena: &mut Arena,
     keys: KeySpace,
     pools: &mut PeerPools,
@@ -1113,7 +1109,12 @@ fn lend_set(
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, keys, pools, limits).lend(arena, keys, pools, gets, peer, limits)
+    let at = sets.len();
+    let set = push_rowless(sets, keys, pools, limits).ok_or(LendRefused::OverCeiling {
+        rows: at.saturating_add(1),
+        ceiling: at,
+    })?;
+    set.lend(arena, keys, pools, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -1244,25 +1245,24 @@ mod tests {
     }
 
     /// Every face keeps the keys of what its peer declares in the session's key arena: the dial
-    /// face's set, a set the open lent that a face takes as it comes (a group's, which the session
-    /// adds as it joins the group, `join_groups`), and a set of no rows for a face past the plan.
-    /// A subscriber each face's peer declares is held and matched, its key a block of the one
-    /// arena, and nothing is refused.
+    /// face's set and the sets the open lent that faces take as they come (a group's, which the
+    /// session adds as it joins the group, `join_groups`). A subscriber each face's peer declares
+    /// is held and matched, its key a block of the one arena, and nothing is refused.
     #[test]
     fn every_face_keeps_what_its_peer_declares_in_the_sessions_key_arena() {
         use wz_session_core::declare_build::build_declare_subscriber;
         use wz_session_core::key_arena::block_bytes;
 
-        let mut held = held(2);
-        held.registry.add_face(5);
-        held.registry.add_face(6);
+        let mut held = held(3);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        held.registry
+            .add_face(6)
+            .expect("the open lent a set for the face");
         assert!(
-            in_a_lent_set(&held, 5),
-            "CONTROL: the second face takes the set the open lent"
-        );
-        assert!(
-            !in_a_lent_set(&held, 6),
-            "CONTROL: the third face is past the plan"
+            in_a_lent_set(&held, 5) && in_a_lent_set(&held, 6),
+            "CONTROL: each face takes a set the open lent"
         );
         let key = "demo/declared/k";
         let block = block_bytes(key.len()).expect("a short key");
@@ -1302,7 +1302,9 @@ mod tests {
         use wz_session_core::key_arena::block_bytes;
 
         let mut held = held(2);
-        held.registry.add_face(5);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
         let block = block_bytes("demo/**".len()).expect("a short key");
         for (held_before, id) in [DIAL_FACE, 5].into_iter().enumerate() {
             let at = held
@@ -1376,7 +1378,9 @@ mod tests {
     fn an_accepted_face_takes_a_lent_set_where_it_lies_and_gives_it_back_there() {
         let mut held = held(2);
         assert_eq!(free_lent(&held), 1);
-        held.registry.add_face(5);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
         assert_eq!(free_lent(&held), 0);
         assert!(in_a_lent_set(&held, 5));
         let accepted = face(&mut held.registry, 5);
@@ -1395,7 +1399,9 @@ mod tests {
             vec![DIAL_FACE],
             "the face that went is not among the faces"
         );
-        held.registry.add_face(6);
+        held.registry
+            .add_face(6)
+            .expect("the open lent a set for the face");
         let next = face(&mut held.registry, 6);
         assert!(ptr::eq(&*next, lies_at), "the next face took the same set");
         holds_one_final(next);
@@ -1435,8 +1441,12 @@ mod tests {
                 }),
             )
             .expect("the subscriber is registered");
-        held.registry.add_face(5);
-        held.registry.add_face(6);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        held.registry
+            .add_face(6)
+            .expect("the open lent a set for the face");
         for (id, tokens) in [(5, [3_u64, 1]), (6, [4, 2])] {
             let at = held
                 .registry
@@ -1472,7 +1482,9 @@ mod tests {
             "CONTROL: no room, so still owed"
         );
         assert!(heard.lock().unwrap().is_empty(), "CONTROL: nothing handed");
-        held.registry.add_face(7);
+        held.registry
+            .add_face(7)
+            .expect("the open lent a set for the face");
         let next: *const FaceTables = face(&mut held.registry, 7);
         assert!(
             ptr::eq(next, lies_at),
@@ -1510,7 +1522,9 @@ mod tests {
         let lent = held.arena.arena_mut().high_water();
         assert_eq!(free_lent(&held), 2);
         for id in [5, 6] {
-            held.registry.add_face(id);
+            held.registry
+                .add_face(id)
+                .expect("the open lent a set for the face");
             let accepted = face(&mut held.registry, id);
             accepted.peer.finals.owe(1, QosLevel::DEFAULT);
             assert!(
@@ -1624,32 +1638,31 @@ mod tests {
         assert!(!set.peer.finals.has_room());
     }
 
-    /// A face past those the open planned for holds a set of no rows, taking no memory of the
-    /// arena: the `Final` its peer's query would need has no room, so the query is refused before
-    /// it runs. Its going leaves the set where it lies, and the next face past the plan takes it.
+    /// A face past the sets the open lent is refused and nothing is lent or held for it: the
+    /// session refuses it as one past `max_faces`. The CONTROL is the same face once a set is
+    /// free again, which takes it.
     #[test]
-    fn a_face_past_the_plan_refuses_before_holding_anything() {
-        let mut held = held(1);
+    fn a_face_past_the_plan_is_refused() {
+        let mut held = held(2);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
         let lent = held.arena.arena_mut().high_water();
-        held.registry.add_face(5);
-        assert!(!in_a_lent_set(&held, 5));
-        let accepted = face(&mut held.registry, 5);
-        assert!(!accepted.peer.finals.has_room());
-        assert!(!accepted.gets.replies.has_room());
+        assert_eq!(held.registry.add_face(6), Err(FacesFull));
+        assert!(held.registry.held_at(6).is_none(), "no set is held for it");
         assert_eq!(
             held.arena.arena_mut().high_water(),
             lent,
             "no rows were lent"
         );
+        assert_eq!(held.registry.sets.len(), 2, "the sets are the open's");
         held.registry.remove_face(5);
-        assert_eq!(free_lent(&held), 0, "no lent set comes of it");
-        held.registry.add_face(6);
         assert_eq!(
-            held.registry.sets.len(),
-            2,
-            "the set of no rows was taken again"
+            held.registry.add_face(6),
+            Ok(()),
+            "CONTROL: a set is free again"
         );
-        assert!(!face(&mut held.registry, 6).peer.finals.has_room());
+        assert!(in_a_lent_set(&held, 6));
     }
 
     /// The walk over the faces takes exactly the sets faces hold, in set order, as faces come, go
@@ -1659,7 +1672,9 @@ mod tests {
     fn the_walk_takes_the_held_sets_in_set_order() {
         let mut held = held(5);
         for id in [5, 6, 7] {
-            held.registry.add_face(id);
+            held.registry
+                .add_face(id)
+                .expect("the open lent a set for the face");
         }
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 5, 6, 7]);
         assert_eq!(
@@ -1669,7 +1684,9 @@ mod tests {
         held.registry.remove_face(6);
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 5, 7]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1, 3]));
-        held.registry.add_face(8);
+        held.registry
+            .add_face(8)
+            .expect("the open lent a set for the face");
         assert_eq!(
             face_ids(&held.registry),
             vec![DIAL_FACE, 5, 8, 7],
@@ -1685,7 +1702,9 @@ mod tests {
         held.registry.remove_accepted_faces();
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0]));
-        held.registry.add_face(9);
+        held.registry
+            .add_face(9)
+            .expect("the open lent a set for the face");
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 9]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1]));
         assert_eq!(held.registry.sets.len(), 5, "no set was made or dropped");
@@ -1697,7 +1716,9 @@ mod tests {
     fn the_other_faces_are_the_other_held_sets() {
         let mut held = held(6);
         for id in [5, 6, 7, 8] {
-            held.registry.add_face(id);
+            held.registry
+                .add_face(id)
+                .expect("the open lent a set for the face");
         }
         held.registry.remove_face(5);
         held.registry.remove_face(8);
@@ -1736,10 +1757,9 @@ mod tests {
     }
 
     /// Eight faces whose peers each declare two subscribers fit the session's pool of sixteen
-    /// rows, where the faces' own bounds add up to eight times `MAX_REMOTE_DECLS`; a face past
-    /// the plan, in a set of no rows, keeps its peer's in the same pool. The next declaration,
-    /// on any face, finds the pool full: it alone is refused, counted by that face's table and by
-    /// the pool, and every face keeps what it held.
+    /// rows, where the faces' own bounds add up to eight times `MAX_REMOTE_DECLS`. The next
+    /// declaration, on any face, finds the pool full: it alone is refused, counted by that face's
+    /// table and by the pool, and every face keeps what it held.
     #[test]
     fn many_faces_each_declaring_a_few_fit_a_pool_far_smaller_than_their_bounds() {
         if wz_session_core::caps::MAX_REMOTE_DECLS < 3 {
@@ -1748,7 +1768,7 @@ mod tests {
         }
         const FACES: u64 = 8;
         let mut held = held_with(
-            7,
+            8,
             PeerPoolRows {
                 aliases: 1,
                 remote_decls: 16,
@@ -1760,12 +1780,10 @@ mod tests {
             .chain(5..5 + FACES - 1)
             .collect();
         for id in &faces[1..] {
-            held.registry.add_face(*id);
+            held.registry
+                .add_face(*id)
+                .expect("the open lent a set for the face");
         }
-        assert!(
-            !in_a_lent_set(&held, faces[7]),
-            "CONTROL: the eighth face is past the plan"
-        );
         for id in &faces {
             for sub in 1..=2 {
                 declare_on(&mut held.registry, *id, sub, &format!("demo/{id}/{sub}"));
@@ -1824,8 +1842,12 @@ mod tests {
                 shared: true,
             },
         );
-        held.registry.add_face(5);
-        held.registry.add_face(6);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        held.registry
+            .add_face(6)
+            .expect("the open lent a set for the face");
         for (id, count) in [(DIAL_FACE, 1u64), (5, 3), (6, 2)] {
             for sub in 1..=count {
                 declare_on(&mut held.registry, id, sub, &format!("demo/{id}/{sub}"));
@@ -1854,7 +1876,9 @@ mod tests {
         );
         assert_eq!(subscribers_of(&held.registry, DIAL_FACE), (1, 0));
         assert_eq!(subscribers_of(&held.registry, 6), (2, 0));
-        held.registry.add_face(7);
+        held.registry
+            .add_face(7)
+            .expect("the open lent a set for the face");
         for sub in 1..=3 {
             declare_on(&mut held.registry, 7, sub, &format!("demo/7/{sub}"));
         }
@@ -1887,8 +1911,7 @@ mod tests {
 
     /// A session of one face keeps what its peer writes in spans of its tables' own, which no
     /// pool counts: the dial face's peer is held to its spans' rows, the declaration past them
-    /// refused and counted by its table; a face past the plan is handed none of those spans, so
-    /// its peer's declaration is refused and counted by its own table and the dial face keeps
+    /// refused and counted by its table. A face past the plan is refused, and the dial face keeps
     /// every row.
     #[test]
     fn a_session_of_one_face_keeps_its_peers_rows_in_spans_of_its_own() {
@@ -1920,10 +1943,11 @@ mod tests {
             (2, 1),
             "the spans' two rows held, the third refused and counted"
         );
-        held.registry.add_face(5);
-        assert!(!in_a_lent_set(&held, 5), "CONTROL: past the plan");
-        declare_on(&mut held.registry, 5, 1, "demo/past/1");
-        assert_eq!(subscribers_of(&held.registry, 5), (0, 1));
+        assert_eq!(
+            held.registry.add_face(5),
+            Err(FacesFull),
+            "CONTROL: no set past the plan"
+        );
         assert_eq!(subscribers_of(&held.registry, DIAL_FACE), (2, 1));
         assert!(held
             .registry
@@ -1935,8 +1959,12 @@ mod tests {
     #[test]
     fn a_walk_over_the_faces_reads_the_held_sets_alone() {
         let mut held = held(16);
-        held.registry.add_face(5);
-        held.registry.add_face(6);
+        held.registry
+            .add_face(5)
+            .expect("the open lent a set for the face");
+        held.registry
+            .add_face(6)
+            .expect("the open lent a set for the face");
         assert_eq!(
             held.registry.sets.len(),
             16,

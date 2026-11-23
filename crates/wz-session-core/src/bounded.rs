@@ -689,6 +689,39 @@ pub struct BoundedVec<T, const N: usize, P: Storage = Profile> {
     inner: P::Seq<T, N>,
 }
 
+impl<T, const N: usize> BoundedVec<T, N, Lent> {
+    /// The next row, for `write` to build a value in where the table keeps it, counted as held
+    /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
+    /// every row it was lent. For a value too large to be one of its own in a frame, which
+    /// [`Self::push_with`] does not promise.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `T` in the row it is handed, and does not unwind.
+    pub unsafe fn push_in_place(
+        &mut self,
+        write: impl FnOnce(&mut core::mem::MaybeUninit<T>),
+    ) -> Option<&mut T> {
+        let seq = &mut self.inner;
+        seq.refuse_unlent();
+        if seq.len == seq.room {
+            return None;
+        }
+        // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no
+        // value; a `MaybeUninit<T>` has the layout of `T`.
+        let row = unsafe {
+            &mut *seq
+                .base
+                .as_ptr()
+                .add(seq.len)
+                .cast::<core::mem::MaybeUninit<T>>()
+        };
+        write(&mut *row);
+        seq.len += 1;
+        // SAFETY: the caller's contract: `write` left a whole value in the row.
+        Some(unsafe { row.assume_init_mut() })
+    }
+}
+
 // The `const` constructors are written per concrete policy, because a `const fn`
 // cannot call a trait function and a trait constant would be materialised at every
 // use (see [`SeqBacking::empty`]). Generic code constructs through `Default`.
@@ -2122,6 +2155,37 @@ mod tests {
             .lend(0)
             .expect("no rows fit any arena");
         assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
+    }
+
+    /// A value pushed in place is built in the next row the table was lent and is held from then
+    /// on, handed back to write; once the rows lent are held, the push is refused and `write` is
+    /// not called. The CONTROL is the table's contents, the values in the order built.
+    #[test]
+    fn a_push_in_place_builds_in_the_next_lent_row_and_refuses_past_them() {
+        let mut arena = arena_of(64);
+        let mut v: BoundedVec<u32, 8, Lent> = arena.lend(2).expect("two rows fit");
+        for value in [5_u32, 6] {
+            // SAFETY: the closure writes a whole `u32` and does not unwind.
+            let held = unsafe {
+                v.push_in_place(|row| {
+                    row.write(value);
+                })
+            };
+            let held = held.expect("within the lent rows");
+            assert_eq!(*held, value, "the value built is handed back");
+            *held += 10;
+        }
+        let mut called = false;
+        // SAFETY: as above; this closure is never called.
+        let refused = unsafe {
+            v.push_in_place(|row| {
+                called = true;
+                row.write(0);
+            })
+        };
+        assert!(refused.is_none(), "past the lent rows");
+        assert!(!called, "and nothing was written");
+        assert_eq!(v.as_ref(), &[15, 16], "CONTROL: in the order built");
     }
 
     /// A lent table holds the rows its open lent it, under the ceiling `N` its type names: the

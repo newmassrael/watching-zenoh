@@ -1552,7 +1552,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         );
         let count = if LINK_PARTS.contains(&theirs.part) {
             ours.count * (1 + faces + handshakes)
-        } else if theirs.part == "peer tables" {
+        } else if theirs.part == "peer tables" || theirs.part == "face tables" {
             ours.count * (1 + faces)
         } else if FACE_PARTS.contains(&theirs.part) {
             // The gets' tables, and the ends of their legs, hold the session's own once.

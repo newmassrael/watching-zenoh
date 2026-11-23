@@ -113,7 +113,7 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, LegSink, SubscriberRow};
+use crate::engine::{CoopTables, EntryBytes, LegSink, SubscriberRow, FACE_SET_BYTES};
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 
@@ -147,7 +147,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 33;
+pub const ARENA_ROWS: usize = 34;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -525,6 +525,14 @@ impl ArenaPlan {
             tables: faces,
             pools: pool_rows(limits, faces)?,
         };
+        // The sets of face tables themselves, one for each face, in one table
+        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
+        plan.put(
+            "face tables",
+            "MAX_FACES + 1",
+            plan.peers.tables.max(1),
+            FACE_SET_BYTES,
+        )?;
         plan.put(
             "peer tables",
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",

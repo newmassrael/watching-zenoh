@@ -158,6 +158,7 @@ mod queued;
 use queued::{MatchFlips, Queued};
 
 mod registry;
+pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, Registry, DIAL_FACE};
@@ -2804,7 +2805,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let id = self.next_face;
             // The tables first: the group's task dispatches to them from its first step. They are
             // the face's for as long as the session holds the group, across its joins.
-            self.registry.borrow_mut().add_face(id);
+            if self.registry.borrow_mut().add_face(id).is_err() {
+                return Err(OpenError::Group(EndpointRefusal::new(
+                    &join.endpoint,
+                    Refusal::FacesFull,
+                )));
+            }
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
             if let Some(ids) = &self.key_ids {
@@ -3032,8 +3038,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return;
         }
         let id = self.next_face;
-        // The tables first: the link's task dispatches to them from its first step.
-        self.registry.borrow_mut().add_face(id);
+        // The tables first: the link's task dispatches to them from its first step. A link past
+        // the sets the open lent is closed unread, as one past `max_faces` is.
+        if self.registry.borrow_mut().add_face(id).is_err() {
+            return;
+        }
         let Ok(wire) = self.open_wire(id, opened, SessionRole::Acceptor, endpoint) else {
             self.registry.borrow_mut().remove_face(id);
             return;
@@ -3933,11 +3942,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )));
         }
         let id = core.next_face;
+        // The tables first: the link's task dispatches to them from its first step.
+        if core.registry.borrow_mut().add_face(id).is_err() {
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::FacesFull,
+            )));
+        }
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
-        let pending = core.begin_dial(id, endpoint)?;
-        // The tables first: the link's task dispatches to them from its first step.
-        core.registry.borrow_mut().add_face(id);
+        let pending = match core.begin_dial(id, endpoint) {
+            Ok(pending) => pending,
+            Err(refused) => {
+                core.registry.borrow_mut().remove_face(id);
+                return Err(refused);
+            }
+        };
         core.next_face += 1;
         let deadline_us = core.open_deadline_us();
         core.dialing.push(Dial {
