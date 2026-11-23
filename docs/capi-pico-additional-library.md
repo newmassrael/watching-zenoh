@@ -55,8 +55,11 @@ DLL (`raw-dylib`); elsewhere `WZ_CAPI_PICO_CORE_DIR` names the directory of the 
 library is linked to, which it then records as a library it needs.
 
 `scripts/pico-additional-forms.sh` builds both forms on Linux; `scripts/lib/pico_windows_package.py
---form split` makes the Windows package of the second form, both DLLs with their import libraries
-and symbols.
+--stdlib std --form split` makes the Windows package of the second form, both DLLs with their import
+libraries and symbols. The second form is built with Rust's standard library only, since this crate
+has no form without it, so no release carries it: a release ships the core alone, built without
+`std` (owner, 2026-11-23, `docs/c-abi-engine-and-memory.md` E7), and the Platform lane builds the
+split package to compare against.
 
 ## What crosses between the two
 
