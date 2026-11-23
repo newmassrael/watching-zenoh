@@ -142,7 +142,10 @@ impl<
                     |_, key, body| put(handle, key, body),
                 ),
             ),
-            None => (Some(now_ms + RETRY_MS), Some(now_ms + RETRY_MS)),
+            None => {
+                let retry = now_ms.saturating_add(RETRY_MS);
+                (Some(retry), Some(retry))
+            }
         };
         #[cfg(feature = "query-get")]
         let (next_ask, pending) = {

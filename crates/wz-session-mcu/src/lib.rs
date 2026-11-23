@@ -184,8 +184,6 @@ pub mod slot_schedule;
 ))]
 pub mod slot_querier;
 // The application layer of a node that publishes and asks on its own.
-// Totality debt TD-227 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_active;
 // The application of that client, written once for every platform: its storage, its factory and
