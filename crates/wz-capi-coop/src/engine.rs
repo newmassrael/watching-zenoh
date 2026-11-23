@@ -118,7 +118,7 @@ use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms,
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
-use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
+use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 #[cfg(feature = "listen")]
 use wz_session_core::zid_hex::same_zid;
@@ -717,9 +717,6 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     decl_watches: Arc<DeclWatches>,
     zid: SessionZid,
     closed: AtomicBool,
-    /// The entity ids the session's declarations and Interests take, from 1: `u32`, upstream's
-    /// `EntityId`, and refused once spent rather than wrapped (`SessionEngine::next_entity_id`).
-    next_entity: AtomicU64,
     /// The ids of what the session holds for the program and never names to a peer: the legs
     /// of its gets and its periodic jobs. A space of their own, so they are not refused when the
     /// entity ids are spent.
@@ -2055,6 +2052,13 @@ impl RuntimeTables {
             )
         }
     }
+}
+
+/// The session's next entity id, taken: what a declaration and an Interest of the session are
+/// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed out,
+/// which refuses the declaration rather than wrap onto a live id.
+fn take_entity_id(&self) -> Option<EntityId> {
+    self.tables.borrow_mut().take_entity_id()
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -3840,7 +3844,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             decl_watches,
             zid: wire,
             closed: AtomicBool::new(false),
-            next_entity: AtomicU64::new(1),
             #[cfg(any(feature = "query", feature = "ticker"))]
             next_local: AtomicU64::new(1),
             reader: Mutex::new(None),
@@ -5033,7 +5036,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         for group in &core.groups {
             if group.owes_keyexpr_ask() {
-                if let Some(interest_id) = self.next_entity_id() {
+                if let Some(interest_id) = core.take_entity_id() {
                     group.ask_keyexprs(u64::from(interest_id));
                 }
             }
@@ -5069,7 +5072,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(key) = core.row_key(keyexpr) else {
             return Err(core.key_refusal(keyexpr));
         };
-        let Some(interest_id) = self.next_entity_id() else {
+        let Some(interest_id) = core.take_entity_id() else {
             return Err(Declined::NoEntityId);
         };
         // The rest of the key the form names is read from the row's own key, not copied.
@@ -5379,11 +5382,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn next_entity_id(&self) -> Option<EntityId> {
-        u32_id_taken(self.next_entity.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            next_u32_id,
-        ))
+        // The session's tables number every entity, open or closed: an id is taken under the lock.
+        self.core.lock().0.take_entity_id()
     }
 
     #[cfg(feature = "ticker")]
@@ -5604,7 +5604,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if core.registry.borrow().app.subscribers.is_full() {
             return Err(Declined::TableFull);
         }
-        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
         // The row goes at the end of the table, where the replay finds it.
         let at = core.registry.borrow().app.subscribers.len();
         let row = SubscriberRow {
@@ -5977,7 +5977,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides.
             None => {
-                let taken = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+                let taken = core.take_entity_id().ok_or(Declined::NoEntityId)?;
                 spent = Some(u64::from(taken));
             }
         }
@@ -5992,7 +5992,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .iter()
             .any(|group| group.declarations().asks_for_filters())
         {
-            if let Some(interest_id) = spent.or_else(|| self.next_entity_id().map(u64::from)) {
+            if let Some(interest_id) = spent.or_else(|| core.take_entity_id().map(u64::from)) {
                 for group in &core.groups {
                     group.ask_filter(id, interest_id, plane, keyexpr, wire);
                 }
@@ -6202,7 +6202,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(key) = core.row_key(keyexpr) else {
             return Err(core.key_refusal(keyexpr));
         };
-        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
         // The registry's queryable only copies a query out, with the row's callback, and holds its
         // Final; the callback `sink` mints runs when the deliveries are handed out (`query`).
         let callback: QueryableCallback = Arc::new(LiveQueryable {
@@ -6695,7 +6695,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(key) = core.row_key(keyexpr) else {
             return Err(core.key_refusal(keyexpr));
         };
-        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
         core.registry
             .borrow_mut()
             .app
@@ -6770,7 +6770,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(key) = core.row_key(keyexpr) else {
             return Err(core.key_refusal(keyexpr));
         };
-        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
         // The table of callbacks holds it before the sink does, so a sink the registration refuses
         // is not its last holder when it is dropped under the session's lock.
         let callback: LivelinessCallback = Arc::new(LiveLiveliness::new(sink));
