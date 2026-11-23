@@ -1826,8 +1826,6 @@ pub mod compression;
 /// a cfg-gated pub struct field appears, which is the C1bf hazard class.
 /// (Code spans, not links: the counting half is gated and this doc is read in
 /// the default-feature rustdoc Layer C1bz measures.)
-// Totality debt TD-046 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stats;
 
 /// R2821 — the pin's node-wide stats REGISTRY: transports and links as
