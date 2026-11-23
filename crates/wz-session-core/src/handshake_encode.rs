@@ -316,11 +316,20 @@ impl<'e> HeldBody<'e> {
     }
 }
 
-/// How many held entries are presented as parts on the stack: as many as a chain a session
-/// stages holds, one entry per kind of extension the build stages (`ext_chain::STAGED_EXT_KINDS`
-/// counts the same kinds). A chain handed over whole that is longer is presented on the heap where
-/// there is one, and refused where there is none, which a build with no heap never hands over.
+/// The parts of an entry no write reads: what the holder of a chain's parts starts as.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+const EMPTY_PARTS: ExtEntryParts<'static> = ExtEntryParts {
+    header: 0,
+    body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtUnit(&NO_BODY),
+};
+
+/// How many held entries a build with no growable store presents: as many as a chain a session
+/// stages holds, one entry per kind of extension the build stages (`ext_chain::STAGED_EXT_KINDS`
+/// counts the same kinds, and the staged chain is that long at most). A longer chain is refused.
+#[cfg(all(
+    any(feature = "codec-init-body", feature = "codec-open-body"),
+    any(not(feature = "alloc"), feature = "session-fixed-storage")
+))]
 const STACK_PARTS: usize = 3
     + cfg!(feature = "transport-qos") as usize
     + cfg!(feature = "transport-lowlatency") as usize
@@ -329,40 +338,50 @@ const STACK_PARTS: usize = 3
     + cfg!(feature = "session-extauth") as usize
     + cfg!(feature = "transport-multilink") as usize;
 
-/// Run `write` over `entries` presented as parts ([`HeldChain`]).
+/// Present `entries` as parts in the holders the caller gives, and answer the parts that were
+/// filled. Out of line and not generic, so the projection is compiled once whatever the caller
+/// writes the parts with.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[inline(never)]
+fn project_parts<'b, 'p>(
+    entries: &'b [ExtEntryOwned],
+    bodies: &'b mut [HeldBody<'b>],
+    parts: &'p mut [ExtEntryParts<'b>],
+) -> &'p [ExtEntryParts<'b>] {
+    for (slot, entry) in bodies.iter_mut().zip(entries) {
+        *slot = HeldBody::of(entry);
+    }
+    let bodies: &'b [HeldBody<'b>] = bodies;
+    let filled = entries.len().min(bodies.len()).min(parts.len());
+    for ((slot, body), entry) in parts.iter_mut().zip(bodies).zip(entries) {
+        *slot = body.parts(entry.header);
+    }
+    parts.get(..filled).unwrap_or(&[])
+}
+
+/// Run `write` over `entries` presented as parts ([`HeldChain`]): in holders on the stack where
+/// the store does not grow, refusing a chain longer than a session stages, and in holders of the
+/// chain's own length on the heap profile. `write` is called at one place, so each caller's
+/// writer is compiled once.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn with_parts<R>(
     entries: &[ExtEntryOwned],
     write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
 ) -> Result<R, CodecError> {
-    if entries.len() <= STACK_PARTS {
+    #[cfg(any(not(feature = "alloc"), feature = "session-fixed-storage"))]
+    {
+        if entries.len() > STACK_PARTS {
+            return Err(CodecError::CapacityExceeded);
+        }
         let mut bodies = [HeldBody::Unit; STACK_PARTS];
-        for (slot, entry) in bodies.iter_mut().zip(entries) {
-            *slot = HeldBody::of(entry);
-        }
-        let mut parts = [ExtEntryParts {
-            header: 0,
-            body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtUnit(&NO_BODY),
-        }; STACK_PARTS];
-        for ((slot, body), entry) in parts.iter_mut().zip(&bodies).zip(entries) {
-            *slot = body.parts(entry.header);
-        }
-        return write(parts.get(..entries.len()).unwrap_or(&[]));
+        let mut parts = [EMPTY_PARTS; STACK_PARTS];
+        write(project_parts(entries, &mut bodies, &mut parts))
     }
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
     {
-        let bodies: Vec<HeldBody<'_>> = entries.iter().map(HeldBody::of).collect();
-        let parts: Vec<ExtEntryParts<'_>> = bodies
-            .iter()
-            .zip(entries)
-            .map(|(body, entry)| body.parts(entry.header))
-            .collect();
-        write(&parts)
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        let _ = write;
-        Err(CodecError::CapacityExceeded)
+        let mut bodies = alloc::vec![HeldBody::Unit; entries.len()];
+        let mut parts = alloc::vec![EMPTY_PARTS; entries.len()];
+        write(project_parts(entries, &mut bodies, &mut parts))
     }
 }
 
