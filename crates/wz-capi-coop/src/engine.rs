@@ -3725,6 +3725,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 queryables: entities.queryables,
                 local_tokens: entities.tokens,
                 liveliness_subscribers: entities.liveliness_subscribers,
+                // The subscriptions are kept in a subscriber table, which reads no table set's
+                // rows.
+                ..ObserverRows::default()
             },
             plan.gets(),
             plan.peers(),

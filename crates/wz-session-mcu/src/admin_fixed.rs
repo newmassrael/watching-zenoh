@@ -45,12 +45,13 @@ use wz_admin::adminspace::{
     AdminSessionRef,
 };
 use wz_runtime_coop::cs::Mutex;
-use wz_session_core::bounded::BoundedVec;
+use wz_session_core::bounded::{BoundedVec, Storage};
 use wz_session_core::caps;
 #[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_wire::VerbKey;
 use wz_session_core::lifecycle_wire::{write_verb_list, OpenKey, OPEN_VERB};
 use wz_session_core::locality::Locality;
+use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
@@ -561,6 +562,7 @@ impl<const BODY: usize, const SESSIONS: usize, O: InBand> ObserverSinks
     type Subscriber = crate::admin_host::ConnectWriteSink;
     #[cfg(not(feature = "adminspace-write"))]
     type Subscriber = NoSink;
+    type Subscribers<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = AdminQuerySink<BODY, SESSIONS, O>;
     type Declared = NoSink;
     type Undeclared = NoSink;
