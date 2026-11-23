@@ -904,9 +904,15 @@ pub unsafe extern "C" fn z_open(
     options: *const z_open_options_t,
 ) -> ZResult {
     guarded(|| {
+        // The moved config is the open's to read where it lies until the open returns, when its
+        // place is given back: the request borrows what the engine is handed from it.
+        let cfg = match taken_config(zs, config) {
+            Ok(cfg) => cfg,
+            Err(code) => return code,
+        };
         // What the config and the options ask for is read in a frame of its own, which has
         // returned before the engine opens the session (`open_request`).
-        let request = match open_request(zs, config, options) {
+        let request = match open_request(&cfg, options) {
             Ok(request) => request,
             Err(code) => return code,
         };
@@ -917,36 +923,19 @@ pub unsafe extern "C" fn z_open(
     })
 }
 
-/// What [`z_open`] reads off the moved config and its options, or the code `z_open` answers when
-/// it refuses them: `*zs` is written null before anything fallible, and the config is consumed.
-/// Never inlined, for the stack: the config's state, its resolved snapshots and a scout for a
-/// locator lie in this frame, which has returned before the session is opened, so none of them is
-/// under the open's handshake.
+/// The config [`z_open`] is moved, taken out of the caller's place, or the code `z_open` answers
+/// when it is handed none: `*zs` is written null before anything fallible, and a config handed is
+/// consumed whatever the open does with it.
 ///
 /// # Safety
-/// As [`z_open`]'s: `zs`, `config` and `options` are each null or valid.
-#[inline(never)]
-unsafe fn open_request(
+/// As [`z_open`]'s: `zs` and `config` are each null or valid.
+unsafe fn taken_config(
     zs: *mut z_owned_session_t,
     config: *mut z_moved_config_t,
-    options: *const z_open_options_t,
-) -> Result<OpenRequest, ZResult> {
+) -> Result<crate::object_slot::Placed<ConfigState>, ZResult> {
     if zs.is_null() || config.is_null() {
         return Err(Z_ERR_NULL);
     }
-    // pico reads the options only when they are given and otherwise takes
-    // `z_open_options_default`, whose read task starts.
-    #[cfg(feature = "multi-thread")]
-    let start_read_task = options.is_null() || (*options).auto_start_read_task;
-    #[cfg(not(feature = "multi-thread"))]
-    let start_read_task = {
-        // Read only for the admin-space flag, which a build may not have.
-        let _ = options;
-        true
-    };
-    // And its admin space does not start unless asked to.
-    #[cfg(feature = "admin-space")]
-    let start_admin_space = !options.is_null() && (*options).auto_start_admin_space;
     // Always-initialize the out-param (pico contract) before any fallible
     // work, so a caller reading `*zs` on an error path sees a null session.
     *zs = z_owned_session_t::null_value();
@@ -960,8 +949,35 @@ unsafe fn open_request(
         return Err(Z_ERR_NULL);
     };
     (*config)._this = z_owned_config_t::null_value();
+    Ok(cfg)
+}
 
-    let open = open_config(&cfg)?;
+/// What [`z_open`] reads off the config `cfg` and its options, borrowing from `cfg` what the
+/// engine is handed, or the code `z_open` answers when it refuses them. Never inlined, for the
+/// stack: the resolved snapshots and a scout for a locator lie in this frame, which has returned
+/// before the session is opened, so none of them is under the open's handshake.
+///
+/// # Safety
+/// As [`z_open`]'s: `options` is null or valid.
+#[inline(never)]
+unsafe fn open_request<'cfg>(
+    cfg: &'cfg ConfigState,
+    options: *const z_open_options_t,
+) -> Result<OpenRequest<'cfg>, ZResult> {
+    // pico reads the options only when they are given and otherwise takes
+    // `z_open_options_default`, whose read task starts.
+    #[cfg(feature = "multi-thread")]
+    let start_read_task = options.is_null() || (*options).auto_start_read_task;
+    #[cfg(not(feature = "multi-thread"))]
+    let start_read_task = {
+        // Read only for the admin-space flag, which a build may not have.
+        let _ = options;
+        true
+    };
+    // And its admin space does not start unless asked to.
+    #[cfg(feature = "admin-space")]
+    let start_admin_space = !options.is_null() && (*options).auto_start_admin_space;
+    let open = open_config(cfg)?;
     // The id the session opens on, refused here if the config names one pico's reader cannot
     // take (see [`session_zid`]).
     let zid = session_zid(&open)?;
@@ -978,9 +994,7 @@ unsafe fn open_request(
     let app_transport = cfg.transport.clone();
     #[cfg(feature = "app-transport")]
     if app_transport.is_some() {
-        if let Some(code) =
-            crate::app_transport::refused_open(connect.as_deref(), listen.as_deref())
-        {
+        if let Some(code) = crate::app_transport::refused_open(connect, listen) {
             return Err(code);
         }
     }
@@ -990,7 +1004,7 @@ unsafe fn open_request(
     // or trust-free session: a caller that asked for TLS and silently got
     // something else is the one outcome worse than a failed z_open.
     #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
-    let tls = resolve_tls_config(&cfg)?;
+    let tls = resolve_tls_config(cfg)?;
     // The connect locators: the configured one, or with neither locator configured the
     // first scouted node's (`vendor/zenoh-pico/src/net/session.c` @
     // `ret = _z_locators_by_scout(config, zid, &connect_locators);`), whose build without
@@ -1004,26 +1018,25 @@ unsafe fn open_request(
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
-    let key_ids = crate::key_ids::admit_at_open(&cfg, &policy, &limits)?;
+    let key_ids = crate::key_ids::admit_at_open(cfg, &policy, &limits)?;
     #[cfg(not(feature = "shared-key-ids"))]
-    crate::key_ids::admit_at_open(&cfg, &policy)?;
+    crate::key_ids::admit_at_open(cfg, &policy)?;
     #[cfg(not(feature = "engine-tokio"))]
     let key_ids = crate::key_ids::coop_key_ids(
         #[cfg(feature = "shared-key-ids")]
         key_ids,
     );
-    let connect: Vec<String> = match (connect, &listen) {
-        (Some(connect), _) => vec![connect],
-        (None, Some(_)) => Vec::new(),
+    let connect = match (connect, listen) {
+        (Some(connect), _) => Dial::Stated(connect),
+        (None, Some(_)) => Dial::Nothing,
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-        (None, None) => crate::scout::locators_by_scout(&cfg, &policy, &limits)?,
+        (None, None) => Dial::Scouted(crate::scout::locators_by_scout(cfg, &policy, &limits)?),
         #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
         (None, None) => return Err(crate::result::Z_ERR_SCOUT_NO_RESULTS),
     };
     // The time base the config names, which the session holds from here on.
     #[cfg(feature = "time-base")]
     let time_base = cfg.time_base.clone();
-    drop(cfg);
     // A build without the `peer` feature is a client build: it opens to the endpoint it is
     // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own
     // `Z_FEATURE_UNICAST_PEER` gates less: a build without it still takes a lone listener,
@@ -1072,14 +1085,15 @@ unsafe fn open_request(
 
 /// What a config tells pico's open, read once for [`z_open`] and for the door that describes the
 /// open (`wz_ext_config_device_requires`), so the two cannot read a config differently: the
-/// locator it dials, the one it listens on, and the role it dials as.
-pub(crate) struct OpenConfig {
-    pub(crate) connect: Option<String>,
-    pub(crate) listen: Option<String>,
+/// locator it dials, the one it listens on, and the role it dials as. The texts are the config's
+/// own, read where it holds them.
+pub(crate) struct OpenConfig<'cfg> {
+    pub(crate) connect: Option<&'cfg str>,
+    pub(crate) listen: Option<&'cfg str>,
     pub(crate) dial_whatami: WhatAmI,
     /// The text of `Z_CONFIG_SESSION_ZID_KEY`, if the config states one: the id the session opens
     /// on. Read by [`session_zid`], which says whether pico's reader could take it.
-    pub(crate) zid: Option<String>,
+    pub(crate) zid: Option<&'cfg str>,
 }
 
 /// The id the session opens on: the one `Z_CONFIG_SESSION_ZID_KEY` names, and `None` when the
@@ -1091,8 +1105,8 @@ pub(crate) struct OpenConfig {
 /// pico reads whatever its fixed indexes land on, so what it opens as is not an id the caller
 /// named, and a caller that stated an id and silently got another is worse off than one whose
 /// open failed, as with the TLS keys.
-pub(crate) fn session_zid(open: &OpenConfig) -> Result<Option<Vec<u8>>, ZResult> {
-    stated_zid(open.zid.as_deref()).map(|zid| zid.map(|zid| zid.to_vec()))
+pub(crate) fn session_zid(open: &OpenConfig<'_>) -> Result<Option<Vec<u8>>, ZResult> {
+    stated_zid(open.zid).map(|zid| zid.map(|zid| zid.to_vec()))
 }
 
 /// The id the text of `Z_CONFIG_SESSION_ZID_KEY` names, `None` when the config states none, and
@@ -1204,8 +1218,8 @@ mod zid_tests {
 /// (`vendor/zenoh-pico/src/net/session.c` @
 /// `_zp_config_insert(config, Z_CONFIG_MODE_KEY, Z_CONFIG_MODE_PEER);`), so its mode is never
 /// refused.
-pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig, ZResult> {
-    let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig<'_>, ZResult> {
+    let listen = cfg.get(Z_CONFIG_LISTEN_KEY);
     let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
         _ if listen.is_some() => WhatAmI::Peer,
         None | Some("client") => WhatAmI::Client,
@@ -1213,16 +1227,20 @@ pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig, ZResult> {
         Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),
     };
     Ok(OpenConfig {
-        connect: cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned),
+        connect: cfg.get(Z_CONFIG_CONNECT_KEY),
         listen,
         dial_whatami,
-        zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY).map(str::to_owned),
+        zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY),
     })
 }
 
 #[cfg(test)]
 mod open_config_tests {
-    use super::{open_config, ConfigState, WhatAmI, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY};
+    use super::{
+        open_config, ConfigState, Dial, WhatAmI, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY,
+        Z_CONFIG_MODE_KEY,
+    };
+    use crate::prelude::*;
     use crate::result::Z_ERR_CONFIG_INVALID_MODE;
 
     fn config(entries: &[(u8, &str)]) -> ConfigState {
@@ -1279,15 +1297,87 @@ mod open_config_tests {
             assert_eq!(role(&entries), Ok(WhatAmI::Peer), "{mode:?}");
         }
     }
+
+    /// The locators the open reads are the config's own texts, read where the config holds them
+    /// and not copied. Turned red by a reading that copies them.
+    #[test]
+    fn the_open_reads_the_configs_locators_where_it_holds_them() {
+        let cfg = config(&[
+            (Z_CONFIG_CONNECT_KEY, "tcp/127.0.0.1:7447"),
+            (Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:7448"),
+        ]);
+        let open = open_config(&cfg).expect("a listener is a peer");
+        for (read, key) in [
+            (open.connect, Z_CONFIG_CONNECT_KEY),
+            (open.listen, Z_CONFIG_LISTEN_KEY),
+        ] {
+            let held = cfg.get(key).expect("stated");
+            assert!(read.is_some_and(|read| core::ptr::eq(read, held)), "{key}");
+        }
+        assert_eq!(
+            open_config(&config(&[])).map(|open| open.connect.is_none()),
+            Ok(true)
+        );
+    }
+
+    /// A session dials the locator its config states, read where the config holds it, or none
+    /// when it only listens. Turned red by a dial that leaves the stated locator out.
+    #[test]
+    fn a_session_dials_the_locator_its_config_states() {
+        let stated = "tcp/127.0.0.1:7447";
+        let dial = Dial::Stated(stated);
+        let dialled: Vec<&str> = dial.iter().collect();
+        assert_eq!(dialled, [stated]);
+        assert!(core::ptr::eq(dialled[0], stated), "not copied");
+        assert_eq!(Dial::Nothing.iter().count(), 0);
+    }
+
+    /// The locators a scout found are dialled in the order the answer gave them.
+    #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+    #[test]
+    fn a_session_dials_what_a_scout_found_in_order() {
+        let found = vec![
+            String::from("tcp/192.0.2.1:7447"),
+            String::from("udp/192.0.2.1:7447"),
+        ];
+        let dial = Dial::Scouted(found.clone());
+        assert!(dial.iter().eq(found.iter().map(String::as_str)));
+    }
 }
 
-/// What `z_open` read off the C config and its options, for the engine that opens it.
-struct OpenRequest {
+/// The locators a session dials: the one its config states, read where the config holds it, or
+/// those of the first node a scout found, which the scout's answer owns.
+enum Dial<'cfg> {
+    /// None: the config states a listener and no locator to dial.
+    Nothing,
+    /// The connect locator of the config.
+    Stated(&'cfg str),
+    /// The locators of the first node that answered a scout, for a config that names neither.
+    #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+    Scouted(Vec<String>),
+}
+
+impl Dial<'_> {
+    /// Each locator dialled, in order.
+    fn iter(&self) -> impl Iterator<Item = &str> + '_ {
+        let (stated, scouted): (Option<&str>, &[String]) = match self {
+            Self::Nothing => (None, &[]),
+            Self::Stated(locator) => (Some(*locator), &[]),
+            #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+            Self::Scouted(locators) => (None, locators.as_slice()),
+        };
+        stated.into_iter().chain(scouted.iter().map(String::as_str))
+    }
+}
+
+/// What `z_open` read off the C config and its options, for the engine that opens it: the texts
+/// the engine is handed are borrowed from the config, which outlives the open.
+struct OpenRequest<'cfg> {
     /// The place the session's handle is installed in, taken before anything is opened.
     #[cfg(feature = "engine-tokio")]
     slot: crate::object_slot::Slot<PicoSessionHandle>,
-    connect: Vec<String>,
-    listen: Option<String>,
+    connect: Dial<'cfg>,
+    listen: Option<&'cfg str>,
     dial_whatami: WhatAmI,
     /// The id the config names for the session, as the bytes an INIT carries, `None` for one the
     /// engine mints.
@@ -1331,7 +1421,7 @@ struct OpenRequest {
 /// # Safety
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
 #[cfg(feature = "engine-tokio")]
-unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
+unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest<'_>) -> ZResult {
     let OpenRequest {
         slot,
         connect,
@@ -1351,6 +1441,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         #[cfg(feature = "time-base")]
         time_base,
     } = request;
+    // The tokio engine holds the locators it dials and listens on as text of its own.
+    let connect: Vec<String> = connect.iter().map(String::from).collect();
+    let listen: Option<String> = listen.map(String::from);
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
     let memory = memory_basis(listen.as_deref(), !connect.is_empty(), &tx_queue, &limits);
@@ -1691,7 +1784,7 @@ mod faces_besides_dial_tests {
 /// # Safety
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
 #[cfg(not(feature = "engine-tokio"))]
-unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
+unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest<'_>) -> ZResult {
     // A build without `peer` is a client build: `z_open` refused a listener and the peer role
     // before this.
     #[cfg(not(feature = "peer"))]
@@ -1700,7 +1793,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // connect locator beside it opens nothing, as the tokio engine's open reads it (pico adds a
     // peer to a unicast transport only). A build without the multicast transport refuses it.
     #[cfg(feature = "peer")]
-    let joins_a_group = request.listen.as_deref().is_some_and(is_group_endpoint);
+    let joins_a_group = request.listen.is_some_and(is_group_endpoint);
     #[cfg(all(feature = "peer", not(feature = "multicast-transport")))]
     if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -1711,8 +1804,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
     let memory = memory_basis(
-        request.listen.as_deref(),
-        !request.connect.is_empty(),
+        request.listen,
+        request.connect.iter().next().is_some(),
         &tx_queue,
         &limits,
     );
@@ -1726,18 +1819,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "admin-space")]
     let transport_endpoint = request
         .listen
-        .clone()
-        .or_else(|| request.connect.first().cloned());
+        .or_else(|| request.connect.iter().next())
+        .map(String::from);
     // pico's config carries ONE listen locator, so the set is that one or none, unless it names
     // the group the session joins.
     #[cfg(feature = "multicast-transport")]
-    let (mut listen, mut connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen
-    {
+    let (listen, connect, groups): (Option<&str>, Dial<'_>, Vec<_>) = match request.listen {
         Some(endpoint) if joins_a_group => (
-            Vec::new(),
-            Vec::new(),
+            None,
+            Dial::Nothing,
             vec![wz_capi_port::group::GroupJoin {
-                endpoint,
+                endpoint: endpoint.into(),
                 profile: pico_group(sn_resolution, &limits),
                 is_shm: false,
                 // pico declares its entities over whatever transport it holds, a group too, and
@@ -1749,27 +1841,30 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
                 declarations: wz_capi_port::group::GroupDeclarations::Mapped,
             }],
         ),
-        listen => (listen.into_iter().collect(), request.connect, Vec::new()),
+        listen => (listen, request.connect, Vec::new()),
     };
     #[cfg(not(feature = "multicast-transport"))]
-    let (mut listen, mut connect, groups): (
-        Vec<String>,
-        Vec<String>,
+    let (listen, connect, groups): (
+        Option<&str>,
+        Dial<'_>,
         Vec<wz_capi_port::group::GroupJoin>,
-    ) = (
-        request.listen.into_iter().collect(),
-        request.connect,
-        Vec::new(),
-    );
-    // The unicast endpoints as pico's links read them, each read over its own text: the engine is
-    // handed what pico's link of the scheme reads, so a key that link does not know (`#iface=` on
-    // `tcp/`) is left out as pico leaves it, and what it reads stays for the engine to carry out
-    // or refuse.
-    for endpoint in listen.iter_mut().chain(connect.iter_mut()) {
-        if let Err(code) = crate::endpoint::engine_endpoint(endpoint) {
-            return code;
-        }
-    }
+    ) = (request.listen, request.connect, Vec::new());
+    // The unicast endpoints as pico's links read them, each read over the config's own text and
+    // made once as the engine's: the engine is handed what pico's link of the scheme reads, so a
+    // key that link does not know (`#iface=` on `tcp/`) is left out as pico leaves it, and what
+    // it reads stays for the engine to carry out or refuse.
+    let listen = match listen.map(crate::endpoint::engine_endpoint).transpose() {
+        Ok(listen) => listen.into_iter().collect::<Vec<String>>(),
+        Err(code) => return code,
+    };
+    let connect = match connect
+        .iter()
+        .map(crate::endpoint::engine_endpoint)
+        .collect::<Result<Vec<String>, ZResult>>()
+    {
+        Ok(connect) => connect,
+        Err(code) => return code,
+    };
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
