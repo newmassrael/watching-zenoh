@@ -752,8 +752,6 @@ pub mod accept_state;
 /// (decision D1 of `docs/session-lifecycle-intent.md`). Ungated for the reason
 /// [`accept_state`] is: the rule allocates nothing, the MCU profile shares it,
 /// and the `sha2` it hashes with is already a dependency of every build.
-// Totality debt TD-096 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod credential_identity;
 
 /// What a handshake step does with a handshake message it does not await (the
