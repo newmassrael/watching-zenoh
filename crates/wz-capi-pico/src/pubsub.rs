@@ -1311,6 +1311,10 @@ impl PublisherQos {
     /// carried, and its encoding when the call carried none. Taken by value, so the call's
     /// attachment and encoding move into what is sent and are not copied; the publisher's
     /// encoding is lent for the publish, so a put copies none of it.
+    ///
+    /// One body out of line: the declare and both ways a publish is sent call it, and each copy
+    /// inlined would rebuild the whole options value in place.
+    #[inline(never)]
     fn apply<'a>(&'a self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
         let mut out = opts
             .with_priority(self.priority)
