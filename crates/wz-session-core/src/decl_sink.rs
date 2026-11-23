@@ -49,7 +49,7 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
-use crate::bounded::{BoundedVec, Profile, Storage};
+use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 
@@ -196,6 +196,31 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Profile> {
             on_undecl: BoundedVec::new(),
             quota: crate::limits::MaxDeclObserversHeld::build_default(),
             next_id: 0,
+        }
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Lent> {
+    /// An empty pair whose two lists are lent from `arena`, `rows` rows each: the
+    /// `MAX_DECL_OBSERVERS` a session's open resolved, under the build's. Refused, the list lent so
+    /// far going back with the arena, past the build's value or past what the arena has left.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            on_decl: arena.lend(rows)?,
+            on_undecl: arena.lend(rows)?,
+            ..Self::default()
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows: its two lists, each a span of
+    /// its own. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        match (
+            Arena::table_bytes::<KeyedSink<D>>(rows),
+            Arena::table_bytes::<KeyedSink<U>>(rows),
+        ) {
+            (Some(on_decl), Some(on_undecl)) => on_decl.checked_add(on_undecl),
+            _ => None,
         }
     }
 }
@@ -642,5 +667,59 @@ mod tests {
             "the removed observer is told no more, the other still is"
         );
         assert_eq!(sinks.len(), 1);
+    }
+
+    /// A pair lent from an arena holds the rows its open lent each list and refuses one more,
+    /// whatever the build's ceiling, with the observers in kept; an arena without the room for
+    /// both lists refuses the pair. Turned red by a pair lent the build's ceiling, or one list.
+    #[test]
+    fn a_lent_pair_refuses_an_observer_past_its_rows() {
+        /// Memory an arena may start on: aligned as its spans are.
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; 16]);
+
+        fn arena_over(memory: &mut [Block], bytes: usize) -> Arena {
+            assert!(bytes <= core::mem::size_of_val(memory));
+            // SAFETY: the blocks are aligned to `ARENA_ALIGN`, hold `bytes`, and outlive every
+            // table the arena lends in this test.
+            unsafe {
+                Arena::over(
+                    core::ptr::NonNull::new(memory.as_mut_ptr().cast::<u8>())
+                        .expect("a vector's data"),
+                    bytes,
+                )
+            }
+        }
+
+        type Pair = DeclObserverPair<CountingDeclSink, CountingUndeclSink, Lent>;
+        let rows = caps::MAX_DECL_OBSERVERS.min(2);
+        let bytes = Pair::arena_bytes(rows).expect("within the address space");
+        let mut memory = std::vec![Block([0; 16]); bytes / 16 + 1];
+        let mut arena = arena_over(&mut memory, bytes);
+        let mut pair = Pair::lent(&mut arena, rows).expect("the arena holds both lists");
+        assert_eq!(arena.high_water(), bytes, "both lists, and no more");
+        for _ in 0..rows {
+            pair.install_decl(CountingDeclSink::default())
+                .expect("within the rows");
+            pair.install_undecl(CountingUndeclSink::default())
+                .expect("within the rows");
+        }
+        assert!(
+            pair.install_decl(CountingDeclSink::default()).is_err(),
+            "a declaration observer past the rows"
+        );
+        assert!(
+            pair.install_undecl(CountingUndeclSink::default()).is_err(),
+            "an undeclaration observer past the rows"
+        );
+        assert_eq!((pair.decl_len(), pair.undecl_len()), (rows, rows));
+
+        let mut other = std::vec![Block([0; 16]); bytes / 16 + 1];
+        let mut short = arena_over(&mut other, bytes - 1);
+        assert!(
+            Pair::lent(&mut short, rows).is_err(),
+            "an arena one byte short holds no pair"
+        );
     }
 }

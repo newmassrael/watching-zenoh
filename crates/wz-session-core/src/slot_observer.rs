@@ -38,6 +38,7 @@
 use core::mem::MaybeUninit;
 
 use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
+use crate::caps;
 use crate::decl_sink::{DeclSink, UndeclSink};
 #[cfg(all(feature = "alloc", feature = "liveliness-token"))]
 use crate::declare::liveliness::LivelinessRegistry;
@@ -53,6 +54,7 @@ use crate::declare::queryable::RemoteQueryableTable;
 use crate::declare::subscriber::RemoteSubscriberTable;
 use crate::driver_loop::IterationEvent;
 use crate::key_arena::KeySpace;
+use crate::limit_binding::{Quota, UnlentRows};
 use crate::peer_tables::PeerTables;
 use crate::pubsub::SubscriberTable;
 #[cfg(feature = "query-queryable")]
@@ -233,9 +235,8 @@ impl OtherPeers for NoOtherPeers {
 /// `P` is the storage of the tables the application writes (its subscriptions,
 /// queryables, tokens and liveliness subscribers): the build's [`Profile`], or
 /// [`Lent`] for an observer whose rows a session's arena lent at its open
-/// ([`SlotObserverOf::lent`]). What a peer writes is in the [`PeerTables`] each
-/// call is handed, of their own policy; the declaration watchers are installed once
-/// and stay the build's profile's.
+/// ([`SlotObserverOf::lent`]), the declaration watchers' lists among them. What a peer
+/// writes is in the [`PeerTables`] each call is handed, of their own policy.
 pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile> {
     /// The local subscriptions. One registration serves every session.
     pub subscribers: SubscriberTable<K::Subscriber, P>,
@@ -247,14 +248,14 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile>
     pub queryables: QueryableRegistry<K::Queryable, P>,
     /// The application's listeners on the subscribers a peer declares.
     #[cfg(feature = "declare-subscriber")]
-    pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared>,
+    pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared, P>,
     /// The application's listeners on the queryables a peer declares.
     #[cfg(feature = "declare-queryable")]
-    pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared>,
+    pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared, P>,
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
-        LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
+        LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink, P>,
     /// The tokens wz itself holds, answered to a peer's interest.
     #[cfg(feature = "liveliness-token")]
     pub local_tokens: LocalTokenRegistry<P>,
@@ -615,16 +616,22 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
 impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
     /// many rows each as `rows` states, their keys kept in `keys`, the session's key arena, and
-    /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. Refused, the rows lent so
-    /// far going back with the arena, when the arena has not the room. The declaration watchers
-    /// are the build's profile's: their lists are installed once, at most `MAX_DECL_OBSERVERS`
-    /// each.
+    /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. The declaration watchers'
+    /// lists are lent too, as many rows each as `limits` admits watchers
+    /// ([`Self::decl_watcher_rows`]). Refused, the rows lent so far going back with the arena,
+    /// when the arena has not the room, or when `limits` admits more watchers than the build.
     pub fn lent(
         arena: &mut Arena,
         keys: KeySpace,
         rows: ObserverRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        ))]
+        let watchers = Self::decl_watcher_rows(limits)?;
         let mut observer = Self {
             subscribers: SubscriberTable::lent(arena, keys, rows.subscribers)?,
             #[cfg(feature = "switchboard")]
@@ -632,11 +639,11 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
             #[cfg(feature = "query-queryable")]
             queryables: QueryableRegistry::lent(arena, keys, rows.queryables)?,
             #[cfg(feature = "declare-subscriber")]
-            remote_subscribers: RemoteSubscriberTable::with_sink_backing(),
+            remote_subscribers: RemoteSubscriberTable::lent(arena, watchers)?,
             #[cfg(feature = "declare-queryable")]
-            remote_queryables: RemoteQueryableTable::with_sink_backing(),
+            remote_queryables: RemoteQueryableTable::lent(arena, watchers)?,
             #[cfg(feature = "liveliness-token")]
-            liveliness: LivelinessRegistry::new(),
+            liveliness: LivelinessRegistry::lent(arena, watchers)?,
             #[cfg(feature = "liveliness-token")]
             local_tokens: LocalTokenRegistry::lent(arena, keys, rows.local_tokens)?,
             #[cfg(feature = "liveliness-subscriber")]
@@ -648,6 +655,65 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
         };
         observer.limit_to(limits);
         Ok(observer)
+    }
+
+    /// How many rows [`Self::lent`] lends each declaration watcher list under `limits`: the
+    /// session's `MAX_DECL_OBSERVERS`, under the build's, as the arena that holds them counts it.
+    /// Refused past the build's value. A build that states no value of it lends its lists no row,
+    /// as their type holds none.
+    pub fn decl_watcher_rows(limits: &crate::limits::SessionLimits) -> Result<usize, LendRefused> {
+        match limits
+            .max_decl_observers()
+            .lent_under(Quota::at_most(caps::MAX_DECL_OBSERVERS))
+        {
+            Ok(rows) => Ok(rows),
+            Err(UnlentRows::OverCeiling { value, ceiling }) => Err(LendRefused::OverCeiling {
+                rows: value,
+                ceiling,
+            }),
+            Err(UnlentRows::NoCeiling) => Ok(0),
+        }
+    }
+
+    /// The bytes of an arena the declaration watchers' lists of [`Self::lent`] take, `rows` rows
+    /// each: two lists for each plane of the build that has watchers, each a span of its own.
+    /// `None` past the address space.
+    pub const fn decl_watcher_bytes(rows: usize) -> Option<usize> {
+        let bytes = Some(0);
+        #[cfg(feature = "declare-subscriber")]
+        let bytes = sum_of(
+            bytes,
+            RemoteSubscriberTable::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
+        );
+        #[cfg(feature = "declare-queryable")]
+        let bytes = sum_of(
+            bytes,
+            RemoteQueryableTable::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
+        );
+        #[cfg(feature = "liveliness-token")]
+        let bytes = sum_of(
+            bytes,
+            LivelinessRegistry::<
+                crate::decl_sink::BoxedDeclSink,
+                crate::decl_sink::BoxedUndeclSink,
+                Lent,
+            >::arena_bytes(rows),
+        );
+        let _ = rows;
+        bytes
+    }
+}
+
+/// `a + b`, `None` when either is or the sum is past the address space.
+#[cfg(any(
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "liveliness-token"
+))]
+const fn sum_of(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(a), Some(b)) => a.checked_add(b),
+        _ => None,
     }
 }
 
@@ -1874,5 +1940,86 @@ mod lent_tests {
             SubscribersOnly.subscribes(&publisher),
             "CONTROL: the method the faces do say is theirs"
         );
+    }
+
+    /// The watchers' lists of the observer are lent from its arena, the session's
+    /// `MAX_DECL_OBSERVERS` rows each: a session that admits fewer watchers is lent fewer bytes, by
+    /// what `decl_watcher_bytes` states for the rows between, and a watcher past the rows is
+    /// refused on each plane. Turned red by lists of the build's profile, or lent other rows.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn lent_watcher_lists_take_the_sessions_rows_and_refuse_one_more() {
+        use crate::decl_sink::BoxedDeclSink;
+        type App = SlotObserverOf<HeapSinks, Lent>;
+        let mut lowered = SessionLimits::defaults();
+        // A build whose value is one, or whose domain holds its value alone, has no lower one.
+        if caps::MAX_DECL_OBSERVERS < 2
+            || lowered
+                .select_max_decl_observers(Quota::at_most(1))
+                .is_err()
+        {
+            return;
+        }
+        assert_eq!(App::decl_watcher_rows(&lowered), Ok(1));
+        assert_eq!(
+            App::decl_watcher_rows(&SessionLimits::defaults()),
+            Ok(caps::MAX_DECL_OBSERVERS)
+        );
+        let mut one = arena(1 << 16);
+        let mut observer = App::lent(&mut one, keys(64), ObserverRows::default(), &lowered)
+            .expect("the arena has the rows");
+        let mut built = arena(1 << 16);
+        let _built = App::lent(
+            &mut built,
+            keys(64),
+            ObserverRows::default(),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let between = App::decl_watcher_bytes(caps::MAX_DECL_OBSERVERS)
+            .zip(App::decl_watcher_bytes(1))
+            .map(|(all, least)| all - least);
+        assert_eq!(
+            Some(built.high_water() - one.high_water()),
+            between,
+            "the lists are lent the session's rows, from the arena"
+        );
+
+        observer
+            .remote_subscribers
+            .on_subscriber_declared_sink(BoxedDeclSink::new(|_| {}))
+            .expect("within the row");
+        assert_eq!(
+            observer
+                .remote_subscribers
+                .on_subscriber_declared_sink(BoxedDeclSink::new(|_| {})),
+            Err(RegisterError::TableFull)
+        );
+        #[cfg(feature = "declare-queryable")]
+        {
+            observer
+                .remote_queryables
+                .on_queryable_declared_sink(BoxedDeclSink::new(|_| {}))
+                .expect("within the row");
+            assert_eq!(
+                observer
+                    .remote_queryables
+                    .on_queryable_declared_sink(BoxedDeclSink::new(|_| {})),
+                Err(RegisterError::TableFull)
+            );
+        }
+        #[cfg(feature = "liveliness-token")]
+        {
+            observer
+                .liveliness
+                .on_token_declared_sink(BoxedDeclSink::new(|_| {}))
+                .expect("within the row");
+            assert_eq!(
+                observer
+                    .liveliness
+                    .on_token_declared_sink(BoxedDeclSink::new(|_| {})),
+                Err(RegisterError::TableFull)
+            );
+        }
     }
 }

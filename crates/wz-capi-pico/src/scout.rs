@@ -102,8 +102,8 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 ///
 /// Each window is handed the two snapshots of the scout's config. The tokio engine opens its
 /// sockets under its policies; the cooperative engine's sockets read no policy of it, and its
-/// window over one datagram socket (`scout-mcu`) reads each datagram into a buffer of the
-/// multicast batch its limits hold (`PICO_MULTICAST_BATCH_BYTES`), as zenoh-pico reads a scout.
+/// windows read each datagram into a buffer of the multicast batch its limits hold
+/// (`PICO_MULTICAST_BATCH_BYTES`), as zenoh-pico reads a scout.
 mod window {
     use core::net::IpAddr;
 
@@ -119,12 +119,12 @@ mod window {
     #[cfg(not(feature = "engine-tokio"))]
     use crate::result::WZ_EXT_ERR_SCOUT_REENTERED;
 
-    /// The process's one table of a cooperative window's Hellos: in the library's static memory,
-    /// reserved when it is built, never on a stack and never on the heap. A window holds it for
-    /// its run and its delivery. A window that finds it held by another thread's window waits for
-    /// it, at most its own budget, on a condition variable the holder signals when it lets go; one
-    /// that finds it held by its own thread, a scout asked from inside a scout's callback, is
-    /// refused at once.
+    /// The process's one table of a cooperative window's Hellos, and the buffer the window reads
+    /// each datagram into: in the library's static memory, reserved when it is built, never on a
+    /// stack and never on the heap. A window holds both for its run and its delivery. A window
+    /// that finds them held by another thread's window waits for them, at most its own budget, on
+    /// a condition variable the holder signals when it lets go; one that finds them held by its
+    /// own thread, a scout asked from inside a scout's callback, is refused at once.
     #[cfg(not(feature = "engine-tokio"))]
     pub(in crate::scout) mod table {
         use core::cell::UnsafeCell;
@@ -132,6 +132,8 @@ mod window {
 
         use wz_capi_port::os;
         use wz_capi_port::sync::Lock;
+        use wz_session_core::caps;
+        use wz_session_core::limits::SessionLimits;
         use wz_session_core::scouting_host::HelloTable;
 
         struct Region(UnsafeCell<HelloTable>);
@@ -140,6 +142,15 @@ mod window {
         unsafe impl Sync for Region {}
 
         static TABLE: Region = Region(UnsafeCell::new(HelloTable::new()));
+
+        /// The buffer a window reads each datagram into: the build's multicast batch, which
+        /// zenoh-pico reads a scout into, and of which a window uses its session limits' value.
+        struct Buffer(UnsafeCell<[u8; caps::PICO_MULTICAST_BATCH_BYTES]>);
+
+        // SAFETY: the buffer is reached only by the one holder of the claim, through it.
+        unsafe impl Sync for Buffer {}
+
+        static BUFFER: Buffer = Buffer(UnsafeCell::new([0; caps::PICO_MULTICAST_BATCH_BYTES]));
 
         /// Which thread holds the table, by its word, and the condition its waiters sleep on.
         struct Holder {
@@ -242,10 +253,17 @@ mod window {
                 }
             }
 
-            /// The table the claim holds.
-            pub(in crate::scout) fn table(&mut self) -> &mut HelloTable {
-                // SAFETY: one claim exists at a time, and it lends the table through `&mut self`.
-                unsafe { &mut *TABLE.0.get() }
+            /// The table and the read buffer the claim holds, the buffer as long as the multicast
+            /// batch `limits` state, at most the build's.
+            pub(in crate::scout) fn parts(
+                &mut self,
+                limits: &SessionLimits,
+            ) -> (&mut HelloTable, &mut [u8]) {
+                // SAFETY: one claim exists at a time, and it lends the table and the buffer through
+                // `&mut self`.
+                let (table, buffer) = unsafe { (&mut *TABLE.0.get(), &mut *BUFFER.0.get()) };
+                let room = limits.pico_multicast_batch_bytes().min(buffer.len());
+                (table, &mut buffer[..room])
             }
         }
 
@@ -360,21 +378,15 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
-        _limits: &SessionLimits,
+        limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
     ) -> Result<usize, ZResult> {
         let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
             return Ok(0);
         };
+        let (table, buffer) = claim.parts(limits);
         let delivered = wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
-            clock,
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-            claim.table(),
-            on_hello,
+            clock, group, port, what, zid, budget_ms, table, buffer, on_hello,
         );
         Ok(delivered)
     }
@@ -389,19 +401,14 @@ mod window {
         zid: Option<SessionZid>,
         budget_ms: u64,
         _policy: &SessionPolicy,
-        _limits: &SessionLimits,
+        limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
         let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
             return Ok(None);
         };
+        let (table, buffer) = claim.parts(limits);
         let first = wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
-            clock,
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-            claim.table(),
+            clock, group, port, what, zid, budget_ms, table, buffer,
         );
         Ok(first)
     }
@@ -424,16 +431,9 @@ mod window {
         let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
             return Ok(0);
         };
+        let (table, buffer) = claim.parts(limits);
         Ok(crate::coop_host::run_scout(
-            clock,
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-            limits.pico_multicast_batch_bytes(),
-            claim.table(),
-            on_hello,
+            clock, group, port, what, zid, budget_ms, table, buffer, on_hello,
         ))
     }
 
@@ -452,15 +452,9 @@ mod window {
         let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
             return Ok(None);
         };
+        let (table, buffer) = claim.parts(limits);
         Ok(crate::coop_host::scout_first(
-            clock,
-            group,
-            port,
-            what,
-            zid,
-            budget_ms,
-            limits.pico_multicast_batch_bytes(),
-            claim.table(),
+            clock, group, port, what, zid, budget_ms, table, buffer,
         ))
     }
 }

@@ -162,7 +162,7 @@ pub const MAX_DECL_OBSERVERS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 

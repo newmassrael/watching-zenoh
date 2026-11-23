@@ -455,21 +455,6 @@ fn after_member(lex: &mut Lexer<'_>) -> Result<(), Refused> {
     }
 }
 
-/// The key ids `member`, the text of a document's `wz/key-ids`, states, read by the reader the
-/// other ABIs read them with: a member the door reads apart, as the only one with a shape of its
-/// own.
-#[cfg(all(feature = "config-document", feature = "shared-key-ids"))]
-fn key_ids_of(member: &str) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, Refused> {
-    let value = json5::parse(member)?;
-    let tree = Json5Value::Object(alloc::vec![(
-        alloc::string::String::from(WZ_MEMBER),
-        Json5Value::Object(alloc::vec![(alloc::string::String::from("key-ids"), value)]),
-    )]);
-    policy_document::statements_from_json5(&tree)
-        .map(|read| read.key_ids)
-        .map_err(|_| Refused)
-}
-
 #[cfg(feature = "config-document")]
 impl DocumentRows {
     /// Whether the document states nothing, so a config resolves as one handed none.
@@ -515,18 +500,18 @@ impl DocumentRows {
         {
             self.key_ids = Default::default();
         }
-        self.read_document(&mut Lexer::new(text), text)
+        self.read_document(&mut Lexer::new(text))
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
     /// The whole document: an object, each of whose `wz` members is read, and nothing after it.
-    fn read_document(&mut self, lex: &mut Lexer<'_>, text: &str) -> Result<(), Refused> {
+    fn read_document(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
         lex.skip_trivia()?;
         open_object(lex)?;
         let mut seen_wz = false;
         while let Some(name) = next_member(lex)? {
             if name.eq_str(WZ_MEMBER) {
-                self.read_wz(lex, text, &mut seen_wz)?;
+                self.read_wz(lex, &mut seen_wz)?;
             } else {
                 lex.skip_value(caps::CONFIG_DOCUMENT_DEPTH - 1)?;
             }
@@ -542,12 +527,7 @@ impl DocumentRows {
 
     /// One `wz` member: an object, or `null`, zenoh's spelling of a member left unset, which
     /// states nothing as the zenoh-c ABI's reader of the same document takes it.
-    fn read_wz(
-        &mut self,
-        lex: &mut Lexer<'_>,
-        text: &str,
-        seen_wz: &mut bool,
-    ) -> Result<(), Refused> {
+    fn read_wz(&mut self, lex: &mut Lexer<'_>, seen_wz: &mut bool) -> Result<(), Refused> {
         if lex.peek() != Some(b'{') {
             let unset = !lex.at_string()
                 && !lex.at_number()
@@ -570,18 +550,20 @@ impl DocumentRows {
                 self.read_limits(lex)?;
             } else if name.eq_str("key-ids") {
                 first(&mut seen.key_ids)?;
+                // Read where it lies, into the rows of its entries, by the rules of the reader
+                // the other ABIs read it with: the member nests below `wz`, two levels down.
                 #[cfg(feature = "shared-key-ids")]
                 {
-                    let start = lex.pos();
-                    lex.skip_value(caps::CONFIG_DOCUMENT_DEPTH - 2)?;
-                    self.key_ids = key_ids_of(&text[start..lex.pos()])?;
+                    self.key_ids = wz_session_core::shared_key_ids::read_member_in(
+                        lex,
+                        caps::CONFIG_DOCUMENT_DEPTH - 2,
+                        wz_session_core::shared_key_ids::form_in_domain,
+                    )
+                    .map_err(|_| Refused)?;
                 }
                 // A build without the capability refuses the member by name.
                 #[cfg(not(feature = "shared-key-ids"))]
-                {
-                    let _ = text;
-                    return Err(Refused);
-                }
+                return Err(Refused);
             } else {
                 return Err(Refused);
             }
@@ -1202,6 +1184,46 @@ mod tests {
         assert_eq!(
             config.resolved(),
             Resolved::unchanged(SessionPolicy::defaults())
+        );
+    }
+
+    /// The door reads `wz/key-ids` where it lies, into the rows of its entries, as the tree reader
+    /// the other ABIs read it with reads it; a refused part of it refuses the document, and the
+    /// config keeps the key ids it held. Turned red by a door whose reader drops a link or an
+    /// entry, or keeps what a refused document stated.
+    #[cfg(all(feature = "config-document", feature = "shared-key-ids"))]
+    #[test]
+    fn the_document_door_reads_key_ids_as_the_tree_reader_does() {
+        let text = r#"{ mode: "peer", wz: { "key-ids": {
+            dictionary: [ { id: 40, key: "lab/rig" }, { key: 'lab/rig/alpha', id: 0x29 } ],
+            links: [ { locator: "tcp/192.0.2.7:7447", form: "declared" } ] } } }"#;
+        let mut config = Config::new();
+        assert_eq!(config.document(text), Z_OK);
+        let tree = policy_document::statements_from_json5(&wz_members(text).expect("an object"))
+            .expect("well formed")
+            .key_ids;
+        assert!(
+            tree.ids.is_some() && !tree.links.is_empty(),
+            "CONTROL: the document states a dictionary and a link"
+        );
+        let read = |config: &Config| {
+            config
+                .state()
+                .policies
+                .document_key_ids()
+                .expect("the door's rows")
+        };
+        assert_eq!(read(&config), tree);
+
+        assert_eq!(
+            config
+                .document(r#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/a" } ] } } }"#),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(
+            read(&config),
+            tree,
+            "a refused document keeps the key ids the config held"
         );
     }
 
