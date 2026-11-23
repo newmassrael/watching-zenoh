@@ -2741,8 +2741,6 @@ pub mod session_slot_pool_mcu {
 // land in later rounds. Gated on `session-multicast` (it names the two
 // generated FSM engines).
 #[cfg(feature = "session-multicast")]
-// Totality debt TD-029 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod multicast_dispatch;
 
 /// The rows of a multicast group's member table: fixed, and grown past them on a heap build whose
