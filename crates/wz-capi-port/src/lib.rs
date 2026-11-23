@@ -94,9 +94,7 @@ pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, Session
 pub use engine::{RedeclareRefusal, SessionEngine};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
-pub use query::{
-    HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback,
-};
+pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 pub use refusal::Refusal;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an

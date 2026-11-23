@@ -11,7 +11,8 @@
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FanoutError, LinksNotHonoured, SessionEngine, StatementNotHonoured, SubscriberSink, WireKey,
+    FanoutError, LinksNotHonoured, Refusal, SessionEngine, StatementNotHonoured, SubscriberSink,
+    WireKey,
 };
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::link_restriction::LinkRestriction;
@@ -107,9 +108,8 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
     });
 }
 
-/// A get limited to a link or addressed to one node is refused by name through the door that
-/// names it, and asked of no link through the door of no statement; no leg is minted for it
-/// either way.
+/// A get limited to a link or addressed to one node is refused by that statement, and no leg is
+/// minted for it.
 #[cfg(feature = "query")]
 #[test]
 fn a_stated_get_is_refused_by_name_and_asks_no_link() {
@@ -132,19 +132,6 @@ fn a_stated_get_is_refused_by_name_and_asks_no_link() {
         ),
     ] {
         assert_eq!(
-            engine.get_stated(
-                "demo/links/q",
-                &WireKey::literal(),
-                &stated,
-                None,
-                &mut || -> ReplyCallback {
-                    legs += 1;
-                    Box::new(|_: &dyn ReplyView| {})
-                }
-            ),
-            Err(named)
-        );
-        assert_eq!(
             engine.get_on_wire(
                 "demo/links/q",
                 &WireKey::literal(),
@@ -155,7 +142,7 @@ fn a_stated_get_is_refused_by_name_and_asks_no_link() {
                     Box::new(|_: &dyn ReplyView| {})
                 }
             ),
-            Some(0)
+            Err(Refusal::NotHonoured(named))
         );
     }
     assert_eq!(legs, 0, "no leg was minted for a get that states something");
@@ -213,7 +200,7 @@ fn a_limited_liveliness_get_is_refused_by_name() {
                 Box::new(|_: &dyn ReplyView| {})
             }
         ),
-        Err(LinksNotHonoured)
+        Err(Refusal::NotHonoured(StatementNotHonoured::Links))
     );
     assert_eq!(legs, 0, "no leg was minted for a limited liveliness get");
 }

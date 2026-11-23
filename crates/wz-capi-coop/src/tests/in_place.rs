@@ -56,7 +56,7 @@ fn a_reply_read_in_place_answers_its_get() {
     let engine = open(&router);
     settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
     let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
-    assert_eq!(issued, Some(1), "one leg: the link's peer");
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
     until(&engine, "the leg to end", || leg.lock().unwrap().ended);
     assert_eq!(
         leg.lock().unwrap().replies,

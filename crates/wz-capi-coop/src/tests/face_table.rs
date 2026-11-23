@@ -145,7 +145,7 @@ fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
             }) as ReplyCallback
         },
     );
-    assert_eq!(issued, Some(2), "one leg for each face");
+    assert_eq!(issued, Ok(2), "one leg for each face");
     assert!(
         legs.lock().unwrap().ended.is_empty(),
         "CONTROL: both legs are open until their routers' Finals come"

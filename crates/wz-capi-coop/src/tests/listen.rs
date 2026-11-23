@@ -189,7 +189,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
             }) as ReplyCallback
         },
     );
-    assert_eq!(issued, Some(2), "one leg for each face the listener holds");
+    assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
     eventually("both legs to end", || *ended.lock().unwrap() == 2);
     let mut answers = replies.lock().unwrap().clone();
     answers.sort();

@@ -7422,6 +7422,39 @@ mod matching_aggregate_tests {
         assert_eq!(declare(&shared), Err(Refusal::Closed));
     }
 
+    /// Through the engine port a get asked of a closed session is refused as closed and mints no
+    /// leg, where one asked of an open session with no face reaches nobody.
+    #[cfg(feature = "query")]
+    #[test]
+    fn the_port_refuses_a_get_on_a_closed_session() {
+        use wz_capi_port::{Refusal, SessionEngine};
+        use wz_session_core::query_options::QueryOptions;
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let minted = std::cell::Cell::new(0usize);
+        let ask = |shared: &SharedSession| {
+            SessionEngine::get_on_wire(
+                shared,
+                "wz/get/port",
+                &WireKey::literal(),
+                &QueryOptions::get()
+                    .with_allowed_destination(wz_session_core::locality::Locality::Remote),
+                None,
+                &mut || -> wz_capi_port::ReplyCallback {
+                    minted.set(minted.get() + 1);
+                    Box::new(|_view: &dyn wz_session_core::reply_sink::ReplyView| {})
+                },
+            )
+        };
+        assert_eq!(ask(&shared), Ok(0), "CONTROL: an open session with no face");
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(ask(&shared), Err(Refusal::Closed));
+        assert_eq!(minted.get(), 0, "no leg was minted");
+    }
+
     /// The session numbers every declaration from one `u32` space, upstream's `EntityId`: it
     /// hands out `u32::MAX`, and from then on refuses every declaration that needs an id, with
     /// nothing recorded, where upstream's counter would wrap onto an id a live one holds.
@@ -10255,12 +10288,12 @@ mod face_up_order_tests {
         };
         assert_eq!(
             asked(LinkRestriction::only([1]).expect("one slot")),
-            Ok(Some(1)),
+            Ok(1),
             "a set is honoured: the one link it names is asked"
         );
         assert_eq!(
             asked(LinkRestriction::Any),
-            Ok(Some(2)),
+            Ok(2),
             "no set: every link is asked"
         );
 

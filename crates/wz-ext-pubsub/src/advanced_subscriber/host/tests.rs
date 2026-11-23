@@ -273,7 +273,7 @@ impl SessionEngine for Script {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let mut legs = Vec::new();
         for _ in 0..*self.legs.lock().unwrap() {
             let slot = Arc::new(Mutex::new(Some(leg())));
@@ -296,7 +296,7 @@ impl SessionEngine for Script {
             destination: opts.allowed_destination,
             legs,
         });
-        Some(count)
+        Ok(count)
     }
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
         if self.no_tickers.load(Ordering::SeqCst) {

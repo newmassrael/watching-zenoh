@@ -119,7 +119,7 @@ fn a_get_sees_the_reply_timestamp_as_the_policy_says_unless_it_chooses() {
                         into.lock().unwrap().push(stamped);
                     }) as ReplyCallback
                 });
-            assert_eq!(issued, Some(1), "one leg, to the router");
+            assert_eq!(issued, Ok(1), "one leg, to the router");
             until(&engine, "the stamped reply", || {
                 !seen.lock().unwrap().is_empty()
             });

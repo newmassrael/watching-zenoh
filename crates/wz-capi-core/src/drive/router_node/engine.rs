@@ -496,13 +496,10 @@ impl SessionEngine for RouterState {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
-        // A get limited to some links or addressed to one node is asked of none: the router reads
-        // neither, and asking every link would widen it. `get_stated` is the door that refuses it
-        // by name.
-        if StatementNotHonoured::of_query(opts).is_err() {
-            return Some(0);
-        }
+    ) -> Result<usize, Refusal> {
+        // A get limited to some links or addressed to one node is refused by that statement: the
+        // router reads neither, and asking every link would widen it.
+        StatementNotHonoured::of_query(opts)?;
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
@@ -515,12 +512,13 @@ impl SessionEngine for RouterState {
                 Box::new(move |view| callback(view)),
                 Box::new(|| {}),
             )
-            .ok()?;
+            // The one way the node fails to ask: a query its codec cannot build.
+            .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
             fan.record(move || face.cancel_query(id));
         }
-        Some(1)
+        Ok(1)
     }
 
     #[cfg(feature = "transport-shm")]
@@ -532,11 +530,9 @@ impl SessionEngine for RouterState {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
-        // Asked of none when it states what the router does not read, as `get_on_wire` is.
-        if StatementNotHonoured::of_query(opts).is_err() {
-            return Some(0);
-        }
+    ) -> Result<usize, Refusal> {
+        // Refused when it states what the router does not read, as `get_on_wire` is.
+        StatementNotHonoured::of_query(opts)?;
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
@@ -550,12 +546,13 @@ impl SessionEngine for RouterState {
                 Box::new(move |view| callback(view)),
                 Box::new(|| {}),
             )
-            .ok()?;
+            // The node fails to ask a query its codec cannot build, or a chunk it cannot send.
+            .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
             fan.record(move || face.cancel_query(id));
         }
-        Some(1)
+        Ok(1)
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -566,7 +563,7 @@ impl SessionEngine for RouterState {
         _timeout_ms: u32,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         // One leg: the node's own face tells the tokens the router's tables hold and the ones the
         // program declared, and then those a router above the node answers, as upstream's peer
         // hat sends its session's current interest to a gateway; a router tells a peer below it
@@ -604,12 +601,13 @@ impl SessionEngine for RouterState {
         // held, is not called.
         let id = face.tokens_get_id();
         let cancel_face = Arc::clone(&face);
+        // A fan already cancelled issues no leg: the get is over, having asked nobody.
         if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
-            return Some(0);
+            return Ok(0);
         }
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
         face.get_tokens(id, keyexpr, on_key, on_final);
-        Some(1)
+        Ok(1)
     }
 
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {

@@ -228,14 +228,16 @@ pub(crate) enum Door {
     /// The write filter a publisher or a querier is declared with (`z_declare_publisher`,
     /// `z_declare_querier`, the advanced publisher's), made after the entity's key is declared.
     WriteFilter,
+    /// A get, a querier's get or a liveliness get (`z_get`, `z_querier_get`, `z_liveliness_get`).
+    Get,
 }
 
-/// The code of a declaration the engine refused at `door`: this ABI's one table for the port's
+/// The code of a call the engine refused at `door`: this ABI's one table for the port's
 /// [`Refusal`], each door's row the code zenoh-pico's own door answers for the cause. A plane the
-/// build does not hold has no pico code at any door, as the door has no pico symbol to be declared
-/// through in such a build; it is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
+/// build does not hold, and a statement the engine does not carry out, have no pico code at any
+/// door, as zenoh-pico has neither; each is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
 pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
-    if refusal == Refusal::NotBuilt {
+    if matches!(refusal, Refusal::NotBuilt | Refusal::NotHonoured(_)) {
         return WZ_EXT_ERR_UNSUPPORTED;
     }
     match door {
@@ -258,6 +260,17 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
             Refusal::Closed => Z_ERR_GENERIC,
             _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         },
+        // A get pico has no room to hold pending is `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_pending_query_t *pq = _z_unsafe_liveliness_register_pending_query(zn);`),
+        // one asked of a session that is closed is `_Z_ERR_SESSION_CLOSED`
+        // (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `return _z_session_is_closed(zn) ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK;`), and one larger
+        // than the session's codec carries the generic error, as a publication of one is.
+        Door::Get => match refusal {
+            Refusal::Closed => Z_ERR_SESSION_CLOSED,
+            Refusal::ExceedsCapacity => Z_ERR_GENERIC,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
     }
 }
 
@@ -265,9 +278,9 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
 mod tests {
     use super::*;
 
-    /// Each refusal at a matching listener's door answers the code pico's door answers, and every
-    /// code is a failure to a caller's `< 0` test: none reads as the `Z_OK` of a declaration
-    /// that was never made.
+    /// Each refusal at a write filter's door answers the code pico's door answers, and every code
+    /// is a failure to a caller's `< 0` test: none reads as the `Z_OK` of a declaration that
+    /// was never made.
     #[test]
     fn each_refusal_of_a_write_filter_answers_picos_code() {
         let at = |refusal| refusal_code(refusal, Door::WriteFilter);
@@ -278,7 +291,24 @@ mod tests {
         assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
     }
 
-    /// See [`each_refusal_of_a_write_filter_answers_picos_code`].
+    /// A get pico has no room for is out of memory, one on a closed session is
+    /// `Z_ERR_SESSION_CLOSED`, and a statement the engine does not carry out is wz's own code.
+    #[test]
+    fn each_refusal_of_a_get_answers_picos_code() {
+        let at = |refusal| refusal_code(refusal, Door::Get);
+        assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::Closed), Z_ERR_SESSION_CLOSED);
+        assert_eq!(at(Refusal::ExceedsCapacity), Z_ERR_GENERIC);
+        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(
+            at(Refusal::NotHonoured(
+                wz_capi_port::StatementNotHonoured::TargetPeer
+            )),
+            WZ_EXT_ERR_UNSUPPORTED
+        );
+    }
+
+    /// The same table at a matching listener's door.
     #[test]
     fn each_refusal_of_a_matching_listener_answers_picos_code() {
         let at = |refusal| refusal_code(refusal, Door::MatchingListener);

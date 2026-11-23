@@ -37,8 +37,8 @@ use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, NoRoomToHold, QblId, QueryableSink, Refusal, ReplyCallback, StatementNotHonoured,
-    SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -422,9 +422,10 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// platform default, never none) or the loss of its link. Its replies are token
     /// declarations, with the token's key as the reply's. `leg` and `fan` are as
     /// [`Self::get_on_wire`]'s: `leg` mints each leg's [`ReplyCallback`], whose drop is that
-    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, or
-    /// `None` from an engine with no liveliness get in this build, which is the provided
-    /// answer.
+    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
+    /// for a get that reached nobody; refused as [`Self::get_on_wire`] is, and with
+    /// [`Refusal::NotBuilt`] by an engine with no liveliness get in this build, which is the
+    /// provided answer.
     fn liveliness_get_on_wire(
         &self,
         keyexpr: &str,
@@ -432,9 +433,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         timeout_ms: u32,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let _ = (keyexpr, wire, timeout_ms, fan, leg);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Declare a liveliness token on `keyexpr`, announced as `wire`, to every peer the session
@@ -479,8 +480,16 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
     /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
     /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
-    /// legs are issued stops the issuing. The number of legs issued, or `None` from an engine
-    /// with no requesting end in this build, which is the provided answer.
+    /// legs are issued stops the issuing.
+    ///
+    /// The number of legs issued, `0` for a get that reached nobody (its destination admits
+    /// nobody, or no link is up), which is over at once. A refused get issued no leg (`leg` was
+    /// not called) and sent nothing, and answers why: the session is closed; a peer or queryable it
+    /// had to ask found no room in the table that holds the session's pending gets
+    /// ([`Refusal::TableFull`]; where some found room, the legs that found it are issued); the
+    /// query states what this engine does not carry out ([`Refusal::NotHonoured`]: a set of links,
+    /// or the one node it is addressed to, which asked of every link would widen it); or the engine
+    /// has no requesting end in this build ([`Refusal::NotBuilt`], the provided answer).
     fn get_on_wire(
         &self,
         keyexpr: &str,
@@ -488,26 +497,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let _ = (keyexpr, wire, opts, fan, leg);
-        None
-    }
-
-    /// [`Self::get_on_wire`], a get the session could not hold pending told apart from one that
-    /// reached nobody: `Err` when no leg was issued (`leg` was not called) and nothing was sent,
-    /// and a peer or queryable it had to ask found no room in the table that holds the session's
-    /// pending gets. Where some found room and some did not, the legs that found it are issued, as
-    /// [`Self::get_on_wire`] issues them. The provided answer is [`Self::get_on_wire`]'s, for an
-    /// engine whose pending gets are not held to a table of its own.
-    fn get_held(
-        &self,
-        keyexpr: &str,
-        wire: &WireKey,
-        opts: &QueryOptions,
-        fan: Option<&CancellableFan>,
-        leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, NoRoomToHold> {
-        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
+        Err(Refusal::NotBuilt)
     }
 
     /// [`Self::get_on_wire`] for a query whose VALUE is a buffer of shared memory some owner of a
@@ -525,7 +517,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let mut opts = opts.clone();
         opts.payload = Some(value.bytes().to_vec());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
@@ -606,8 +598,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// [`Self::liveliness_get_on_wire`] limited to the links of `links`: asked of the nodes behind
-    /// those links only. `Err` when the engine cannot honour a set it was given, and no leg is
-    /// issued (`leg` is not called).
+    /// those links only. A set the engine cannot honour is refused as that statement
+    /// ([`Refusal::NotHonoured`]), and no leg is issued (`leg` is not called).
     fn liveliness_get_on_link_set(
         &self,
         keyexpr: &str,
@@ -616,27 +608,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         links: LinkRestriction,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
+    ) -> Result<usize, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg))
-    }
-
-    /// [`Self::get_on_wire`] for a query that may state what not every engine honours: a set of
-    /// links (`opts.links`) or the one node it is addressed to (`opts.target_peer`). `Err` names
-    /// the first statement the engine cannot honour, and no leg is issued. An engine that cannot
-    /// honour one and is handed it through [`Self::get_on_wire`] asks no link and issues no leg,
-    /// so such a get is never widened to every link; this is the door that says why. The provided
-    /// answer honours neither.
-    fn get_stated(
-        &self,
-        keyexpr: &str,
-        wire: &WireKey,
-        opts: &QueryOptions,
-        fan: Option<&CancellableFan>,
-        leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, StatementNotHonoured> {
-        StatementNotHonoured::of_query(opts)?;
-        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
+        self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg)
     }
 
     /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or

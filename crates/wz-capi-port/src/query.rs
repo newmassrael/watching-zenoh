@@ -51,10 +51,3 @@ pub type QueryableSink = Arc<dyn Fn(Arc<dyn QueryHolder>) -> QueryCallback + Sen
 /// One leg of a get: it reads each reply that leg delivers, and dropping it is that leg's end
 /// (its final, its timeout, the loss of its face, its cancellation), whichever comes first.
 pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
-
-/// A get refused whole ([`crate::SessionEngine::get_held`]): it issued no leg and sent nothing,
-/// and a peer or queryable it had to ask found no room to hold it pending. The bound is the
-/// session's `MAX_PENDING_QUERIES`, and an ABI answers it with the code it answers any full table
-/// of the session with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoRoomToHold;

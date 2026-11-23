@@ -9,8 +9,11 @@
 //! code in one table of its own; this crate names none, for the reason it names no result code
 //! at all (both ABIs typedef their result to `int8_t` and disagree about the values).
 
-/// Why an engine refused to declare an entity. By the time it is answered nothing of the
-/// declaration is held, nothing was sent, and the callback the caller handed in has been let go.
+use crate::{LinksNotHonoured, StatementNotHonoured};
+
+/// Why an engine refused to declare an entity or to ask a request. By the time it is answered
+/// nothing of the call is held, nothing was sent, and the callback the caller handed in has been
+/// let go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// A table the session holds the entity in, or the key arena its key is kept in, is at the
@@ -24,6 +27,23 @@ pub enum Refusal {
     Closed,
     /// This build does not hold the plane the entity is declared on.
     NotBuilt,
+    /// The call states what this engine does not carry out (a set of links, the one node a query
+    /// is addressed to); taken without it, it would be something the caller did not ask for.
+    NotHonoured(StatementNotHonoured),
+    /// What the request carries is past what the session's codec can put in one message.
+    ExceedsCapacity,
+}
+
+impl From<StatementNotHonoured> for Refusal {
+    fn from(statement: StatementNotHonoured) -> Self {
+        Self::NotHonoured(statement)
+    }
+}
+
+impl From<LinksNotHonoured> for Refusal {
+    fn from(links: LinksNotHonoured) -> Self {
+        Self::NotHonoured(links.into())
+    }
 }
 
 impl core::fmt::Display for Refusal {
@@ -34,6 +54,8 @@ impl core::fmt::Display for Refusal {
             Self::NoEntityId => "the session has no entity id left",
             Self::Closed => "the session is closed",
             Self::NotBuilt => "this build does not hold the plane the declaration needs",
+            Self::NotHonoured(statement) => return core::fmt::Display::fmt(statement, f),
+            Self::ExceedsCapacity => "the request is larger than the session's codec carries",
         })
     }
 }
@@ -55,6 +77,8 @@ mod tests {
             Refusal::NoEntityId,
             Refusal::Closed,
             Refusal::NotBuilt,
+            Refusal::NotHonoured(StatementNotHonoured::TargetPeer),
+            Refusal::ExceedsCapacity,
         ];
         let texts: Vec<_> = all.iter().map(ToString::to_string).collect();
         for (at, text) in texts.iter().enumerate() {
@@ -64,5 +88,14 @@ mod tests {
                 "{text:?} is said twice"
             );
         }
+    }
+
+    /// A set of links an engine cannot honour is refused as that statement, by either name.
+    #[test]
+    fn a_set_of_links_not_honoured_is_that_statement() {
+        assert_eq!(
+            Refusal::from(LinksNotHonoured),
+            Refusal::NotHonoured(StatementNotHonoured::Links)
+        );
     }
 }

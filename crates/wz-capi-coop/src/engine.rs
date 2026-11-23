@@ -210,7 +210,7 @@ mod get;
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, PendingGet},
-    wz_capi_port::{cancellation::CancellableFan, NoRoomToHold, ReplyCallback},
+    wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
@@ -1808,6 +1808,17 @@ fn counted(plane: FilterPlane, count_local: bool) -> Locality {
         Locality::Any
     } else {
         Locality::Remote
+    }
+}
+
+/// What a get answers when its session closes while its legs are issued: the legs issued so far,
+/// which the close has ended, or the close itself when it came before the first.
+#[cfg(any(feature = "query", feature = "liveliness-get"))]
+fn issued_so_far(issued: usize) -> Result<usize, Declined> {
+    if issued == 0 {
+        Err(Declined::Closed)
+    } else {
+        Ok(issued)
     }
 }
 
@@ -6324,21 +6335,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
-        // A get no table could hold issued no leg, as one that reached nobody.
-        self.get_held(keyexpr, wire, opts, fan, leg)
-            .unwrap_or(Some(0))
-    }
-
-    #[cfg(feature = "query")]
-    fn get_held(
-        &self,
-        keyexpr: &str,
-        wire: &WireKey,
-        opts: &QueryOptions,
-        fan: Option<&CancellableFan>,
-        leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, NoRoomToHold> {
+    ) -> Result<usize, Declined> {
         // One leg for each face whose link is up, when the destination admits a peer, and one to
         // the session's own queryables, when it admits the session and the build has them
         // (`local-queryable`: zenoh-pico's default build asks none, `Z_FEATURE_LOCAL_QUERYABLE`
@@ -6346,12 +6343,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // link is up, is over at once. Each leg is issued under the session's lock and no lock is
         // held between two of them.
         //
-        // A get limited to some links or addressed to one node is asked of none: this engine
-        // reads neither, and asking every link would widen it. `get_stated` is the door that
-        // refuses it by name.
-        if StatementNotHonoured::of_query(opts).is_err() {
-            return Ok(Some(0));
-        }
+        // A get limited to some links or addressed to one node is refused by that statement:
+        // this engine reads neither, and asking every link would widen it.
+        StatementNotHonoured::of_query(opts)?;
         // The session's own queryables are asked all or none, under a row of the plane's held
         // Finals taken before any leg is issued: a session with none free refuses the get whole,
         // with nothing sent and no queryable asked, where zenoh-pico refuses a get whose delivery
@@ -6359,23 +6353,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
         #[cfg(feature = "local-queryable")]
         let own = if opts.allowed_destination.allows_local() {
-            let Some(mut guard) = self.live() else {
-                return Ok(Some(0));
-            };
+            let mut guard = self.live().ok_or(Declined::Closed)?;
             // The session's own request ids are a space of their own: the leg is registered in
             // the session's own pending gets (`Registry::local`) and answered under the local
             // generation (`query::LOCAL_QUERY`), so no table a link's ids reach holds it, and
             // the two counters never meet.
             let rid = guard.0.next_local_request;
             guard.0.next_local_request = rid.wrapping_add(1);
-            Some(query::OwnFinalHold::take(&self.plane.holds, rid).ok_or(NoRoomToHold)?)
+            Some(query::OwnFinalHold::take(&self.plane.holds, rid).ok_or(Declined::TableFull)?)
         } else {
             None
         };
         let (faces, expose) = {
-            let Some(guard) = self.live() else {
-                return Ok(Some(0));
-            };
+            let guard = self.live().ok_or(Declined::Closed)?;
             // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
             // states none, applied to every leg's callback, after its replies are consolidated.
             let expose = opts.expose_timestamp_by(&guard.0.policy);
@@ -6394,7 +6384,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for face in faces {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Ok(Some(issued));
+                return issued_so_far(issued);
             };
             let core = &mut guard.0;
             let Some(actions) = core.up_actions(face).cloned() else {
@@ -6459,7 +6449,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
             if !self.cancelling(fan, leg_id) {
-                return Ok(Some(issued));
+                return Ok(issued);
             }
         }
         // And one leg for each group the session asks queries of
@@ -6483,7 +6473,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for face in groups {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Ok(Some(issued));
+                return issued_so_far(issued);
             };
             let core = &mut guard.0;
             let Some(group) = core.groups.iter().find(|group| group.id() == face) else {
@@ -6539,14 +6529,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             issued += 1;
             if !self.cancelling(fan, leg_id) {
-                return Ok(Some(issued));
+                return Ok(issued);
             }
         }
         #[cfg(feature = "local-queryable")]
         if let Some(own) = own {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Ok(Some(issued));
+                return issued_so_far(issued);
             };
             let core = &mut guard.0;
             let rid = own.rid();
@@ -6585,9 +6575,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         // Asked of someone and held by none, with nothing sent: refused whole.
         if issued == 0 && unheld > 0 {
-            return Err(NoRoomToHold);
+            return Err(Declined::TableFull);
         }
-        Ok(Some(issued))
+        Ok(issued)
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -6598,15 +6588,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         timeout_ms: u32,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Declined> {
         // One leg for each face whose link is up; a session with no link up reaches nobody, and
-        // the snapshot is over at once.
-        let faces = {
-            let Some(guard) = self.live() else {
-                return Some(0);
-            };
-            guard.0.up_faces()
-        };
+        // the snapshot is over at once. A closed session asks nothing.
+        let faces = self.live().ok_or(Declined::Closed)?.0.up_faces();
         // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
         // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
         // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
@@ -6618,7 +6603,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         for face in faces {
             let leg_id = self.next_local_id();
             let Some(mut guard) = self.live() else {
-                return Some(issued);
+                return issued_so_far(issued);
             };
             let core = &mut guard.0;
             let Some(actions) = core.up_actions(face).cloned() else {
@@ -6677,10 +6662,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             issued += 1;
             // A fan cancelled while the legs are issued stops the issuing.
             if !self.cancelling(fan, leg_id) {
-                return Some(issued);
+                return Ok(issued);
             }
         }
-        Some(issued)
+        Ok(issued)
     }
 
     #[cfg(feature = "queryable")]

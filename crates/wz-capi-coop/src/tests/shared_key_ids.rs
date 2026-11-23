@@ -311,7 +311,7 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
             }) as ReplyCallback
         },
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
     eventually("the leg to end", || *ended.lock().unwrap() == 1);
     assert_eq!(
         *asked.lock().unwrap(),
@@ -660,7 +660,7 @@ fn alive_by(engine: &Engine, declared: ExprId) {
         None,
         &mut || Box::new(|_: &dyn ReplyView| {}) as ReplyCallback,
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
 }
 
 #[cfg(feature = "liveliness-get")]

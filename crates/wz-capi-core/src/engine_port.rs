@@ -471,9 +471,8 @@ impl SessionEngine for SharedSession {
         timeout_ms: u32,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
-        // The walk is the registry's own, for a get that states no links.
-        Some(self.liveliness_get_on_links(keyexpr, timeout_ms, LinkRestriction::Any, fan, leg))
+    ) -> Result<usize, Refusal> {
+        self.liveliness_get_on_port(keyexpr, timeout_ms, LinkRestriction::Any, fan, leg)
     }
 
     // The runtime's token names in its retraction the key it was declared on, which is the key
@@ -541,7 +540,11 @@ impl SessionEngine for SharedSession {
         opts: &wz_session_core::query_options::QueryOptions,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
+        // A closed session asks nothing; one that is open but reaches nobody issues no leg.
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
         // The registry's fan: one leg per face (and group), and the local plane where the
         // options admit it. A leg whose issue fails (a face mid-teardown, an alias the face was
         // never told) drops its callback with its rolled-back pending entry, so it cannot hold
@@ -560,7 +563,7 @@ impl SessionEngine for SharedSession {
                 rid
             },
         );
-        Some(issued)
+        Ok(issued)
     }
 
     #[cfg(all(feature = "transport-shm", feature = "query"))]
@@ -572,7 +575,10 @@ impl SessionEngine for SharedSession {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
         // `get_on_wire`'s fan, each leg asking with the chunk (`QueryLeg::query_shm`): a face that
         // negotiated shared memory is sent its descriptor and every other leg the bytes. A query
         // whose value is a chunk names its key literally, as the registry's own getter does, so
@@ -591,7 +597,7 @@ impl SessionEngine for SharedSession {
                 rid
             },
         );
-        Some(issued)
+        Ok(issued)
     }
 
     // The registry numbers its links (`faces::link_slot_of_face`) and honours a set on every
@@ -689,26 +695,27 @@ impl SessionEngine for SharedSession {
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
-        Ok(Some(self.liveliness_get_on_links(
-            keyexpr, timeout_ms, links, fan, leg,
-        )))
+    ) -> Result<usize, Refusal> {
+        self.liveliness_get_on_port(keyexpr, timeout_ms, links, fan, leg)
     }
+}
 
-    // `get_on_wire`'s fan reads `opts.links` and `opts.target_peer` (`QueryReach::of`), so the get
-    // is the same call.
-    #[cfg(feature = "query")]
-    fn get_stated(
+impl SharedSession {
+    /// The registry's walk of a liveliness get, as the port answers it: refused on a closed session,
+    /// which asks nothing, and the number of legs issued on an open one.
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_port(
         &self,
         keyexpr: &str,
-        wire: &WireKey,
-        opts: &wz_session_core::query_options::QueryOptions,
+        timeout_ms: u32,
+        links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
         leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
-    ) -> Result<Option<usize>, wz_capi_port::StatementNotHonoured> {
-        Ok(SessionEngine::get_on_wire(
-            self, keyexpr, wire, opts, fan, leg,
-        ))
+    ) -> Result<usize, Refusal> {
+        if self.is_closed() {
+            return Err(Refusal::Closed);
+        }
+        Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, leg))
     }
 }
 

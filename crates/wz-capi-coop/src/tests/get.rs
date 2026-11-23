@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
-use wz_capi_port::{NoRoomToHold, ReplyCallback, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -62,7 +62,7 @@ pub(super) fn ask(
     fan: Option<&CancellableFan>,
     registration: Option<Arc<Registration>>,
     step: Option<Arc<Engine>>,
-) -> (Option<usize>, Arc<Mutex<Leg>>) {
+) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
     let seen = leg.clone();
     let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), opts, fan, &mut || {
@@ -109,7 +109,7 @@ fn a_get_is_answered_and_ends_with_its_final() {
         None,
         Some(engine.clone()),
     );
-    assert_eq!(issued, Some(1), "one leg: the link's peer");
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
     {
         let leg = leg.lock().unwrap();
         assert!(
@@ -136,7 +136,7 @@ fn a_get_nobody_answers_ends_at_its_deadline() {
     opts.timeout_ms = 300;
     let asked = Instant::now();
     let (issued, leg) = ask(&engine, "demo/g/a", &opts, None, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     while asked.elapsed() < Duration::from_millis(150) {
         let _ = SessionDrive::read(&*engine, false);
     }
@@ -173,7 +173,7 @@ fn a_cancelled_get_ends_without_a_step() {
         None,
     );
     drop(registration);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     assert!(
         !leg.lock().unwrap().ended,
         "CONTROL: open before the cancel"
@@ -197,14 +197,14 @@ fn a_get_past_its_table_is_refused_and_sends_nothing() {
     let mut opts = remote_get();
     opts.timeout_ms = 300;
     let (issued, first) = ask(&engine, "demo/g/a", &opts, None, None, None);
-    assert_eq!(issued, Some(1), "CONTROL: the one row holds the first get");
+    assert_eq!(issued, Ok(1), "CONTROL: the one row holds the first get");
     until(&engine, "the first query to reach the router", || {
         router.seen(|s| s.queries) == 1
     });
 
     let minted = Arc::new(Mutex::new(0usize));
     let counting = minted.clone();
-    let refused = engine.get_held(
+    let refused = engine.get_on_wire(
         "demo/g/b",
         &WireKey::literal(),
         &remote_get(),
@@ -214,12 +214,10 @@ fn a_get_past_its_table_is_refused_and_sends_nothing() {
             Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
         },
     );
-    assert_eq!(refused, Err(NoRoomToHold));
-    let (through_wire, _) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
     assert_eq!(
-        through_wire,
-        Some(0),
-        "the door without the refusal issues no leg"
+        refused,
+        Err(Refusal::TableFull),
+        "refused whole, not answered as a get that reached nobody"
     );
     assert_eq!(*minted.lock().unwrap(), 0, "no leg was minted");
     let quiet = Instant::now() + Duration::from_millis(100);
@@ -232,11 +230,23 @@ fn a_get_past_its_table_is_refused_and_sends_nothing() {
         first.lock().unwrap().ended
     });
     let (issued, _next) = ask(&engine, "demo/g/c", &remote_get(), None, None, None);
-    assert_eq!(
-        issued,
-        Some(1),
-        "the row the first gave back holds the next"
-    );
+    assert_eq!(issued, Ok(1), "the row the first gave back holds the next");
+}
+
+/// A get asked of a closed session is refused as closed and mints no leg: it is not answered as
+/// a get that reached nobody. The CONTROL is the same get asked while the session is open.
+#[test]
+fn a_get_on_a_closed_session_is_refused_as_closed() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let (issued, _) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1), "CONTROL: the open session asks");
+
+    SessionDrive::close(&*engine);
+    let (issued, leg) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
+    assert_eq!(issued, Err(Refusal::Closed));
+    assert_eq!(leg.lock().unwrap().open, 0, "no leg was minted");
 }
 
 /// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
@@ -247,7 +257,7 @@ fn a_get_ends_with_its_link() {
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     until(&engine, "the query to reach the router", || {
         router.seen(|s| s.queries) == 1
     });

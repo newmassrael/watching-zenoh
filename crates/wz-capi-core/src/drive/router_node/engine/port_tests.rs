@@ -828,32 +828,24 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         ),
     ] {
         assert_eq!(
-            engine.get_stated(key, &WireKey::literal(), &stated, None, &mut || {
-                legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
-            }),
-            Err(named),
-            "a get that states {named:?}, through the door that names the refusal"
-        );
-        assert_eq!(
             engine.get_on_wire(key, &WireKey::literal(), &stated, None, &mut || {
                 legs += 1;
                 Box::new(|_: &dyn ReplyView| {})
             }),
-            Some(0),
-            "a get that states {named:?}, handed to the door of no statement, asks no link"
+            Err(Refusal::NotHonoured(named)),
+            "a get that states {named:?} is refused by that statement and asks no link"
         );
     }
     assert_eq!(legs, 0, "no leg was minted for a get that states something");
     assert_eq!(
-        engine.get_stated(
+        engine.get_on_wire(
             key,
             &WireKey::literal(),
             &QueryOptions::default(),
             None,
             &mut || Box::new(|_: &dyn ReplyView| {})
         ),
-        Ok(Some(1)),
+        Ok(1),
         "a get that states no set is the node's one leg"
     );
 
@@ -1125,7 +1117,7 @@ mod shared_memory {
                     None,
                     &mut || Box::new(|_: &dyn ReplyView| {}),
                 ),
-                Some(1),
+                Ok(1),
                 "a node asks with a chunk on one leg"
             );
         });
@@ -1169,14 +1161,16 @@ mod shared_memory {
         let (told, _) = subscribe(&engine);
         let value = chunk();
         until_each_is_told(&[&asked], || {
-            other.get_shm_on_wire(
-                ASKED,
-                &WireKey::literal(),
-                &QueryOptions::default(),
-                value.send_handle(),
-                None,
-                &mut || Box::new(|_: &dyn ReplyView| {}),
-            );
+            other
+                .get_shm_on_wire(
+                    ASKED,
+                    &WireKey::literal(),
+                    &QueryOptions::default(),
+                    value.send_handle(),
+                    None,
+                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                )
+                .expect("a client asks with a chunk");
         });
         until_each_is_told(&[&told], || {
             other
@@ -1242,7 +1236,45 @@ mod shared_memory {
         let got: Got = Arc::default();
         until_each_is_told(&[&got], || {
             let sink = Arc::clone(&got);
-            engine.get_on_wire(
+            engine
+                .get_on_wire(
+                    ASKED,
+                    &WireKey::literal(),
+                    &QueryOptions::default(),
+                    None,
+                    &mut || {
+                        let sink = Arc::clone(&sink);
+                        Box::new(move |reply: &dyn ReplyView| {
+                            if reply.kind() == ReplyKind::Put {
+                                let shared = reply
+                                    .payload_shared()
+                                    .and_then(|bytes| bytes.shm_chunk())
+                                    .is_some();
+                                sink.lock()
+                                    .unwrap()
+                                    .push((reply.payload().to_vec(), shared));
+                            }
+                        })
+                    },
+                )
+                .expect("a session asks queries");
+        });
+
+        assert_eq!(
+            first(&got, "the node's own get"),
+            (BODY.to_vec(), true),
+            "the node's own get was not handed the chunk the client replied with"
+        );
+        shared.close();
+        node.close();
+    }
+
+    /// Ask `ASKED` through `engine`'s port, keeping in `got` each Put reply's payload and
+    /// whether it was handed as a chunk of shared memory rather than as bytes.
+    fn ask_keeping_replies(engine: &Arc<dyn SessionEngine>, got: &Got) {
+        let sink = Arc::clone(got);
+        engine
+            .get_on_wire(
                 ASKED,
                 &WireKey::literal(),
                 &QueryOptions::default(),
@@ -1261,42 +1293,8 @@ mod shared_memory {
                         }
                     })
                 },
-            );
-        });
-
-        assert_eq!(
-            first(&got, "the node's own get"),
-            (BODY.to_vec(), true),
-            "the node's own get was not handed the chunk the client replied with"
-        );
-        shared.close();
-        node.close();
-    }
-
-    /// Ask `ASKED` through `engine`'s port, keeping in `got` each Put reply's payload and
-    /// whether it was handed as a chunk of shared memory rather than as bytes.
-    fn ask_keeping_replies(engine: &Arc<dyn SessionEngine>, got: &Got) {
-        let sink = Arc::clone(got);
-        engine.get_on_wire(
-            ASKED,
-            &WireKey::literal(),
-            &QueryOptions::default(),
-            None,
-            &mut || {
-                let sink = Arc::clone(&sink);
-                Box::new(move |reply: &dyn ReplyView| {
-                    if reply.kind() == ReplyKind::Put {
-                        let shared = reply
-                            .payload_shared()
-                            .and_then(|bytes| bytes.shm_chunk())
-                            .is_some();
-                        sink.lock()
-                            .unwrap()
-                            .push((reply.payload().to_vec(), shared));
-                    }
-                })
-            },
-        );
+            )
+            .expect("the engine asks queries");
     }
 
     /// A reply the node's own queryable makes with a chunk goes to a client that negotiated

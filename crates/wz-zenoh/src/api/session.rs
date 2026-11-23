@@ -1723,7 +1723,7 @@ impl Engine {
                 tokio_engine::ask_liveliness(
                     request,
                     Box::new(move |key, _wire, timeout_ms, fan, leg| {
-                        Some(shared.liveliness_get_on_links(key, timeout_ms, links, fan, leg))
+                        Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, leg))
                     }),
                 )
             }
@@ -3235,10 +3235,9 @@ mod tokio_engine {
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
         drop(leg);
-        match issued {
-            Some(_) => Ok(()),
-            None => Err(zerror!("this engine asks no queries").into()),
-        }
+        issued
+            .map(|_| ())
+            .map_err(|refused| zerror!("the engine refused the query: {refused}").into())
     }
 
     /// Ask the query `request` says as the node's own face of a router node: the router routes
@@ -3473,7 +3472,7 @@ mod tokio_engine {
             u32,
             Option<&CancellableFan>,
             &mut dyn FnMut() -> ReplyCallback,
-        ) -> Option<usize>
+        ) -> Result<usize, wz_capi_port::Refusal>
         + 'a;
 
     /// Ask the liveliness query `request` says through `issue`, handing each token that is alive
@@ -3509,10 +3508,9 @@ mod tokio_engine {
         let mut leg = leg_minter(callback, fan.clone(), ConsolidationMode::None);
         let issued = issue(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
-        match issued {
-            Some(_) => Ok(()),
-            None => Err(zerror!("this engine asks no liveliness queries").into()),
-        }
+        issued
+            .map(|_| ())
+            .map_err(|refused| zerror!("the engine refused the liveliness query: {refused}").into())
     }
 
     /// What mints the callback of each leg of a query: they share what the query holds, and the
@@ -10611,7 +10609,7 @@ mod tests {
                     })
                 },
             );
-            assert!(issued.is_some(), "the engine asks queries");
+            assert!(issued.is_ok(), "the engine asks queries");
             drop(ended);
             // Every callback of a leg drops with its leg, which closes the channel.
             assert_eq!(
