@@ -10171,19 +10171,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(used)
     }
 
-    /// [`Self::handle_inbound_consuming_into`] for the reader of the transport messages that carry
-    /// no data: a `Frame` or a `Fragment` is not decoded (`inbound::parse_control_consuming_into`).
-    #[cfg(all(feature = "alloc", feature = "codec-frame"))]
-    pub(crate) fn handle_control_consuming_into(
-        &self,
-        bytes: &[u8],
-        out: &mut crate::inbound::InboundFrame,
-    ) -> Result<usize, crate::parse_error::InboundParseError> {
-        let used = crate::inbound::parse_control_consuming_into(bytes, out)?;
-        self.observe_inbound(out);
-        Ok(used)
-    }
-
     /// [`Self::handle_inbound_consuming_into`] over a unit that can be shared (see
     /// [`Self::handle_inbound_consuming_in`]).
     #[cfg(feature = "alloc")]
@@ -10213,19 +10200,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         parsed
     }
 
-    /// What the link records about one decoded transport message: the
-    /// handshake facts it carries and the RX-activity stamp. Total: a parsed
-    /// frame is always taken, so it cannot fail. It reads the frame where it lies:
-    /// an `InboundFrame` is 712 bytes on the fixed profile, and a by-value pass
-    /// (a parameter, a destructuring, a returned tuple) is one more such slot in
-    /// the frame of the dispatch that inlines it.
+    /// [`Self::observe_control`] for a decoded message. It reads the frame where it lies: an
+    /// `InboundFrame` is 712 bytes on the fixed profile, and a by-value pass (a parameter, a
+    /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
+    /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
+        self.observe_control(&frame.control_facts());
+    }
+
+    /// What the link records about one received transport message, whichever read it: the
+    /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
+    /// taken, so it cannot fail.
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor
         // keeps a silent peer's lease alive. The dispatch drops it after this.
         #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-        if crate::drive::handshake_message_of(frame).is_some()
+        if facts.handshake_message().is_some()
             && crate::handshake_stray::established_drops_silently(
                 self.params.policy.handshake_stray_message(),
             )
@@ -10233,11 +10225,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             return;
         }
-        match frame {
+        match facts {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
-                is_ack: true, body, ..
-            } => {
+            crate::inbound::ControlFacts::Init(
+                init @ crate::inbound::InitFacts { is_ack: true, .. },
+            ) => {
                 // R311qh — capture the acceptor's zid from the InitAck into the
                 // routing identity slot (NOT `inbound_peer_zid`: R86 scopes that
                 // slot to the Accepting-side cookie-HMAC capture, and
@@ -10251,20 +10243,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // conversion holds for every frame it produced; a frame built by hand
                 // that names none records none.
                 R::with_mutex_mut(&self.remote_peer_zid, |slot| {
-                    *slot = SessionZid::new(body.zid.as_slice()).ok();
+                    *slot = SessionZid::new(init.zid).ok();
                 });
                 // R311td — capture the peer's WhatAmI role (raw 2-bit wire form)
                 // alongside its zid. Both Init arms capture it (a face may be
                 // opened from either side); the routing boundary maps wire -> the
                 // graph's API-form role. The gossip-policy prerequisite ("F1").
                 R::with_mutex_mut(&self.peer_whatami, |slot| {
-                    *slot = Some(body.whatami());
+                    *slot = Some(init.whatami);
                 });
-                if let Some(cookie) = &body.cookie {
+                if let Some(cookie) = init.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(
-                            cookie.as_slice(),
-                        );
+                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
                     });
                 }
                 // R311kb — capture the InitAck's sizing caps too: the
@@ -10276,21 +10266,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // same SN ring; the packed `sn_res` byte is wire-identical
                 // on InitSyn and InitAck, so the decoder is shared.
                 self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
-                    body.s.map(|s| s.sn_res),
-                    body.s.map(|s| s.batch_size),
+                    init.s.map(|s| s.sn_res),
+                    init.s.map(|s| s.batch_size),
                 )));
             }
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init {
-                is_ack: false,
-                body,
-                ..
-            } => {
+            crate::inbound::ControlFacts::Init(
+                init @ crate::inbound::InitFacts { is_ack: false, .. },
+            ) => {
                 // R86 — Accepting-side InitSyn arrival: capture the
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 // As the InitAck arm's: `parse_init` refused a zid that is none.
-                let zid = SessionZid::new(body.zid.as_slice()).ok();
+                let zid = SessionZid::new(init.zid).ok();
                 R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
                     *slot = zid;
                 });
@@ -10305,7 +10293,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // alongside its zid; see the InitAck arm above for why both
                 // directions capture it (the gossip-policy "F1" prerequisite).
                 R::with_mutex_mut(&self.peer_whatami, |slot| {
-                    *slot = Some(body.whatami());
+                    *slot = Some(init.whatami);
                 });
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
@@ -10313,27 +10301,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
                 self.set_peer_init_caps(Some(PeerInitCaps::from_init_body(
-                    body.s.map(|s| s.sn_res),
-                    body.s.map(|s| s.batch_size),
+                    init.s.map(|s| s.sn_res),
+                    init.s.map(|s| s.batch_size),
                 )));
             }
             #[cfg(feature = "codec-open-body")]
-            InboundFrame::Open {
+            crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false,
-                body,
+                cookie,
                 ..
-            } => {
+            }) => {
                 // R89 — Accepting-side OpenSyn arrival: capture the
                 // echoed cookie so the `cookie_valid()` guard can
                 // re-HMAC peer_zid and compare against this slot.
                 // Closes the loop opened by R86 (outbound cookie
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
-                if let Some(cookie) = &body.cookie {
+                if let Some(cookie) = cookie {
                     R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(
-                            cookie.as_slice(),
-                        );
+                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
                     });
                 }
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
@@ -10357,12 +10343,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // former R72b stamp lived in the KeepAlive arm alone, so a peer
         // sending only data frames was expired after one lease window —
         // and the R311kx TX suppression guarantees a busy peer sends no
-        // KeepAlives, making the gap live. `Unknown` is excluded: pico
+        // KeepAlives, making the gap live. An unread message is excluded: pico
         // never reaches its stamp for an unrecognized MID (the decode
         // fails before rx.c:88), and the FSM tears the session down on
         // the FramingError projection anyway. R294 — the stamp shares
         // the monotonic epoch with the drive loop's clock.
-        if !matches!(frame, InboundFrame::Unknown { .. }) {
+        if !matches!(facts, crate::inbound::ControlFacts::Unread) {
             self.stamp_rx_activity();
         }
     }
