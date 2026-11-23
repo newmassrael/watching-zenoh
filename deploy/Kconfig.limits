@@ -96,7 +96,7 @@ config WZ_LIMIT_DELIVERY_LANE_EVENTS
 config WZ_LIMIT_DELIVERY_LANE_BYTES
 	int "DELIVERY_LANE_BYTES"
 	range 1 4294967295
-	default 4380 if WZ_LIMITS_ZENOH_PICO
+	default 4768 if WZ_LIMITS_ZENOH_PICO
 	default 65536
 	help
 	  How many bytes of copied samples a delivery lane holds at once: the key, the
@@ -344,8 +344,7 @@ config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 
 config WZ_LIMIT_MAX_PENDING_DECLARES
 	int "MAX_PENDING_DECLARES"
-	default 4 if WZ_LIMITS_ZENOH_PICO
-	default 32
+	default 101
 	help
 	  The declarations a session can have ready to send in answer to its peers'
 	  interests between two sends: each answer is the session's matching

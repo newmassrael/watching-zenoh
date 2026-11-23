@@ -58,7 +58,7 @@ pub(super) const CONFIG_TEXT_BYTES: usize = limit(option_env!("WZ_LIMIT_CONFIG_T
 pub(super) const MAX_PENDING_LIVELINESS_GETS: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"), 8);
 pub(super) const MAX_PENDING_DECLARES: usize =
-    limit(option_env!("WZ_LIMIT_MAX_PENDING_DECLARES"), 32);
+    limit(option_env!("WZ_LIMIT_MAX_PENDING_DECLARES"), 101);
 pub(super) const MAX_INBOUND_SUB_INTERESTS: usize =
     limit(option_env!("WZ_LIMIT_MAX_INBOUND_SUB_INTERESTS"), 16);
 pub(super) const MAX_PEER_KEYEXPR_ALIASES: usize =
