@@ -467,7 +467,9 @@ impl DeclaredKeyexpr {
 
 /// The session `shared` as a key's hold names it: weakly, through the engine's door for keys.
 fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine> {
-    Arc::downgrade(shared)
+    // The engine's own type named, so the downgrade is of it and the coercion to the door's
+    // object follows it, on an engine of a concrete type and on the door's object alike.
+    Arc::<Engine>::downgrade(shared)
 }
 
 /// The longest text a join or a concatenation reads to canonize: a key of the bound on each side
