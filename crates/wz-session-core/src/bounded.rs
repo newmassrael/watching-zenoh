@@ -565,7 +565,8 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
     }
 
     fn free_slots(&self) -> usize {
-        N.saturating_sub(self.len())
+        // A `heapless::Vec` never holds more than `N`.
+        N.wrapping_sub(self.len())
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -581,7 +582,7 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
         // written whole before the length covers it, and `make` panicking leaves both as they were.
         unsafe {
             self.as_mut_ptr().add(len).write(make());
-            self.set_len(len.saturating_add(1));
+            self.set_len(len.wrapping_add(1));
         }
         true
     }
@@ -811,7 +812,7 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
                 return Some(self.inner.remove(*at));
             }
             // Below the table's length, so the next place does not wrap.
-            *at = at.saturating_add(1);
+            *at = at.wrapping_add(1);
         }
         None
     }
@@ -985,7 +986,7 @@ impl<T> LentSeq<T> {
             return;
         }
         // `len < self.len`, checked above.
-        let tail = self.len.saturating_sub(len);
+        let tail = self.len.wrapping_sub(len);
         self.len = len;
         // SAFETY: the `tail` rows from `len` held values, which the length no longer covers, so
         // each is dropped here once.
@@ -1029,7 +1030,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
 
     // `len` never passes `room`, so the counts below are exact.
     fn free_slots(&self) -> usize {
-        self.room.saturating_sub(self.len)
+        self.room.wrapping_sub(self.len)
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1039,7 +1040,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         }
         // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no value.
         unsafe { self.base.as_ptr().add(self.len).write(value) };
-        self.len = self.len.saturating_add(1);
+        self.len = self.len.wrapping_add(1);
         Ok(())
     }
 
@@ -1050,7 +1051,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         }
         // SAFETY: as `push`; `make` panicking leaves the row and the length as they were.
         unsafe { self.base.as_ptr().add(self.len).write(make()) };
-        self.len = self.len.saturating_add(1);
+        self.len = self.len.wrapping_add(1);
         true
     }
 
@@ -1058,7 +1059,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         if self.len == 0 {
             return None;
         }
-        self.len = self.len.saturating_sub(1);
+        self.len = self.len.wrapping_sub(1);
         // SAFETY: the row at the old last index held a value, which the length no longer covers,
         // so it is read out once.
         Some(unsafe { self.base.as_ptr().add(self.len).read() })
@@ -1075,12 +1076,8 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         unsafe {
             let at = self.base.as_ptr().add(index);
             let value = at.read();
-            core::ptr::copy(
-                at.add(1),
-                at,
-                self.len.saturating_sub(index).saturating_sub(1),
-            );
-            self.len = self.len.saturating_sub(1);
+            core::ptr::copy(at.add(1), at, self.len.wrapping_sub(index).wrapping_sub(1));
+            self.len = self.len.wrapping_sub(1);
             value
         }
     }
@@ -1090,7 +1087,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         let mut index = 0usize;
         while let Some(value) = self.as_slice().get(index) {
             if keep(value) {
-                index = index.saturating_add(1);
+                index = index.wrapping_add(1);
             } else {
                 self.remove(index);
             }
@@ -1128,7 +1125,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         T: Clone,
     {
         self.refuse_unlent();
-        if src.len() > self.room.saturating_sub(self.len) {
+        if src.len() > self.room.wrapping_sub(self.len) {
             return Err(CapacityFull(()));
         }
         for value in src {
@@ -1179,14 +1176,14 @@ impl<T> Iterator for LentIntoIter<T> {
         }
         let index = self.next;
         // Below `end`, checked above.
-        self.next = self.next.saturating_add(1);
+        self.next = self.next.wrapping_add(1);
         // SAFETY: the rows `next..end` hold values this iterator owns; this one is read out once
         // and the cursor has passed it.
         Some(unsafe { self.base.as_ptr().add(index).read() })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.end.saturating_sub(self.next);
+        let left = self.end.wrapping_sub(self.next);
         (left, Some(left))
     }
 }
@@ -1195,7 +1192,7 @@ impl<T> ExactSizeIterator for LentIntoIter<T> {}
 
 impl<T> Drop for LentIntoIter<T> {
     fn drop(&mut self) {
-        let (from, left) = (self.next, self.end.saturating_sub(self.next));
+        let (from, left) = (self.next, self.end.wrapping_sub(self.next));
         self.next = self.end;
         // SAFETY: the rows `from..end` hold values no call handed out; each is dropped here once.
         unsafe {
@@ -1358,7 +1355,7 @@ impl Arena {
             return Err(LendRefused::OverCeiling { rows, ceiling: N });
         }
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let span = match Self::table_bytes::<T>(rows) {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
@@ -1370,7 +1367,7 @@ impl Arena {
             let at = NonNull::new_unchecked(self.base.as_ptr().add(self.lent)).cast::<T>();
             LentSeq::lent(at, rows)
         };
-        self.lent = self.lent.saturating_add(span);
+        self.lent = self.lent.wrapping_add(span);
         Ok(BoundedVec { inner })
     }
 
@@ -1388,7 +1385,7 @@ impl Arena {
         longest: crate::limits::MaxKeyexprBytesHeld,
     ) -> Result<crate::key_arena::KeySpace, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let span = match crate::key_arena::KeySpace::span_bytes(bytes) {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
@@ -1403,7 +1400,7 @@ impl Arena {
                 longest,
             )
         };
-        self.lent = self.lent.saturating_add(span);
+        self.lent = self.lent.wrapping_add(span);
         Ok(keys)
     }
 
@@ -1436,7 +1433,7 @@ impl Arena {
     /// (past the address space).
     pub(crate) fn lend_span(&mut self, bytes: Option<usize>) -> Result<NonNull<u8>, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let span = match bytes.and_then(Self::span) {
             Some(span) if span <= left => span,
             asked => return Err(LendRefused::Exhausted { asked, left }),
@@ -1445,7 +1442,7 @@ impl Arena {
         // base aligned to it; it lies inside the arena, and nothing was lent it before, as `lent`
         // only grows.
         let at = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(self.lent)) };
-        self.lent = self.lent.saturating_add(span);
+        self.lent = self.lent.wrapping_add(span);
         Ok(at)
     }
 
@@ -1488,7 +1485,7 @@ impl Arena {
         count: usize,
     ) -> Result<LentByteCells, LendRefused> {
         // `lent` never passes `bytes`.
-        let left = self.bytes.saturating_sub(self.lent);
+        let left = self.bytes.wrapping_sub(self.lent);
         let (flags, bytes) = match Self::byte_cells_spans(size, count) {
             Some((flags, bytes)) if flags.checked_add(bytes).is_some_and(|all| all <= left) => {
                 (flags, bytes)
@@ -1512,7 +1509,7 @@ impl Arena {
             }
             let data = at.add(flags);
             // `byte_cells_spans` answered, so the product does not overflow.
-            core::ptr::write_bytes(data, 0, count.saturating_mul(size));
+            core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
             LentByteCells::over(
                 NonNull::new_unchecked(taken),
                 NonNull::new_unchecked(data),
@@ -1520,7 +1517,7 @@ impl Arena {
                 count,
             )
         };
-        self.lent = self.lent.saturating_add(flags).saturating_add(bytes);
+        self.lent = self.lent.wrapping_add(flags).wrapping_add(bytes);
         Ok(table)
     }
 }
