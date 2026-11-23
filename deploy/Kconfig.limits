@@ -42,8 +42,7 @@ config WZ_LIMIT_KEY_ARENA_BYTES
 
 config WZ_LIMIT_MAX_SUBSCRIPTIONS
 	int "MAX_SUBSCRIPTIONS"
-	default 3 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The subscribers a session holds at once. Declaring one more is refused
 	  while the table is full.
@@ -118,8 +117,7 @@ config WZ_LIMIT_DELIVERY_LANE_CALLBACKS
 
 config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
-	default 4 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The queryables a session holds at once. Declaring one more is refused
 	  while the table is full.
@@ -170,8 +168,7 @@ config WZ_LIMIT_MAX_LOCAL_TOKENS
 
 config WZ_LIMIT_MAX_PUBLISHERS
 	int "MAX_PUBLISHERS"
-	default 2 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The publishers a session holds at once, each with the write filter that
 	  asks whether anything subscribes to its key. Declaring one more is
@@ -196,8 +193,8 @@ config WZ_LIMIT_MAX_MATCHING_LISTENERS
 
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
-	default 14 if WZ_LIMITS_ZENOH_PICO
-	default 80
+	default 306 if WZ_LIMITS_ZENOH_PICO
+	default 332
 	help
 	  The key expressions a session declares to its peers at once, each held by
 	  the entities that name it and by the program's declarations. Declaring
