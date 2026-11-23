@@ -14644,7 +14644,11 @@ layer_c1m_session_lwip() {
     # 19 -> 23, counted from the source: a connect begun without waiting is made or refused when
     # asked, a write that does not wait takes what the stream has room for, a timed wait for room
     # reports the time it took, and a link that owes the stream is woken by room alone.
-    _runci_guarded_test "C1m posix tcp seam" 23 \
+    # 23 -> 27, counted from the source and printed on a build host (2026-11-23): the owner's read
+    # waits in the recv and sets its timeout once, a shutdown ends a read waiting in it, a stream
+    # that does not block gives no read that waits, and a host stream link lends its buffer to its
+    # owner's read.
+    _runci_guarded_test "C1m posix tcp seam" 27 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
