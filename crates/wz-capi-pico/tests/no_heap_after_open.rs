@@ -111,7 +111,7 @@ enum Round {
     SubscriberDeclare,
     QueryableDeclare,
     MatchingListener,
-    LivelinessSubscriber,
+    LivelinessSub,
     QuerierDeclare,
     QuerierGet,
     ConfigClone,
@@ -136,7 +136,7 @@ impl Round {
         Round::SubscriberDeclare,
         Round::QueryableDeclare,
         Round::MatchingListener,
-        Round::LivelinessSubscriber,
+        Round::LivelinessSub,
         Round::QuerierDeclare,
         Round::QuerierGet,
         Round::ConfigClone,
@@ -153,7 +153,7 @@ impl Round {
             Round::Replay => cfg!(feature = "replay-cache"),
             Round::ConfigDocument => cfg!(feature = "config-document"),
             Round::QueryableDeclare => cfg!(feature = "queryable"),
-            Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
+            Round::LivelinessSub => cfg!(feature = "liveliness"),
             Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::Idle
             | Round::PublisherDeclare
@@ -200,11 +200,7 @@ const FAMILIES: [(&str, Round, Part); 23] = [
     ("subscriber-declare", Round::SubscriberDeclare, Part::All),
     ("queryable-declare", Round::QueryableDeclare, Part::All),
     ("matching-listener", Round::MatchingListener, Part::All),
-    (
-        "liveliness-subscriber",
-        Round::LivelinessSubscriber,
-        Part::All,
-    ),
+    ("liveliness-subscriber", Round::LivelinessSub, Part::All),
     ("querier-declare", Round::QuerierDeclare, Part::All),
     ("querier-get", Round::QuerierGet, Part::Calling),
     ("config-clone", Round::ConfigClone, Part::All),
@@ -606,7 +602,7 @@ impl Bench {
                 self.queryable_declare();
             }
             Round::MatchingListener => self.matching_listener(),
-            Round::LivelinessSubscriber => {
+            Round::LivelinessSub => {
                 #[cfg(feature = "liveliness")]
                 self.liveliness_subscriber();
             }
