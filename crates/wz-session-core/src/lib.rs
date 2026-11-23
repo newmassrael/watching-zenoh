@@ -279,8 +279,6 @@ pub mod quota;
 /// the part of paced declaration sync (`declaration-sync-pacing`) that every host shares.
 /// It holds no list, clock or heap and does no I/O, so a host with no allocator uses it as it is.
 /// Unconditional, no_std and no_alloc.
-// Totality debt TD-093 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod replay_cursor;
 
 /// The bookkeeping of a bounded lane between the receive path and the task that runs a

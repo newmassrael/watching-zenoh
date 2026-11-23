@@ -306,7 +306,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-089 | `wz-session-core` | `sn` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
 | TD-090 | `wz-session-core` | `decl_sink` | `arithmetic_side_effects` | 5 | open |
 | TD-091 | `wz-session-core` | `initial_sn` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
-| TD-093 | `wz-session-core` | `replay_cursor` | `arithmetic_side_effects` | 5 | open |
 | TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
 | TD-095 | `wz-session-core` | `slot_observer` | `panic`, `arithmetic_side_effects` | 5 | open |
 | TD-096 | `wz-session-core` | `credential_identity` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
