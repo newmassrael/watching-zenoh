@@ -156,10 +156,12 @@ pub(crate) fn links_of(
 }
 
 /// How many links a session whose open listens on `listen` (none for one that only dials) holds
-/// at most on the cooperative engine under `limits`: one for a dial; for a listener, its dial and
-/// the faces besides it its `MAX_FACES` admits, the peer it dials one of them when it `dials`
-/// (`crate::session::faces_besides_dial`), as the open bounds it; none for a group, which
-/// rejoins the messages of every member, nor for a value over the build's, which the open refuses.
+/// at most on the cooperative engine under `limits`: one for a dial; for a listener, the faces
+/// besides its dial that its `MAX_FACES` admits (`crate::session::faces_besides_dial`) and the
+/// dial's own link only when it `dials`, as the engine's arena lends the dial role a link only
+/// to a session that lists an endpoint to dial (its `dials`), so a listener holds its
+/// `MAX_FACES` either way; none for a group, which rejoins the messages of every member, nor for
+/// a value over the build's, which the open refuses.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn links_of(listen: Option<&str>, dials: bool, limits: &SessionLimits) -> Option<usize> {
     let Some(endpoint) = listen else {
@@ -175,7 +177,7 @@ pub(crate) fn links_of(listen: Option<&str>, dials: bool, limits: &SessionLimits
         Some(wz_capi_coop::arena::admitted_faces(limits).ok()?),
         dials,
     )
-    .checked_add(1)
+    .checked_add(usize::from(dials))
 }
 
 impl MemoryBasis {
@@ -394,8 +396,9 @@ mod tests {
     }
 
     /// A session that only dials holds one link; a listener on the tokio engine holds links to no
-    /// bound, and on the cooperative engine its faces' bound and its dial: the build's
-    /// `MAX_FACES` for a session that states none, and the value a session lowers it to.
+    /// bound, and on the cooperative engine its faces' bound, its dial one of them when it dials
+    /// and holding no link when it does not: the build's `MAX_FACES` for a session that states
+    /// none, and the value a session lowers it to.
     #[test]
     fn a_dial_holds_one_link_and_a_listener_its_engines_bound() {
         let limits = SessionLimits::defaults();
@@ -406,16 +409,17 @@ mod tests {
         {
             assert_eq!(
                 links_of(Some("tcp/127.0.0.1:7447"), false, &limits),
-                Some(wz_session_core::caps::MAX_FACES + 1)
+                Some(wz_session_core::caps::MAX_FACES)
             );
             let mut lowered = SessionLimits::defaults();
             if lowered
                 .select_max_faces(wz_session_core::limit_binding::Quota::at_most(10))
                 .is_ok()
             {
+                // A listener that dials nothing lends its dial role no link.
                 assert_eq!(
                     links_of(Some("tcp/127.0.0.1:7447"), false, &lowered),
-                    Some(11)
+                    Some(10)
                 );
                 // A listener that dials a peer holds it as one of its ten, as pico's does.
                 assert_eq!(
