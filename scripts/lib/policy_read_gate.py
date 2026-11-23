@@ -116,6 +116,11 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-runtime-tokio/src/zenoh_config.rs", "build_policies", "the base a zenoh document's wz member is resolved over, and a document without one"),
     ("crates/wz-zenoh/src/api/config.rs", "judge_alone", "creator: a Rust API open's door statement, judged over the build defaults it is resolved over"),
     ("crates/wz-zenoh/src/api/config.rs", "resolve", "creator: the snapshot a Rust API open resolves from its Config's wz member and doors"),
+    # The fuzz harnesses of the network ingress: each makes the session it feeds, with nothing above
+    # it to hand a snapshot down, so it is the creator, as an integration test is.
+    ("crates/wz-fuzz/coop-engine/fuzz_targets/coop_read.rs", "config", "creator: the harness opens the engine it feeds over the build defaults, a fuzz target of the build"),
+    ("crates/wz-fuzz/session-heap/fuzz_targets/session_unicast.rs", "params", "creator: the harness makes the session it feeds over the build defaults, a fuzz target of the build"),
+    ("crates/wz-fuzz/session-slot/fuzz_targets/slot_session.rs", "params", "creator: the harness makes the session it feeds over the build defaults, a fuzz target of the build"),
 )
 
 #: The items a read can be in. A `const fn` is a `fn`; `const` and `static` are named by the
