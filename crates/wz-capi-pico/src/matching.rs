@@ -558,6 +558,10 @@ pub(crate) unsafe fn consume_matching_closure(
 /// the callback returns instead of waiting on itself (`ReleaseLatch::wait`).
 fn matching_sink(owned: MatchingCClosure) -> MatchingSink {
     Arc::new(move |matching: bool| {
+        // Named whole, so the closure captures the closure value and not its fields: the sink
+        // then owns it (its drop runs the C `drop(context)` when the sink goes) and is `Send` and
+        // `Sync` as the closure value is, where a captured raw context pointer is neither.
+        let owned = &owned;
         let Some(call) = owned.call else {
             return;
         };
