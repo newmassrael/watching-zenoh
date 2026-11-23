@@ -659,6 +659,11 @@ where
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.groups.join(endpoint)
     }
+
+    /// A link of these is shared already: the pump is the handle the sink is a clone of.
+    fn share_pump(pump: Self::Pump) -> Rc<dyn SessionDatagramLink> {
+        pump
+    }
 }
 
 /// A stream dial whose stream `P` is being made (a `tcp/` connection, or a `tls/` channel's

@@ -873,6 +873,14 @@ pub trait SessionLinks {
         let _ = endpoint;
         Err(LinkOpenError::Unsupported)
     }
+
+    /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
+    /// its owner's read of it reach the same link through clones of this. The default puts the
+    /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
+    /// handle back, so its link is behind one pointer and not two.
+    fn share_pump(pump: Self::Pump) -> Rc<dyn SessionDatagramLink> {
+        Rc::new(pump)
+    }
 }
 
 /// The accepting end of a stream protocol: a port a node listens on, and the links of the
