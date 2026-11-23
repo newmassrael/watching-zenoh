@@ -63,10 +63,7 @@
 //! kept every pass active.
 
 use crate::runtime_impl::{share_inner, CoopRuntime, InnerRef};
-#[cfg(not(feature = "session-slot"))]
-use alloc::boxed::Box;
 use core::future::Future;
-#[cfg(feature = "session-slot")]
 use core::marker::PhantomPinned;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -168,13 +165,9 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
                 .now_us()
                 .saturating_add(ms.saturating_mul(1000)),
             inner: share_inner(&self.inner),
-            // Under `session-slot` the future is held where the timeout is, not
-            // in a box: the timeout is itself pinned wherever it is polled.
-            #[cfg(not(feature = "session-slot"))]
-            fut: Box::pin(fut),
-            #[cfg(feature = "session-slot")]
+            // Held where the timeout is, not in a box: the timeout is itself pinned wherever
+            // it is polled.
             fut,
-            #[cfg(feature = "session-slot")]
             _pinned: PhantomPinned,
             registered: false,
         }
@@ -242,47 +235,10 @@ impl<C: ClockSource> Future for SleepFuture<C> {
 /// The inner future's own wakers drive most re-polls; the timer
 /// queue's deadline wake is the fallback when the inner stays
 /// Pending past the deadline.
-#[cfg(not(feature = "session-slot"))]
-pub struct TimeoutFuture<C: ClockSource, F: Future> {
-    deadline_us: u64,
-    inner: InnerRef<C>,
-    fut: Pin<Box<F>>,
-    registered: bool,
-}
-
-// Pin<Box<F>> contains the pinning guarantee for F internally; the
-// outer wrapper struct itself can be moved freely because moving
-// it copies the Box pointer, not F. Explicit Unpin to enable safe
-// field access in poll().
-#[cfg(not(feature = "session-slot"))]
-impl<C: ClockSource, F: Future> Unpin for TimeoutFuture<C, F> {}
-
-#[cfg(not(feature = "session-slot"))]
-impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
-    type Output = Result<F::Output, TimeoutElapsed>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        // Poll inner first — fastest-path: inner Ready before the
-        // deadline check matters.
-        match this.fut.as_mut().poll(cx) {
-            Poll::Ready(out) => return Poll::Ready(Ok(out)),
-            Poll::Pending => {}
-        }
-        if this.inner.clock.now_us() >= this.deadline_us {
-            return Poll::Ready(Err(TimeoutElapsed));
-        }
-        if !this.registered {
-            this.registered = arm(&this.inner, this.deadline_us, cx);
-        }
-        Poll::Pending
-    }
-}
-
-/// `session-slot` form: the inner future is held in the timeout itself instead of
-/// a box, so the timeout is NOT `Unpin` (`PhantomPinned`) and projects its pin to
-/// the field.
-#[cfg(feature = "session-slot")]
+///
+/// The inner future is held in the timeout itself, not in a box, so a timeout takes no memory
+/// of its own on either profile: the timeout is NOT `Unpin` (`PhantomPinned`) and projects its
+/// pin to the field.
 pub struct TimeoutFuture<C: ClockSource, F: Future> {
     deadline_us: u64,
     inner: InnerRef<C>,
@@ -291,7 +247,6 @@ pub struct TimeoutFuture<C: ClockSource, F: Future> {
     registered: bool,
 }
 
-#[cfg(feature = "session-slot")]
 impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
     type Output = Result<F::Output, TimeoutElapsed>;
 

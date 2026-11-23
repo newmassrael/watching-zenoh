@@ -432,6 +432,32 @@ fn a_reserved_runtime_takes_no_memory_for_a_sleep() {
 }
 
 #[test]
+fn a_timeout_holds_its_future_in_place_and_takes_no_memory() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let runtime = CoopRuntime::reserved(
+        Hand(&NOW),
+        RuntimeRows {
+            tasks: 1,
+            task_bytes: 256,
+            timers: 1,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    let (elapsed, made) = allocations(|| {
+        let time = CoopTime::new(&runtime);
+        let handle = local.spawn_local(async move { time.timeout(2, forever()).await.is_err() });
+        local.run_until_idle();
+        NOW.store(5_000, Ordering::SeqCst);
+        local.block_on_local(handle).expect("not cancelled")
+    });
+    assert!(elapsed, "the deadline passed before the inner future ended");
+    assert_eq!(
+        made, 0,
+        "the inner future lies in the timeout, in the task's cell"
+    );
+}
+
+#[test]
 fn a_grown_timer_table_takes_every_sleep_and_reuses_its_entries() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     let runtime = CoopRuntime::new(Hand(&NOW));
