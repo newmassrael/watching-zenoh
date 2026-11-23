@@ -958,8 +958,7 @@ impl GroupFace {
         // engine's group is; any other by its literal.
         let key = self.join.declarations.key(put.keyexpr, put.wire);
         // Written from its parts, the bytes the owned Push below encodes to; the owned Push is built
-        // only for a publication the writer declines (a timestamp stack it does not carry) or
-        // refuses, whose error the builder reports.
+        // only for a publication the writer refuses, whose error the builder reports.
         let suffix = match key.mapping_id {
             0 => Some(put.keyexpr),
             _ => key.suffix,

@@ -1075,8 +1075,8 @@ pub fn multicast_tx_group_retraction<R>(
 /// A Put or a Del a group session publishes, written from its parts
 /// ([`crate::lent_push::write_publication`]) and handed to `f` as a message lent for the call:
 /// framed as the owned Push of the same publication is, on `priority` and the channel
-/// `reliable`. `None` when the writer declines the publication (a timestamp stack, which it does
-/// not carry) or refuses it, with `f` not called: the caller sends the owned Push.
+/// `reliable`. `None` when the writer refuses it, with `f` not called: the caller sends the owned
+/// Push.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 // The key, the kind and value, the metadata, the channel and band, and what is done with it.
 #[allow(clippy::too_many_arguments)]
@@ -1090,10 +1090,6 @@ pub fn multicast_tx_publication<R>(
     priority: Priority,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Option<R> {
-    #[cfg(feature = "pubsub-ts-stack")]
-    if meta.ts_stack.is_some() {
-        return None;
-    }
     #[cfg(feature = "pubsub-qos")]
     let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
     #[cfg(not(feature = "pubsub-qos"))]

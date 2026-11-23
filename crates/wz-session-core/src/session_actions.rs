@@ -14513,8 +14513,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// `None`, with nothing sent, where the owned message is what goes out
     /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]): a session that rewrites the keys it
-    /// originates, a build whose network counters classify a message by its owned form, and
-    /// metadata that starts a timestamp stack.
+    /// originates, and a build whose network counters classify a message by its owned form.
     #[cfg(all(
         feature = "codec-push",
         feature = "alloc",
@@ -14543,10 +14542,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-stats"))]
         {
             if self.rewrites_originated_keys() {
-                return None;
-            }
-            #[cfg(feature = "pubsub-ts-stack")]
-            if meta.ts_stack.is_some() {
                 return None;
             }
             #[cfg(feature = "pubsub-qos")]
