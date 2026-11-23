@@ -86,6 +86,11 @@ use crate::udp_link::{PortPeer, UdpPort};
 /// receive buffer and `X` the memory it encodes its frames into: the image's byte tables on the
 /// slot profile (the defaults), an `RxBuffer` and a `TxBuffer` on the heap profile
 /// (`HeapIpDriver`, which a slot build has not).
+// On a stack with no stream the `tcp/` and `tls/` cases are values of no size that cannot be
+// made, so the enum is its `udp/` case alone; clippy weighs the variants by size and calls that a
+// large difference. Boxing the datagram case would put the one live link on a heap the slot
+// profile does not have.
+#[allow(clippy::large_enum_variant)]
 pub enum IpDriver<
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
@@ -2449,9 +2454,9 @@ mod tests {
         // Each binding compiles only while the stream names that link.
         let none: fn(<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>) -> NoStream =
             core::convert::identity;
-        let some: fn(
-            <Stream as StreamSocket>::Link<ByteBuf, ByteBuf>,
-        ) -> crate::stream_link::StreamDriver<Stream, ByteBuf, ByteBuf> = core::convert::identity;
+        type StreamLinkOf = <Stream as StreamSocket>::Link<ByteBuf, ByteBuf>;
+        type StreamDriverOf = crate::stream_link::StreamDriver<Stream, ByteBuf, ByteBuf>;
+        let some: fn(StreamLinkOf) -> StreamDriverOf = core::convert::identity;
         let _ = (none, some);
         assert_eq!(
             core::mem::size_of::<<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>>(),
