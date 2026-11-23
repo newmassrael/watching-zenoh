@@ -2799,8 +2799,6 @@ pub mod multicast_stats;
     feature = "codec-frame",
     feature = "storage-profile"
 ))]
-// Totality debt TD-053 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod multicast_tx;
 
 // R311md — the shared observer-drain reply sink SSOT

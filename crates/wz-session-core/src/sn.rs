@@ -303,7 +303,7 @@ impl RxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut RxSn {
         #[cfg(feature = "transport-qos")]
         {
-            conduit_mut(&mut self.conduits, _priority)
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -427,7 +427,7 @@ impl MulticastTxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            conduit_mut(&mut self.conduits, _priority)
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -464,7 +464,7 @@ impl MulticastTxConduits {
     pub fn advertise_default(&self) -> TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            *conduit(&self.conduits, crate::qos::Priority::DEFAULT)
+            *crate::qos::Priority::DEFAULT.of(&self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -532,7 +532,7 @@ impl MulticastRxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut MulticastRxPair {
         #[cfg(feature = "transport-qos")]
         {
-            conduit_mut(&mut self.conduits, _priority)
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -605,46 +605,6 @@ impl MulticastRxConduits {
             pair.best_effort = sn;
         }
         true
-    }
-}
-
-/// The conduit of `priority` among one per priority, by the priority itself: every priority
-/// names one of the eight, so none is out of range.
-#[cfg(feature = "transport-qos")]
-fn conduit<T>(conduits: &[T; crate::qos::Priority::NUM], priority: crate::qos::Priority) -> &T {
-    use crate::qos::Priority;
-    let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
-        conduits;
-    match priority {
-        Priority::Control => control,
-        Priority::RealTime => real_time,
-        Priority::InteractiveHigh => interactive_high,
-        Priority::InteractiveLow => interactive_low,
-        Priority::DataHigh => data_high,
-        Priority::Data => data,
-        Priority::DataLow => data_low,
-        Priority::Background => background,
-    }
-}
-
-/// [`conduit`], to write.
-#[cfg(feature = "transport-qos")]
-fn conduit_mut<T>(
-    conduits: &mut [T; crate::qos::Priority::NUM],
-    priority: crate::qos::Priority,
-) -> &mut T {
-    use crate::qos::Priority;
-    let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
-        conduits;
-    match priority {
-        Priority::Control => control,
-        Priority::RealTime => real_time,
-        Priority::InteractiveHigh => interactive_high,
-        Priority::InteractiveLow => interactive_low,
-        Priority::DataHigh => data_high,
-        Priority::Data => data,
-        Priority::DataLow => data_low,
-        Priority::Background => background,
     }
 }
 
