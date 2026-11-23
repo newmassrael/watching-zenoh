@@ -243,8 +243,6 @@ pub mod limits;
 // What a runtime's limits give the machines a process holds apart from any session (its
 // supervisor, its reception supervisors, its message catalogs), each lent under the build's value.
 // Unconditional, no_std and no_alloc, like `limits`. Documented from inside.
-// Totality debt TD-144 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod process_limits;
 
 // The open stage of the policies: a document's statements composed in layers over a base into one
