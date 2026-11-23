@@ -1348,12 +1348,12 @@ fn a_reply_is_handed_from_the_lane_as_it_came() {
     assert_eq!(lane.counts(), LaneCounts::default());
 }
 
+/// What [`noting`] callbacks write: the tag, the payload's first byte and where it lies.
+type Noted = std::sync::Arc<std::sync::Mutex<Vec<(u8, u8, usize)>>>;
+
 /// A callback the tests count the samples of: each is noted with `tag`, its payload's first
 /// byte and where its payload lies.
-fn noting(
-    tag: u8,
-    seen: &std::sync::Arc<std::sync::Mutex<Vec<(u8, u8, usize)>>>,
-) -> crate::engine::SubscriberCallback {
+fn noting(tag: u8, seen: &Noted) -> crate::engine::SubscriberCallback {
     let seen = seen.clone();
     alloc::sync::Arc::new(crate::engine::LiveCallback::new(Box::new(
         move |sample: &dyn SampleView| {
