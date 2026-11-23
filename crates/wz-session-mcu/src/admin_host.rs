@@ -335,8 +335,7 @@ pub fn host_connect_writes(
     let zid_hex = String::from(zid_hex);
     let whatami = String::from(whatami);
     observer
-        .subscribers
-        .register_sink(
+        .register_subscriber(
             &pattern,
             Locality::Any,
             BoxedSink::new(move |sample: &dyn SampleView| {

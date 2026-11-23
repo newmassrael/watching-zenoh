@@ -608,6 +608,11 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
         )
     }
 
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(LinkProto::Udp.subject())
+    }
+
     // A driver whose buffers are declared is bounded by them: the frame it sends is at most the
     // storage it lends, and the batch it advertises is at most the datagram it receives whole, as
     // lwIP's session socket declares its slot (`link_mtu` bounds the session's send budget, so a

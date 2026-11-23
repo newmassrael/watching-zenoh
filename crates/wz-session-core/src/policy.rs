@@ -146,28 +146,31 @@ pub const fn policy_choice(stated: Option<&str>, choices: &[&str], default: usiz
     let Some(text) = stated else {
         return default;
     };
-    let mut index = 0;
-    while index < choices.len() {
-        if same(text, choices[index]) {
+    let mut index = 0usize;
+    let mut rest = choices;
+    while let [choice, tail @ ..] = rest {
+        if same(text, choice) {
             return index;
         }
-        index += 1;
+        // Below `choices.len()`: the count of the choices passed so far.
+        index = index.wrapping_add(1);
+        rest = tail;
     }
     panic!("a WZ_POLICY_* value is not one of its policy's choices")
 }
 
 /// `a == b` where the language allows it in a constant.
 const fn same(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
     }
-    let mut index = 0;
-    while index < a.len() {
-        if a[index] != b[index] {
+    while let ([x, a_rest @ ..], [y, b_rest @ ..]) = (a, b) {
+        if *x != *y {
             return false;
         }
-        index += 1;
+        a = a_rest;
+        b = b_rest;
     }
     true
 }

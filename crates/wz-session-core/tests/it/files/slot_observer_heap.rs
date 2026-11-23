@@ -79,7 +79,11 @@ fn push_on(id: wz_session_core::wire_id::ExprId) -> NetworkMessage {
 
 fn ask(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
-        build_request_query(rid, 0, Some(keyexpr)).expect("build the request"),
+        build_request_query(
+            rid,
+            crate::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+        )
+        .expect("build the request"),
     ))
 }
 
@@ -185,7 +189,13 @@ fn dispatch(
     messages: Vec<NetworkMessage>,
 ) {
     let outcome = frame(messages);
-    observer.dispatch(peers, requesters, IterationEvent::Poll(&outcome), sent);
+    observer.dispatch(
+        &mut (),
+        peers,
+        requesters,
+        IterationEvent::Poll(&outcome),
+        sent,
+    );
 }
 
 /// Two peers number their aliases from the same id; the one subscriber the application registered
@@ -284,7 +294,12 @@ fn the_replies_can_be_drained_with_the_final_held_back() {
     let held = Sent::default();
 
     let outcome = frame(vec![ask(7, "demo/q/a")]);
-    observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::Poll(&outcome));
+    observer.dispatch_event(
+        &mut (),
+        &mut peers,
+        &mut requesters,
+        IterationEvent::Poll(&outcome),
+    );
     observer.flush_pending_replies(&mut peers, &mut requesters, &held);
     let log = held.log();
     assert_eq!(log.len(), 2, "two replies and no Final: {log:?}");
@@ -346,20 +361,22 @@ fn for_one_session_the_slot_observer_does_what_the_application_observer_does() {
     let mut ap = ApplicationLayerObserver::new();
     let ap_seen = Arc::new(Mutex::new(Vec::new()));
     let into = ap_seen.clone();
-    ap.subscribers
-        .register_sink(
-            "**",
-            Locality::Any,
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                into.lock()
-                    .expect("not poisoned")
-                    .push(sample.keyexpr().to_string());
-            }),
-        )
-        .expect("register the subscriber");
-    ap.queryables
-        .register_sink("demo/q/**", Locality::Any, false, two_replies())
-        .expect("register the queryable");
+    ap.register_subscriber(
+        "**",
+        Locality::Any,
+        BoxedSink::new(move |sample: &dyn SampleView| {
+            into.lock()
+                .expect("not poisoned")
+                .push(sample.keyexpr().to_string());
+        }),
+    )
+    .expect("register the subscriber");
+    ap.with_app(|app_half| {
+        app_half
+            .queryables
+            .register_sink("demo/q/**", Locality::Any, false, two_replies())
+            .expect("register the queryable")
+    });
     let ap_sent = Sent::default();
     for messages in frames() {
         let outcome = frame(messages);
@@ -442,6 +459,7 @@ fn a_peer_whose_tables_are_lent_is_answered_in_the_rows_it_was_lent() {
     for rid in [7, 8] {
         let outcome = frame(vec![ask(rid, "demo/q/a")]);
         observer.dispatch(
+            &mut (),
             &mut peers,
             &mut requesters,
             IterationEvent::Poll(&outcome),

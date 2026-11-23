@@ -439,14 +439,16 @@ config WZ_LIMIT_MAX_MULTICAST_REPLIES
 
 config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
-	default 8
+	default 11 if WZ_LIMITS_ZENOH_PICO
+	default 16
 	help
 	  The most tasks a runtime holds: a ceiling on the task table a fixed-memory
 	  image declares, which the image is checked against when it compiles, and on
 	  the task cells a session of the C ABI's cooperative engine reserves when it
-	  opens, one for each link and group its configuration admits. A link or a
-	  group past them is refused, at the open as out of memory and after it as a
-	  link past the faces the session admits.
+	  opens, one for each face and group its configuration admits (the dial role's
+	  and MAX_FACES besides). A face or a group past them is refused, at the open
+	  as out of memory and after it as a link past the faces the session admits,
+	  so a preset that admits faces admits a task for each.
 
 config WZ_LIMIT_MAX_TIMERS
 	int "MAX_TIMERS"

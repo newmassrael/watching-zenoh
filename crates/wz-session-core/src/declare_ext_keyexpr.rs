@@ -235,7 +235,10 @@ pub fn set_ext_keyexpr_literal(
     if read_ext_keyexpr(Some(exts)).is_none() {
         return Ok(false);
     }
-    exts[index].body = build_ext_keyexpr(literal)?.body;
+    let Some(entry) = exts.get_mut(index) else {
+        return Ok(false);
+    };
+    entry.body = build_ext_keyexpr(literal)?.body;
     Ok(true)
 }
 

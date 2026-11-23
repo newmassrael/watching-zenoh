@@ -522,7 +522,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     R::with_mutex_mut(&observer, |obs| {
                         for reply in ReplyStaging::drain_staged(&mut replies) {
                             let inbound: crate::reply::InboundReply = reply.into();
-                            obs.replies.deliver_local_reply(&inbound);
+                            obs.face().replies.deliver_local_reply(&inbound);
                         }
                     });
                 } else {
@@ -701,7 +701,7 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
         #[cfg(feature = "query-queryable")]
         {
             R::with_mutex_mut(&self.observer, |observer| {
-                let removed = observer.queryables.unregister(self.id);
+                let removed = observer.with_app(|app| app.queryables.unregister(self.id));
                 // R311y797 — the undeclare twin of the declare-side
                 // re-evaluation (pico `_z_write_filter_notify_queryable`
                 // with `add = false` ->
@@ -714,10 +714,14 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
                 // only add a way to skip it.
                 #[cfg(all(feature = "declare-queryable", feature = "session-matching"))]
                 {
-                    let queryables = &observer.queryables;
-                    observer.remote_queryables.reevaluate_matching(&|c| {
-                        c.locality.allows_local()
-                            && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                    observer.with_parts(|app, face| {
+                        let queryables = &*app.queryables;
+                        app.remote_queryables
+                            .reevaluate_matching(&*face.remote_queryables, &|c| {
+                                c.locality.allows_local()
+                                    && queryables
+                                        .has_local_matching(&c.keyexpr, c.complete_required)
+                            });
                     });
                 }
                 removed

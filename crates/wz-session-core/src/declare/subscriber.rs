@@ -579,6 +579,23 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberRegistry<D, U, P> {
         &self.peer
     }
 
+    /// The two halves apart: the application's RemoteSubscriberTable<D, U, P> and the peer's RemoteSubscriberPeer<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(
+        &mut self,
+    ) -> (
+        &mut RemoteSubscriberTable<D, U, P>,
+        &mut RemoteSubscriberPeer<P>,
+    ) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&RemoteSubscriberTable<D, U, P>, &RemoteSubscriberPeer<P>) {
+        (&self.table, &self.peer)
+    }
+
     /// [`RemoteSubscriberPeer::limit_to`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
     pub fn limit_peer_to(&mut self, quota: crate::limits::MaxRemoteDeclsHeld) {
@@ -783,7 +800,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
 
     /// R311gb-3d — install an explicit [`DeclSink`] observer (the
     /// seam-native entry point; works on every profile). The `alloc`-only
-    /// [`on_subscriber_declared`](RemoteSubscriberRegistry::on_subscriber_declared)
+    /// [`on_subscriber_declared`](RemoteSubscriberTable::on_subscriber_declared)
     /// convenience wrapper funnels through here after wrapping a closure
     /// in a [`BoxedDeclSink`]. Duplicate sinks are explicitly allowed;
     /// dispatch fires them in registration order. R311lb — returns the
@@ -795,7 +812,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
-    /// [`on_subscriber_undeclared`](RemoteSubscriberRegistry::on_subscriber_undeclared)
+    /// [`on_subscriber_undeclared`](RemoteSubscriberTable::on_subscriber_undeclared)
     /// convenience wrapper funnels through here. R311lb — returns the
     /// registry-local observer id for
     /// [`remove_subscriber_undeclared_sink`](Self::remove_subscriber_undeclared_sink).
@@ -1356,7 +1373,12 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     pub fn new() -> Self {
         Self::with_sink_backing()
     }
+}
 
+/// The closure installers on the application's table, so a caller that holds the table alone (a
+/// session whose table is shared with other faces) installs as one that holds the registry does.
+#[cfg(feature = "alloc")]
+impl RemoteSubscriberTable<BoxedDeclSink, BoxedUndeclSink> {
     /// Install a closure fired on every inbound `Declare(DeclSubscriber)`
     /// whose keyexpr resolves through the peer keyexpr table. The closure
     /// receives `&dyn DeclView` (the peer-declared `id` + resolved
@@ -2073,6 +2095,7 @@ mod tests {
         assert!(!reg.has_matching("home/door"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_peer_pattern_covers_publish_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
@@ -2084,6 +2107,7 @@ mod tests {
         assert!(!reg.has_matching("other/x"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_false_on_a_malformed_published_key() {
         // The LOCAL delivery membership check (zenoh compute_data_route parity):
@@ -2105,6 +2129,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_publish_pattern_covers_peer_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
@@ -2133,6 +2158,7 @@ mod tests {
 
     // ── R293 — honest two-pattern overlap (Pub-side mirror) ──
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn subscriber_has_matching_true_when_two_patterns_share_literal_via_mid_star() {
         // Pub-side mirror of the Q-side test
@@ -2164,6 +2190,7 @@ mod tests {
         assert!(!reg.has_matching("kitchen/**/temp"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_double_star_intersects_either_direction() {
         // Pub-side mirror — `home/** ∩ **/temp` shares `home/temp`

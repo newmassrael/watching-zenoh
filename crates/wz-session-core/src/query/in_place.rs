@@ -12,12 +12,12 @@
 //! ([`resolve_wireexpr_view`]), the selector parameters, the attachment, the
 //! source info and the value are read where they lie, and the matching
 //! queryables are fired through the SAME fan-out the owned path takes
-//! ([`QueryableRegistry::fire_projection`]), over a projection of the lent query
+//! ([`QueryPeer::fire_projection`]), over a projection of the lent query
 //! instead of the owned one. A queryable's contract was already a view borrowed
 //! for the call (`QuerySinkOf::handle_typed`), so no queryable changes; its replies are
 //! staged as they always are.
 //!
-//! What it dispatches is what [`QueryableRegistry::dispatch_request`] dispatches
+//! What it dispatches is what [`QueryPeer::dispatch_request`] dispatches
 //! for the owned projection of the same record, field for field: only a Query
 //! body reaches the table; the keyexpr by the same resolution rule; the target
 //! and the QoS off the same extension chain by the same readers
@@ -41,7 +41,9 @@ use wz_codecs::query::QueryView;
 use wz_codecs::query_ext_entry::{QueryExtEntryView, QueryExtEntryViewVariant};
 use wz_codecs::request::{RequestView, RequestViewVariant};
 
-use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryableRegistry};
+use super::{
+    DispatchOutcome, LocalQueryables, QueryEnvelope, QueryPeer, QueryProjection, ResponderSink,
+};
 use crate::ext_view::{walked, ExtEntryView};
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
 use crate::wireexpr_resolve::{
@@ -79,7 +81,7 @@ fn read_envelope_extensions(
 }
 
 /// Whether a Query's chain carries its value as a list of slices: the shape the
-/// owned path un-swaps before routing (`QueryableRegistry::unswap_query_value`
+/// owned path un-swaps before routing (`QueryPeer::unswap_query_value`
 /// reads the first value entry that has slices).
 fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bool {
     exts.into_iter().any(|ext| {
@@ -146,19 +148,22 @@ fn lent_projection<'q, 'f: 'q>(
     }
 }
 
-impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
+impl QueryPeer {
     /// Dispatch a Request the in-place receive path lent: the queryable side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace),
     /// staging replies into `pending_replies` and the Final it owes into
     /// `pending_final_rids`, as [`Self::dispatch_messages`] does for an owned
     /// one. See the module docs for what it hands to the owned projection.
-    pub(super) fn dispatch_request_in_place<S: crate::bounded::Storage>(
+    pub(super) fn dispatch_request_in_place<L: LocalQueryables, S: crate::bounded::Storage>(
         &mut self,
+        queryables: &mut L,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) {
+    ) where
+        L::Sink: ResponderSink,
+    {
         // As the owned path: a Query that would owe a Final the table cannot
         // hold is refused before any queryable runs, and counted.
         if matches!(request.body, RequestViewVariant::CodecZenohQuery(_))
@@ -175,7 +180,7 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
             target,
             qos,
         };
-        match self.dispatch_lent(request, spaces, envelope, pending_replies) {
+        match self.dispatch_lent(queryables, request, spaces, envelope, pending_replies) {
             Ok(outcome) => {
                 if outcome.owes_final(self.answers_unresolved_queries()) {
                     // The terminator carries the query's QoS, read by the rule
@@ -184,9 +189,14 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
                 }
             }
             #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-            Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
-                self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
-            }
+            Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => self
+                .dispatch_owned_projection(
+                    queryables,
+                    request,
+                    spaces,
+                    pending_replies,
+                    pending_final_rids,
+                ),
             // With no allocator there is no owned projection to fall back on, and a build that
             // lends only (`rx-lent-only`) links none, so a Request the lent form cannot represent
             // reaches no queryable, and is owed its Final as a query that matched nobody is: the
@@ -200,13 +210,17 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
 
     /// The lent dispatch itself: [`Self::dispatch_request`]'s steps over the
     /// Request where it lies.
-    fn dispatch_lent<S: crate::bounded::Storage>(
+    fn dispatch_lent<L: LocalQueryables, S: crate::bounded::Storage>(
         &mut self,
+        queryables: &mut L,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         envelope: QueryEnvelope,
         replies: &mut ReplyStage<S>,
-    ) -> Result<DispatchOutcome, Fallback> {
+    ) -> Result<DispatchOutcome, Fallback>
+    where
+        L::Sink: ResponderSink,
+    {
         // Only the Query body arm reaches the table.
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(DispatchOutcome::NOT_DISPATCHED);
@@ -232,7 +246,7 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack.as_ref(),
         );
-        let matched = self.fire_projection(envelope, keyexpr, projection, replies, true);
+        let matched = self.fire_projection(queryables, envelope, keyexpr, projection, replies);
         Ok(DispatchOutcome::routed(matched))
     }
 
@@ -241,13 +255,16 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
     /// it always did. Heap profile only, and not a build that lends only (`rx-lent-only`).
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection<S: crate::bounded::Storage>(
+    fn dispatch_owned_projection<L: LocalQueryables, S: crate::bounded::Storage>(
         &mut self,
+        queryables: &mut L,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) {
+    ) where
+        L::Sink: ResponderSink,
+    {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Request. The
         // view is first filled into the codec's own record (the heap profile has the stack
@@ -259,6 +276,7 @@ impl<C: super::ResponderSink, P: crate::bounded::Storage> QueryableRegistry<C, P
         }
         if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
             self.dispatch_messages(
+                queryables,
                 &[crate::network_message::NetworkMessage::Request(Box::new(
                     owned,
                 ))],
@@ -368,11 +386,18 @@ mod tests {
         let messages = parse_frame_payload(&wire).expect("the record decodes");
         assert!(matches!(messages.as_slice(), [NetworkMessage::Request(_)]));
         let (mut owned_replies, mut owned_finals) = (ReplyStage::new(), FinalStage::new());
-        owned.dispatch_messages(&messages, &peer, &mut owned_replies, &mut owned_finals);
+        QueryPeer::default().dispatch_messages(
+            &mut owned,
+            &messages,
+            &peer,
+            &mut owned_replies,
+            &mut owned_finals,
+        );
         let (mut lent, lent_log) = recording();
         let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut lent_replies, mut lent_finals) = (ReplyStage::new(), FinalStage::new());
-        lent.dispatch_iteration_event(
+        QueryPeer::default().dispatch_iteration_event(
+            &mut lent,
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
                 &decoded,
                 true,
@@ -402,9 +427,12 @@ mod tests {
     #[test]
     fn a_query_is_dispatched_lent_as_the_owned_path_dispatches_it() {
         let full = {
-            let builder = RequestQueryBuilder::new(12, 0, Some("demo/full"))
-                .parameters(b"a=1;b=2")
-                .request_qos(0x0D);
+            let builder = RequestQueryBuilder::new(
+                12,
+                crate::wire_key::WireKey::literal("demo/full").expect("a literal key"),
+            )
+            .parameters(b"a=1;b=2")
+            .request_qos(0x0D);
             #[cfg(feature = "query-attachment")]
             let builder = builder.query_attachment(b"att");
             #[cfg(feature = "query-value")]
@@ -420,35 +448,56 @@ mod tests {
             builder.build().expect("build")
         };
         let cases = [
-            RequestQueryBuilder::new(11, 0, Some("demo/a"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                11,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
             full,
             // Matches nobody: still dispatched, still owed its Final.
-            RequestQueryBuilder::new(13, 0, Some("other/a"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                13,
+                crate::wire_key::WireKey::literal("other/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
             // A target only complete queryables answer: matches nobody here.
-            RequestQueryBuilder::new(14, 0, Some("demo/a"))
-                .request_target(QueryTarget::AllComplete)
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                14,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .request_target(QueryTarget::AllComplete)
+            .build()
+            .expect("build"),
             // Through the peer's alias, with and without a suffix.
-            RequestQueryBuilder::new(15, 5, None)
-                .build()
-                .expect("build"),
-            RequestQueryBuilder::new(16, 5, Some("/more"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                15,
+                crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            RequestQueryBuilder::new(
+                16,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             // An id the peer never declared: never routed, owed nothing.
-            RequestQueryBuilder::new(17, 77, None)
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                17,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             // Past the bounded buffer: the fixed backing falls back to the
             // owned projection, which dispatches it.
-            RequestQueryBuilder::new(18, 6, Some("/tail"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                18,
+                crate::wire_key::WireKey::from_parts(6, Some("/tail")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
         ];
         let mut finals = 0;
         for (i, request) in cases.iter().enumerate() {
@@ -477,29 +526,41 @@ mod tests {
     fn a_lent_request_names_its_key_as_the_owned_decode_does() {
         use crate::wire::parts::{WireexprLocalOwned, WireexprNonlocalOwned, WireexprOwnedVariant};
 
-        let mut senders = RequestQueryBuilder::new(23, 5, None)
-            .build()
-            .expect("build");
+        let mut senders = RequestQueryBuilder::new(
+            23,
+            crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+        )
+        .build()
+        .expect("build");
         senders.keyexpr.body = WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id: 5,
             suffix_len: None,
             suffix: None,
         });
-        let mut receivers = RequestQueryBuilder::new(24, 5, None)
-            .build()
-            .expect("build");
+        let mut receivers = RequestQueryBuilder::new(
+            24,
+            crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+        )
+        .build()
+        .expect("build");
         receivers.keyexpr.body = WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
             id: 5,
             suffix_len: None,
             suffix: None,
         });
         let cases = [
-            RequestQueryBuilder::new(21, 0, Some("demo/a"))
-                .build()
-                .expect("build"),
-            RequestQueryBuilder::new(22, 5, Some("/more"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                21,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
+            RequestQueryBuilder::new(
+                22,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             senders,
             receivers,
         ];
@@ -536,10 +597,13 @@ mod tests {
             (bound + 1).min(most)
         };
         let long = alloc::vec![b'x'; length];
-        let request = RequestQueryBuilder::new(19, 0, Some("demo/a"))
-            .parameters(&long)
-            .build()
-            .expect("build");
+        let request = RequestQueryBuilder::new(
+            19,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .parameters(&long)
+        .build()
+        .expect("build");
         let (owned, lent) = both(&request);
         assert_eq!(lent, owned);
         let (seen, replies, finals) = owned;
@@ -561,11 +625,14 @@ mod tests {
 
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, alloc::vec![9, 8, 7], false);
-        let instrumented = RequestQueryBuilder::new(21, 0, Some("demo/a"))
-            .request_qos(0x0D)
-            .request_ts_stack(&stack)
-            .build()
-            .expect("build");
+        let instrumented = RequestQueryBuilder::new(
+            21,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .request_qos(0x0D)
+        .request_ts_stack(&stack)
+        .build()
+        .expect("build");
         let (owned, lent) = both(&instrumented);
         assert_eq!(lent, owned, "the lent path is the owned one");
         assert_eq!(owned.0.len(), 1);
@@ -573,9 +640,12 @@ mod tests {
         assert!(!owned.0[0].is_local, "it came in over a link");
         assert_eq!(owned.2.len(), 1, "the query is owed its Final");
 
-        let plain = RequestQueryBuilder::new(22, 0, Some("demo/a"))
-            .build()
-            .expect("build");
+        let plain = RequestQueryBuilder::new(
+            22,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
         let (owned, lent) = both(&plain);
         assert_eq!(lent, owned);
         assert_eq!(owned.0[0].ts_stack, None);
@@ -587,9 +657,12 @@ mod tests {
     #[cfg(feature = "bounded-heapless")]
     #[test]
     fn a_lent_query_past_pending_finals_is_refused_before_a_queryable_runs() {
-        let request = RequestQueryBuilder::new(21, 0, Some("demo/a"))
-            .build()
-            .expect("build");
+        let request = RequestQueryBuilder::new(
+            21,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
         let wire = request
             .try_as_borrowed()
             .expect("a borrowed view")
@@ -600,7 +673,8 @@ mod tests {
         for rid in 0..crate::caps::MAX_PENDING_FINALS as u32 {
             finals.owe(rid, QosLevel::DEFAULT);
         }
-        reg.dispatch_iteration_event(
+        QueryPeer::default().dispatch_iteration_event(
+            &mut reg,
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
                 &decoded,
                 true,

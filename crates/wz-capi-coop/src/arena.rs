@@ -104,6 +104,7 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent, ARENA_ALIGN};
@@ -112,6 +113,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -119,6 +121,7 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
 use crate::engine::{EntryBytes, SubscriberRow};
+use crate::open_source::EndpointList;
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -322,14 +325,29 @@ pub struct ArenaPlan {
     /// The bytes of the place the ABI keeps its handle of the session in, none for no place
     /// ([`Self::holding`]).
     handle_bytes: usize,
+    /// The rows of the texts of the endpoints the session dials, and of those it listens on.
+    endpoint_rows: (usize, usize),
 }
 
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
-    pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+    pub fn of<E: EndpointList>(
+        config: &CoopConfig<E>,
+        limits: &SessionLimits,
+    ) -> Result<Self, ArenaRefused> {
         hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
-        if !config.listen.is_empty() {
+        hold(
+            "MAX_STATIC_CONNECT",
+            config.endpoints.count(),
+            caps::MAX_STATIC_CONNECT,
+        )?;
+        hold(
+            "MAX_ADMIN_LOCATORS",
+            config.listen.count(),
+            caps::MAX_ADMIN_LOCATORS,
+        )?;
+        if config.listen.count() > 0 {
             hold(
                 "MAX_ACCEPT_PENDING",
                 config.accept_pending,
@@ -392,8 +410,22 @@ impl ArenaPlan {
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
             handle_bytes: 0,
+            endpoint_rows: (config.endpoints.count(), config.listen.count()),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
+        // The texts of the endpoints the session dials and listens on, a text a row of one table
+        // each, written once when it opens and named by place after
+        // (`SessionArena::lend_endpoints`): one row of the plan, the two tables' spans.
+        let (dial_rows, listen_rows) = plan.endpoint_rows;
+        plan.put(
+            "endpoint texts",
+            "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
+            1,
+            Arena::table_bytes::<LocatorText>(dial_rows)
+                .zip(Arena::table_bytes::<LocatorText>(listen_rows))
+                .and_then(|(dial, listen)| dial.checked_add(listen))
+                .ok_or(ArenaRefused::TooLarge)?,
+        )?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
         plan.put(
             "link receive flags",
@@ -748,7 +780,7 @@ fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize
 /// advertises, which is the most a peer sends once the two have negotiated, held to the batch the
 /// session's `limits` state (`PICO_UNICAST_BATCH_BYTES`) under the build's. A batch over either
 /// is refused, as a stage after the build only lowers the memory the build fixes.
-fn link_batch(config: &CoopConfig, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+fn link_batch<E>(config: &CoopConfig<E>, limits: &SessionLimits) -> Result<usize, ArenaRefused> {
     let ceiling = lent::<{ caps::PICO_UNICAST_BATCH_BYTES }>(
         "PICO_UNICAST_BATCH_BYTES",
         Quota::at_most(limits.pico_unicast_batch_bytes()),
@@ -988,14 +1020,25 @@ fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaR
 /// join, whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks
 /// this). A session that only listens or only joins groups never dials from that face: a face it
 /// attaches later is one of `max_faces`.
-pub(crate) fn dials(config: &CoopConfig) -> bool {
-    !(config.endpoints.is_empty() && (!config.listen.is_empty() || !config.groups.is_empty()))
+pub(crate) fn dials(config: &CoopConfig<impl EndpointList>) -> bool {
+    dials_of(
+        config.endpoints.count(),
+        config.listen.count(),
+        config.groups.len(),
+    )
+}
+
+/// [`dials`] of a session by its counts: the endpoints it dials, those it listens on and the
+/// groups it joins, which an open session reads from its endpoint texts once the config's are
+/// gone.
+pub(crate) fn dials_of(endpoints: usize, listens: usize, groups: usize) -> bool {
+    !(endpoints == 0 && (listens > 0 || groups > 0))
 }
 
 /// The faces a session `config` opens may hold at once: the dial role's when it dials
 /// (`dials`), as many besides as `max_faces` admits, a link still in its handshake among them,
 /// and one for each group it joins. `None` past the address space.
-fn faces_of(config: &CoopConfig) -> Option<usize> {
+fn faces_of(config: &CoopConfig<impl EndpointList>) -> Option<usize> {
     usize::from(dials(config))
         .checked_add(config.max_faces)?
         .checked_add(config.groups.len())
@@ -1005,10 +1048,11 @@ fn faces_of(config: &CoopConfig) -> Option<usize> {
 /// role's when it dials (the endpoints it lists, or none with neither a port nor a group), as many
 /// besides as `max_faces` admits (each a link it attaches or accepts), and for a listener as many
 /// in their handshake as `accept_pending` admits. `None` past the address space. The one count
-/// of them: the plan's link rows and the runtime's task cells are both sized by it, a link's
-/// session being one task, and an ABI that reports the session's memory reads it here.
-pub fn links_of(config: &CoopConfig) -> Option<usize> {
-    let handshakes = if config.listen.is_empty() {
+/// of them: the plan's link rows are sized by it, and an ABI that reports the session's memory
+/// reads it here. A link in its handshake past the faces holds buffers only, to be taken off its
+/// port and closed; the runtime's task cells are reserved for the faces (`engine::RuntimeTables`).
+pub fn links_of(config: &CoopConfig<impl EndpointList>) -> Option<usize> {
+    let handshakes = if config.listen.count() == 0 {
         0
     } else {
         config.accept_pending
@@ -1190,6 +1234,17 @@ impl SessionArena {
             .map_err(ArenaRefused::Lend)
     }
 
+    /// Lend the rows `plan` lays out for the texts of the endpoints the session dials and listens
+    /// on, none written: the session writes each once as it opens. Refused only by an arena
+    /// reserved by another plan.
+    pub(crate) fn lend_endpoints(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<EndpointTexts, ArenaRefused> {
+        let (dials, listens) = plan.endpoint_rows;
+        Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
+    }
+
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
     /// in, for the session's life, each key at most `longest` bytes, the session's
     /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
@@ -1284,6 +1339,7 @@ mod tests {
             held_queries: 0,
             key_bytes: 0,
             handle_bytes: 0,
+            endpoint_rows: (0, 0),
         }
     }
 

@@ -52,7 +52,6 @@ use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 use super::SubscriberRow;
 use crate::arena::{FacePeers, GetTables};
 use wz_capi_port::FilterPlane;
-use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
@@ -265,6 +264,10 @@ pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
+    type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type Delivery = ();
+    type Tables<P: wz_session_core::bounded::Storage> =
+        wz_session_core::pubsub::SubscriberTable<Self::Subscriber, P>;
     type Queryable = BoxedQuerySink;
     type Declared = BoxedDeclSink;
     type Undeclared = BoxedUndeclSink;
@@ -426,19 +429,17 @@ impl Registry {
     pub(super) fn peers_declare(&self, plane: FilterPlane, keyexpr: &str) -> bool {
         #[cfg(test)]
         self.peer_looks.set(self.peer_looks.get() + 1);
+        // Asked from the borrowed key: a poll builds no criterion.
         match plane {
-            FilterPlane::Subscribers => {
-                let subscribers = PublisherCriterion::new(keyexpr, Locality::Remote);
-                self.faces()
-                    .any(|face| face.peer.remote_subscribers.has_matching_for(&subscribers))
-            }
+            FilterPlane::Subscribers => self
+                .faces()
+                .any(|face| face.peer.remote_subscribers.has_matching(keyexpr)),
             #[cfg(any(feature = "query", feature = "queryable"))]
-            FilterPlane::Queryables { complete_required } => {
-                let queryables =
-                    QuerierCriterion::new(keyexpr, Locality::Remote, complete_required);
-                self.faces()
-                    .any(|face| face.peer.remote_queryables.has_matching_for(&queryables))
-            }
+            FilterPlane::Queryables { complete_required } => self.faces().any(|face| {
+                face.peer
+                    .remote_queryables
+                    .answers_query(keyexpr, complete_required)
+            }),
             // A build without a querier or a queryable holds no queryable a peer declared.
             #[cfg(not(any(feature = "query", feature = "queryable")))]
             FilterPlane::Queryables { .. } => false,
@@ -603,6 +604,18 @@ impl Registry {
         }
     }
 
+    /// State the answer face `id`'s session gives a query of its peer whose key the face's tables
+    /// cannot resolve: the session's policy, held by the face from its link on.
+    pub(super) fn set_unanswerable_final(
+        &mut self,
+        id: FaceId,
+        value: wz_session_core::policy::QueryUnanswerableFinal,
+    ) {
+        if let Some(face) = self.held_mut(id) {
+            face.peer.queries.set_unanswerable_final(value);
+        }
+    }
+
     /// Let go of the id space the tables of face `id` hold, the link it was the space of being gone:
     /// until the next link of the face installs its own, the peer's ids of the session's
     /// declarations resolve to nothing, as before the first link.
@@ -671,7 +684,7 @@ impl Registry {
         #[cfg(feature = "declarations-synced-event")]
         let was_final = self.declarations_final(id);
         if let Some(Split { app, face, others }) = self.split(id) {
-            app.dispatch_event_among(&mut face.peer, &mut face.gets, event, &others);
+            app.dispatch_event_among(&mut (), &mut face.peer, &mut face.gets, event, &others);
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(id) {

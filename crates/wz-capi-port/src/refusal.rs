@@ -58,6 +58,9 @@ impl From<RegisterError> for Refusal {
             RegisterError::KeyexprTooLong => Self::KeyTooLong,
             RegisterError::KeyNotInSet => Self::NotBuilt,
             RegisterError::IdsExhausted => Self::NoEntityId,
+            // A listener's publisher or querier was undeclared: what it is declared on is gone, as
+            // everything of a closed session is.
+            RegisterError::OwnerGone => Self::Closed,
         }
     }
 }

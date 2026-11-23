@@ -3127,7 +3127,7 @@ reason = "No key of upstream's configuration bounds it: wz holds the replies of 
 
 [limit.pico_preset]
 value = 2
-reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to."
+reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to. The same count of rows holds back what the session's consolidating gets keep of their replies (`reply_hold::HeldReplies`), each row the room of one reply's payload and key (`MAX_REPLY_PAYLOAD_BYTES` and `MAX_KEYEXPR_BYTES`, 1,024 and 256 bytes here): two rows are about 2.6 KB of the session's arena, where zenoh-pico holds each reply of a `Latest` get in an allocation of its own (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h` @ `typedef struct _z_pending_reply_t {`)."
 
 [[limit]]
 id = "MAX_PENDING_FINALS"
@@ -3270,7 +3270,7 @@ id = "MAX_TASKS"
 kconfig = "WZ_LIMIT_MAX_TASKS"
 kind = "bound"
 driven = "local"
-default = 8
+default = 16
 storage = "capacity"
 scope = "runtime"
 binding_heap = "build"
@@ -3280,14 +3280,19 @@ help = '''
 The most tasks a runtime holds: a ceiling on the task table a fixed-memory
 image declares, which the image is checked against when it compiles, and on
 the task cells a session of the C ABI's cooperative engine reserves when it
-opens, one for each link and group its configuration admits. A link or a
-group past them is refused, at the open as out of memory and after it as a
-link past the faces the session admits.
+opens, one for each face and group its configuration admits (the dial role's
+and MAX_FACES besides). A face or a group past them is refused, at the open
+as out of memory and after it as a link past the faces the session admits,
+so a preset that admits faces admits a task for each.
 '''
 
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a wz runtime whose tables are fixed."
+
+[limit.pico_preset]
+value = 11
+reason = "One task for each face the pico preset admits: the dial role's and MAX_FACES (10) besides, as zenoh-pico runs a transport for each of its Z_LISTEN_MAX_CONNECTION_NB peers (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`). Fewer would refuse a peer pico takes."
 
 [[limit]]
 id = "MAX_TIMERS"

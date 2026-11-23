@@ -122,10 +122,12 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
+use wz_session_core::bounded::Heap;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::wire_id::{next_u32_id, EntityId, ExprId};
+use wz_session_core::session_tables::{RowCallbacks, SessionTables};
+use wz_session_core::wire_id::{EntityId, ExprId};
 
 #[cfg(feature = "multicast-transport")]
 mod multicast;
@@ -1329,25 +1331,17 @@ struct QblEntry {
     sink: QueryableSink,
 }
 
-/// A C-declared keyexpr alias — the third SSOT, replayed onto every face
-/// exactly as [`SubEntry`] and [`QblEntry`] are.
-///
-/// The mapping id is allocated ONCE per C declaration and reused on every
-/// face, which is pico's model rather than a shortcut: `_z_get_resource_id`
-/// is a session-global counter and the same id is announced to every peer.
-/// It is safe because a keyexpr mapping table is DIRECTIONAL — each peer
-/// holds our ids in its own inbound table, so two peers cannot collide, and
-/// a peer's own outbound ids live in a different table entirely.
-struct KexprEntry {
-    id: ExprId,
-    keyexpr: String,
-    /// How many holders the declaration has: `1` for one made through
-    /// [`SharedSession::declare_keyexpr`], and one more for each
-    /// [`SharedSession::acquire_keyexpr`] that found it. The key is retracted
-    /// when [`SharedSession::release_keyexpr`] takes the count to zero, which is
-    /// zenoh-pico's resource table (`_refcount` in
-    /// `vendor/zenoh-pico/src/session/resource.c`).
-    holders: usize,
+/// The callbacks the session's one table set holds for this engine (`docs/c-abi-l3-tables.md`,
+/// section 7): none yet. The table set holds the session's key expression declarations and numbers
+/// its entities; the entities themselves are still the lists of [`Inner`] and each face's own.
+enum CoreRows {}
+
+impl RowCallbacks for CoreRows {
+    type Subscriber = ();
+    type Queryable = ();
+    type LivelinessSubscriber = ();
+    type Matching = ();
+    type Reply = ();
 }
 
 /// A C-declared liveliness TOKEN — the fourth SSOT. Replayed onto every face
@@ -1977,7 +1971,7 @@ struct Inner {
     /// depend on.
     face_watchers: Vec<(u64, FaceEventSink)>,
     /// The allocator behind [`SharedSession::watch_faces`]. Its own space, for
-    /// the reason `next_entity_id` has one: an id shared with another plane
+    /// the reason the entity ids (`tables`) have one: an id shared with another plane
     /// makes two unrelated undeclares able to collide.
     next_face_watcher_id: u64,
     /// The locators the session's listeners actually got, without the loopback ones: where a
@@ -2040,7 +2034,20 @@ struct Inner {
     /// with them under it.
     transports: Arc<TransportsCell>,
     subs: Vec<SubEntry>,
-    /// R311y559 — the session-scope ENTITY id counter: the `eid` of every entity the session
+    /// The session's one table set (`docs/c-abi-l3-tables.md`): its key expression declarations,
+    /// replayed onto every face that comes up, and its entity ids.
+    ///
+    /// A key expression's mapping id is allocated ONCE per declaration and reused on every face,
+    /// which is pico's model rather than a shortcut: `_z_get_resource_id` is a session-global
+    /// counter and the same id is announced to every peer. It is safe because a keyexpr mapping
+    /// table is DIRECTIONAL — each peer holds our ids in its own inbound table, so two peers cannot
+    /// collide, and a peer's own outbound ids live in a different table entirely. A declaration is
+    /// held once by [`SharedSession::declare_keyexpr`] and once more by each
+    /// [`SharedSession::acquire_keyexpr`] that finds it, and retracted when
+    /// [`SharedSession::release_keyexpr`] lets go of the last hold, which is zenoh-pico's resource
+    /// table (`_refcount` in `vendor/zenoh-pico/src/session/resource.c`).
+    ///
+    /// The session-scope ENTITY ids come from the same set: the `eid` of every entity the session
     /// declares, the one the C ABIs' `z_*_id` accessors report.
     ///
     /// Open-debt item 913 — ONE counter for every kind, from 1, and the registry's own keys
@@ -2057,9 +2064,8 @@ struct Inner {
     /// first entity of a session).
     ///
     /// The ids are `u32`, upstream's `EntityId`, and the space refuses once spent rather than
-    /// wrap as both upstream counters do ([`Inner::take_entity_id`]); the counter is a `u64` only
-    /// so that it can stand one past `u32::MAX`.
-    next_entity_id: u64,
+    /// wrap as both upstream counters do ([`Inner::take_entity_id`]).
+    tables: SessionTables<CoreRows, Heap>,
     qbls: Vec<QblEntry>,
     tokens: Vec<TokenEntry>,
     live_subs: Vec<LiveSubEntry>,
@@ -2083,22 +2089,14 @@ struct Inner {
     groups: Vec<GroupEntry>,
     #[cfg(feature = "group")]
     next_group_id: GroupId,
-    kexprs: Vec<KexprEntry>,
-    /// Next alias id to hand out. Starts at 0 and is PRE-incremented, so the
-    /// first id issued is 1: zero is reserved on the wire
-    /// (`SendDeclareError::ReservedMappingIdZero`) and is also this crate's
-    /// "not declared" discriminant in `z_loaned_keyexpr_t::_mapping`.
-    next_kexpr_id: ExprId,
 }
 
 impl Inner {
-    /// The next session-scope entity id ([`Inner::next_entity_id`]), or `None` once every `u32`
-    /// one has been handed out: a declaration is retracted by its id, and an id handed out twice
-    /// would retract a live one.
+    /// The next session-scope entity id ([`Inner::tables`]), or `None` once every `u32` one has
+    /// been handed out: a declaration is retracted by its id, and an id handed out twice would
+    /// retract a live one.
     fn take_entity_id(&mut self) -> Option<EntityId> {
-        let held = self.next_entity_id;
-        self.next_entity_id = next_u32_id(held)?;
-        u32::try_from(held).ok()
+        self.tables.take_entity_id()
     }
 
     /// Rebuild [`Self::face_set`] from `faces`. Call it right after `faces` changes, with the
@@ -2833,8 +2831,7 @@ impl SharedSession {
                 peer_zid: None,
                 dialled: false,
             }),
-            // Both upstreams number a session's first entity 1.
-            next_entity_id: 1,
+            // Both upstreams number a session's first entity 1, as the table set does.
             ..Default::default()
         };
         Ok(Self {
@@ -3443,13 +3440,13 @@ impl SharedSession {
         // our DeclareKeyExpr, so any declaration or Push that could reference
         // the alias must not reach it earlier. Cheap to guarantee here, and
         // impossible to notice if it were wrong until a race showed up.
-        for entry in &guard.kexprs {
+        for (_, entry) in guard.tables.keyexprs().iter() {
             // Best-effort per face, exactly as the sub/qbl replays below: a
             // face mid-teardown drops its declare and the SSOT entry survives
             // for the next face.
             let _ = session
                 .actions()
-                .send_declare_keyexpr(entry.id, &entry.keyexpr);
+                .send_declare_keyexpr(entry.id(), entry.key());
         }
         let mut subs = BTreeMap::new();
         for entry in &guard.subs {
@@ -4901,41 +4898,67 @@ impl SharedSession {
     /// no face yet, nothing goes on the wire and the entry is still recorded,
     /// so every FUTURE face replays it in [`Self::face_up`].
     ///
-    /// Returns `None` when the id space is exhausted. The space is the WIRE's
-    /// `ExprId`, as zenoh's `DeclareKeyExpr.id` and pico's `uint16_t _id` are,
-    /// so the counter is one and exhausts where it does. Refusing is the honest
-    /// answer — wrapping would silently re-issue a live id and re-point a
-    /// peer's existing alias at a different keyexpr.
+    /// Each call is a declaration of its own, under an id of its own, even for a
+    /// key the session declared already. Returns `None` when the id space is
+    /// exhausted. The space is the WIRE's `ExprId`, as zenoh's
+    /// `DeclareKeyExpr.id` and pico's `uint16_t _id` are: an id is handed out
+    /// again only once its declaration is retracted, never while a peer may still
+    /// hold it as an alias of another key. A retracted id is free on the wire: a
+    /// peer drops its alias when it reads the `UndeclareKeyExpr`
+    /// (`vendor/zenoh-pico/src/session/rx.c` @
+    /// `_z_unregister_resource(zn, decl->_decl._body._undecl_kexpr._id, peer);`), and pico's own
+    /// counter wraps its `u16` without asking which ids are live
+    /// (`vendor/zenoh-pico/src/session/resource.c` @
+    /// `uint16_t _z_get_resource_id(_z_session_t *zn) { return zn->_resource_id++; }`), where
+    /// this skips every id still declared.
     pub fn declare_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
         let mut guard = self.lock();
-        let id = guard.next_kexpr_id.checked_add(1)?;
-        // An id of the shared dictionary names its key in this node's space too, so no key
-        // expression is declared under one: the next id past them, or none when none is left.
-        #[cfg(feature = "shared-key-ids")]
-        let id = match self.key_ids.ids() {
-            Some(ids) => ids.next_free_id(id)?,
-            None => id,
-        };
-        guard.next_kexpr_id = id;
+        let declared = guard
+            .tables
+            .declare_keyexpr_where(&keyexpr, true, |id| self.mapping_id_free(id))
+            .ok()?;
+        self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, true);
+        Some(declared.id)
+    }
 
+    /// Whether a key expression id of this session's may be handed out: an id of the shared
+    /// dictionary names its key in this node's space too, so no declaration takes one.
+    #[cfg(feature = "shared-key-ids")]
+    fn mapping_id_free(&self, id: ExprId) -> bool {
+        !matches!(self.key_ids.ids(), Some(ids) if ids.reserves(id))
+    }
+
+    /// Without the shared dictionary every id is the session's to hand out.
+    #[cfg(not(feature = "shared-key-ids"))]
+    fn mapping_id_free(&self, _id: ExprId) -> bool {
+        true
+    }
+
+    /// Tell every live face, the local plane and every group the declaration of `keyexpr` under
+    /// `id`: a declaration when it is `new`, the same one again when it is held once more.
+    fn announce_keyexpr_locked(&self, guard: &Inner, id: ExprId, keyexpr: &str, new: bool) {
         for face in guard.faces.values() {
-            let _ = face.session.actions().send_declare_keyexpr(id, &keyexpr);
+            let actions = face.session.actions();
+            let _ = if new {
+                actions.send_declare_keyexpr(id, keyexpr)
+            } else {
+                actions.resend_declare_keyexpr(id, keyexpr)
+            };
         }
         // R311y557 — the LOCAL PLANE takes the same alias. Its declare goes to
         // the inert driver, so nothing extra reaches any peer; what it populates
         // is the plane's own OUTBOUND mapping table, which is what
         // [`Self::publish_aliased_all`]'s local leg resolves against. Without
         // it an aliased put would deliver on the wire and to nobody in-process.
-        let _ = self.local.actions().send_declare_keyexpr(id, &keyexpr);
+        let local = self.local.actions();
+        let _ = if new {
+            local.send_declare_keyexpr(id, keyexpr)
+        } else {
+            local.resend_declare_keyexpr(id, keyexpr)
+        };
         // Open-debt item 913 — and every group told the session's keyexprs.
         #[cfg(feature = "multicast-transport")]
-        Self::announce_keyexpr_on_groups(&guard, id, &keyexpr);
-        guard.kexprs.push(KexprEntry {
-            id,
-            keyexpr,
-            holders: 1,
-        });
-        Some(id)
+        Self::announce_keyexpr_on_groups(guard, id, keyexpr);
     }
 
     /// Declare a keyexpr the way zenoh-pico's resource table does: a key the
@@ -4952,26 +4975,18 @@ impl SharedSession {
     /// token, and the components an advanced publisher or subscriber is made of —
     /// goes through it, so the ids and the messages depend on it.
     ///
-    /// [`Self::declare_keyexpr`] is unchanged and is what the other ABI uses:
-    /// each call there is its own declaration with its own id.
+    /// [`Self::declare_keyexpr`] is what the other ABI uses: each call there is
+    /// its own declaration with its own id.
     ///
     /// `None` when the id space is exhausted, as for [`Self::declare_keyexpr`].
     pub fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
-        {
-            let mut guard = self.lock();
-            if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
-                entry.holders += 1;
-                let id = entry.id;
-                for face in guard.faces.values() {
-                    let _ = face.session.actions().resend_declare_keyexpr(id, &keyexpr);
-                }
-                let _ = self.local.actions().resend_declare_keyexpr(id, &keyexpr);
-                #[cfg(feature = "multicast-transport")]
-                Self::announce_keyexpr_on_groups(&guard, id, &keyexpr);
-                return Some(id);
-            }
-        }
-        self.declare_keyexpr(keyexpr)
+        let mut guard = self.lock();
+        let declared = guard
+            .tables
+            .declare_keyexpr_where(&keyexpr, false, |id| self.mapping_id_free(id))
+            .ok()?;
+        self.announce_keyexpr_locked(&guard, declared.id, &keyexpr, declared.new);
+        Some(declared.id)
     }
 
     /// Let go of one holder of a keyexpr [`Self::acquire_keyexpr`] (or
@@ -4986,23 +5001,27 @@ impl SharedSession {
     /// zero, take a holder, and then have its key retracted from under it.
     pub fn release_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
-        let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) else {
+        let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) else {
             return;
         };
-        entry.holders = entry.holders.saturating_sub(1);
-        if entry.holders > 0 {
-            return;
+        if guard.tables.undeclare_keyexpr(handle).is_some() {
+            self.retract_keyexpr_locked(&mut guard, mapping_id);
         }
-        self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
 
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
-    /// in declaration order — the SSOT every new face is replayed from.
+    /// — the SSOT every new face is replayed from. In the order of their rows: a
+    /// row a retracted declaration left is taken by the next one, so this is the
+    /// order they were declared in only while none was retracted. A replay does not
+    /// depend on it: each declaration names its key whole, so the declarations of
+    /// key expressions may reach a peer in any order, as long as all of them come
+    /// before the entities that name them ([`Self::face_up`]).
     pub fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.lock()
-            .kexprs
+            .tables
+            .keyexprs()
             .iter()
-            .map(|entry| (entry.id, entry.keyexpr.clone()))
+            .map(|(_, entry)| (entry.id(), entry.key().to_owned()))
             .collect()
     }
 
@@ -5010,7 +5029,7 @@ impl SharedSession {
     /// replays it, and emit the wire undeclare on every live face.
     ///
     /// No cross-lock drop dance is needed here, unlike the subscriber and
-    /// queryable twins: a `KexprEntry` owns a `String` and no `Arc<CClosure>`,
+    /// queryable twins: a key expression's row owns its key and no `Arc<CClosure>`,
     /// so releasing it cannot run C code.
     pub fn undeclare_keyexpr(&self, mapping_id: ExprId) {
         let mut guard = self.lock();
@@ -5021,8 +5040,8 @@ impl SharedSession {
     /// — [`Self::undeclare_keyexpr`] and [`Self::release_keyexpr`], which must
     /// not let it go between deciding and doing.
     fn retract_keyexpr_locked(&self, guard: &mut Inner, mapping_id: ExprId) {
-        if let Some(pos) = guard.kexprs.iter().position(|e| e.id == mapping_id) {
-            guard.kexprs.remove(pos);
+        if let Some(handle) = guard.tables.keyexpr_by_id(mapping_id) {
+            let _ = guard.tables.retract_keyexpr(handle);
         }
         for face in guard.faces.values() {
             face.session.actions().send_undeclare_kexpr(mapping_id);
@@ -7414,7 +7433,7 @@ mod matching_aggregate_tests {
             declare(&shared).is_ok(),
             "CONTROL: an open session with ids left declares"
         );
-        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        shared.lock().tables.entity_ids_from(None);
         assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
         shared
             .closed_latch()
@@ -7445,7 +7464,7 @@ mod matching_aggregate_tests {
             declare(&shared).is_ok(),
             "CONTROL: an open session with ids left declares"
         );
-        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        shared.lock().tables.entity_ids_from(None);
         assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
         shared
             .closed_latch()
@@ -7507,7 +7526,7 @@ mod matching_aggregate_tests {
     fn a_session_hands_out_its_last_entity_id_and_then_refuses() {
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
-        shared.lock().next_entity_id = u64::from(u32::MAX);
+        shared.lock().tables.entity_ids_from(Some(u32::MAX));
         let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
         let last = shared
@@ -7556,8 +7575,8 @@ mod matching_aggregate_tests {
         assert!(guard.qbls.is_empty() && guard.tokens.is_empty());
         assert!(guard.live_subs.is_empty() && guard.filters.is_empty());
         assert_eq!(
-            guard.next_entity_id,
-            u64::from(u32::MAX) + 1,
+            guard.tables.next_entity_id(),
+            None,
             "a spent space stays spent"
         );
     }

@@ -149,8 +149,7 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -357,8 +356,7 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -727,8 +725,7 @@ async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
         let got = got.clone();
         let mut observer = ApplicationLayerObserver::new();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 got.lock().unwrap().push(sample.payload().len());
             })
             .expect("no quota is stated on this table");

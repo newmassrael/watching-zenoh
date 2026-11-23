@@ -111,12 +111,11 @@ enum Slots {
     /// A `static` table the image declares.
     #[cfg(feature = "session-slot")]
     Table(&'static Entries<[TimerSlot]>),
-    /// A table reserved when the runtime was made.
+    /// The runtime's own table: reserved when the runtime was made, or grown by an entry when
+    /// every entry is taken (`TimerQueue::grow`). One form for both, so every look at the entries
+    /// is one body and not one for each.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    Reserved(Mutex<RefCell<Box<[TimerSlot]>>>),
-    /// A table that grows by an entry when every entry is taken.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    Growing(Mutex<RefCell<Vec<TimerSlot>>>),
+    Owned(Mutex<RefCell<Vec<TimerSlot>>>),
 }
 
 /// Deadline-keyed wake registry over a table of entries. Held inside the runtime
@@ -132,9 +131,9 @@ pub struct TimerQueue {
     grow: Option<GrowFn>,
 }
 
-/// Place a deadline in a new entry of the table, or hand it back.
+/// Place a deadline in a new entry of the table.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-type GrowFn = fn(&Slots, CriticalSection<'_>, TimerEntry) -> Option<TimerEntry>;
+type GrowFn = fn(&mut Vec<TimerSlot>, TimerEntry);
 
 impl TimerQueue {
     fn over(slots: Slots) -> Self {
@@ -150,7 +149,7 @@ impl TimerQueue {
     /// A table that grows by an entry when every entry is taken.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn growing() -> Self {
-        let mut queue = Self::over(Slots::Growing(Mutex::new(RefCell::new(Vec::new()))));
+        let mut queue = Self::over(Slots::Owned(Mutex::new(RefCell::new(Vec::new()))));
         queue.grow = Some(grow_by_one);
         queue
     }
@@ -159,9 +158,9 @@ impl TimerQueue {
     /// allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(timers: usize) -> Self {
-        Self::over(Slots::Reserved(Mutex::new(RefCell::new(empty_slots(
-            timers,
-        )))))
+        Self::over(Slots::Owned(Mutex::new(RefCell::new(
+            empty_slots(timers).into_vec(),
+        ))))
     }
 
     /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
@@ -171,9 +170,7 @@ impl TimerQueue {
             #[cfg(feature = "session-slot")]
             Slots::Table(entries) => f(&mut entries.borrow(cs).borrow_mut()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Slots::Reserved(slots) => f(&mut slots.borrow(cs).borrow_mut()),
-            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Slots::Growing(grown) => f(&mut grown.borrow(cs).borrow_mut()),
+            Slots::Owned(owned) => f(&mut owned.borrow(cs).borrow_mut()),
         }
     }
 
@@ -207,13 +204,10 @@ impl TimerQueue {
                 return true;
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            let entry = match self.grow {
-                Some(grow) => match grow(&self.slots, cs, entry) {
-                    Some(back) => back,
-                    None => return true,
-                },
-                None => entry,
-            };
+            if let (Some(grow), Slots::Owned(owned)) = (self.grow, &self.slots) {
+                grow(&mut owned.borrow(cs).borrow_mut(), entry);
+                return true;
+            }
             // The entry was not placed: its waker goes with it.
             drop(entry);
             let refused = self.refused.borrow(cs);
@@ -289,16 +283,10 @@ impl TimerQueue {
     }
 }
 
-/// Place `entry` in a new entry of a table that grows; hand it back from a reserved one.
+/// Place `entry` in a new entry of a table that grows.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-fn grow_by_one(slots: &Slots, cs: CriticalSection<'_>, entry: TimerEntry) -> Option<TimerEntry> {
-    match slots {
-        Slots::Growing(grown) => {
-            grown.borrow(cs).borrow_mut().push(TimerSlot(Some(entry)));
-            None
-        }
-        Slots::Reserved(_) => Some(entry),
-    }
+fn grow_by_one(slots: &mut Vec<TimerSlot>, entry: TimerEntry) {
+    slots.push(TimerSlot(Some(entry)));
 }
 
 /// `count` empty entries in one allocation of their size; none for a count past the address

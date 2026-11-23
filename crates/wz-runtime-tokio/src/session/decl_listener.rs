@@ -194,7 +194,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclListener<R, T> {
         #[cfg(feature = "declarations-synced-event")]
         if let Some(synced_id) = self.synced_id {
             R::with_mutex_mut(self.session.observer(), |obs| {
-                obs.declarations_final.uninstall(synced_id)
+                obs.with_app(|app| app.declarations_final.uninstall(synced_id))
             });
         }
         // Each arm rides its variant's gate (see [`DeclListenerScope`]).
@@ -202,33 +202,39 @@ impl<R: SessionRuntime, T: TimeSource> DeclListener<R, T> {
             #[cfg(feature = "declare-subscriber")]
             DeclListenerScope::RemoteSubscribers => {
                 R::with_mutex_mut(self.session.observer(), |obs| {
-                    let d = obs
-                        .remote_subscribers
-                        .remove_subscriber_declared_sink(self.decl_id);
-                    let u = obs
-                        .remote_subscribers
-                        .remove_subscriber_undeclared_sink(self.undecl_id);
-                    d && u
+                    obs.with_app(|app| {
+                        let d = app
+                            .remote_subscribers
+                            .remove_subscriber_declared_sink(self.decl_id);
+                        let u = app
+                            .remote_subscribers
+                            .remove_subscriber_undeclared_sink(self.undecl_id);
+                        d && u
+                    })
                 })
             }
             #[cfg(feature = "declare-queryable")]
             DeclListenerScope::RemoteQueryables => {
                 R::with_mutex_mut(self.session.observer(), |obs| {
-                    let d = obs
-                        .remote_queryables
-                        .remove_queryable_declared_sink(self.decl_id);
-                    let u = obs
-                        .remote_queryables
-                        .remove_queryable_undeclared_sink(self.undecl_id);
-                    d && u
+                    obs.with_app(|app| {
+                        let d = app
+                            .remote_queryables
+                            .remove_queryable_declared_sink(self.decl_id);
+                        let u = app
+                            .remote_queryables
+                            .remove_queryable_undeclared_sink(self.undecl_id);
+                        d && u
+                    })
                 })
             }
             #[cfg(feature = "liveliness-token")]
             DeclListenerScope::LivelinessTokens => {
                 R::with_mutex_mut(self.session.observer(), |obs| {
-                    let d = obs.liveliness.remove_token_declared_sink(self.decl_id);
-                    let u = obs.liveliness.remove_token_undeclared_sink(self.undecl_id);
-                    d && u
+                    obs.with_app(|app| {
+                        let d = app.liveliness.remove_token_declared_sink(self.decl_id);
+                        let u = app.liveliness.remove_token_undeclared_sink(self.undecl_id);
+                        d && u
+                    })
                 })
             }
         }
@@ -370,10 +376,12 @@ where
             let queue = self.fires.clone();
             let cell = cell.clone();
             let peer = self.peer_reading();
-            Some(obs.declarations_final.install(move || {
-                let cell = cell.clone();
-                let event = DeclEvent::Synced { peer: peer() };
-                cell.stage(&queue, move |cb| cb(event));
+            Some(obs.with_app(|app| {
+                app.declarations_final.install(move || {
+                    let cell = cell.clone();
+                    let event = DeclEvent::Synced { peer: peer() };
+                    cell.stage(&queue, move |cb| cb(event));
+                })
             }))
         }
         #[cfg(not(feature = "declarations-synced-event"))]
@@ -464,21 +472,23 @@ where
             // Both observers or neither: a list that refuses the second gives back the
             // first, and what is held is staged only for a listener that was installed.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
-                let d = obs
-                    .remote_subscribers
-                    .on_subscriber_declared_sink(decl_sink)?;
-                let u = match obs
-                    .remote_subscribers
-                    .on_subscriber_undeclared_sink(undecl_sink)
-                {
-                    Ok(u) => u,
-                    Err(refusal) => {
-                        obs.remote_subscribers.remove_subscriber_declared_sink(d);
-                        return Err(refusal);
+                let (d, u) = obs.with_app(|app| {
+                    let d = app
+                        .remote_subscribers
+                        .on_subscriber_declared_sink(decl_sink)?;
+                    match app
+                        .remote_subscribers
+                        .on_subscriber_undeclared_sink(undecl_sink)
+                    {
+                        Ok(u) => Ok((d, u)),
+                        Err(refusal) => {
+                            app.remote_subscribers.remove_subscriber_declared_sink(d);
+                            Err(refusal)
+                        }
                     }
-                };
+                })?;
                 if from_held {
-                    self.stage_held(obs.remote_subscribers.iter_declared(), &cell);
+                    self.stage_held(obs.face_ref().remote_subscribers.iter_declared(), &cell);
                 }
                 Ok((d, u, self.tell_when_synced(obs, &cell)))
             })
@@ -522,21 +532,23 @@ where
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
             // Both observers or neither, as the subscriber listener's.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
-                let d = obs
-                    .remote_queryables
-                    .on_queryable_declared_sink(decl_sink)?;
-                let u = match obs
-                    .remote_queryables
-                    .on_queryable_undeclared_sink(undecl_sink)
-                {
-                    Ok(u) => u,
-                    Err(refusal) => {
-                        obs.remote_queryables.remove_queryable_declared_sink(d);
-                        return Err(refusal);
+                let (d, u) = obs.with_app(|app| {
+                    let d = app
+                        .remote_queryables
+                        .on_queryable_declared_sink(decl_sink)?;
+                    match app
+                        .remote_queryables
+                        .on_queryable_undeclared_sink(undecl_sink)
+                    {
+                        Ok(u) => Ok((d, u)),
+                        Err(refusal) => {
+                            app.remote_queryables.remove_queryable_declared_sink(d);
+                            Err(refusal)
+                        }
                     }
-                };
+                })?;
                 if from_held {
-                    self.stage_held(obs.remote_queryables.iter_declared(), &cell);
+                    self.stage_held(obs.face_ref().remote_queryables.iter_declared(), &cell);
                 }
                 Ok((d, u, self.tell_when_synced(obs, &cell)))
             })
@@ -573,14 +585,16 @@ where
             let (cell, decl_sink, undecl_sink) = self.deferred_decl_sinks(callback);
             // Both observers or neither, as the subscriber listener's.
             let (decl_id, undecl_id, synced_id) = R::with_mutex_mut(&self.observer, |obs| {
-                let d = obs.liveliness.on_token_declared_sink(decl_sink)?;
-                let u = match obs.liveliness.on_token_undeclared_sink(undecl_sink) {
-                    Ok(u) => u,
-                    Err(refusal) => {
-                        obs.liveliness.remove_token_declared_sink(d);
-                        return Err(refusal);
+                let (d, u) = obs.with_app(|app| {
+                    let d = app.liveliness.on_token_declared_sink(decl_sink)?;
+                    match app.liveliness.on_token_undeclared_sink(undecl_sink) {
+                        Ok(u) => Ok((d, u)),
+                        Err(refusal) => {
+                            app.liveliness.remove_token_declared_sink(d);
+                            Err(refusal)
+                        }
                     }
-                };
+                })?;
                 Ok((d, u, self.tell_when_synced(obs, &cell)))
             })
             .map_err(DeclListenerError::Refused)?;

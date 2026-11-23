@@ -2297,8 +2297,13 @@ mod tests {
                 .observer()
                 .lock()
                 .unwrap()
-                .liveliness_subscribers
-                .dispatch_declare(&make_decl_token(id, ke), &hashbrown::HashMap::new());
+                .with_parts(|app_half, face_half| {
+                    app_half.liveliness_subscribers.dispatch_declare(
+                        &mut *face_half.tokens,
+                        &make_decl_token(id, ke),
+                        &hashbrown::HashMap::new(),
+                    )
+                });
         }
         session.drain_deferred_fires();
 
@@ -3292,8 +3297,13 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .dispatch_declare(&make_decl_token(93u64, &pub_adv_ke), &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.liveliness_subscribers.dispatch_declare(
+                    &mut *face_half.tokens,
+                    &make_decl_token(93u64, &pub_adv_ke),
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
 
         assert_eq!(
@@ -3431,6 +3441,7 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
+            .face()
             .replies
             .sweep_timed_out(now_past_deadline);
         session.drain_deferred_fires();
@@ -3787,8 +3798,13 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .dispatch_declare(&make_decl_token(token_id, &pub_adv_ke), &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.liveliness_subscribers.dispatch_declare(
+                    &mut *face_half.tokens,
+                    &make_decl_token(token_id, &pub_adv_ke),
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
 
         assert_eq!(
@@ -3804,8 +3820,13 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .dispatch_declare(&make_undecl_token(token_id), &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.liveliness_subscribers.dispatch_declare(
+                    &mut *face_half.tokens,
+                    &make_undecl_token(token_id),
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
         assert_eq!(
             delivered.lock().unwrap().len(),
@@ -3915,8 +3936,13 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .dispatch_declare(&make_decl_token(91u64, &pub_adv_ke), &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.liveliness_subscribers.dispatch_declare(
+                    &mut *face_half.tokens,
+                    &make_decl_token(91u64, &pub_adv_ke),
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
 
         assert_eq!(
@@ -3936,8 +3962,13 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
-            .liveliness_subscribers
-            .dispatch_declare(&make_decl_token(92u64, &pub_adv_ke), &HashMap::new());
+            .with_parts(|app_half, face_half| {
+                app_half.liveliness_subscribers.dispatch_declare(
+                    &mut *face_half.tokens,
+                    &make_decl_token(92u64, &pub_adv_ke),
+                    &HashMap::new(),
+                )
+            });
         session.drain_deferred_fires();
         assert_eq!(
             *delivered.lock().unwrap(),
@@ -4003,7 +4034,7 @@ mod tests {
         let (delivered, session, sub, rid) = history_pending_fixture();
 
         assert_eq!(
-            session.observer().lock().unwrap().replies.len(),
+            session.observer().lock().unwrap().face_ref().replies.len(),
             1,
             "the startup history GET is in flight before the drop"
         );
@@ -4011,7 +4042,7 @@ mod tests {
         drop(sub);
 
         assert_eq!(
-            session.observer().lock().unwrap().replies.len(),
+            session.observer().lock().unwrap().face_ref().replies.len(),
             0,
             "dropping the subscriber unregistered its in-flight history GET"
         );
@@ -4097,7 +4128,7 @@ mod tests {
              an early-finish marker behind"
         );
         assert_eq!(
-            session.observer().lock().unwrap().replies.len(),
+            session.observer().lock().unwrap().face_ref().replies.len(),
             0,
             "and the session agrees: no pending query outlived the loopback answer"
         );
@@ -4171,6 +4202,7 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
+            .face()
             .replies
             .deliver_local_reply(&inbound);
         session.drain_deferred_fires();
@@ -4184,6 +4216,7 @@ mod tests {
             .observer()
             .lock()
             .unwrap()
+            .face()
             .replies
             .deliver_local_final(rid);
         session.drain_deferred_fires();

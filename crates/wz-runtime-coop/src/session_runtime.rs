@@ -94,8 +94,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     // call the session makes through the link a direct one.
     type Driver = D;
 
+    // The sink is a counted handle on the cell the link's driver lives in, lent from the session's
+    // arena or, for a link no table lends one, on the heap (`crate::link_cells`).
     #[cfg(not(feature = "session-slot"))]
-    type LinkSink = Rc<D>;
+    type LinkSink = crate::link_cells::CellRc<D>;
 
     // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
     // driver the session's own slot holds (`wz_session_core::session_slot`), not
@@ -167,7 +169,7 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
     fn link_driver(sink: &Self::LinkSink) -> &D {
         #[cfg(not(feature = "session-slot"))]
         {
-            // The `Rc<D>` derefs to the driver the action methods send through: `dyn
+            // The handle derefs to the driver the action methods send through: `dyn
             // BoxedLinkDriver` for the profile that picks its link at run time, the driver's own
             // type otherwise. No auto-trait coercion is needed (the MCU sink carries none),
             // unlike the AP `&**sink` which also drops `+ Send + Sync`.
@@ -312,7 +314,7 @@ pub fn install_own_mapping_space<C, T, S>(
 /// that ends when this function returns.
 #[cfg(not(feature = "session-slot"))]
 pub fn new_session_actions<C, E>(
-    driver: Rc<dyn BoxedLinkDriver>,
+    driver: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
     entropy: E,
@@ -460,7 +462,7 @@ mod cookie_nonce_draw_tests {
     ) -> Rc<SessionLinkActions<CoopRuntime<StoppedClock>, CoopTime<StoppedClock>>> {
         let runtime = CoopRuntime::new(StoppedClock);
         let clock = CoopTime::new(&runtime);
-        let driver: Rc<dyn BoxedLinkDriver> = Rc::new(NullDriver);
+        let driver = crate::link_cells::heap_sink(NullDriver);
         new_session_actions(driver, params(), clock, entropy)
     }
 

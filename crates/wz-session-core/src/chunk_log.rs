@@ -89,12 +89,16 @@ impl<T> ChunkLog<T> {
     /// that grew is whole chunks and not the items it holds, and the list of
     /// chunks.
     pub fn allocated_bytes(&self) -> usize {
-        self.chunks.capacity() * core::mem::size_of::<VecDeque<T>>()
-            + self
-                .chunks
-                .iter()
-                .map(|chunk| chunk.capacity() * core::mem::size_of::<T>())
-                .sum::<usize>()
+        // Allocated bytes are below `isize::MAX`, so no product or sum here saturates.
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.capacity().saturating_mul(core::mem::size_of::<T>()))
+            .fold(
+                self.chunks
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<VecDeque<T>>()),
+                usize::saturating_add,
+            )
     }
 
     /// No item is held.
@@ -126,7 +130,7 @@ impl<T> ChunkLog<T> {
                 self.chunks.push(chunk);
             }
         }
-        self.len += 1;
+        self.len = self.len.saturating_add(1);
     }
 
     /// Release the oldest item.
@@ -139,7 +143,7 @@ impl<T> ChunkLog<T> {
             straighten(first);
         }
         if item.is_some() {
-            self.len -= 1;
+            self.len = self.len.saturating_sub(1);
         }
         item
     }
@@ -154,8 +158,8 @@ impl<T> ChunkLog<T> {
         if index < first {
             return Some((0, index));
         }
-        let rest = index - first;
-        Some((1 + rest / CHUNK_ITEMS, rest % CHUNK_ITEMS))
+        let rest = index.saturating_sub(first);
+        Some(((rest / CHUNK_ITEMS).saturating_add(1), rest % CHUNK_ITEMS))
     }
 
     /// The item at `index`, oldest first.
@@ -189,9 +193,10 @@ impl<T> ChunkLog<T> {
     pub fn partition_point(&self, mut pred: impl FnMut(&T) -> bool) -> usize {
         let (mut low, mut high) = (0usize, self.len);
         while low < high {
-            let mid = low + (high - low) / 2;
+            // `low < high`, so the midpoint is below `high` and one past it at most `high`.
+            let mid = low.saturating_add(high.saturating_sub(low) / 2);
             match self.get(mid) {
-                Some(item) if pred(item) => low = mid + 1,
+                Some(item) if pred(item) => low = mid.saturating_add(1),
                 _ => high = mid,
             }
         }
@@ -201,20 +206,26 @@ impl<T> ChunkLog<T> {
     /// The items from position `from` on, oldest first: what one call added to
     /// the log, read without walking what was there before it.
     pub fn iter_from(&self, from: usize) -> Iter<'_, T> {
-        let chunks = self.chunks.len();
+        // A position the log holds is in a chunk it holds, so the reads below all find
+        // what they name.
         let Some((chunk, at)) = self.locate(from) else {
             return Iter {
                 front: <&[T]>::default().iter(),
-                middle: self.chunks[chunks..].iter(),
+                middle: <&[VecDeque<T>]>::default().iter(),
                 back: <&[T]>::default().iter(),
             };
         };
-        let last = chunks - 1;
-        let front = run(&self.chunks[chunk])[at..].iter();
+        let last = self.chunks.len().saturating_sub(1);
+        let front = self
+            .chunks
+            .get(chunk)
+            .and_then(|items| run(items).get(at..))
+            .unwrap_or_default()
+            .iter();
         if chunk == last {
             Iter {
                 front,
-                middle: self.chunks[chunks..].iter(),
+                middle: <&[VecDeque<T>]>::default().iter(),
                 back: <&[T]>::default().iter(),
             }
         } else {
@@ -222,8 +233,12 @@ impl<T> ChunkLog<T> {
             // full, which is what `Iter::left` counts on.
             Iter {
                 front,
-                middle: self.chunks[chunk + 1..last].iter(),
-                back: run(&self.chunks[last]).iter(),
+                middle: self
+                    .chunks
+                    .get(chunk.saturating_add(1)..last)
+                    .unwrap_or_default()
+                    .iter(),
+                back: self.chunks.get(last).map(run).unwrap_or_default().iter(),
             }
         }
     }
@@ -297,7 +312,12 @@ impl<T> Clone for Iter<'_, T> {
 impl<'a, T> Iter<'a, T> {
     /// Items not yet read.
     fn left(&self) -> usize {
-        self.front.len() + self.middle.len() * CHUNK_ITEMS + self.back.len()
+        // What a log holds is below `isize::MAX` items, so nothing here saturates.
+        self.middle
+            .len()
+            .saturating_mul(CHUNK_ITEMS)
+            .saturating_add(self.front.len())
+            .saturating_add(self.back.len())
     }
 
     /// The iterator, spent.
@@ -367,7 +387,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
             if n < here {
                 return self.front.nth(n);
             }
-            n -= here;
+            n = n.saturating_sub(here);
             // The run is passed whole: spent here, so no later step reads it
             // again.
             self.front = <&[T]>::default().iter();
@@ -398,7 +418,7 @@ impl<T> DoubleEndedIterator for Iter<'_, T> {
             if n < here {
                 return self.back.nth_back(n);
             }
-            n -= here;
+            n = n.saturating_sub(here);
             self.back = <&[T]>::default().iter();
             match self.middle.next_back() {
                 Some(chunk) => self.back = run(chunk).iter(),

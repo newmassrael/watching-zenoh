@@ -131,11 +131,18 @@ fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
 }
 
 /// The arena is the sum of its rows' spans, and lending every row from it brings its high-water
-/// mark to its size: the plan the open reserves by is exactly what the rows take.
+/// mark to its size: the plan the open reserves by is exactly what the rows take. The client
+/// dials an endpoint, whose text is a row as every other part is.
 #[test]
 fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .expect("the build's limits lay an arena out");
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("the build's limits lay an arena out");
     let reserved = plan.reserved_bytes().expect("within the address space");
     assert!(
         plan.rows()
@@ -1530,6 +1537,16 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
                 theirs.part
             );
             assert_eq!(theirs.count, 1, "{} is one area", theirs.part);
+            continue;
+        }
+        // Each session's endpoint texts are its own config's, one area of them: the client here
+        // names none, the peer the one endpoint it listens on.
+        if theirs.part == "endpoint texts" {
+            assert_eq!((theirs.count, ours.count), (1, 1), "the texts are one area");
+            assert!(
+                theirs.entry_bytes > ours.entry_bytes,
+                "the peer's endpoint takes a text's row and the client's none"
+            );
             continue;
         }
         assert_eq!(

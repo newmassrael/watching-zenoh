@@ -85,7 +85,7 @@ impl ExpiryRun {
             return false;
         }
         self.run = self.run.saturating_add(1);
-        !close_after.admits(usize::from(self.run) + 1)
+        !close_after.admits(usize::from(self.run).saturating_add(1))
     }
 }
 
@@ -243,7 +243,8 @@ impl PushDeadline {
         }
         self.step_us = self.step_us.saturating_mul(2);
         let add = self.step_us.min(self.extend_left_us);
-        self.extend_left_us -= add;
+        // `add` is at most what is left.
+        self.extend_left_us = self.extend_left_us.saturating_sub(add);
         self.left_us = self.left_us.saturating_add(add);
     }
 }

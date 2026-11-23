@@ -23,7 +23,7 @@ pub(crate) fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
     use sce_forge_runtime::codec::SceCursor;
     let mut cursor = SceCursor::new(bytes);
     let value = cursor.read_vle_u64().ok()?;
-    Some((value, bytes.len() - cursor.remaining()))
+    Some((value, bytes.len().saturating_sub(cursor.remaining())))
 }
 
 /// Append `v` to `out` as a VLE — the write twin of [`read_vle_u64`]. Delegates
@@ -33,9 +33,8 @@ pub(crate) fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
 #[cfg(feature = "alloc")]
 pub(crate) fn encode_vle_u64_into(out: &mut alloc::vec::Vec<u8>, v: u64) {
     use sce_forge_runtime::codec::{SceSink, VecSink};
-    VecSink::new(out)
-        .write_vle_u64(v)
-        .expect("VecSink is growable, so write_vle_u64 never overflows");
+    // A growable sink takes every VLE, so there is no refusal to hand on.
+    let _ = VecSink::new(out).write_vle_u64(v);
 }
 
 /// Write one zenoh `ZBuf` — a VLE length then that many bytes — to `out` (the

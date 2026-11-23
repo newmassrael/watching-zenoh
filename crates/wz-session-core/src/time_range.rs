@@ -276,13 +276,12 @@ pub fn parse_range<C: Clock>(s: &str) -> Result<TimeRange<TimeExpr<C::Instant>>,
         Some(']') => false,
         _ => return Err(RangeError::BadStart),
     };
-    let inclusive_end = match chars.last() {
+    let inclusive_end = match chars.next_back() {
         Some(']') => true,
         Some('[') => false,
         _ => return Err(RangeError::BadEnd),
     };
-    // Both delimiters are ASCII, so these are char boundaries.
-    let inner = &s[1..len - 1];
+    let inner = chars.as_str();
     if let Some((start, end)) = inner.split_once("..") {
         Ok(TimeRange {
             start: parse_edge::<C>(start, inclusive_start)?,
@@ -326,8 +325,10 @@ fn parse_edge<C: Clock>(
 
 /// Parse one time: `now(...)` or an RFC3339 UTC timestamp.
 pub fn parse_time<C: Clock>(s: &str) -> Result<TimeExpr<C::Instant>, TimeError<'_>> {
-    let parsed = if s.starts_with("now(") && s.ends_with(')') {
-        let inner = &s[4..s.len() - 1];
+    let parsed = if let Some(inner) = s
+        .strip_prefix("now(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
         if inner.is_empty() {
             Ok(TimeExpr::Now { offset_secs: 0.0 })
         } else if let Some(magnitude) = inner.strip_prefix('-') {
@@ -350,23 +351,22 @@ pub fn parse_time<C: Clock>(s: &str) -> Result<TimeExpr<C::Instant>, TimeError<'
 /// A duration literal in seconds: a bare float, or a float followed by one of `u` (microseconds),
 /// `ms`, `s`, `m`, `h`, `d`, `w`.
 pub fn parse_duration(s: &str) -> Result<f64, DurationError<'_>> {
-    let b = s.as_bytes();
-    let n = b.len();
-    if n == 0 {
+    let Some(&unit) = s.as_bytes().last() else {
         return Err(DurationError::Empty);
-    }
-    // Every unit is ASCII, so each slice below ends on a char boundary.
-    match b[n - 1] {
-        b'u' => s[..n - 1].parse::<f64>().map(|u| U_TO_SECS * u),
+    };
+    // The text before the unit; the unit is the text's last byte, so it is there to strip.
+    let number = |unit: &str| s.strip_suffix(unit).unwrap_or(s);
+    match unit {
+        b'u' => number("u").parse::<f64>().map(|u| U_TO_SECS * u),
         // A lone `s` has nothing before the unit: upstream asks for the byte before it and
         // panics; here the whole text is read as a float, which it is not.
-        b's' if n == 1 => s.parse::<f64>(),
-        b's' if b[n - 2] == b'm' => s[..n - 2].parse::<f64>().map(|ms| MS_TO_SECS * ms),
-        b's' => s[..n - 1].parse::<f64>(),
-        b'm' => s[..n - 1].parse::<f64>().map(|m| M_TO_SECS * m),
-        b'h' => s[..n - 1].parse::<f64>().map(|h| H_TO_SECS * h),
-        b'd' => s[..n - 1].parse::<f64>().map(|d| D_TO_SECS * d),
-        b'w' => s[..n - 1].parse::<f64>().map(|w| W_TO_SECS * w),
+        b's' if s.len() == 1 => s.parse::<f64>(),
+        b's' if s.ends_with("ms") => number("ms").parse::<f64>().map(|ms| MS_TO_SECS * ms),
+        b's' => number("s").parse::<f64>(),
+        b'm' => number("m").parse::<f64>().map(|m| M_TO_SECS * m),
+        b'h' => number("h").parse::<f64>().map(|h| H_TO_SECS * h),
+        b'd' => number("d").parse::<f64>().map(|d| D_TO_SECS * d),
+        b'w' => number("w").parse::<f64>().map(|w| W_TO_SECS * w),
         _ => s.parse::<f64>(),
     }
     .map_err(|error| DurationError::Float { text: s, error })
@@ -380,32 +380,29 @@ pub fn parse_duration(s: &str) -> Result<f64, DurationError<'_>> {
 /// `:60` reads as `:59`, the year is four digits from 1970 to 9999, and fractional digits past the
 /// ninth are read and carry no weight.
 pub fn parse_rfc3339_weak(s: &str) -> Result<Duration, Rfc3339Error> {
-    if s.len() < "2018-02-14T00:28:07".len() {
-        return Err(Rfc3339Error::InvalidFormat);
-    }
     let b = s.as_bytes();
-    if b[4] != b'-'
-        || b[7] != b'-'
-        || (b[10] != b'T' && b[10] != b' ')
-        || b[13] != b':'
-        || b[16] != b':'
+    // The date and the time to the second, `2018-02-14T00:28:07`.
+    let Some(head) = b.first_chunk::<19>() else {
+        return Err(Rfc3339Error::InvalidFormat);
+    };
+    if head[4] != b'-'
+        || head[7] != b'-'
+        || (head[10] != b'T' && head[10] != b' ')
+        || head[13] != b':'
+        || head[16] != b':'
     {
         return Err(Rfc3339Error::InvalidFormat);
     }
-    let two = |i: usize| -> Result<u64, Rfc3339Error> {
-        let hi = (b[i] as char).to_digit(10);
-        let lo = (b[i + 1] as char).to_digit(10);
-        match (hi, lo) {
-            (Some(hi), Some(lo)) => Ok(u64::from(hi * 10 + lo)),
-            _ => Err(Rfc3339Error::InvalidDigit),
-        }
-    };
-    let year = two(0)? * 100 + two(2)?;
-    let month = two(5)?;
-    let day = two(8)?;
-    let hour = two(11)?;
-    let minute = two(14)?;
-    let mut second = two(17)?;
+    // Every product and sum below is of numbers of a few digits, far from `u64::MAX`, so the
+    // saturating forms are the exact ones.
+    let year = two(head[0], head[1])?
+        .saturating_mul(100)
+        .saturating_add(two(head[2], head[3])?);
+    let month = two(head[5], head[6])?;
+    let day = two(head[8], head[9])?;
+    let hour = two(head[11], head[12])?;
+    let minute = two(head[14], head[15])?;
+    let mut second = two(head[17], head[18])?;
 
     if year < 1970 || hour > 23 || minute > 59 || second > 60 {
         return Err(Rfc3339Error::OutOfRange);
@@ -415,7 +412,7 @@ pub fn parse_rfc3339_weak(s: &str) -> Result<Duration, Rfc3339Error> {
     }
 
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let (mut ydays, mdays) = match month {
+    let (mut ydays, mdays): (u64, u64) = match month {
         1 => (0, 31),
         2 if leap => (31, 29),
         2 => (31, 28),
@@ -434,48 +431,72 @@ pub fn parse_rfc3339_weak(s: &str) -> Result<Duration, Rfc3339Error> {
     if day > mdays || day == 0 {
         return Err(Rfc3339Error::OutOfRange);
     }
-    ydays += day - 1;
+    ydays = ydays.saturating_add(day.saturating_sub(1));
     if leap && month > 2 {
-        ydays += 1;
+        ydays = ydays.saturating_add(1);
     }
 
-    let leap_years =
-        ((year - 1) - 1968) / 4 - ((year - 1) - 1900) / 100 + ((year - 1) - 1600) / 400;
-    let days = (year - 1970) * 365 + leap_years + ydays;
-    let time = second + minute * 60 + hour * 3600;
+    // `year` is at least 1970, so no difference below falls under zero.
+    let before = year.saturating_sub(1);
+    let leap_years = (before.saturating_sub(1968) / 4)
+        .saturating_sub(before.saturating_sub(1900) / 100)
+        .saturating_add(before.saturating_sub(1600) / 400);
+    let days = year
+        .saturating_sub(1970)
+        .saturating_mul(365)
+        .saturating_add(leap_years)
+        .saturating_add(ydays);
+    let time = second
+        .saturating_add(minute.saturating_mul(60))
+        .saturating_add(hour.saturating_mul(3600));
 
     let mut nanos = 0u32;
     let mut mult = 100_000_000u32;
-    if b.get(19) == Some(&b'.') {
-        for idx in 20..b.len() {
-            if b[idx] == b'Z' {
-                if idx == b.len() - 1 {
+    let tail = b.get(19..).unwrap_or_default();
+    if tail.first() == Some(&b'.') {
+        let mut rest = tail.get(1..).unwrap_or_default();
+        while let [c, after @ ..] = rest {
+            if *c == b'Z' {
+                if after.is_empty() {
                     break;
                 }
                 return Err(Rfc3339Error::InvalidDigit);
-            } else if b[idx] == b'+' {
+            } else if *c == b'+' {
                 // The start of `+00:00`, which must end the text.
-                if idx == b.len() - 6 {
+                if after.len() == 5 {
                     break;
                 }
                 return Err(Rfc3339Error::InvalidDigit);
             }
-            let digit = (b[idx] as char)
+            let digit = char::from(*c)
                 .to_digit(10)
                 .ok_or(Rfc3339Error::InvalidDigit)?;
-            nanos += mult * digit;
+            // `mult` falls a tenth a digit, so the sum stays below 1e9.
+            nanos = nanos.saturating_add(mult.saturating_mul(digit));
             mult /= 10;
+            rest = after;
         }
-    } else if b.len() != 19 && (b.len() > 25 || (b[19] != b'Z' && &b[19..] != b"+00:00")) {
+    } else if !tail.is_empty()
+        && (b.len() > 25 || (tail.first() != Some(&b'Z') && tail != b"+00:00"))
+    {
         return Err(Rfc3339Error::InvalidFormat);
     }
 
-    let total_seconds = time + days * 86_400;
+    let total_seconds = time.saturating_add(days.saturating_mul(86_400));
     if total_seconds > RFC3339_MAX_SECONDS {
         return Err(Rfc3339Error::OutOfRange);
     }
     // `nanos` is below 1e9: nine digits at most carry weight.
     Ok(Duration::new(total_seconds, nanos))
+}
+
+/// The two decimal digits `hi` and `lo` as a number.
+fn two(hi: u8, lo: u8) -> Result<u64, Rfc3339Error> {
+    match (char::from(hi).to_digit(10), char::from(lo).to_digit(10)) {
+        // Two digits make at most 99.
+        (Some(hi), Some(lo)) => Ok(u64::from(hi.saturating_mul(10).saturating_add(lo))),
+        _ => Err(Rfc3339Error::InvalidDigit),
+    }
 }
 
 #[cfg(test)]

@@ -98,7 +98,7 @@ impl<'s, R: SessionRuntime, T: TimeSource> TokenPlace<'s, R, T> {
         // (the CURRENT-replay state for peers that subscribe LATER; the
         // proactive declare covers peers subscribed at declare time).
         R::with_mutex_mut(&session.observer, |observer| {
-            observer.local_tokens.register(token_id, &keyexpr)
+            observer.with_app(|app| app.local_tokens.register(token_id, &keyexpr))
         })?;
         Ok(Self {
             session,
@@ -114,7 +114,7 @@ impl<R: SessionRuntime, T: TimeSource> Drop for TokenPlace<'_, R, T> {
     fn drop(&mut self) {
         if self.armed {
             R::with_mutex_mut(&self.session.observer, |observer| {
-                observer.local_tokens.unregister(self.token_id);
+                observer.with_app(|app| app.local_tokens.unregister(self.token_id));
             });
         }
     }
@@ -436,7 +436,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
         #[cfg(feature = "liveliness-token")]
         let sent = R::with_mutex_mut(&*session.declaration_order, |_owed| {
             R::with_mutex_mut(&*session.observer, |obs| {
-                obs.local_tokens.unregister(self.id);
+                obs.with_app(|app| app.local_tokens.unregister(self.id));
             });
             self.send_retraction(&session)
         });
@@ -992,9 +992,10 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             R::with_mutex_mut(&self.session.observer, |observer| {
-                observer
-                    .liveliness_subscribers
-                    .history_complete(self.interest_id)
+                observer.read_app(|app| {
+                    app.liveliness_subscribers
+                        .history_complete(self.interest_id)
+                })
             })
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
@@ -1062,7 +1063,7 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
         {
             self.cell.kill();
             R::with_mutex_mut(&self.session.observer, |observer| {
-                observer.liveliness_subscribers.unregister(self.interest_id);
+                observer.with_app(|app| app.liveliness_subscribers.unregister(self.interest_id));
             });
         }
         // R311mx (B5b-2b-4) — route the `Interest(Final)` emit through the
@@ -1176,7 +1177,7 @@ impl<R: SessionRuntime> GroupLivelinessSubscriber<R> {
         self.armed = false;
         self.cell.kill();
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.liveliness_subscribers.unregister(self.interest_id);
+            observer.with_app(|app| app.liveliness_subscribers.unregister(self.interest_id));
         });
     }
 }
@@ -1221,9 +1222,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let history = options.effective_history();
         let (cell, sink) = self.deferred_liveliness_sample_sink(callback);
         R::with_mutex_mut(&self.observer, |observer| {
-            observer
-                .liveliness_subscribers
-                .register(interest_id, &keyexpr, history, sink)
+            observer.with_parts(|app, face| {
+                app.liveliness_subscribers.register(
+                    &*face.tokens,
+                    interest_id,
+                    &keyexpr,
+                    history,
+                    sink,
+                )
+            })
         })?;
         Ok(GroupLivelinessSubscriber {
             observer: self.observer.clone(),

@@ -33,8 +33,8 @@ use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
 use crate::net::{
-    errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag, set_nonblocking,
-    PosixNetError, RawAddr,
+    call_at, errno, family_of, name_of, poll_writable, set_close_on_exec, set_flag,
+    set_nonblocking, PosixNetError,
 };
 
 /// The most parts one write gathers: a length and its batch, with room to spare.
@@ -79,15 +79,17 @@ impl PosixTcpSocket {
             peer: to,
         };
         set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
-        let peer = RawAddr::of(to);
-        // SAFETY: `peer` is a live socket address of the length passed.
-        let rc = unsafe { libc::connect(fd, peer.as_ptr(), peer.size()) };
-        if rc != 0 {
-            return Err(PosixNetError::Connect(errno()));
-        }
-        this.local = name_of(fd, libc::getsockname).map_err(PosixNetError::SockName)?;
-        this.peer = name_of(fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
+        call_at(fd, to, libc::connect).map_err(PosixNetError::Connect)?;
+        this.learn_ends()?;
         Ok(this)
+    }
+
+    /// Read the connection's two ends from the kernel: the one way each connection here, dialled
+    /// or accepted, learns them.
+    fn learn_ends(&mut self) -> Result<(), PosixNetError> {
+        self.local = name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)?;
+        self.peer = name_of(self.fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
+        Ok(())
     }
 }
 
@@ -105,14 +107,10 @@ impl PosixTcpSocket {
         };
         set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
         set_nonblocking(fd, true).map_err(PosixNetError::NonBlocking)?;
-        let peer = RawAddr::of(to);
-        // SAFETY: `peer` is a live socket address of the length passed.
-        if unsafe { libc::connect(fd, peer.as_ptr(), peer.size()) } != 0 {
-            match errno() {
-                // Under way, which `connected` reads; a signal does not stop it either.
-                libc::EINPROGRESS | libc::EINTR => {}
-                refused => return Err(PosixNetError::Connect(refused)),
-            }
+        match call_at(fd, to, libc::connect) {
+            // Under way, which `connected` reads; a signal does not stop it either.
+            Ok(()) | Err(libc::EINPROGRESS | libc::EINTR) => {}
+            Err(refused) => return Err(PosixNetError::Connect(refused)),
         }
         Ok(this)
     }
@@ -197,12 +195,7 @@ impl PosixTcpListener {
         // The listener never waits: a pass of the node's loop asks, and nothing queued is an answer.
         set_nonblocking(fd, true).map_err(PosixNetError::NonBlocking)?;
         set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
-        let raw = RawAddr::of(at);
-        // SAFETY: `raw` is a live socket address of the length passed.
-        let rc = unsafe { libc::bind(fd, raw.as_ptr(), raw.size()) };
-        if rc != 0 {
-            return Err(PosixNetError::Bind(errno()));
-        }
+        call_at(fd, at, libc::bind).map_err(PosixNetError::Bind)?;
         // SAFETY: plain system call with value arguments.
         if unsafe { libc::listen(fd, Self::BACKLOG) } != 0 {
             return Err(PosixNetError::Listen(errno()));
@@ -272,14 +265,9 @@ impl StreamListen for PosixTcpListener {
         {
             return Ok(None);
         }
-        let (Ok(local), Ok(peer)) = (
-            name_of(fd, libc::getsockname),
-            name_of(fd, libc::getpeername),
-        ) else {
+        if socket.learn_ends().is_err() {
             return Ok(None);
-        };
-        socket.local = local;
-        socket.peer = peer;
+        }
         Ok(Some(socket))
     }
 }
@@ -407,8 +395,7 @@ impl StreamSocket for PosixTcpSocket {
             refused => return Err(PosixNetError::Connect(refused)),
         }
         set_nonblocking(self.fd, false).map_err(PosixNetError::NonBlocking)?;
-        self.local = name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)?;
-        self.peer = name_of(self.fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
+        self.learn_ends()?;
         Ok(true)
     }
 
@@ -1055,10 +1042,11 @@ mod tests {
             let fd =
                 unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
             assert!(fd >= 0, "a TCP socket");
-            let raw = RawAddr::of(at(0));
-            // SAFETY: `raw` is a live socket address of the length passed.
-            let rc = unsafe { libc::bind(fd, raw.as_ptr(), raw.size()) };
-            assert_eq!(rc, 0, "bind without listen");
+            assert_eq!(
+                call_at(fd, at(0), libc::bind),
+                Ok(()),
+                "bind without listen"
+            );
             let port = name_of(fd, libc::getsockname)
                 .expect("the bound number")
                 .port();

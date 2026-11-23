@@ -16,14 +16,14 @@
 //! autoconfiguration or Kconfig through [`board_ip`](crate::net::board_ip), of the
 //! family the image's Kconfig chose.
 
-use alloc::rc::Rc;
 use core::net::{IpAddr, SocketAddr};
+use wz_runtime_coop::link_cells::CellRc;
 
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks};
 use wz_runtime_coop::udp_link::{bind_refused, dial_bind};
 
 use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
-use crate::stream::{ZephyrTcpDial, ZephyrTcpSocket};
+use crate::stream::ZephyrTcpDial;
 
 /// Zephyr's sockets as the session shell's links on the heap profile, `udp/` and `tcp/` alike:
 /// `wz_runtime_coop::ip_stack`'s `IpLinks` at [`ZephyrUdpSocket`] and [`ZephyrTcpDial`], made
@@ -33,10 +33,6 @@ use crate::stream::{ZephyrTcpDial, ZephyrTcpSocket};
 /// allocator on Zephyr (the pico C ABI over the cooperative engine) gives the session shell;
 /// [`ZephyrLinks`] is the datagram-only form the heap images that predate it were written against.
 pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;
-
-/// The driver [`ZephyrIpLinks`] opens: a datagram or a stream link, as the dial named.
-pub type ZephyrHeapDriver =
-    wz_runtime_coop::ip_stack::HeapIpDriver<ZephyrUdpSocket, ZephyrTcpSocket>;
 
 /// The links of a node whose network stack is Zephyr's own.
 pub struct ZephyrLinks {
@@ -86,7 +82,9 @@ impl ZephyrLinks {
 }
 
 impl SessionLinks for ZephyrLinks {
-    type Pump = Rc<ZephyrUdpDriver>;
+    type Pump = CellRc<ZephyrUdpDriver>;
+
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
     // Its links are the datagram socket's, which opens IPv6 only on an image whose stack has it.
     const IPV6: bool = <ZephyrUdpSocket as wz_runtime_coop::udp_link::DatagramSocket>::IPV6;
@@ -95,13 +93,13 @@ impl SessionLinks for ZephyrLinks {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = ZephyrUdpSocket::bind(SocketAddr::new(self.local, port))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = Rc::new(ZephyrUdpDriver::acceptor_with_buffers(
+        let driver = CellRc::boxed(ZephyrUdpDriver::acceptor_with_buffers(
             socket,
             self.rx_capacity,
             HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: driver,
         })
     }
@@ -115,14 +113,14 @@ impl SessionLinks for ZephyrLinks {
         // Port 0 has the stack choose a free one, one per initiator session.
         let socket = ZephyrUdpSocket::bind(dial_bind(self.local, to.at))
             .map_err(bind_refused::<ZephyrUdpSocket>)?;
-        let driver = Rc::new(ZephyrUdpDriver::initiator_with_buffers(
+        let driver = CellRc::boxed(ZephyrUdpDriver::initiator_with_buffers(
             socket,
             to.at,
             self.rx_capacity,
             HeapTx::new(self.tx_slots, self.tx_capacity),
         ));
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: driver,
         })
     }
@@ -134,12 +132,12 @@ mod tests {
 
     use wz_runtime_coop::session_drive::SessionLinks;
 
-    /// What the session shell holds of a stack: its links, and the driver each link pumps.
-    fn shell_links<L: SessionLinks<Pump = Rc<ZephyrHeapDriver>>>(_: &L) {}
+    /// What the session shell holds of a stack: its links, each pumped through its own table.
+    fn shell_links<L: SessionLinks<Pump = wz_runtime_coop::ip_stack::HeapLink>>(_: &L) {}
 
     /// Zephyr's two sockets meet every bound the heap profile's stack asks of a platform's, so the
     /// session shell takes them as it takes the host's: the stack is made without opening a
-    /// socket, and its driver is the datagram-or-stream one.
+    /// socket, and its links are the heap profile's.
     #[test]
     fn zephyrs_sockets_are_the_shells_links_on_the_heap_profile() {
         let links = ZephyrIpLinks::new(IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED), ZephyrTcpDial)

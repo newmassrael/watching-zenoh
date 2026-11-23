@@ -82,7 +82,7 @@ impl Quota {
                 Err(QuotaExceeded { limit: most })
             }
             _ => {
-                self.live += 1;
+                self.live = self.live.saturating_add(1);
                 Ok(())
             }
         }

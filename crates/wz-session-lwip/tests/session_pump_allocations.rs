@@ -345,8 +345,7 @@ fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_, '_>) + 'stati
     let counted = seen.clone();
     observer
         .borrow_mut()
-        .subscribers
-        .register_sink(
+        .register_subscriber(
             KEY,
             Locality::Any,
             BoxedSink::new(move |_sample| {
@@ -516,8 +515,9 @@ mod placing_on_the_heap {
         peer: Option<([u8; 4], u16)>,
         zid: u8,
     ) -> (Handle, LwipSessionLink<LinkHandle>) {
-        let driver = Rc::new(driver_over(socket, peer));
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver_over(socket, peer));
+        let sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
+            driver.clone().into_sink();
         let actions = if zid == 0xa1 {
             new_session_actions(sink, params(zid), CoopTime::new(runtime), Counting(zid))
         } else {

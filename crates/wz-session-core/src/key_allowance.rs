@@ -29,9 +29,10 @@
 //!
 //! # A bad table is a build error
 //!
-//! [`PeerAllowance::new`] is a `const fn` that checks the shape (the zids' order, the size of the bit
-//! array, the bits past the last key being zero), so a table the generator wrote wrongly stops the
-//! build that contains it. [`PeerAllowance::try_new`] answers with the reason, for a test.
+//! [`PeerAllowance::try_new`] is a `const fn` that checks the shape (the zids' order, the size of the
+//! bit array, the bits past the last key being zero) and answers with the reason. The generated table
+//! is built by it in a `const` of the image's own crate, which stops the build on a refusal, so a
+//! table the generator wrote wrongly is a build error there and this crate holds no panic for it.
 
 use crate::key_catalogue::KeyId;
 
@@ -123,40 +124,43 @@ impl<'a> PeerAllowance<'a> {
         if zids.len() > u16::MAX as usize {
             return Err(AllowanceError::TooLarge);
         }
-        let mut index = 1;
-        while index < zids.len() {
-            if !zid_less(&zids[index - 1], &zids[index]) {
-                return Err(AllowanceError::ZidOrder);
+        let mut rest = zids;
+        while let [before, after @ ..] = rest {
+            if let [next, ..] = after {
+                if !zid_less(before, next) {
+                    return Err(AllowanceError::ZidOrder);
+                }
             }
-            index += 1;
+            rest = after;
         }
         let row = keys.div_ceil(8);
-        if bits.len() != zids.len() * PEER_OPS * row {
-            return Err(AllowanceError::BitsLength);
+        let want = match zids.len().checked_mul(PEER_OPS) {
+            Some(rows) => rows.checked_mul(row),
+            None => None,
+        };
+        match want {
+            Some(want) if want == bits.len() => {}
+            _ => return Err(AllowanceError::BitsLength),
         }
         // The bits past the last key of each row are zero, so a row is the same bytes however it was
         // made and a count of its bits is a count of keys.
         let spare = keys % 8;
         if spare != 0 {
-            let mask = !((1u8 << spare) - 1);
-            let mut at = row;
-            while at <= bits.len() && at > 0 {
-                if bits[at - 1] & mask != 0 {
-                    return Err(AllowanceError::SpareBits);
+            // The bits at and above `spare` of a row's last byte.
+            let mask = u8::MAX.wrapping_shl(spare as u32);
+            let mut rest = bits;
+            // `row` is not zero here, and the length is a whole number of rows, checked above.
+            while rest.len() >= row && row > 0 {
+                let (head, tail) = rest.split_at(row);
+                if let [.., last] = head {
+                    if *last & mask != 0 {
+                        return Err(AllowanceError::SpareBits);
+                    }
                 }
-                at += row;
+                rest = tail;
             }
         }
         Ok(Self { zids, keys, bits })
-    }
-
-    /// The table over the generated arrays. A bad table panics, and in a `const` it stops the build,
-    /// which is where the generated one is built.
-    pub const fn new(zids: &'a [[u8; 16]], keys: usize, bits: &'a [u8]) -> Self {
-        match Self::try_new(zids, keys, bits) {
-            Ok(table) => table,
-            Err(error) => panic!("{}", error.describe()),
-        }
     }
 
     /// How many peers the image declares.
@@ -179,9 +183,17 @@ impl<'a> PeerAllowance<'a> {
             return false;
         }
         let row = self.keys.div_ceil(8);
-        let start = (class.index() * PEER_OPS + op.index()) * row;
-        match self.bits.get(start + key.index() / 8) {
-            Some(byte) => ((byte >> (key.index() % 8)) & 1) == 1,
+        // An offset past the address space is no bit of the table.
+        let at = class
+            .index()
+            .checked_mul(PEER_OPS)
+            .and_then(|rows| rows.checked_add(op.index()))
+            .and_then(|rows| rows.checked_mul(row))
+            .and_then(|start| start.checked_add(key.index() / 8));
+        match at.and_then(|at| self.bits.get(at)) {
+            Some(byte) => byte
+                .checked_shr((key.index() % 8) as u32)
+                .is_some_and(|bits| bits & 1 == 1),
             None => false,
         }
     }
@@ -189,12 +201,13 @@ impl<'a> PeerAllowance<'a> {
 
 /// Whether `a` sorts strictly before `b` by bytes.
 const fn zid_less(a: &[u8; 16], b: &[u8; 16]) -> bool {
-    let mut i = 0;
-    while i < 16 {
-        if a[i] != b[i] {
-            return a[i] < b[i];
+    let (mut a, mut b): (&[u8], &[u8]) = (a, b);
+    while let ([x, a_rest @ ..], [y, b_rest @ ..]) = (a, b) {
+        if *x != *y {
+            return *x < *y;
         }
-        i += 1;
+        a = a_rest;
+        b = b_rest;
     }
     false
 }
@@ -210,7 +223,11 @@ pub(crate) mod tests {
     const BITS: [u8; 4] = [0b0000_1001, 0b0000_0010, 0b0000_0010, 0b0000_0000];
 
     /// The two-peer table of these tests, for the tests of what is built on an allowance.
-    pub(crate) const TABLE: PeerAllowance<'static> = PeerAllowance::new(&ZIDS, 10, &BITS);
+    pub(crate) const TABLE: PeerAllowance<'static> = match PeerAllowance::try_new(&ZIDS, 10, &BITS)
+    {
+        Ok(table) => table,
+        Err(_) => panic!("the test table is a table"),
+    };
 
     #[test]
     fn a_peer_is_found_by_its_zid_and_only_by_all_of_it() {

@@ -706,6 +706,44 @@ mod tests {
         assert_eq!(rx.router().active_chains(), 0);
     }
 
+    /// A receive over a lent Router ends no chain when it sweeps, past the chain's deadline and
+    /// inside the lend too: the session that owns the Router sweeps it, and that sweep ends it.
+    #[cfg(all(feature = "reassembly", feature = "alloc"))]
+    #[test]
+    fn a_receive_over_a_lent_router_leaves_the_sweep_to_the_session() {
+        use crate::reassembly_dispatch::{Fragment, IngestOutcome, ReassemblyConfig};
+        const TIMEOUT_MS: u64 = 500;
+        let mut router: ReassemblyDispatcher<2, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, TIMEOUT_MS));
+        let begun = router.ingest(
+            Fragment {
+                peer_key: &[0x11; 16],
+                reliable: true,
+                sn: 1,
+                more: 1,
+                payload: b"part",
+                priority: crate::qos::Priority::DEFAULT,
+                markers: crate::extfragment::FragmentMarkers::NONE,
+            },
+            crate::sn::mask_from_res(0x02),
+            0,
+            |_| {},
+        );
+        assert_eq!(begun, IngestOutcome::Begun);
+        let lend = RouterLend::new();
+        let mut rx = UnicastRx::new(lend.clone());
+        let mut events = 0usize;
+        lend.lend_for(&mut router, || {
+            rx.sweep(TIMEOUT_MS, &mut |_event: IterationEvent<'_, '_>| {
+                events += 1
+            });
+        });
+        assert_eq!(events, 0, "the link's receive sweeps nothing");
+        assert_eq!(router.active_chains(), 1);
+        assert_eq!(router.sweep(TIMEOUT_MS), 1);
+        assert_eq!(router.active_chains(), 0);
+    }
+
     /// Each path a unit takes is counted under its own name, and the copied total is the sum of
     /// the copying reasons alone.
     #[cfg(feature = "rx-in-place")]

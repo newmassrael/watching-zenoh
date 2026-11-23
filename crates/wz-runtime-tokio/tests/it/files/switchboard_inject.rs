@@ -78,9 +78,11 @@ fn fresh_engine() -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding>> {
 fn wire_push_injects_domain_event_into_real_engine() {
     let mut engine = fresh_engine();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register("home/livingroom/temp", "temp_update");
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register("home/livingroom/temp", "temp_update")
+    });
 
     let outcome = frame_event(put_push("home/livingroom/temp", b"22.0"));
     let mut injector = EngineInjector::new(&mut engine);
@@ -95,9 +97,11 @@ fn wire_push_injects_domain_event_into_real_engine() {
 fn wire_push_on_unmapped_keyexpr_injects_nothing() {
     let mut engine = fresh_engine();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register("home/livingroom/temp", "temp_update");
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register("home/livingroom/temp", "temp_update")
+    });
 
     let outcome = frame_event(put_push("home/kitchen/humidity", b"55"));
     let mut injector = EngineInjector::new(&mut engine);

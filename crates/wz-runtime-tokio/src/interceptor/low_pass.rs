@@ -570,7 +570,7 @@ mod tests {
     fn message_size_classifies_every_kind_zenoh_sizes() {
         use wz_session_core::push_build::{build_push_del_literal, build_push_literal};
         use wz_session_core::request_build::build_request_query;
-        use wz_session_core::response_build::build_response_reply_literal;
+        use wz_session_core::response_build::build_response_reply;
 
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("demo/x", b"1234").expect("build put"),
@@ -586,7 +586,11 @@ mod tests {
         );
 
         let query = NetworkMessage::Request(Box::new(
-            build_request_query(1, 0, Some("demo/q")).expect("build query"),
+            build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build query"),
         ));
         assert_eq!(
             message_size(query.view()),
@@ -594,7 +598,12 @@ mod tests {
         );
 
         let reply = NetworkMessage::Response(Box::new(
-            build_response_reply_literal(1, "demo/q", b"abc").expect("build reply"),
+            build_response_reply(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                b"abc",
+            )
+            .expect("build reply"),
         ));
         assert_eq!(
             message_size(reply.view()),

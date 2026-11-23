@@ -248,7 +248,7 @@ impl<R: Runtime> DeferredFireQueue<R> {
     where
         G: Send + 'static,
     {
-        let mut fired = 0;
+        let mut fired = 0usize;
         loop {
             let (batch, number, mark) = R::with_mutex_mut(serializer, |_serialized| {
                 let batch = self.take_batch();
@@ -258,7 +258,7 @@ impl<R: Runtime> DeferredFireQueue<R> {
                         return (batch, None, mark);
                     }
                     let number = batches.taken;
-                    batches.taken += 1;
+                    batches.taken = batches.taken.saturating_add(1);
                     batches.running.insert(number);
                     (batch, Some(number), mark)
                 })
@@ -272,7 +272,7 @@ impl<R: Runtime> DeferredFireQueue<R> {
             };
             for job in batch {
                 job();
-                fired += 1;
+                fired = fired.saturating_add(1);
             }
         }
     }
@@ -384,7 +384,7 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
     pub fn ticket(&self) -> Ticket<R, F> {
         let number = R::with_mutex_mut(&self.state, |s| {
             let number = s.issued;
-            s.issued += 1;
+            s.issued = s.issued.saturating_add(1);
             number
         });
         Ticket {
@@ -457,7 +457,7 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
                 // exit, outside the cell lock.
                 return None;
             }
-            let call = pending.take().expect("pending set just above");
+            let call = pending.take()?;
             s.parked.insert(number, call);
             if s.parked.contains_key(&s.next) {
                 s.callback.take()
@@ -468,7 +468,7 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
         let Some(callback) = taken else {
             return;
         };
-        self.run_parked(Some(callback));
+        self.run_parked(callback);
     }
 
     /// Run the call with ticket `number`, in its turn, taking the shortest way there.
@@ -493,8 +493,11 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
         let turn = R::with_mutex_mut(&self.state, |s| {
             if s.dead {
                 Turn::Dead
-            } else if s.next == number && s.callback.is_some() {
-                Turn::Mine(s.callback.take().expect("checked just above"))
+            } else if s.next == number {
+                match s.callback.take() {
+                    Some(callback) => Turn::Mine(callback),
+                    None => Turn::Elsewhere,
+                }
             } else {
                 Turn::Elsewhere
             }
@@ -503,50 +506,61 @@ impl<R: Runtime, F: Send + 'static> DeferredListenerCell<R, F> {
             // The call is dropped here, outside the cell lock.
             Turn::Dead => drop(call),
             Turn::Elsewhere => self.run_ticket(number, Box::new(call)),
-            Turn::Mine(callback) => {
-                let mut callback_slot = Some(callback);
-                call(callback_slot.as_mut().expect("set just above"));
+            Turn::Mine(mut callback) => {
+                call(&mut callback);
                 // This number's turn is over. A kill that ran meanwhile leaves the
                 // number alone: `run_parked` sees the cell dead and drops everything.
                 R::with_mutex_mut(&self.state, |s| {
                     if !s.dead {
-                        s.next += 1;
+                        s.next = s.next.saturating_add(1);
                     }
                 });
-                self.run_parked(callback_slot);
+                self.run_parked(callback);
             }
         }
     }
 
-    /// The cell's runner: with the callback in hand (`callback_slot`), run the parked calls in
-    /// their order until the next number is missing, then restore the callback, unless a
-    /// kill arrived, in which case the callback and whatever is still parked are dropped.
-    /// `callback_slot` is taken by the restore, so a surviving `Some` drops outside the
-    /// cell lock.
-    fn run_parked(&self, mut callback_slot: Option<F>) {
+    /// The cell's runner: with the callback in hand, run the parked calls in their order until
+    /// the next number is missing, then restore the callback, unless a kill arrived, in which
+    /// case the callback and whatever is still parked are dropped. The callback goes into the
+    /// cell's lock and comes back out of it with each call, so a dead cell's callback drops
+    /// outside the lock.
+    fn run_parked(&self, callback: F) {
+        enum Step<C, F> {
+            Run(C, F),
+            Restored,
+            Dead(F),
+        }
+        let mut callback = callback;
         loop {
-            let next = R::with_mutex_mut(&self.state, |s| {
+            let step = R::with_mutex_mut(&self.state, move |s| {
                 if s.dead {
                     s.parked.clear();
-                    return None;
+                    return Step::Dead(callback);
                 }
                 let turn = s.next;
                 match s.parked.remove(&turn) {
                     Some(call) => {
-                        s.next += 1;
-                        Some(call)
+                        s.next = s.next.saturating_add(1);
+                        Step::Run(call, callback)
                     }
                     None => {
-                        s.callback = callback_slot.take();
-                        None
+                        s.callback = Some(callback);
+                        Step::Restored
                     }
                 }
             });
-            let Some(call) = next else { return };
-            let callback = callback_slot
-                .as_mut()
-                .expect("parked calls are handed to the cell's runner only");
-            call(callback);
+            match step {
+                Step::Run(call, mut held) => {
+                    call(&mut held);
+                    callback = held;
+                }
+                Step::Restored => return,
+                Step::Dead(held) => {
+                    drop(held);
+                    return;
+                }
+            }
         }
     }
 

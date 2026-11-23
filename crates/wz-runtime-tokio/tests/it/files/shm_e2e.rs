@@ -106,14 +106,14 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
     let fired = Arc::new(AtomicUsize::new(0));
     let mut observer = ApplicationLayerObserver::new();
     observer
+        .face()
         .subscribers
         .set_shm_resolver(Box::new(PosixShmResolver));
     {
         let fired = fired.clone();
         let expect = data.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -156,6 +156,7 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
             // live actions rather than hard-coded `true`, so this stays a
             // measurement of the negotiation and not an assertion about itself.
             observer
+                .face()
                 .subscribers
                 .set_shm_negotiated(acc_actions_for_stamp.is_shm());
             observer.dispatch_event(event)
@@ -353,14 +354,14 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
 
     let mut observer = ApplicationLayerObserver::new();
     observer
+        .face()
         .subscribers
         .set_shm_resolver(Box::new(PosixShmResolver));
     let seen: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     {
         let seen = seen.clone();
         observer
-            .subscribers
-            .register("demo/shm/enforce", move |sample| {
+            .subscribe("demo/shm/enforce", move |sample| {
                 seen.lock().unwrap().push(sample.payload().to_vec());
             })
             .expect("no quota is stated on this table");
@@ -371,24 +372,27 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
     // the resolver is installed, so the ONLY thing standing between the peer and
     // this node's memory is the gate.
     assert!(
-        !observer.subscribers.shm_negotiated(),
+        !observer.face_ref().subscribers.shm_negotiated(),
         "precondition: this registry has not been stamped as negotiated"
     );
-    observer.subscribers.dispatch(
-        &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
-        wz_session_core::reliability::Reliability::Reliable,
-    );
+    observer.with_parts(|app_half, face_half| {
+        app_half.subscribers.dispatch(
+            &mut *face_half.subscribers,
+            &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
+            wz_session_core::reliability::Reliability::Reliable,
+        )
+    });
     assert!(
         seen.lock().unwrap().is_empty(),
         "an un-negotiated peer's SHM descriptor must deliver NOTHING"
     );
     assert_eq!(
-        observer.subscribers.shm_unnegotiated_drops(),
+        observer.face_ref().subscribers.shm_unnegotiated_drops(),
         1,
         "and the refusal is COUNTED, so it is observable rather than a vanished sample"
     );
     assert_eq!(
-        observer.subscribers.shm_unresolved_drops(),
+        observer.face_ref().subscribers.shm_unresolved_drops(),
         0,
         "the drop is attributed to the NEGOTIATION, not to an unresolvable segment — \
          the segment is live and the resolver is installed"
@@ -396,23 +400,26 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
 
     // ── Arm B: same everything, negotiation ON ────────────────────────────
     // Proves Arm A measured the gate and not a broken fixture.
-    observer.subscribers.set_shm_negotiated(true);
-    observer.subscribers.dispatch(
-        &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
-        wz_session_core::reliability::Reliability::Reliable,
-    );
+    observer.face().subscribers.set_shm_negotiated(true);
+    observer.with_parts(|app_half, face_half| {
+        app_half.subscribers.dispatch(
+            &mut *face_half.subscribers,
+            &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
+            wz_session_core::reliability::Reliability::Reliable,
+        )
+    });
     assert_eq!(
         seen.lock().unwrap().as_slice(),
         std::slice::from_ref(&data),
         "with SHM negotiated the SAME descriptor resolves to the owner's bytes"
     );
     assert_eq!(
-        observer.subscribers.shm_unnegotiated_drops(),
+        observer.face_ref().subscribers.shm_unnegotiated_drops(),
         1,
         "the negotiated delivery adds no refusal"
     );
     assert_eq!(
-        observer.subscribers.shm_unresolved_drops(),
+        observer.face_ref().subscribers.shm_unresolved_drops(),
         0,
         "and no resolve failed in either arm"
     );

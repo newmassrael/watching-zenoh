@@ -56,14 +56,11 @@ impl core::fmt::Display for ZidDerivationError {
 
 /// Whether `address` can head a derived zid, and why not.
 pub const fn admit_address(address: [u8; 4]) -> Result<(), ZidDerivationError> {
-    if address[0] == 0 && address[1] == 0 && address[2] == 0 && address[3] == 0 {
-        Err(ZidDerivationError::Unspecified)
-    } else if address[0] & 0xF0 == 0xE0 {
-        Err(ZidDerivationError::Multicast)
-    } else if address[0] == 0xFF && address[1] == 0xFF && address[2] == 0xFF && address[3] == 0xFF {
-        Err(ZidDerivationError::Broadcast)
-    } else {
-        Ok(())
+    match address {
+        [0, 0, 0, 0] => Err(ZidDerivationError::Unspecified),
+        [first, ..] if first & 0xF0 == 0xE0 => Err(ZidDerivationError::Multicast),
+        [0xFF, 0xFF, 0xFF, 0xFF] => Err(ZidDerivationError::Broadcast),
+        _ => Ok(()),
     }
 }
 
@@ -77,11 +74,12 @@ pub fn derive(
     random: [u8; RANDOM_BYTES],
 ) -> Result<[u8; ZID_MAX], ZidDerivationError> {
     admit_address(address)?;
-    let tcp = tcp_port.to_le_bytes();
-    let udp = udp_port.to_le_bytes();
+    let [a0, a1, a2, a3] = address;
+    let [t0, t1] = tcp_port.to_le_bytes();
+    let [u0, u1] = udp_port.to_le_bytes();
+    let [r0, r1, r2, r3, r4, r5, r6, r7] = random;
     Ok([
-        address[0], address[1], address[2], address[3], tcp[0], tcp[1], udp[0], udp[1], random[0],
-        random[1], random[2], random[3], random[4], random[5], random[6], random[7],
+        a0, a1, a2, a3, t0, t1, u0, u1, r0, r1, r2, r3, r4, r5, r6, r7,
     ])
 }
 

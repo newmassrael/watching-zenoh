@@ -14,7 +14,7 @@
 //! extension are read where they lie, and the subscribers are handed a
 //! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
-//! a view borrowed for the call ([`SampleSink::deliver`]), so no subscriber
+//! a view borrowed for the call ([`SampleDelivery::deliver`]), so no subscriber
 //! changes; one that keeps the sample copies it
 //! ([`Sample::from_view`](crate::sample::Sample::from_view)).
 //!
@@ -39,7 +39,7 @@ use core::cell::OnceCell;
 
 use wz_codecs::lent::{Encoding, Push, PushVariant, Timestamp};
 
-use super::{SubscriberPeer, SubscriberTable};
+use super::{LocalSubscribers, PeerDelivery, SubscriberPeer};
 use crate::bounded::Storage;
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
@@ -47,7 +47,7 @@ use crate::reliability::Reliability;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
-use crate::sink::{SampleSink, SampleView};
+use crate::sink::{SampleDelivery, SampleView};
 use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound};
 
 /// The sample a Push read in place is delivered as: every field a range of the
@@ -232,17 +232,18 @@ fn lent_body<'s, 'f>(push: &'s Push<'f>) -> Result<Option<LentBody<'s, 'f>>, Fal
     }
 }
 
-impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+impl<Q: Storage> SubscriberPeer<Q> {
     /// Deliver a Push the in-place receive path lent: the subscriber side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned
     /// projection.
     ///
-    /// `peer` is the sending peer's side: whose aliases the keyexpr resolves
-    /// through and whose zid names a self-echo.
-    pub(super) fn dispatch_in_place<Q: Storage>(
+    /// This is the sending peer's side, whose aliases the keyexpr resolves through and whose
+    /// zid names a self-echo; `subs` are the subscriptions the Push is delivered to.
+    pub(super) fn dispatch_in_place<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
-        peer: &SubscriberPeer<Q>,
+        subs: &mut L,
+        cx: &mut X,
         record: &InPlaceRecord<'_, '_>,
     ) {
         // A lent Request or Response is the queryables' or the pending gets'.
@@ -250,36 +251,37 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             return;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.deliver_lent(peer, push, reliability) {
+        match self.deliver_lent(subs, cx, push, reliability) {
             Ok(()) => {}
             // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(peer, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(peer, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
                 self.in_place_fallbacks.instrumented =
                     self.in_place_fallbacks.instrumented.saturating_add(1);
                 #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(peer, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
         }
     }
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
-    fn deliver_lent<Q: Storage>(
-        &mut self,
-        peer: &SubscriberPeer<Q>,
+    fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
+        &self,
+        subs: &mut L,
+        cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
     ) -> Result<(), Fallback> {
@@ -298,11 +300,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             return Err(Fallback::Instrumented);
         }
         // The keyexpr may be the peer table's own literal, so the table stays
-        // borrowed through the delivery; the subscribers are a field of their
-        // own (`fire_lent`). A composed keyexpr lies in `composed`, in this
+        // borrowed through the delivery; the subscriptions are another value
+        // (`subs`). A composed keyexpr lies in `composed`, in this
         // frame: fixed on the fixed backing, an empty string until written on
         // the growable one.
-        let spaces = peer.mapping_spaces();
+        let spaces = self.mapping_spaces();
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_view(&push.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
@@ -340,7 +342,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         };
         // R231 -- the self-echo rule of `dispatch_push`, on the same fields: a
         // wire-arrived sample whose source names this session is not fired.
-        if let (Some(own), Some(info)) = (peer.own_zid(), sample.source_info.as_ref()) {
+        if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
                 return Ok(());
@@ -348,7 +350,15 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         }
         // Through the key gate and, for a key of a closed set, the selection: the one delivery of
         // a message from a peer, as the copying receive takes it.
-        self.fire_lent(&sample, peer.class);
+        subs.deliver_from_peer(
+            sample.keyexpr,
+            self.class,
+            PeerDelivery {
+                no_allocation: true,
+                ..PeerDelivery::default()
+            },
+            |id, row| cx.deliver(id, row, &sample),
+        );
         Ok(())
     }
 
@@ -356,9 +366,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection<Q: Storage>(
+    fn dispatch_owned_projection<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
-        peer: &SubscriberPeer<Q>,
+        subs: &mut L,
+        cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
     ) {
@@ -366,13 +377,13 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(peer, &owned, reliability, true);
+            self.dispatch_push(subs, cx, &owned, reliability, true);
         }
     }
 }
 
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+impl<Q: Storage> SubscriberPeer<Q> {
     /// Deliver the plain `Put`s of one frame
     /// ([`DriverLoopOutcome::FramePlainPuts`](crate::driver_loop::DriverLoopOutcome::FramePlainPuts)),
     /// in the order they lie in it: what [`Self::dispatch_push`] delivers for the owned
@@ -382,15 +393,16 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     ///
     /// A key the peer never declared (or the empty key) is dropped, as the owned path
     /// drops it, and one record's key never affects another's.
-    pub(super) fn dispatch_plain_puts<Q: Storage>(
-        &mut self,
-        peer: &SubscriberPeer<Q>,
+    pub(super) fn dispatch_plain_puts<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
+        &self,
+        subs: &mut L,
+        cx: &mut X,
         reliable: bool,
         frame: &crate::link::RxBytes,
         puts: &[crate::plain_push::PlainPut],
     ) {
         let reliability = Reliability::from_reliable_bool(reliable);
-        let spaces = peer.mapping_spaces();
+        let spaces = self.mapping_spaces();
         // The text of the suffix just read, which the next record of a stream repeats: its
         // bytes are compared with the last ones instead of being checked as UTF-8 again.
         let mut last_suffix: Option<(&[u8], &str)> = None;
@@ -450,12 +462,18 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             if repeats {
                 sample = sample.repeating_the_previous_key();
             }
-            self.fire_plain_to_subscribers(&sample, true, peer.class);
+            subs.deliver_from_peer(
+                &current,
+                self.class,
+                PeerDelivery {
+                    repeats_previous: repeats,
+                    ..PeerDelivery::default()
+                },
+                |id, row| cx.deliver_plain(id, row, &sample),
+            );
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
-        for subscriber in self.subscribers.iter_mut() {
-            subscriber.sink.end_plain_frame();
-        }
+        subs.end_plain_frame(cx);
     }
 }
 

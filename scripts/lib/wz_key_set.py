@@ -346,7 +346,7 @@ def table_lines(
     skip = "    #[rustfmt::skip]"
     out = [
         "/// The key catalogue of the declaration, as `KeyCatalogue` reads it. A bad table is a build",
-        "/// error: `KeyCatalogue::new` checks every property in a `const`.",
+        "/// error: `KeyCatalogue::try_new` checks every property in a `const` and a refusal stops it.",
         "pub mod key_set {",
         "    #![allow(dead_code)]",
         "    use wz_session_core::key_catalogue::{EntityId, EntityKind, EntityRow, KeyCatalogue, KeyId};",
@@ -375,7 +375,10 @@ def table_lines(
         "",
         skip,
         "    pub const CATALOGUE: KeyCatalogue<'static> =",
-        "        KeyCatalogue::new(KEY_TEXT, &KEY_ENDS, &OFFSETS, &MEMBERS, &ENTITIES);",
+        "        match KeyCatalogue::try_new(KEY_TEXT, &KEY_ENDS, &OFFSETS, &MEMBERS, &ENTITIES) {",
+        "            Ok(table) => table,",
+        "            Err(error) => panic!(\"{}\", error.describe()),",
+        "        };",
     ]
     if closed:
         out += [
@@ -407,7 +410,10 @@ def table_lines(
                 "",
                 skip,
                 "    pub const PEER_ALLOWANCE: wz_session_core::key_allowance::PeerAllowance<'static> =",
-                f"        wz_session_core::key_allowance::PeerAllowance::new(&PEER_ZIDS, {allowance['keys']}, &PEER_BITS);",
+                f"        match wz_session_core::key_allowance::PeerAllowance::try_new(&PEER_ZIDS, {allowance['keys']}, &PEER_BITS) {{",
+                "            Ok(table) => table,",
+                "            Err(error) => panic!(\"{}\", error.describe()),",
+                "        };",
                 "",
                 skip,
                 "    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> =",
@@ -722,7 +728,7 @@ def _selftest() -> int:
     refuses_allow("a peer the node does not declare", [allow("a1", ["a/b"])], "not a peer endpoint", {"b2"})
     one = emit_table(build(small), "x.toml", closed=True, allowance=allowed)
     expect("the allowance is a table checked in a const, and `ALLOWED_PEERS` is `Some` of it",
-           "PeerAllowance::new(&PEER_ZIDS, 3, &PEER_BITS)" in one and "Some(&PEER_ALLOWANCE)" in one)
+           "PeerAllowance::try_new(&PEER_ZIDS, 3, &PEER_BITS)" in one and "Some(&PEER_ALLOWANCE)" in one)
     expect("a closed key set that declares no peers has `ALLOWED_PEERS = None`",
            "ALLOWED_PEERS" in emit_table(build(small), "x.toml", closed=True)
            and "PEER_BITS" not in emit_table(build(small), "x.toml", closed=True))

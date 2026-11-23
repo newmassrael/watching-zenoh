@@ -419,6 +419,11 @@ pub(crate) struct RawAddr {
 
 impl RawAddr {
     /// `at` in the kernel's form, for a call that reads an address (`bind`, `connect`, `sendto`).
+    ///
+    /// Out of line, as [`Self::to_socket_addr`] and [`name_of`] are: each opener and each send
+    /// would otherwise carry its own copy of both families' conversion, where the one system call
+    /// beside it costs far more than the call.
+    #[inline(never)]
     pub(crate) fn of(at: SocketAddr) -> Self {
         // SAFETY: an all-zero `sockaddr_storage` is a valid value of it, an unspecified family.
         let mut storage: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
@@ -501,6 +506,7 @@ impl RawAddr {
     /// The address the kernel wrote, or `None` for a family other than the two (no socket here
     /// has one). The flow label is left out: it is a field of a packet and not of an end, and a
     /// link compares its peer by address, port and scope.
+    #[inline(never)]
     pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
         match c_int::from(self.storage.ss_family) {
             libc::AF_INET if self.len as usize >= size_of::<libc::sockaddr_in>() => {
@@ -528,8 +534,27 @@ impl RawAddr {
     }
 }
 
+/// Bind or connect `fd` to `at`: `call` is `libc::bind` or `libc::connect`, handed `at` in the
+/// kernel's form. The `errno` when the call fails. The one way a socket here is given an address,
+/// so each opener calls it and carries no conversion of its own.
+#[inline(never)]
+pub(crate) fn call_at(
+    fd: c_int,
+    at: SocketAddr,
+    call: unsafe extern "C" fn(c_int, *const libc::sockaddr, libc::socklen_t) -> c_int,
+) -> Result<(), c_int> {
+    let raw = RawAddr::of(at);
+    // SAFETY: `raw` is a live socket address of the length passed, which `call` only reads.
+    if unsafe { call(fd, raw.as_ptr(), raw.size()) } == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
 /// The address a `getsockname` or `getpeername` of `fd` reports: the `errno` when the call fails,
 /// `EAFNOSUPPORT` when it names a family other than the two.
+#[inline(never)]
 pub(crate) fn name_of(
     fd: c_int,
     call: unsafe extern "C" fn(c_int, *mut libc::sockaddr, *mut libc::socklen_t) -> c_int,
@@ -568,12 +593,7 @@ impl PosixUdpSocket {
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).map_err(PosixNetError::ReusePort)?;
         }
-        let local = RawAddr::of(at);
-        // SAFETY: `local` is a live socket address of the length passed.
-        let rc = unsafe { libc::bind(fd, local.as_ptr(), local.size()) };
-        if rc != 0 {
-            return Err(PosixNetError::Bind(errno()));
-        }
+        call_at(fd, at, libc::bind).map_err(PosixNetError::Bind)?;
         if at.port() == 0 {
             // The locators the link reports and the source every reply comes from name this
             // port; keeping the 0 that was asked for would render `udp/<ip>:0` for a link that
@@ -753,6 +773,8 @@ impl PosixUdpSocket {
     /// leave) or was interrupted by a signal, any other failure as an error. A datagram whose
     /// source the kernel names in a family other than the socket's two is an error too: there
     /// is no end to judge it by.
+    // Out of line: both receives call it, and a copy inlined in each is larger than the call.
+    #[inline(never)]
     fn receive(&self, buf: &mut [u8], flags: c_int) -> Result<Option<Received>, PosixNetError> {
         let mut src = RawAddr::empty();
         // SAFETY: `buf` and `src` are live and writable for the lengths given.

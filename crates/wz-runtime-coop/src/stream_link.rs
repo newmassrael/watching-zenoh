@@ -1263,6 +1263,11 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         Some(&self.endpoints)
     }
 
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(S::PROTO.subject())
+    }
+
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
         self.socket.peer_credential_zid()
     }
@@ -2608,9 +2613,7 @@ mod tests {
     mod session_room {
         extern crate std;
 
-        use alloc::rc::Rc;
         use std::vec::Vec;
-        use wz_session_core::link::BoxedLinkDriver;
         use wz_session_core::qos::CongestionControl;
         use wz_session_core::qos::Priority;
         use wz_session_core::sample::QosLevel;
@@ -2682,8 +2685,8 @@ mod tests {
             }
         }
 
-        fn link() -> Rc<Heap> {
-            Rc::new(StreamDriver::with_buffers(
+        fn link() -> crate::link_cells::CellRc<Heap> {
+            crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
                 Pipe::default(),
                 STREAM_RX_CAPACITY,
                 HeapTx::new(4, 2048),
@@ -2697,7 +2700,7 @@ mod tests {
         fn a_droppable_message_on_a_full_stream_is_dropped_within_its_own_wait() {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
-            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
+            let sink = link.clone().into_sink();
             let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
             link.socket.full.set(true);
             actions
@@ -2736,7 +2739,7 @@ mod tests {
         fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
-            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
+            let sink = link.clone().into_sink();
             let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
             link.socket.full.set(true);
             let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")

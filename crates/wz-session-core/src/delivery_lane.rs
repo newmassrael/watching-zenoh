@@ -222,10 +222,13 @@ impl Entry {
 
 /// `at` moved on by `n` in a ring of `cap`, which `at` is inside of.
 const fn advance(at: usize, n: usize, cap: usize) -> usize {
-    if n >= cap - at {
-        n - (cap - at)
+    // `at` is inside the ring, so `room` is exact; each branch stays below `cap` for an `n`
+    // below it, and saturates rather than wraps for one that is not.
+    let room = cap.saturating_sub(at);
+    if n >= room {
+        n.saturating_sub(room)
     } else {
-        at + n
+        at.saturating_add(n)
     }
 }
 
@@ -336,19 +339,21 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     /// goes to the start, and the end it skipped is part of the charge.
     fn place(&self, n: usize) -> Option<(usize, usize)> {
         let (head, tail, cap) = (self.byte_head, self.byte_tail, self.byte_capacity);
-        let free = cap - self.byte_used;
+        // The charges never pass the area, and both ends are inside it: each difference below is
+        // exact, and saturates rather than wraps were one not.
+        let free = cap.saturating_sub(self.byte_used);
         if n == 0 {
             return Some((tail, 0));
         }
         if tail >= head {
-            if n <= cap - tail && n <= free {
+            let pad = cap.saturating_sub(tail);
+            if n <= pad && n <= free {
                 return Some((tail, n));
             }
-            let pad = cap - tail;
-            if n <= head && pad <= free && n <= free - pad {
-                return Some((0, pad + n));
+            if n <= head && pad <= free && n <= free.saturating_sub(pad) {
+                return Some((0, pad.saturating_add(n)));
             }
-        } else if n <= head - tail && n <= free {
+        } else if n <= head.saturating_sub(tail) && n <= free {
             return Some((tail, n));
         }
         None
@@ -361,7 +366,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     pub fn fits(&self, bytes: usize) -> Result<(), Refusal> {
         if self.stopping {
             Err(Refusal::Stopping)
-        } else if !self.event_quota.admits(self.len + 1) {
+        } else if !self.event_quota.admits(self.len.saturating_add(1)) {
             Err(Refusal::EventsFull)
         } else if self.place(bytes).is_none() {
             Err(Refusal::BytesFull)
@@ -384,14 +389,18 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         if self.stopping {
             return Err(self.count(Refusal::Stopping));
         }
-        if !self.event_quota.admits(self.len + 1) {
+        if !self.event_quota.admits(self.len.saturating_add(1)) {
             return Err(self.count(Refusal::EventsFull));
         }
         let Some((offset, charge)) = self.place(bytes) else {
             return Err(self.count(Refusal::BytesFull));
         };
+        // The quota is at most `EVENTS`, so the slot after the last one is in the ring.
         let index = advance(self.head, self.len, EVENTS);
-        self.entries[index] = Entry {
+        let Some(slot) = self.entries.get_mut(index) else {
+            return Err(self.count(Refusal::EventsFull));
+        };
+        *slot = Entry {
             offset,
             bytes,
             charge,
@@ -399,9 +408,9 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
             phase: Phase::Reserved,
         };
         self.byte_tail = advance(offset, bytes, self.byte_capacity);
-        self.byte_used += charge;
-        self.len += 1;
-        self.reserved += 1;
+        self.byte_used = self.byte_used.saturating_add(charge);
+        self.len = self.len.saturating_add(1);
+        self.reserved = self.reserved.saturating_add(1);
         Ok(Reservation {
             index,
             offset,
@@ -417,24 +426,29 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     /// one in the lane. A budget of `0`, which only a stated quota gives, admits no callback.
     pub fn publish(&mut self, reservation: Reservation, callbacks: usize) -> Result<(), Refusal> {
         let at = reservation.index;
-        debug_assert_eq!(self.entries[at].phase, Phase::Reserved);
-        self.reserved -= 1;
-        if self.stopping {
-            self.entries[at].phase = Phase::Void;
-            return Err(self.count(Refusal::Stopping));
+        debug_assert_eq!(
+            self.entries.get(at).map(|entry| entry.phase),
+            Some(Phase::Reserved)
+        );
+        self.reserved = self.reserved.saturating_sub(1);
+        let outcome = if self.stopping {
+            Err(Refusal::Stopping)
+        } else if callbacks != 0 && !self.admits_callbacks(callbacks) {
+            Err(Refusal::CallbacksFull)
+        } else {
+            Ok(())
+        };
+        // A reservation names a slot of this lane, which `reserve` found in the ring.
+        if let Some(entry) = self.entries.get_mut(at) {
+            if outcome.is_ok() && callbacks != 0 {
+                self.pending_callbacks = self.pending_callbacks.saturating_add(callbacks);
+                entry.callbacks = callbacks;
+                entry.phase = Phase::Ready;
+            } else {
+                entry.phase = Phase::Void;
+            }
         }
-        if callbacks == 0 {
-            self.entries[at].phase = Phase::Void;
-            return Ok(());
-        }
-        if !self.admits_callbacks(callbacks) {
-            self.entries[at].phase = Phase::Void;
-            return Err(self.count(Refusal::CallbacksFull));
-        }
-        self.pending_callbacks += callbacks;
-        self.entries[at].callbacks = callbacks;
-        self.entries[at].phase = Phase::Ready;
-        Ok(())
+        outcome.map_err(|why| self.count(why))
     }
 
     /// Whether [`Self::publish`] would charge a sample `callbacks` callbacks now, WITHOUT counting
@@ -447,7 +461,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         if budget > 0 && callbacks > budget {
             self.len == 1
         } else {
-            pending <= budget && callbacks <= budget - pending
+            pending <= budget && callbacks <= budget.saturating_sub(pending)
         }
     }
 
@@ -458,37 +472,49 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     /// area, or onto the oldest sample's, are not taken.
     pub fn extend(&mut self, reservation: &mut Reservation, bytes: usize) -> bool {
         let at = reservation.index;
-        let newest = self.len > 0 && at == advance(self.head, self.len - 1, EVENTS);
-        if !newest || self.entries[at].phase != Phase::Reserved {
+        let newest = self
+            .len
+            .checked_sub(1)
+            .is_some_and(|last| at == advance(self.head, last, EVENTS));
+        let Some(entry) = self.entries.get_mut(at) else {
+            return false;
+        };
+        if !newest || entry.phase != Phase::Reserved {
             return false;
         }
         let cap = self.byte_capacity;
-        let end = reservation.offset + reservation.bytes;
+        // A reservation lies inside the area, so its end is at most `cap`: the sums and the
+        // differences below are exact, and saturate rather than wrap were one not.
+        let end = reservation.offset.saturating_add(reservation.bytes);
         // The newest sample's bytes end where the free room starts; it runs to the oldest
         // sample's bytes when those lie after it, and to the end of the area when they do not.
         let after = if self.byte_head > end {
-            self.byte_head - end
+            self.byte_head.saturating_sub(end)
         } else {
-            cap - end
+            cap.saturating_sub(end)
         };
-        if bytes > after || bytes > cap - self.byte_used {
+        if bytes > after || bytes > cap.saturating_sub(self.byte_used) {
             return false;
         }
-        let entry = &mut self.entries[at];
-        entry.bytes += bytes;
-        entry.charge += bytes;
+        entry.bytes = entry.bytes.saturating_add(bytes);
+        entry.charge = entry.charge.saturating_add(bytes);
         self.byte_tail = advance(entry.offset, entry.bytes, cap);
-        self.byte_used += bytes;
-        reservation.bytes += bytes;
+        self.byte_used = self.byte_used.saturating_add(bytes);
+        reservation.bytes = reservation.bytes.saturating_add(bytes);
         true
     }
 
     /// The producer could not write the sample after all (its own failure, not the lane's): the
     /// slot is skipped in order and nothing is counted as a refusal.
     pub fn cancel(&mut self, reservation: Reservation) {
-        debug_assert_eq!(self.entries[reservation.index].phase, Phase::Reserved);
-        self.reserved -= 1;
-        self.entries[reservation.index].phase = Phase::Void;
+        debug_assert_eq!(
+            self.entries.get(reservation.index).map(|entry| entry.phase),
+            Some(Phase::Reserved)
+        );
+        self.reserved = self.reserved.saturating_sub(1);
+        if let Some(entry) = self.entries.get_mut(reservation.index) {
+            entry.phase = Phase::Void;
+        }
     }
 
     /// Take the newest admitted sample out of the lane and give its charges back at once, so that
@@ -508,39 +534,41 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     /// A slot that is reserved and not yet published is not taken: its producer holds it. Nothing
     /// is counted as a refusal; [`Stats::evicted`] counts it.
     pub fn evict_latest(&mut self) -> Option<usize> {
-        if self.len < 2 {
+        let last = self.len.checked_sub(1).filter(|&last| last != 0)?;
+        let at = advance(self.head, last, EVENTS);
+        let slot = self.entries.get_mut(at)?;
+        if slot.phase == Phase::Reserved {
             return None;
         }
-        let at = advance(self.head, self.len - 1, EVENTS);
-        let entry = self.entries[at];
-        if entry.phase == Phase::Reserved {
-            return None;
-        }
+        let entry = core::mem::replace(slot, Entry::FREE);
         // Where the byte area ended before this sample was placed: a sample that wrapped skipped
-        // `pad` bytes at the end of the area, and the tail was there.
-        let pad = entry.charge - entry.bytes;
+        // `pad` bytes at the end of the area, and the tail was there. A charge holds the bytes
+        // and the padding, and the lane's sums hold the charge, so no difference here wraps.
+        let pad = entry.charge.saturating_sub(entry.bytes);
         self.byte_tail = if pad > 0 {
-            self.byte_capacity - pad
+            self.byte_capacity.saturating_sub(pad)
         } else {
             entry.offset
         };
-        self.byte_used -= entry.charge;
-        self.pending_callbacks -= entry.callbacks;
-        self.entries[at] = Entry::FREE;
-        self.len -= 1;
+        self.byte_used = self.byte_used.saturating_sub(entry.charge);
+        self.pending_callbacks = self.pending_callbacks.saturating_sub(entry.callbacks);
+        self.len = last;
         self.evicted = self.evicted.saturating_add(1);
         Some(at)
     }
 
     /// Give the head's charges back and move on.
     fn pop(&mut self) {
-        let entry = self.entries[self.head];
-        self.pending_callbacks -= entry.callbacks;
+        // The head is a slot of the ring, which `advance` keeps it.
+        let Some(slot) = self.entries.get_mut(self.head) else {
+            return;
+        };
+        let entry = core::mem::replace(slot, Entry::FREE);
+        self.pending_callbacks = self.pending_callbacks.saturating_sub(entry.callbacks);
         self.byte_head = advance(self.byte_head, entry.charge, self.byte_capacity);
-        self.byte_used -= entry.charge;
-        self.entries[self.head] = Entry::FREE;
+        self.byte_used = self.byte_used.saturating_sub(entry.charge);
         self.head = advance(self.head, 1, EVENTS);
-        self.len -= 1;
+        self.len = self.len.saturating_sub(1);
         if self.len == 0 {
             // Nothing is charged, so the area starts over: a sample is not split by where the
             // last one happened to end.
@@ -558,7 +586,9 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
             if self.len == 0 {
                 return Next::Empty;
             }
-            let entry = self.entries[self.head];
+            let Some(&entry) = self.entries.get(self.head) else {
+                return Next::Empty;
+            };
             match entry.phase {
                 Phase::Void => self.pop(),
                 Phase::Reserved => return Next::Waiting,
@@ -581,7 +611,8 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
     /// The consumer has run the callbacks of the head sample: its charges come back. Returns
     /// whether there was a published sample at the head to complete.
     pub fn complete(&mut self) -> bool {
-        if self.len == 0 || self.entries[self.head].phase != Phase::Ready {
+        let head = self.entries.get(self.head).map(|entry| entry.phase);
+        if self.len == 0 || head != Some(Phase::Ready) {
             return false;
         }
         self.pop();

@@ -135,9 +135,9 @@ impl ReplayCursor {
         if !owed {
             // Everything the entry depends on precedes it and has been told, so the cursor moves
             // over it with the entries that follow, and it is not owed again.
-            self.next += 1;
+            self.next = self.next.saturating_add(1);
         }
-        self.total += 1;
+        self.total = self.total.saturating_add(1);
         if owed {
             Insertion::Owed
         } else {
@@ -152,10 +152,11 @@ impl ReplayCursor {
         if self.total == 0 {
             return Removal::Silent;
         }
-        let place = place.min(self.total - 1);
-        self.total -= 1;
+        // `total` is not zero here, and `next` is above `place`.
+        let place = place.min(self.total.saturating_sub(1));
+        self.total = self.total.saturating_sub(1);
         if place < self.next {
-            self.next -= 1;
+            self.next = self.next.saturating_sub(1);
             Removal::Retract
         } else {
             Removal::Silent

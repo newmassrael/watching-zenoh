@@ -99,6 +99,10 @@ const COOKIE_HEAD_BYTES: usize = 13;
 /// holds each of those widths to what its `encode` actually appends.
 const COOKIE_EXT_BYTES: usize = NegotiatedExtensions::WIDTH;
 
+/// The bytes of a cookie beside its zid and its multilink member.
+#[cfg(feature = "alloc")]
+const COOKIE_FIXED_BYTES: usize = COOKIE_HEAD_BYTES + COOKIE_EXT_BYTES + COOKIE_TAG_BYTES;
+
 /// The acceptor's InitSyn-derived state, as the cookie carries it.
 ///
 /// Every field is something the acceptor learned from the peer's InitSyn and
@@ -214,14 +218,15 @@ impl MultilinkAcceptState {
     fn decode(tail: &[u8]) -> Result<Self, CookieError> {
         match tail.split_first() {
             Some((0, [])) => Ok(Self(None)),
-            Some((1, rest)) if rest.len() >= 10 => {
-                let challenge =
-                    u64::from_le_bytes(rest[0..8].try_into().map_err(|_| CookieError::Malformed)?);
-                let len =
-                    u16::from_le_bytes(rest[8..10].try_into().map_err(|_| CookieError::Malformed)?)
-                        as usize;
-                let key = &rest[10..];
-                if key.len() != len {
+            Some((1, rest)) => {
+                let (challenge, rest) = rest
+                    .split_first_chunk::<8>()
+                    .ok_or(CookieError::Malformed)?;
+                let (len, key) = rest
+                    .split_first_chunk::<2>()
+                    .ok_or(CookieError::Malformed)?;
+                let challenge = u64::from_le_bytes(*challenge);
+                if key.len() != usize::from(u16::from_le_bytes(*len)) {
                     return Err(CookieError::Malformed);
                 }
                 #[cfg(feature = "alloc")]
@@ -285,9 +290,7 @@ pub fn encode_accept_cookie(key: &SigningKey, state: &AcceptCookieState) -> Opti
         negotiated: state.negotiated,
         multilink: state.multilink.0.as_ref().map(|(c, k)| (*c, k.as_slice())),
     };
-    let mut out = Vec::with_capacity(
-        COOKIE_HEAD_BYTES + view.peer_zid.len() + COOKIE_EXT_BYTES + COOKIE_TAG_BYTES,
-    );
+    let mut out = Vec::with_capacity(COOKIE_FIXED_BYTES.saturating_add(view.peer_zid.len()));
     // `VecSink` grows, so a refused write cannot happen here; the payload writer
     // is the one the fixed-buffer mint runs, where it can.
     write_cookie_payload(&view, &mut VecSink::new(&mut out))?;
@@ -369,9 +372,10 @@ pub fn encode_accept_cookie_into<'o>(
     let mut sink = SliceSink::new(&mut *out);
     write_cookie_payload(view, &mut sink)?;
     let n = sink.position();
-    let t = cookie_payload_tag(key, &out[..n]);
-    out.get_mut(n..n + COOKIE_TAG_BYTES)?.copy_from_slice(&t);
-    Some(&out[..n + COOKIE_TAG_BYTES])
+    let end = n.checked_add(COOKIE_TAG_BYTES)?;
+    let t = cookie_payload_tag(key, out.get(..n)?);
+    out.get_mut(n..end)?.copy_from_slice(&t);
+    out.get(..end)
 }
 
 /// Verify and parse a cookie this node minted.
@@ -385,47 +389,46 @@ pub fn decode_accept_cookie(
     key: &SigningKey,
     bytes: &[u8],
 ) -> Result<AcceptCookieState, CookieError> {
-    if bytes.len() < COOKIE_TAG_BYTES {
+    let Some((payload, got)) = bytes.split_last_chunk::<COOKIE_TAG_BYTES>() else {
         return Err(CookieError::Tampered);
-    }
-    let (payload, got) = bytes.split_at(bytes.len() - COOKIE_TAG_BYTES);
+    };
     // Constant-time, and the key stays inside `signing_key`: see
     // `cookie_payload_tag_verify` for why this is an operation rather than an
     // accessor.
-    if !cookie_payload_tag_verify(key, payload, got) {
+    if !cookie_payload_tag_verify(key, payload, got.as_slice()) {
         return Err(CookieError::Tampered);
     }
 
     // Past this line the bytes are ours, so a failure is THIS code's
     // disagreement with itself rather than an attacker's.
-    if payload.len() < COOKIE_HEAD_BYTES {
+    // The head, `COOKIE_HEAD_BYTES` of it, read a field at a time.
+    let (nonce, rest) = payload
+        .split_first_chunk::<8>()
+        .ok_or(CookieError::Malformed)?;
+    let (&[peer_whatami, sn_res], rest) = rest
+        .split_first_chunk::<2>()
+        .ok_or(CookieError::Malformed)?;
+    let (batch_size, rest) = rest
+        .split_first_chunk::<2>()
+        .ok_or(CookieError::Malformed)?;
+    let (&zid_len, rest) = rest.split_first().ok_or(CookieError::Malformed)?;
+    let nonce = u64::from_le_bytes(*nonce);
+    let batch_size = u16::from_le_bytes(*batch_size);
+    let zid_len = usize::from(zid_len);
+    if zid_len == 0 || zid_len > MAX_ZID_BYTES {
         return Err(CookieError::Malformed);
     }
-    let nonce = u64::from_le_bytes(
-        payload[0..8]
-            .try_into()
-            .map_err(|_| CookieError::Malformed)?,
-    );
-    let peer_whatami = payload[8];
-    let sn_res = payload[9];
-    let batch_size = u16::from_le_bytes(
-        payload[10..12]
-            .try_into()
-            .map_err(|_| CookieError::Malformed)?,
-    );
-    let zid_len = payload[12] as usize;
-    // R2783 — the multilink member makes the tail variable, so the length is
-    // a floor here (at least its one-byte `None`) and the member's own decode
-    // holds the rest to exactly what it wrote.
-    if zid_len == 0
-        || zid_len > MAX_ZID_BYTES
-        || payload.len() < COOKIE_HEAD_BYTES + zid_len + COOKIE_EXT_BYTES + 1
-    {
+    let (Some(zid), Some(rest)) = (rest.get(..zid_len), rest.get(zid_len..)) else {
         return Err(CookieError::Malformed);
-    }
-    let ext_at = COOKIE_HEAD_BYTES + zid_len;
-    let tail_at = ext_at + COOKIE_EXT_BYTES;
-    let mut cursor = SceCursor::new(&payload[ext_at..tail_at]);
+    };
+    // R2783 — the multilink member makes the tail variable: the extension
+    // states are a fixed width, and the member's own decode holds the rest to
+    // exactly what it wrote (an empty tail is refused there).
+    let (Some(exts), Some(tail)) = (rest.get(..COOKIE_EXT_BYTES), rest.get(COOKIE_EXT_BYTES..))
+    else {
+        return Err(CookieError::Malformed);
+    };
+    let mut cursor = SceCursor::new(exts);
     let negotiated =
         NegotiatedExtensions::decode(&mut cursor).map_err(|_| CookieError::Malformed)?;
     // The slice above already fixes the extension region's size, so this can
@@ -435,12 +438,11 @@ pub fn decode_accept_cookie(
     if cursor.remaining() != 0 {
         return Err(CookieError::Malformed);
     }
-    let multilink = MultilinkAcceptState::decode(&payload[tail_at..])?;
+    let multilink = MultilinkAcceptState::decode(tail)?;
     Ok(AcceptCookieState {
         // The tag verified, so these are bytes this node wrote from a zid; a
         // payload that names none is still refused rather than trusted.
-        peer_zid: SessionZid::new(&payload[COOKIE_HEAD_BYTES..ext_at])
-            .map_err(|_| CookieError::Malformed)?,
+        peer_zid: SessionZid::new(zid).map_err(|_| CookieError::Malformed)?,
         peer_whatami,
         sn_res,
         batch_size,

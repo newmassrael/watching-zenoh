@@ -82,7 +82,7 @@ pub struct Refused {
 /// The catalogue of a closed build that was given none: no key, so the gate over it refuses every
 /// key. A closed image that forgot its table takes nothing, which is the safe way for it to be
 /// wrong.
-const NO_KEYS: KeyCatalogue<'static> = KeyCatalogue::new("", &[], &[0], &[], &[]);
+const NO_KEYS: KeyCatalogue<'static> = KeyCatalogue::EMPTY;
 
 /// The gate a host puts in front of its keys. See the module note.
 #[derive(Debug, Clone, Copy)]
@@ -348,7 +348,10 @@ mod tests {
     const PEER_B: [u8; 16] = [2; 16];
     const PEERS: [[u8; 16]; 2] = [PEER_A, PEER_B];
     const PEER_BITS: [u8; 2] = [0b100, 0b001];
-    const ALLOWANCE: PeerAllowance<'static> = PeerAllowance::new(&PEERS, 3, &PEER_BITS);
+    const ALLOWANCE: PeerAllowance<'static> = match PeerAllowance::try_new(&PEERS, 3, &PEER_BITS) {
+        Ok(table) => table,
+        Err(_) => panic!("the test table is a table"),
+    };
 
     #[test]
     fn a_message_from_a_declared_peer_is_admitted_on_the_keys_its_row_allows() {

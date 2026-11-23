@@ -129,12 +129,13 @@ pub struct LwipUdpDriver {
     lent: RefCell<[Option<TxPayload>; LENT_MAX]>,
 }
 
-/// How the drive loop's link holds the driver it reads from: an `Rc` of it on
-/// every profile but `session-slot`, and under it a counted handle to the slot
-/// that holds the driver, which keeps the slot for as long as the loop reads.
+/// How the drive loop's link holds the driver it reads from: a counted handle on the cell the
+/// driver lives in on every profile but `session-slot` (`wz_runtime_coop::link_cells`), the
+/// handle the session's actions send through is a clone of; and under it a counted handle to the
+/// slot that holds the driver, which keeps the slot for as long as the loop reads.
 #[cfg(not(feature = "session-slot"))]
-pub type DriverHandle = Rc<LwipUdpDriver>;
-/// See the `Rc` form of this alias.
+pub type DriverHandle = wz_runtime_coop::link_cells::CellRc<LwipUdpDriver>;
+/// See the cell form of this alias.
 #[cfg(feature = "session-slot")]
 pub type DriverHandle = wz_session_core::session_slot::SlotDriver<LwipUdpDriver>;
 

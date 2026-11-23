@@ -266,7 +266,8 @@ impl<T: PolicyValue> Domain<T> {
         let bits = if count == MAX_VALUES {
             u32::MAX
         } else {
-            (1u32 << count) - 1
+            // At least one, since `count` is below the width of a `u32`.
+            (1u32 << count).saturating_sub(1)
         };
         Self::with_bits(bits)
     }
@@ -283,12 +284,14 @@ impl<T: PolicyValue> Domain<T> {
             "a policy has more values than a domain holds"
         );
         let mut bits = 0u32;
-        let mut index = 0;
-        while index < allowed.len() {
-            if allowed[index] {
-                bits |= 1u32 << index;
+        let mut bit = 1u32;
+        let mut rest = allowed;
+        while let [allow, tail @ ..] = rest {
+            if *allow {
+                bits |= bit;
             }
-            index += 1;
+            bit <<= 1;
+            rest = tail;
         }
         Self::with_bits(bits)
     }
@@ -312,13 +315,17 @@ impl<T: PolicyValue> Domain<T> {
             "a policy has more values than a domain holds"
         );
         let mut bits = 0u32;
-        let mut index = 0;
-        while index < stated.len() {
+        let mut bit = 1u32;
+        let mut index = 0usize;
+        let mut rest = stated;
+        while let [value, tail @ ..] = rest {
             let unstated = !defaults_only || index == default_index;
-            if crate::policy::policy_allows(stated[index], unstated) {
-                bits |= 1u32 << index;
+            if crate::policy::policy_allows(*value, unstated) {
+                bits |= bit;
             }
-            index += 1;
+            bit <<= 1;
+            index = index.saturating_add(1);
+            rest = tail;
         }
         Self::with_bits(bits)
     }
@@ -368,11 +375,20 @@ impl<T: PolicyValue> Domain<T> {
 
     /// The one value allowed, when the domain is a singleton.
     pub const fn only(self) -> Option<T> {
-        if self.is_singleton() {
-            Some(T::ALL[self.bits.trailing_zeros() as usize])
-        } else {
-            None
+        if !self.is_singleton() {
+            return None;
         }
+        // The one bit's place, walked to in the values: a domain has a bit for each value only.
+        let mut skip = self.bits.trailing_zeros();
+        let mut rest = T::ALL;
+        while let [value, tail @ ..] = rest {
+            if skip == 0 {
+                return Some(*value);
+            }
+            skip = skip.saturating_sub(1);
+            rest = tail;
+        }
+        None
     }
 }
 
@@ -483,7 +499,7 @@ impl<P: PolicyValue> fmt::Display for OutsideDomain<P> {
         write!(
             f,
             "the build leaves `{}` out of the domain of the policy `{}`",
-            P::IDS[self.value.index()],
+            P::IDS.get(self.value.index()).copied().unwrap_or_default(),
             P::POLICY
         )
     }
@@ -616,7 +632,11 @@ impl PolicyEntry {
 
     /// The id of the value `policy` holds.
     pub fn value_in(&self, policy: &SessionPolicy) -> &'static str {
-        self.values[(self.held)(policy)]
+        // The place of the held value among the policy's values, which the entry was made from.
+        self.values
+            .get((self.held)(policy))
+            .copied()
+            .unwrap_or_default()
     }
 }
 

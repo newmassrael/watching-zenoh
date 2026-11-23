@@ -1,95 +1,66 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A `get` written as the codec's BORROWED `Request`, straight from the caller's own
-//! text: the query a node with no allocator asks.
+//! A `get` written straight into the slot its link lends, from the borrowed description of it
+//! ([`GetParts`]): no owned `Request`, no `String`, no `Vec`, so a query is asked with nothing
+//! allocated after the session opened, whatever it carries.
 //!
-//! The owned path ([`crate::request_build::RequestQueryBuilder`]) makes a `RequestOwned`
-//! (a `String` for the keyexpr, a `Vec` for the parameters, a `Vec` for the extension
-//! chain) and encodes that, which a session with no allocator cannot do, so
-//! `send_request_query` refuses it with `FeatureDisabled`.
-//! [`RequestWriter`](crate::lent_request::RequestWriter) takes the description of the
-//! query ([`GetParts`](crate::lent_request::GetParts)) with every field borrowed and writes the
-//! `Request` the owned path writes, byte for byte: the text and the parameters are read
-//! where they lie, and the message is described in the codec's PARTS form (references and
-//! a slice of at most three extension entries) that the codec's own wire writer reads. The
-//! lent form (`wz_codecs::lent::Request`) is not built, as R4194 decided: it holds the
-//! lists of the deployment inline at their capacity, and a `get` that states no extension
-//! would carry that capacity on the stack (a frame of 3,328 bytes at the SCE pin
-//! 9619440966).
+//! The writer writes the bytes the owned builder (`request_build::RequestQueryBuilder`) writes
+//! for the same description, which the module's tests hold for every combination of key, envelope
+//! extension and body extension the description can state: the envelope's QoS, target and timeout,
+//! and the Query's consolidation, parameters, value, source info and attachment, each only in a
+//! build that composes it, as the owned builder reads them.
 //!
-//! What it carries is what a `get` of a node that stores nothing asks for: a literal
-//! keyexpr, the selector parameters, the consolidation, the target, the timeout and the
-//! QoS. The Query body's value, source info and attachment, the Request's timestamp and
-//! budget, and a keyexpr named by a mapping id are not carried; a query that needs one
-//! goes the way every owned query goes. Each constant the writer reads is the owned
-//! builder's own ([`crate::query_mode::TARGET_EXT_ID`],
-//! [`crate::request_routing_context::TIMEOUT_EXT_ID`]) and the module's tests hold the
-//! equality for every combination the description can state.
-//!
-//! A description the wire cannot carry (an empty keyexpr) is REFUSED with a
-//! [`RequestRefusal`](crate::lent_request::RequestRefusal) and not repaired.
+//! It writes the bytes itself rather than describe them to the codec, as `lent_push` does for a
+//! publication: the codec's form of a Query's value extension holds the encoding and the payload as
+//! one slice, which the caller does not have without a copy. A timestamp stack is not written; a
+//! query that starts one is declined ([`RequestWriter::new`]) and goes the owned way.
 
-use sce_forge_runtime::codec::{Bounded, Bytes, CodecError, SceSink};
-use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
-use wz_codecs::ext_zint::ExtZintParts;
-use wz_codecs::query::QueryParts;
-use wz_codecs::request::{RequestParts, RequestPartsBody, RequestWire};
-use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
-use wz_codecs::wireexpr_local::WireexprLocalParts;
+use sce_forge_runtime::codec::{CodecError, SceSink};
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
-use crate::ext_header::EXT_FLAG_Z;
-use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
+use crate::ext_header::{body_eid, ext_identity, EXT_ENC_Z64, EXT_FLAG_Z};
+use crate::query_mode::TARGET_EXT_ID;
+use crate::query_parts::{GetParts, QueryParts};
+use crate::reply_stage::EncodingParts;
 use crate::request_routing_context::TIMEOUT_EXT_ID;
-use crate::sample::QosLevel;
+use crate::sample::{QosLevel, SourceInfo};
+use crate::wireexpr_build::NAMED_FLAG;
 
-/// The `Request` envelope header of a query that names its keyexpr inline:
-/// `_Z_MID_N_REQUEST | N` (a suffix follows the id). `M` derives from the `Local` arm at
-/// encode time, and `Z` is added when the envelope carries extensions.
-const REQUEST_HEADER: u8 = 0x1C | 0x20;
+/// `_Z_MID_N_REQUEST` with `M`: the key's id is in the sender's mapping, as the owned builder's
+/// `Local` arm states it.
+const REQUEST_HEADER: u8 = 0x1C | 0x40;
 
-/// The Query body's header: `_Z_MID_Z_QUERY`. The `C` (consolidation), `P` (parameters) and
-/// `Z` (extensions) flags are the codec's to set: it derives them from what the value holds.
+/// The Request header's flag that an extension chain follows the key.
+const REQUEST_FLAG_Z: u8 = 0x80;
+
+/// `_Z_MID_Z_QUERY`.
 const QUERY_HEADER: u8 = 0x03;
+/// The Query header's flags: a consolidation, parameters, an extension chain follow.
+const QUERY_FLAG_C: u8 = 0x20;
+const QUERY_FLAG_P: u8 = 0x40;
+const QUERY_FLAG_Z: u8 = 0x80;
 
-/// The entries the envelope's extension chain holds at most: the QoS, the target and the
-/// timeout.
-const CHAIN_ENTRIES: usize = 3;
+/// The envelope's target and timeout extensions, as the owned builder writes them: the target
+/// mandatory, the timeout not.
+const TARGET_HEADER: u8 = ext_identity(TARGET_EXT_ID, true, EXT_ENC_Z64);
+const TIMEOUT_HEADER: u8 = ext_identity(TIMEOUT_EXT_ID, false, EXT_ENC_Z64);
 
-/// The body of an entry no extension fills: a slot of the chain that is never written.
-static UNUSED_ENTRY_BODY: ExtZintParts = ExtZintParts { value: 0 };
+/// The longest schema an encoding carries (the codec's bound on `Encoding::schema`).
+const SCHEMA_MAX: usize = 255;
 
-/// The extension entry headers of the Request: `ENC_ZINT | id`, and for the target
-/// the mandatory bit as well.
-const ENC_ZINT: u8 = 0x20;
-const FLAG_EXT_M: u8 = 0x10;
+/// Whether the build composes each slot of the Query, as the owned builder's metadata path reads
+/// them. Read as constants, so the writer is the same code in every build and leaves out what the
+/// build does not compose.
+const PARAMETERS_RIDE: bool = cfg!(feature = "query-selector-parameters");
+const VALUE_RIDES: bool = cfg!(feature = "query-value");
+const SOURCE_INFO_RIDES: bool = cfg!(feature = "query-source-info");
+const ATTACHMENT_RIDES: bool = cfg!(feature = "query-attachment");
 
-/// What a `get` asks, every field borrowed from the caller.
-#[derive(Debug, Clone, Copy)]
-pub struct GetParts<'a> {
-    /// The request id the peer echoes in its replies and its final.
-    pub rid: crate::wire_id::RequestId,
-    /// The queried keyexpr, written as a literal.
-    pub keyexpr: &'a str,
-    /// The selector parameters; empty states none.
-    pub parameters: &'a [u8],
-    /// The consolidation the asker wants, or none for the default.
-    pub consolidation: Option<ConsolidationMode>,
-    /// The target of the query, or none for the default.
-    pub target: Option<QueryTarget>,
-    /// How long the peer may take, in milliseconds; zero states no bound.
-    pub timeout_ms: u64,
-    /// The QoS of the request; the default is not written.
-    pub qos: QosLevel,
-}
-
-/// Why a `get` is not written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestRefusal {
-    /// The keyexpr is empty: the wire has no way to say a query of nothing.
-    EmptyKeyexpr,
-}
+/// Whether the build's network counters classify a Request by its owned message
+/// (`transport-stats`): a session of such a build sends every query as that message, which the
+/// counters read.
+pub const COUNTED_FROM_OWNED: bool = cfg!(feature = "transport-stats");
 
 /// A `get`, ready to encode.
 #[derive(Debug, Clone, Copy)]
@@ -98,157 +69,309 @@ pub struct RequestWriter<'a> {
 }
 
 impl<'a> RequestWriter<'a> {
-    /// The writer for `parts`, or the refusal of a query the wire cannot carry.
-    pub fn new(parts: GetParts<'a>) -> Result<Self, RequestRefusal> {
-        if parts.keyexpr.is_empty() {
-            return Err(RequestRefusal::EmptyKeyexpr);
+    /// The writer for `parts`, or `None` for a query this writer does not carry: one that starts
+    /// a timestamp stack.
+    pub fn new(parts: GetParts<'a>) -> Option<Self> {
+        #[cfg(feature = "pubsub-ts-stack")]
+        if parts.query.ts_stack.is_some() {
+            return None;
         }
-        Ok(Self { parts })
+        Some(Self { parts })
     }
 
-    /// Encode the `Request` into `sink`. `LengthOutOfRange` for a keyexpr past the
-    /// protocol's `u16` length or parameters past its `u32` length, before a byte of
-    /// either is written.
+    /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
+    /// the owned builder refuses: a key suffix past the protocol's `u16` length, parameters, a
+    /// value or an attachment past its `u32` length, a schema past [`SCHEMA_MAX`], and a source
+    /// info whose id is not 1 to 16 bytes.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
     where
         CodecError: From<S::Error>,
     {
-        let parts = &self.parts;
-
-        // The message is described in the codec's PARTS form: every field a reference, a
-        // slice or a few words, and the codec's own wire writer reads it (`RequestWire`).
-        // The lent form of the same codecs holds their lists inline at the capacity the
-        // deployment gives them, which a `Query` with no extension and an envelope of three
-        // entries would carry on the stack all the same (a frame of 3,328 bytes).
-
-        // The Query body: the codec derives the `C`, `P` and `Z` flags and the parameters'
-        // length from what the value holds. The parameters ride only in a build that
-        // carries them, as the owned builder's `QueryMetadata` path does
-        // (`query-selector-parameters`).
-        #[cfg(feature = "query-selector-parameters")]
-        let parameters: Option<Bytes<'_, { usize::MAX }>> = if parts.parameters.is_empty() {
-            None
-        } else {
-            Some(crate::codec_owned::sent(parts.parameters)?)
-        };
-        #[cfg(not(feature = "query-selector-parameters"))]
-        let parameters: Option<Bytes<'_, { usize::MAX }>> = None;
-        let query = QueryParts {
-            header: QUERY_HEADER,
-            consolidation: parts.consolidation.map(|mode| u64::from(mode.wire_byte())),
-            parameters,
-            extensions: None,
-        };
-
-        // The envelope's extensions, in the order the owned builder writes them: the
-        // QoS unless it is the default, then the target, then the timeout. The entry of
-        // the QoS is `ENC_ZINT | 0x01`, the one every control message carries and the
-        // owned builder writes.
-        let qos = ExtZintParts {
-            value: u64::from(parts.qos.raw),
-        };
-        let target = ExtZintParts {
-            value: parts
-                .target
-                .map_or(0, |target| u64::from(target.wire_byte())),
-        };
-        let timeout = ExtZintParts {
-            value: parts.timeout_ms,
-        };
-        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); CHAIN_ENTRIES];
-        let mut count = 0;
-        if parts.qos != QosLevel::DEFAULT {
-            chain[count] = zint_entry(QOS_EXT_HEADER, &qos);
-            count += 1;
+        let GetParts { rid, key, query } = self.parts;
+        let suffix = key.suffix();
+        if suffix.is_some_and(|text| u16::try_from(text.len()).is_err()) {
+            return Err(CodecError::LengthOutOfRange);
         }
-        if parts.target.is_some() {
-            chain[count] = zint_entry(ENC_ZINT | FLAG_EXT_M | TARGET_EXT_ID, &target);
-            count += 1;
+        let parameters = sent_parameters(&query);
+        if parameters.is_some_and(|bytes| u32::try_from(bytes.len()).is_err()) {
+            return Err(CodecError::LengthOutOfRange);
         }
-        if parts.timeout_ms != 0 {
-            chain[count] = zint_entry(ENC_ZINT | TIMEOUT_EXT_ID, &timeout);
-            count += 1;
-        }
-        let chain = &mut chain[..count];
-        link_chain(chain);
+        let [value, source_info, attachment] = body_extensions(&query);
+        let body = [
+            measured(value)?,
+            measured(source_info)?,
+            measured(attachment)?,
+        ];
+        let envelope = envelope_extensions(&query);
 
-        let suffix = WireexprLocalParts {
-            id: 0,
-            suffix: Some(crate::codec_owned::sent_suffix(parts.keyexpr)?),
-        };
-        let keyexpr = WireexprParts {
-            body: WireexprPartsBody::WireexprLocal(&suffix),
-        };
-        let request = RequestParts {
-            header: REQUEST_HEADER,
-            rid: parts.rid,
-            keyexpr: &keyexpr,
-            // A chain of no entry is none: the bounds of a chain hold one entry or more.
-            extensions: Bounded::new(&*chain),
-            body: RequestPartsBody::CodecZenohQuery(&query),
-        };
-        RequestWire::encode_source(&request, sink).map_err(CodecError::from)
+        let chained = envelope.iter().any(Option::is_some);
+        sink.write_u8(
+            REQUEST_HEADER
+                | if suffix.is_some() { NAMED_FLAG } else { 0 }
+                | if chained { REQUEST_FLAG_Z } else { 0 },
+        )?;
+        sink.write_vle_u32(rid)?;
+        sink.write_vle_u32(u32::from(key.id()))?;
+        if let Some(text) = suffix {
+            sink.write_vle_u64(widen(text.len()))?;
+            sink.write_bytes(text.as_bytes())?;
+        }
+        let mut entries = envelope.iter().flatten().peekable();
+        while let Some(&(header, value)) = entries.next() {
+            sink.write_u8(continued(header, entries.peek().is_some()))?;
+            sink.write_vle_u64(value)?;
+        }
+
+        sink.write_u8(
+            QUERY_HEADER
+                | if query.consolidation.is_some() {
+                    QUERY_FLAG_C
+                } else {
+                    0
+                }
+                | if parameters.is_some() {
+                    QUERY_FLAG_P
+                } else {
+                    0
+                }
+                | if body.iter().any(Option::is_some) {
+                    QUERY_FLAG_Z
+                } else {
+                    0
+                },
+        )?;
+        if let Some(mode) = query.consolidation {
+            sink.write_vle_u64(u64::from(mode.wire_byte()))?;
+        }
+        if let Some(bytes) = parameters {
+            sink.write_vle_u64(widen(bytes.len()))?;
+            sink.write_bytes(bytes)?;
+        }
+        let mut entries = body.iter().flatten().peekable();
+        while let Some((extension, len)) = entries.next() {
+            sink.write_u8(continued(extension.header(), entries.peek().is_some()))?;
+            sink.write_vle_u64(*len)?;
+            extension.write_body(sink)?;
+        }
+        Ok(())
     }
 }
 
-/// An integer-valued extension entry.
-const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a> {
-    ExtEntryParts {
-        header,
-        body: ExtEntryPartsBody::CodecZenohExtZint(body),
+/// `header` with the chain-continuation bit set when another entry follows it, and clear on the
+/// last.
+const fn continued(header: u8, more: bool) -> u8 {
+    if more {
+        header | EXT_FLAG_Z
+    } else {
+        header & !EXT_FLAG_Z
     }
 }
 
-/// Set the chain-continuation `Z` bit on every entry but the last, which ends the
-/// chain.
-fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
-    let Some(last) = chain.len().checked_sub(1) else {
-        return;
-    };
-    for (index, entry) in chain.iter_mut().enumerate() {
-        entry.header = if index == last {
-            entry.header & !EXT_FLAG_Z
-        } else {
-            entry.header | EXT_FLAG_Z
+/// The parameters the Query carries: none when they are empty, and none in a build that does not
+/// compose them, as the owned builder's metadata path reads them (`query-selector-parameters`).
+fn sent_parameters<'a>(query: &QueryParts<'a>) -> Option<&'a [u8]> {
+    Some(query.parameters).filter(|bytes| PARAMETERS_RIDE && !bytes.is_empty())
+}
+
+/// The envelope's extensions, in the owned builder's order: the QoS unless it is the default, the
+/// target, the timeout unless it is zero. Each is a header and an integer.
+fn envelope_extensions(query: &QueryParts<'_>) -> [Option<(u8, u64)>; 3] {
+    [
+        (query.qos != QosLevel::DEFAULT).then_some((QOS_EXT_HEADER, u64::from(query.qos.raw))),
+        query
+            .target
+            .map(|target| (TARGET_HEADER, u64::from(target.wire_byte()))),
+        (query.timeout_ms != 0).then_some((TIMEOUT_HEADER, u64::from(query.timeout_ms))),
+    ]
+}
+
+/// An extension of the Query body: a header and a body of bytes, written in the owned builder's
+/// order (the value, then the source info, then the attachment).
+#[derive(Debug, Clone, Copy)]
+enum BodyExtension<'a> {
+    /// The value: its encoding, then its payload.
+    Value {
+        encoding: EncodingParts<'a>,
+        payload: &'a [u8],
+    },
+    /// The source the query names.
+    SourceInfo(&'a SourceInfo),
+    /// The attachment.
+    Attachment(&'a [u8]),
+}
+
+/// The body's extensions the build composes and the query states. A value of no payload under
+/// the zero encoding is none, as zenoh-pico's `.body` predicate and the owned builder read it.
+fn body_extensions<'a>(query: &QueryParts<'a>) -> [Option<BodyExtension<'a>>; 3] {
+    let value = query
+        .value
+        .filter(|(encoding, payload)| {
+            VALUE_RIDES
+                && (!payload.is_empty() || encoding.packed_id > 1 || encoding.schema.is_some())
+        })
+        .map(|(encoding, payload)| BodyExtension::Value { encoding, payload });
+    let source_info = query
+        .source_info
+        .filter(|_| SOURCE_INFO_RIDES)
+        .map(BodyExtension::SourceInfo);
+    let attachment = Some(query.attachment)
+        .filter(|bytes| ATTACHMENT_RIDES && !bytes.is_empty())
+        .map(BodyExtension::Attachment);
+    [value, source_info, attachment]
+}
+
+/// `extension` with the length of its body, or the refusal of a body past its bound.
+fn measured(
+    extension: Option<BodyExtension<'_>>,
+) -> Result<Option<(BodyExtension<'_>, u64)>, CodecError> {
+    extension
+        .map(|extension| Ok((extension, extension.body_len()?)))
+        .transpose()
+}
+
+impl BodyExtension<'_> {
+    /// The extension's header, without the chain-continuation bit.
+    const fn header(&self) -> u8 {
+        match self {
+            Self::Value { .. } => body_eid::QUERY_VALUE,
+            Self::SourceInfo(_) => body_eid::SOURCE_INFO,
+            Self::Attachment(_) => body_eid::QUERY_ATTACHMENT,
+        }
+    }
+
+    /// The length of the extension's body, which the wire writes before it.
+    fn body_len(&self) -> Result<u64, CodecError> {
+        let len = match self {
+            Self::Value { encoding, payload } => {
+                let schema = match encoding.schema {
+                    Some(schema) if schema.len() > SCHEMA_MAX => {
+                        return Err(CodecError::LengthOutOfRange)
+                    }
+                    Some(schema) => vle_len(widen(schema.len())).checked_add(schema.len()),
+                    None => Some(0),
+                };
+                schema
+                    .and_then(|schema| {
+                        vle_len(u64::from(encoding_word(*encoding))).checked_add(schema)
+                    })
+                    .and_then(|head| head.checked_add(payload.len()))
+            }
+            Self::SourceInfo(info) => {
+                let zid = source_zid(info)?;
+                vle_len(u64::from(info.eid))
+                    .checked_add(vle_len(u64::from(info.sn)))
+                    .and_then(|ids| ids.checked_add(zid.len()))
+                    .and_then(|body| body.checked_add(1))
+            }
+            Self::Attachment(bytes) => Some(bytes.len()),
         };
+        len.and_then(|len| u32::try_from(len).ok())
+            .map(u64::from)
+            .ok_or(CodecError::LengthOutOfRange)
+    }
+
+    /// Write the extension's body.
+    fn write_body<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        match self {
+            Self::Value { encoding, payload } => {
+                sink.write_vle_u32(encoding_word(*encoding))?;
+                if let Some(schema) = encoding.schema {
+                    sink.write_vle_u64(widen(schema.len()))?;
+                    sink.write_bytes(schema)?;
+                }
+                sink.write_bytes(payload)?;
+            }
+            Self::SourceInfo(info) => {
+                let zid = source_zid(info)?;
+                // The id's length less one, in the high nibble.
+                let nibble = zid
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|n| u8::try_from(n).ok())
+                    .and_then(|n| n.checked_mul(16))
+                    .ok_or(CodecError::LengthOutOfRange)?;
+                sink.write_u8(nibble)?;
+                sink.write_bytes(zid)?;
+                sink.write_vle_u64(u64::from(info.eid))?;
+                sink.write_vle_u64(u64::from(info.sn))?;
+            }
+            Self::Attachment(bytes) => sink.write_bytes(bytes)?,
+        }
+        Ok(())
     }
 }
 
-#[cfg(all(test, feature = "alloc", feature = "codec-request"))]
+/// The id word an encoding is written as: its id, and in the low bit whether a schema follows.
+const fn encoding_word(encoding: EncodingParts<'_>) -> u32 {
+    (encoding.packed_id & !1) | if encoding.schema.is_some() { 1 } else { 0 }
+}
+
+/// The id a source info names, refused as `LengthOutOfRange` unless it is 1 to 16 bytes, which
+/// the wire's nibble carries.
+fn source_zid(info: &SourceInfo) -> Result<&[u8], CodecError> {
+    let zid = info.zid_prefix();
+    if zid.is_empty() || zid.len() > 16 {
+        return Err(CodecError::LengthOutOfRange);
+    }
+    Ok(zid)
+}
+
+/// The bytes the codec's `vle_u64` writes `value` in: seven bits a byte, at most nine.
+fn vle_len(value: u64) -> usize {
+    let mut len = 1usize;
+    let mut rest = value;
+    while rest >= 0x80 && len < 9 {
+        rest = rest.checked_shr(7).unwrap_or(0);
+        len = len.saturating_add(1);
+    }
+    len
+}
+
+/// A length as the wire's integer.
+fn widen(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::declare_ext_qos::QOS_DECLARE;
-    use crate::metadata::QueryMetadata;
-    use crate::request_build::build_request_query_with_meta;
+    use crate::query_mode::{ConsolidationMode, QueryTarget};
+    use crate::wire_key::WireKey;
     use alloc::vec::Vec;
     use sce_forge_runtime::codec::SliceSink;
 
     /// The bytes the owned path writes for `parts`.
-    fn owned_bytes(parts: &GetParts<'_>) -> Vec<u8> {
-        let meta = QueryMetadata {
-            target: parts.target,
-            consolidation: parts.consolidation,
-            parameters: (!parts.parameters.is_empty()).then(|| parts.parameters.to_vec()),
-            timeout_ms: parts.timeout_ms as u32,
-            qos: Some(parts.qos),
-            ..QueryMetadata::default()
-        };
-        let request = build_request_query_with_meta(parts.rid, 0, Some(parts.keyexpr), &meta)
-            .expect("the owned request is built");
+    fn owned_bytes(parts: &GetParts<'_>) -> Result<Vec<u8>, CodecError> {
+        let request = parts.owned_request()?;
         let view = request.try_as_borrowed().expect("a view");
-        view.encode_to_vec()
+        Ok(view.encode_to_vec())
     }
 
     /// The bytes the writer writes for `parts`.
-    fn lent_bytes(parts: GetParts<'_>) -> Vec<u8> {
+    fn lent_bytes(parts: GetParts<'_>) -> Result<Vec<u8>, CodecError> {
         let writer = RequestWriter::new(parts).expect("the query is writable");
-        let mut buffer = [0u8; 512];
+        let mut buffer = alloc::vec![0u8; 4096];
         let mut sink = SliceSink::new(&mut buffer);
-        writer.encode(&mut sink).expect("the buffer holds it");
+        writer.encode(&mut sink)?;
         let len = sink.position();
-        buffer[..len].to_vec()
+        Ok(buffer.get(..len).expect("within the buffer").to_vec())
     }
 
+    fn keys() -> [WireKey<'static>; 4] {
+        [
+            WireKey::literal("demo/**").expect("a literal"),
+            WireKey::literal("demo/example/zenoh-rs-pub").expect("a literal"),
+            WireKey::from_parts(5, None).expect("an id"),
+            WireKey::from_parts(300, Some("/tail")).expect("an id and a suffix"),
+        ]
+    }
+
+    /// The envelope and the key: every key form, request ids of every VLE width, every
+    /// consolidation, target, timeout width and QoS, with and without parameters.
     #[test]
     fn a_get_is_written_as_the_owned_path_writes_it() {
         let consolidations = [
@@ -260,29 +383,26 @@ mod tests {
         let targets = [None, Some(QueryTarget::All), Some(QueryTarget::AllComplete)];
         let parameters: [&[u8]; 3] = [b"", b"_time=[..]", &[b'p'; 200]];
         let mut compared = 0usize;
-        for keyexpr in ["demo/**", "a", "demo/example/zenoh-rs-pub"] {
+        for key in keys() {
             for rid in [0u32, 1, 300, u32::MAX] {
                 for consolidation in consolidations {
                     for target in targets {
                         for params in parameters {
-                            for timeout_ms in [0u64, 1, 10_000, u64::from(u32::MAX)] {
+                            for timeout_ms in [0u32, 1, 10_000, u32::MAX] {
                                 for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
                                     let parts = GetParts {
                                         rid,
-                                        keyexpr,
-                                        parameters: params,
-                                        consolidation,
-                                        target,
-                                        timeout_ms,
-                                        qos,
+                                        key,
+                                        query: QueryParts {
+                                            parameters: params,
+                                            consolidation,
+                                            target,
+                                            timeout_ms,
+                                            qos,
+                                            ..QueryParts::PLAIN
+                                        },
                                     };
-                                    assert_eq!(
-                                        lent_bytes(parts),
-                                        owned_bytes(&parts),
-                                        "rid {rid} key {keyexpr} {consolidation:?} {target:?} \
-                                         params {} timeout {timeout_ms} qos {qos:?}",
-                                        params.len(),
-                                    );
+                                    assert_eq!(lent_bytes(parts), owned_bytes(&parts), "{parts:?}");
                                     compared += 1;
                                 }
                             }
@@ -292,39 +412,93 @@ mod tests {
             }
         }
         // Every combination was compared; a loop that compared none would pass.
-        assert_eq!(compared, 3 * 4 * 4 * 3 * 3 * 4 * 2);
+        assert_eq!(compared, 4 * 4 * 4 * 3 * 3 * 4 * 2);
     }
 
+    /// The body's extensions: each alone and together, a value with and without a payload and a
+    /// schema (the empty one under the zero encoding is none), source infos of the shortest and
+    /// the longest id, and attachments of one and of many bytes.
     #[test]
-    fn a_get_of_an_empty_keyexpr_is_refused_not_repaired() {
-        let parts = GetParts {
-            rid: 1,
-            keyexpr: "",
-            parameters: b"",
-            consolidation: None,
-            target: None,
-            timeout_ms: 0,
-            qos: QosLevel::DEFAULT,
-        };
-        assert_eq!(
-            RequestWriter::new(parts).err(),
-            Some(RequestRefusal::EmptyKeyexpr)
-        );
+    fn a_gets_body_extensions_are_written_as_the_owned_path_writes_them() {
+        let schema = [b's'; 200];
+        let values: [Option<(EncodingParts<'_>, &[u8])>; 6] = [
+            None,
+            Some((
+                EncodingParts {
+                    packed_id: 0,
+                    schema: None,
+                },
+                b"",
+            )),
+            Some((
+                EncodingParts {
+                    packed_id: 0,
+                    schema: None,
+                },
+                b"payload",
+            )),
+            Some((
+                EncodingParts {
+                    packed_id: 0x0A,
+                    schema: None,
+                },
+                b"",
+            )),
+            Some((
+                EncodingParts {
+                    packed_id: 0x0B,
+                    schema: Some(b"json"),
+                },
+                b"{}",
+            )),
+            Some((
+                EncodingParts {
+                    packed_id: 0x0B,
+                    schema: Some(&schema),
+                },
+                &[9u8; 300],
+            )),
+        ];
+        let short = SourceInfo::new(&[1], 0, 0);
+        let long = SourceInfo::new(&[2; 16], u32::MAX, 300);
+        let sources = [None, Some(&short), Some(&long)];
+        let attachments: [&[u8]; 3] = [b"", b"a", &[3u8; 200]];
+        let mut compared = 0usize;
+        for key in keys() {
+            for value in values {
+                for source_info in sources {
+                    for attachment in attachments {
+                        let parts = GetParts {
+                            rid: 7,
+                            key,
+                            query: QueryParts {
+                                consolidation: Some(ConsolidationMode::Latest),
+                                timeout_ms: 2_000,
+                                value,
+                                source_info,
+                                attachment,
+                                ..QueryParts::PLAIN
+                            },
+                        };
+                        assert_eq!(lent_bytes(parts), owned_bytes(&parts), "{parts:?}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 6 * 3 * 3);
     }
 
+    /// A key past the protocol's `u16` length is refused before a byte is written.
     #[test]
-    fn a_get_of_a_keyexpr_past_its_protocol_bound_is_refused_at_encode() {
+    fn a_get_of_a_key_past_its_protocol_bound_is_refused_at_encode() {
         let past_bound = "k".repeat(usize::from(u16::MAX) + 1);
         let parts = GetParts {
             rid: 1,
-            keyexpr: &past_bound,
-            parameters: b"",
-            consolidation: None,
-            target: None,
-            timeout_ms: 0,
-            qos: QosLevel::DEFAULT,
+            key: WireKey::literal(&past_bound).expect("a literal"),
+            query: QueryParts::PLAIN,
         };
-        let writer = RequestWriter::new(parts).expect("a non-empty keyexpr is writable");
+        let writer = RequestWriter::new(parts).expect("writable");
         let mut buffer = [0u8; 16];
         let mut sink = SliceSink::new(&mut buffer);
         assert_eq!(
@@ -332,5 +506,91 @@ mod tests {
             Some(CodecError::LengthOutOfRange)
         );
         assert_eq!(sink.position(), 0, "nothing is written");
+    }
+
+    /// What the owned builder refuses, the writer refuses, before a byte is written: a source
+    /// info naming no id, and a schema past the codec's bound.
+    #[test]
+    fn what_the_owned_builder_refuses_the_writer_refuses() {
+        let nobody = SourceInfo::default();
+        let long_schema = [b's'; SCHEMA_MAX + 1];
+        let refused = [
+            QueryParts {
+                source_info: Some(&nobody),
+                ..QueryParts::PLAIN
+            },
+            QueryParts {
+                value: Some((
+                    EncodingParts {
+                        packed_id: 1,
+                        schema: Some(&long_schema),
+                    },
+                    b"",
+                )),
+                ..QueryParts::PLAIN
+            },
+        ];
+        for query in refused {
+            let parts = GetParts {
+                rid: 1,
+                key: WireKey::literal("demo/a").expect("a literal"),
+                query,
+            };
+            let writer = RequestWriter::new(parts).expect("writable");
+            let mut buffer = [0u8; 512];
+            let mut sink = SliceSink::new(&mut buffer);
+            let lent = writer.encode(&mut sink).err();
+            if SOURCE_INFO_RIDES && VALUE_RIDES {
+                assert_eq!(lent, Some(CodecError::LengthOutOfRange), "{query:?}");
+                assert!(
+                    owned_bytes(&parts).is_err(),
+                    "the owned builder refuses it too"
+                );
+                assert_eq!(sink.position(), 0, "nothing is written");
+            } else {
+                assert_eq!(lent, owned_bytes(&parts).err(), "{query:?}");
+            }
+        }
+    }
+
+    /// A query that starts a timestamp stack is declined: the writer does not carry it.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_get_that_starts_a_timestamp_stack_is_declined() {
+        let stack = crate::ts_stack::TsStack::new(crate::ts_stack::point::SEND);
+        let parts = GetParts {
+            rid: 1,
+            key: WireKey::literal("demo/a").expect("a literal"),
+            query: QueryParts {
+                ts_stack: Some(&stack),
+                ..QueryParts::PLAIN
+            },
+        };
+        assert!(RequestWriter::new(parts).is_none());
+        assert!(RequestWriter::new(GetParts {
+            query: QueryParts::PLAIN,
+            ..parts
+        })
+        .is_some());
+    }
+
+    /// The length the writer states for a body is the number of bytes it writes, at every VLE
+    /// width the length counter meets.
+    #[test]
+    fn the_vle_length_is_the_bytes_the_codec_writes() {
+        for value in [
+            0u64,
+            0x7F,
+            0x80,
+            0x3FFF,
+            0x4000,
+            u64::from(u32::MAX),
+            u64::MAX,
+        ] {
+            let mut buffer = [0u8; 16];
+            let mut sink = SliceSink::new(&mut buffer);
+            sink.write_vle_u64(value).expect("room");
+            assert_eq!(vle_len(value), sink.position(), "{value:#x}");
+        }
     }
 }

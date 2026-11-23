@@ -39,20 +39,21 @@ use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 ///   [VLE u64]            `eid`.
 ///   [VLE u64]            `sn`.
 ///
-/// Panics if `zid.len()` is outside `1..=16` (the caller's setter
-/// guards this; the inner assertion is defence-in-depth).
-pub fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
-    assert!(
-        (1..=16).contains(&zid.len()),
-        "source_info zid length must be 1..=16 (zenoh-pico ZenohId wire constraint)"
-    );
+/// `None` when `zid.len()` is outside `1..=16`, which the leading nibble
+/// cannot carry (zenoh-pico's ZenohId wire constraint).
+pub fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Option<Vec<u8>> {
+    let nibble = zid
+        .len()
+        .checked_sub(1)
+        .filter(|n| *n < 16)
+        .and_then(|n| u8::try_from(n).ok())?;
     // Capacity = 1 leading byte + zid + VLE(u32) worst-case (5 bytes) ×2.
-    let mut out = Vec::with_capacity(1 + zid.len() + 5 + 5);
-    out.push(((zid.len() as u8) - 1) << 4);
+    let mut out = Vec::with_capacity(zid.len().saturating_add(11));
+    out.push(nibble << 4);
     out.extend_from_slice(zid);
     encode_vle_u64_into(&mut out, eid as u64);
     encode_vle_u64_into(&mut out, sn as u64);
-    out
+    Some(out)
 }
 
 /// ENC_ZBUF marker packed into the ext header high bits (`0b10 << 5 = 0x40`);
@@ -78,13 +79,14 @@ pub const SOURCE_INFO_EXT_ID: u8 = 0x01;
 /// (`crate::ext_nodeid::apply_chain_z_bits` for body chains, the per-builder
 /// finalize loop for Query / Err); this helper emits the entry with `Z` clear.
 /// Fallible where the profile stores the ext-zbuf body inline at a capacity
-/// below it (`CapacityExceeded`); a growable profile holds any body.
+/// below it (`CapacityExceeded`); a growable profile holds any body. A zid
+/// outside `1..=16` bytes is refused as `LengthOutOfRange`.
 pub fn encode_source_info_ext_entry<S: for<'x> ExtEntryFrom<'x>>(
     zid: &[u8],
     eid: u32,
     sn: u32,
 ) -> Result<ExtEntryOwned<S>, CodecError> {
-    let value = encode_source_info_ext_body(zid, eid, sn);
+    let value = encode_source_info_ext_body(zid, eid, sn).ok_or(CodecError::LengthOutOfRange)?;
     let held = Bounded::new(value.as_slice())
         .ok_or(CodecError::LengthOutOfRange)?
         .store::<S, ExtZbufValueField>()?;
@@ -120,7 +122,7 @@ mod tests {
     #[test]
     fn encode_source_info_ext_body_matches_zenoh_pico_layout() {
         // zid_len=2 → leading byte = (2-1)<<4 = 0x10
-        let bytes = encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000);
+        let bytes = encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000).expect("a 2-byte zid");
         // Expected: [0x10, 0xDE, 0xAD, VLE(0x80)..., VLE(0x4000)...]
         // VLE(0x80): 0x80 needs 2 bytes (first 0x80|0x00=0x80, second 0x01)
         // VLE(0x4000): 0x4000 needs 3 bytes (0x80, 0x80, 0x01)
@@ -170,11 +172,29 @@ mod tests {
                 // 1 leading + 2 zid + VLE(0x80)=2 + VLE(0x4000)=3).
                 assert_eq!(
                     z.value_len as usize,
-                    encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000).len()
+                    encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000)
+                        .expect("a 2-byte zid")
+                        .len()
                 );
                 assert_eq!(z.value_len, 8);
             }
             _ => panic!("expected ExtZbuf body"),
         }
+    }
+
+    /// A zid the leading nibble cannot carry is refused, by the body and by the
+    /// entry, and the widest one it can is written.
+    #[test]
+    fn a_zid_of_no_byte_or_past_sixteen_is_refused() {
+        assert_eq!(encode_source_info_ext_body(&[], 1, 2), None);
+        assert_eq!(encode_source_info_ext_body(&[0xAA; 17], 1, 2), None);
+        assert_eq!(
+            encode_source_info_ext_body(&[0xAA; 16], 1, 2).map(|b| b[0]),
+            Some(0xF0)
+        );
+        assert_eq!(
+            encode_source_info_ext_entry::<crate::wire::WireStorage>(&[], 1, 2).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
     }
 }

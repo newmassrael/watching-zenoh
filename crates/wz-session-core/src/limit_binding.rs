@@ -276,7 +276,7 @@ impl LimitDomain {
     /// refused by the document's own rule, not by the domain.
     pub const fn bound(capacity: Option<usize>) -> Self {
         // `usize::MAX` is the quota no bound is held as ([`Quota`]), so the integers stop under it.
-        Self::bound_within(capacity, usize::MAX - 1)
+        Self::bound_within(capacity, usize::MAX.saturating_sub(1))
     }
 
     /// [`Self::bound`] of a bound whose code holds no count above `most` (a counter of a narrower
@@ -568,33 +568,43 @@ pub const LIMITS_LENT_AT_OPEN: bool = cfg!(feature = "limits-lent-at-open");
 
 /// Whether a limit's domain keeps only the build's value: what `WZ_LIMIT_DOMAINS` states (`full`
 /// keeps every value the build allows, `defaults` only its own), else whether the target has no
-/// operating system. A value that is neither word is a compile error, not a default.
+/// operating system. A value that is neither word is a compile error, not a default: the
+/// assertion below judges the build's own word.
 pub const fn limit_defaults_only(stated: Option<&str>) -> bool {
-    let Some(text) = stated else {
-        return cfg!(target_os = "none");
-    };
-    if same(text, "full") {
-        false
-    } else if same(text, "defaults") {
-        true
-    } else {
-        panic!("WZ_LIMIT_DOMAINS is neither `full` nor `defaults`")
+    match stated {
+        None => cfg!(target_os = "none"),
+        Some(text) => same(text, "defaults"),
     }
 }
 
+/// Whether `stated` is no word or one of the two `WZ_LIMIT_DOMAINS` takes.
+const fn limit_domains_word(stated: Option<&str>) -> bool {
+    match stated {
+        None => true,
+        Some(text) => same(text, "full") || same(text, "defaults"),
+    }
+}
+
+const _: () = assert!(
+    limit_domains_word(option_env!("WZ_LIMIT_DOMAINS")),
+    "WZ_LIMIT_DOMAINS is neither `full` nor `defaults`"
+);
+
 const fn same(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut index = 0;
-    while index < a.len() {
-        if a[index] != b[index] {
-            return false;
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    loop {
+        match (a, b) {
+            ([x, a_rest @ ..], [y, b_rest @ ..]) => {
+                if *x != *y {
+                    return false;
+                }
+                a = a_rest;
+                b = b_rest;
+            }
+            ([], []) => return true,
+            _ => return false,
         }
-        index += 1;
     }
-    true
 }
 
 /// One limit a stage after the build may decide: its id, its kind, who makes it grow, its capacity

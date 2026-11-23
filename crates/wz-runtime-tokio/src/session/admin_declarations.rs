@@ -180,6 +180,7 @@ pub(crate) fn materialize(
     fold_declarations(
         AdminEntityKind::Subscriber,
         observer
+            .face_ref()
             .remote_subscribers
             .iter_declared()
             .map(|(_, ke)| ke),
@@ -189,7 +190,11 @@ pub(crate) fn materialize(
     #[cfg(feature = "declare-queryable")]
     fold_declarations(
         AdminEntityKind::Queryable,
-        observer.remote_queryables.iter_declared().map(|(_, ke)| ke),
+        observer
+            .face_ref()
+            .remote_queryables
+            .iter_declared()
+            .map(|(_, ke)| ke),
         face,
         &mut map,
     );
@@ -206,10 +211,7 @@ pub(crate) fn materialize(
     #[cfg(feature = "liveliness-subscriber")]
     fold_declarations(
         AdminEntityKind::Token,
-        observer
-            .liveliness_subscribers
-            .iter_peer_tokens()
-            .map(|(_, ke)| ke),
+        observer.face_ref().tokens.iter().map(|(_, ke)| ke),
         face,
         &mut map,
     );
