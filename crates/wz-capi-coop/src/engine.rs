@@ -53,7 +53,9 @@ use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
 use wz_session_core::row_callback::{CallLatch, RowCallback};
-use wz_session_core::session_tables::{RowCallbacks, SessionTables, SubscriberHandle};
+use wz_session_core::session_tables::{
+    KeyexprHandle, RowCallbacks, SessionTables, SubscriberHandle,
+};
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -3193,6 +3195,42 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// The links that took the declaration `prefix` names, when the entity going is the last that
+    /// holds it: asked while the rows stand, which are their places in the replay's order. `None`
+    /// when the entity's key is named by no declaration, or another entity holds it too. The one
+    /// reading of a last hold for every kind of entity and for the key's own release.
+    #[inline(never)]
+    fn prefix_retraction(
+        &mut self,
+        prefix: Option<KeyexprHandle>,
+    ) -> Option<Vec<SessionHandle<C>>> {
+        let prefix = prefix.filter(|&prefix| {
+            tables(&self.registry)
+                .keyexprs()
+                .get(prefix)
+                .is_some_and(|row| row.holds() <= 1)
+        })?;
+        let place = self.keyexpr_place(prefix);
+        Some(self.retract_at(place))
+    }
+
+    /// Tell `links`, and each group the session joined, that the declaration `mapping_id` is
+    /// retracted, once the tables let it go: what its last holder's going sends, after the rows
+    /// went, so a send never finds the tables borrowed.
+    #[inline(never)]
+    fn retract_keyexpr(&self, links: Option<Vec<SessionHandle<C>>>, mapping_id: Option<ExprId>) {
+        let (Some(links), Some(mapping_id)) = (links, mapping_id) else {
+            return;
+        };
+        for actions in links {
+            actions.send_undeclare_kexpr(mapping_id);
+        }
+        #[cfg(feature = "group")]
+        for group in &self.groups {
+            group.retract_keyexpr(mapping_id);
+        }
+    }
+
     /// Move each group on. A group whose session ended on its own (its link was lost) takes with
     /// it what its members declared and the gets asked of them, as a lost link does, and is
     /// joined again `redial_ms` later, and again after each attempt that fails, as zenoh-pico's
@@ -4123,6 +4161,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn subscriber_rows(&self) -> usize {
         tables(&self.core.lock().0.registry).subscribers().len()
+    }
+
+    /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order:
+    /// what a test reads of the session's tables.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
+        self.live()
+            .map(|core| {
+                tables(&core.0.registry)
+                    .keyexprs()
+                    .iter()
+                    .map(|(_, row)| (row.id(), String::from(row.key())))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
@@ -5978,32 +6031,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             // The declaration its key is named by goes with it when it is the last that holds it;
             // what the links are told is read while the row stands.
-            let (handle, last, retraction) = {
-                let tables = tables(&core.registry);
-                let found = tables
-                    .subscribers()
-                    .iter()
-                    .find(|(_, row)| row.id() == id)
-                    .map(|(handle, row)| {
-                        let last = row.key().prefix().filter(|&prefix| {
-                            tables
-                                .keyexprs()
-                                .get(prefix)
-                                .is_some_and(|keyexpr| keyexpr.holds() <= 1)
-                        });
-                        (handle, last, row.callback().retraction.clone())
-                    });
-                found
-            }?;
+            let (handle, prefix, retraction) = tables(&core.registry)
+                .subscribers()
+                .iter()
+                .find(|(_, row)| row.id() == id)
+                .map(|(handle, row)| {
+                    (
+                        handle,
+                        row.key().prefix(),
+                        row.callback().retraction.clone(),
+                    )
+                })?;
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the subscriber's, then the declaration's, which comes before every
             // subscriber.
             let place = core.subscriber_place(handle);
             let links = core.retract_at(place);
-            let keyexpr_links = last.map(|prefix| {
-                let place = core.keyexpr_place(prefix);
-                core.retract_at(place)
-            });
+            let keyexpr_links = core.prefix_retraction(prefix);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             let undeclared = tables_mut(&core.registry).undeclare_subscriber(handle)?;
@@ -6012,15 +6056,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 SubscriberRow::retract(id, retraction.as_ref(), &actions);
             }
-            if let (Some(links), Some(mapping_id)) = (keyexpr_links, undeclared.keyexpr) {
-                for actions in links {
-                    actions.send_undeclare_kexpr(mapping_id);
-                }
-                #[cfg(feature = "group")]
-                for group in &core.groups {
-                    group.retract_keyexpr(mapping_id);
-                }
-            }
+            core.retract_keyexpr(keyexpr_links, undeclared.keyexpr);
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
@@ -6045,18 +6081,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The table refuses it, before an id is taken or anything is sent, when it is full, when
         // the key cannot be held, or when every id is taken. An id of the shared dictionary names
         // its key in this session's space too, so no key expression is declared under one.
-        let declared = {
-            let mut tables = tables_mut(&core.registry);
+        // One declaration, whatever ids the session shares: the table's declaration is one body
+        // for both.
+        #[cfg(feature = "shared-key-ids")]
+        let shared = core.key_ids.as_ref();
+        let usable = |id: ExprId| -> bool {
             #[cfg(feature = "shared-key-ids")]
-            let declared = match &core.key_ids {
-                Some(ids) => tables
-                    .declare_keyexpr_where(keyexpr, false, |id| ids.next_free_id(id) == Some(id)),
-                None => tables.declare_keyexpr(keyexpr),
-            };
+            {
+                shared.map_or(true, |ids| ids.next_free_id(id) == Some(id))
+            }
             #[cfg(not(feature = "shared-key-ids"))]
-            let declared = tables.declare_keyexpr(keyexpr);
-            declared?
+            {
+                let _ = id;
+                true
+            }
         };
+        let declared = tables_mut(&core.registry).declare_keyexpr_where(keyexpr, false, usable)?;
         let id = declared.id;
         if !declared.new {
             return Ok(id);
@@ -6088,31 +6128,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         let core = &mut core.0;
-        let (handle, last) = {
-            let tables = tables(&core.registry);
-            let Some(handle) = tables.keyexpr_by_id(mapping_id) else {
-                return;
-            };
-            let last = tables
-                .keyexprs()
-                .get(handle)
-                .is_some_and(|row| row.holds() <= 1);
-            (handle, last)
+        let Some(handle) = tables(&core.registry).keyexpr_by_id(mapping_id) else {
+            return;
         };
-        // The links are asked while the row stands, which is its place in the replay's order.
-        let place = core.keyexpr_place(handle);
-        let links = last.then(|| core.retract_at(place));
+        let links = core.prefix_retraction(Some(handle));
         let retracted = tables_mut(&core.registry).undeclare_keyexpr(handle);
-        if let (Some(links), Some(_)) = (links, retracted) {
-            // The row went before the links are told: a send never finds the table borrowed.
-            for actions in links {
-                actions.send_undeclare_kexpr(mapping_id);
-            }
-            #[cfg(feature = "group")]
-            for group in &core.groups {
-                group.retract_keyexpr(mapping_id);
-            }
-        }
+        // The row went before the links are told: a send never finds the table borrowed.
+        core.retract_keyexpr(links, retracted);
     }
 
     #[inline(never)]
@@ -6133,19 +6155,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn place_lender(&self) -> Option<&dyn PlaceLender> {
         Some(self)
-    }
-
-    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
-        self.live()
-            .map(|core| {
-                let tables = tables(&core.0.registry);
-                tables
-                    .keyexprs()
-                    .iter()
-                    .map(|(_, row)| (row.id(), String::from(row.key())))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     fn declare_matching_listener(
@@ -7051,28 +7060,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                             let form = tables.wire_of(row.key());
                             (form.mapping, form.suffix.len())
                         });
-                        // The declaration its key is named by, when the token is its last holder.
-                        let last = row.key().prefix().filter(|&prefix| {
-                            tables
-                                .keyexprs()
-                                .get(prefix)
-                                .is_some_and(|keyexpr| keyexpr.holds() <= 1)
-                        });
-                        (handle, names, last)
+                        (handle, names, row.key().prefix())
                     });
             found
         };
-        let Some((handle, names, last)) = retracted else {
+        let Some((handle, names, prefix)) = retracted else {
             return;
         };
         // The links are asked while the rows stand, which are their places in the replay's order:
         // the token's, then the declaration's, which comes before every token.
         let token_place = core.token_place(handle);
         let token_links = core.retract_at(token_place);
-        let keyexpr_links = last.map(|prefix| {
-            let place = core.keyexpr_place(prefix);
-            core.retract_at(place)
-        });
+        let keyexpr_links = core.prefix_retraction(prefix);
         let Some(undeclared) = tables_mut(&core.registry).undeclare_token(handle) else {
             return;
         };
@@ -7096,15 +7095,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 retract_token(&actions, id, names);
             }
         }
-        if let (Some(links), Some(mapping_id)) = (keyexpr_links, undeclared.keyexpr) {
-            for actions in links {
-                actions.send_undeclare_kexpr(mapping_id);
-            }
-            #[cfg(feature = "group")]
-            for group in &core.groups {
-                group.retract_keyexpr(mapping_id);
-            }
-        }
+        core.retract_keyexpr(keyexpr_links, undeclared.keyexpr);
     }
 
     #[cfg(feature = "liveliness")]
