@@ -989,7 +989,9 @@ struct HandedLeg {
     keyexpr: String,
     wire: WireKey,
     payload: Vec<u8>,
-    opts: PublishOptions,
+    /// The options without the attachment they borrowed, which the leg keeps beside them.
+    opts: PublishOptions<'static>,
+    attachment: Option<Vec<u8>>,
     dropped_on: Vec<FaceId>,
 }
 
@@ -998,8 +1000,8 @@ struct Publication<'a> {
     keyexpr: &'a str,
     wire: &'a WireKey,
     payload: &'a [u8],
-    opts: &'a PublishOptions,
-    meta: &'a PushMetadata,
+    opts: &'a PublishOptions<'a>,
+    meta: &'a PushMetadata<'a>,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -4565,11 +4567,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
             ToPublish::DroppedOn { faces, told } => {
+                let (kept, attachment) = opts.clone().into_owned_parts();
                 self.hand_off(HandedLeg {
                     keyexpr: String::from(keyexpr),
                     wire: wire.clone(),
                     payload: payload.to_vec(),
-                    opts: opts.clone(),
+                    opts: kept,
+                    attachment: attachment.map(<[u8]>::to_vec),
                     dropped_on: faces,
                 });
                 return if told {
@@ -4779,7 +4783,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core::mem::take(&mut *handed)
         };
         for leg in &legs {
-            let meta = leg.opts.push_metadata();
+            // The options the leg kept, over the attachment it kept beside them.
+            let mut opts: PublishOptions<'_> = leg.opts.clone();
+            opts.attachment = leg.attachment.as_deref();
+            let meta = opts.push_metadata();
             // The caller was answered when the leg was handed.
             let _ = self.fan_out(
                 core,
@@ -4787,7 +4794,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     keyexpr: &leg.keyexpr,
                     wire: &leg.wire,
                     payload: &leg.payload,
-                    opts: &leg.opts,
+                    opts: &opts,
                     meta: &meta,
                 },
                 &leg.dropped_on,

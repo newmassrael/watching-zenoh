@@ -145,7 +145,7 @@ fn recording_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
     )
 }
 
-fn remote() -> PublishOptions {
+fn remote() -> PublishOptions<'static> {
     PublishOptions::put().with_locality(Locality::Remote)
 }
 

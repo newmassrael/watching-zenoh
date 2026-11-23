@@ -561,7 +561,7 @@ mod tests {
         (lent_seen, owned_seen, lent.in_place_fallbacks())
     }
 
-    fn meta() -> crate::metadata::PushMetadata {
+    fn meta() -> crate::metadata::PushMetadata<'static> {
         crate::metadata::PushMetadata {
             timestamp: Some(TimestampHint {
                 time: 0x0102_0304_0506_0708,
@@ -572,7 +572,7 @@ mod tests {
                 schema: Some(b"schema/x".to_vec()),
             }),
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
-            attachment: Some(alloc::vec![1, 2, 3, 4, 5]),
+            attachment: Some(&[1, 2, 3, 4, 5]),
             qos: Some(QosLevel::from_raw(0x05)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

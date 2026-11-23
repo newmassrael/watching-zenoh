@@ -6774,7 +6774,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn declare_publisher(
         &self,
         keyexpr: impl Into<String>,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> Publisher<R, T> {
         let keyexpr = keyexpr.into();
         // R2577 — ASK THE NEIGHBOUR FOR THE DECLARATIONS THIS PUBLISHER'S
@@ -6972,7 +6972,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> PublisherAliased<R, T> {
         PublisherAliased {
             session: self.clone(),

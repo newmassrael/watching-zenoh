@@ -1308,7 +1308,7 @@ impl PublisherQos {
     /// `opts` as this publisher sends it: its QoS on top of whatever the call
     /// carried, and its encoding when the call carried none. Taken by value, so the call's
     /// attachment and encoding move into what is sent and are not copied.
-    fn apply(&self, opts: PublishOptions) -> PublishOptions {
+    fn apply<'a>(&self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
         let mut out = opts
             .with_priority(self.priority)
             .with_congestion_control(self.congestion_control)
@@ -1751,12 +1751,13 @@ pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
     }
 }
 
-/// Take a moved payload's bytes as a `Vec`, nulling the source: what an option that carries an
-/// attachment reads, which is copied into the options it builds. A borrowed payload is read where
+/// Take a moved payload's bytes as a `Vec`, nulling the source: what an advanced put's option
+/// that carries an attachment reads, which is copied into the options it builds. A borrowed payload is read where
 /// its marshal holds it, which this call outlives, and copied nowhere else.
 ///
 /// # Safety
 /// As [`read_moved_bytes`].
+#[cfg(feature = "advanced")]
 pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
     if payload.is_null() {
         return None;
@@ -1787,11 +1788,14 @@ pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> O
 /// `z_source_info_t` existed, so no C program could build one. `z_source_info_new`
 /// landed in R311y559 and the reason expired with it.
 ///
+/// The options borrow the moved attachment, which `attachment` holds for as long as the put runs.
+///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
 unsafe fn publisher_put_options(
     options: *const z_publisher_put_options_t,
-) -> Option<PublishOptions> {
+    attachment: &mut Option<MovedBytes<'static>>,
+) -> Option<PublishOptions<'_>> {
     if options.is_null() {
         return None;
     }
@@ -1801,7 +1805,7 @@ unsafe fn publisher_put_options(
         attachment: (*options).attachment,
         source_info: (*options).source_info(),
     }
-    .fold(put_options());
+    .fold(put_options(), attachment);
     carried.then_some(opts)
 }
 
@@ -1817,14 +1821,21 @@ struct PutCarried {
 
 impl PutCarried {
     /// `opts` with what the options carry, and whether they carried anything. The moved encoding
-    /// and attachment are consumed on every path. One body for both put doors, out of line so
+    /// and attachment are consumed on every path; the attachment is read where it lies, held in
+    /// `held` for as long as the options borrow it. One body for both put doors, out of line so
     /// that neither export holds a copy of it.
     ///
     /// # Safety
     /// Each field must be null or valid as the options struct it was read from requires.
     #[inline(never)]
-    unsafe fn fold(self, mut opts: PublishOptions) -> (PublishOptions, bool) {
-        let attachment = take_moved_bytes_to_vec(self.attachment);
+    unsafe fn fold<'a>(
+        self,
+        mut opts: PublishOptions<'a>,
+        held: &'a mut Option<MovedBytes<'static>>,
+    ) -> (PublishOptions<'a>, bool) {
+        *held = read_moved_bytes(self.attachment);
+        let held: &'a Option<MovedBytes<'static>> = held;
+        let attachment = held.as_deref().map(ByteBuf::as_slice);
         let encoding = crate::encoding::take_moved_encoding(self.encoding);
         let timestamp = timestamp_hint_of(self.timestamp);
         let source_info = source_info_hint_of(self.source_info);
@@ -1861,7 +1872,7 @@ impl PutCarried {
 /// switch it is `Any`, and the session's own subscribers are reached ONCE, through the
 /// registry's local plane (faces take the remote half, the plane the local one), inside
 /// the call and on the calling thread, which is where pico delivers them.
-fn put_options() -> PublishOptions {
+fn put_options() -> PublishOptions<'static> {
     let mut opts = PublishOptions::default()
         .with_reliability(Reliability::Reliable)
         .with_locality(crate::locality::default_locality!("local-subscriber"));
@@ -1901,7 +1912,8 @@ mod put_options_tests {
             del.priority = 2;
             del.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
             del.is_express = true;
-            let stated_put = session_put_options(&put);
+            let mut held = None;
+            let stated_put = session_put_options(&put, &mut held);
             let stated_del = session_delete_options(&del);
             assert!(stated_put.qos.is_some(), "the stated QoS is set");
             assert_eq!(stated_put.qos, stated_del.qos);
@@ -1937,13 +1949,13 @@ mod put_options_tests {
             ..PublisherQos::pico_default()
         };
         let call = put_options()
-            .with_attachment(alloc::vec![7, 8])
+            .with_attachment(&[7, 8])
             .with_encoding(EncodingHint {
                 packed_id: 4,
                 schema: None,
             });
         let sent = declared.apply(call);
-        assert_eq!(sent.attachment.as_deref(), Some(&[7u8, 8][..]));
+        assert_eq!(sent.attachment, Some(&[7u8, 8][..]));
         assert_eq!(
             sent.encoding.as_ref().map(|encoding| encoding.packed_id),
             Some(4),
@@ -2057,12 +2069,12 @@ mod put_options_tests {
         // SAFETY: each pointer handed over is null or points at a live value of its type, which
         // outlives the call.
         unsafe {
-            assert!(publisher_put_options(core::ptr::null()).is_none());
+            assert!(publisher_put_options(core::ptr::null(), &mut None).is_none());
             let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             assert!(
-                publisher_put_options(&options).is_none(),
+                publisher_put_options(&options, &mut None).is_none(),
                 "default options carry nothing"
             );
             let mut stamp = z_timestamp_t {
@@ -2073,7 +2085,9 @@ mod put_options_tests {
                 time: 42,
             };
             options.timestamp = &mut stamp;
-            let carried = publisher_put_options(&options).expect("a timestamp is carried");
+            let mut held = None;
+            let carried =
+                publisher_put_options(&options, &mut held).expect("a timestamp is carried");
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
         }
     }
@@ -2111,8 +2125,9 @@ mod put_options_tests {
             put.attachment = &mut attachment;
             put.timestamp = &mut stamp;
             put.is_express = true;
-            let carried = session_put_options(&put);
-            assert_eq!(carried.attachment.as_deref(), Some(&b"session"[..]));
+            let mut held = None;
+            let carried = session_put_options(&put, &mut held);
+            assert_eq!(carried.attachment, Some(&b"session"[..]));
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
             assert_eq!(
                 carried.qos.map(|qos| qos.is_express()),
@@ -2126,8 +2141,10 @@ mod put_options_tests {
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             options.attachment = &mut attachment;
-            let carried = publisher_put_options(&options).expect("an attachment is carried");
-            assert_eq!(carried.attachment.as_deref(), Some(&b"publisher"[..]));
+            let mut held = None;
+            let carried =
+                publisher_put_options(&options, &mut held).expect("an attachment is carried");
+            assert_eq!(carried.attachment, Some(&b"publisher"[..]));
             assert!(carried.timestamp.is_none());
             assert!(attachment._this.handle.is_null(), "the attachment is spent");
         }
@@ -2155,14 +2172,16 @@ mod put_options_tests {
             z_publisher_put_options_default(options.as_mut_ptr());
             let mut options = options.assume_init();
             options.source_info = &mut info;
-            let carried = publisher_put_options(&options).expect("a source info is carried");
+            let mut held = None;
+            let carried =
+                publisher_put_options(&options, &mut held).expect("a source info is carried");
             let source = carried.source_info.expect("the source info");
             assert_eq!((source.eid, source.sn), (0x5150, 9001));
             assert_eq!(source.zid, [0xa1; 16]);
             let mut unset = z_source_info_t::empty();
             options.source_info = &mut unset;
             assert!(
-                publisher_put_options(&options).is_none(),
+                publisher_put_options(&options, &mut None).is_none(),
                 "pico's null source info is no source info"
             );
         }
@@ -2183,8 +2202,10 @@ mod put_options_tests {
             let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
             z_put_options_default(put.as_mut_ptr());
             let put = put.assume_init();
-            assert!(session_put_options(&put).source_info.is_none());
-            assert!(session_put_options(core::ptr::null()).source_info.is_none());
+            assert!(session_put_options(&put, &mut None).source_info.is_none());
+            assert!(session_put_options(core::ptr::null(), &mut None)
+                .source_info
+                .is_none());
             let mut delete = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
             z_delete_options_default(delete.as_mut_ptr());
             let delete = delete.assume_init();
@@ -2450,9 +2471,14 @@ pub(crate) unsafe fn source_info_hint_of(
 /// own put to its own subscriber, and there is no field through which a program
 /// could ask it to.
 ///
+/// The options borrow the moved attachment, which `attachment` holds for as long as the put runs.
+///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
-unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions {
+unsafe fn session_put_options(
+    options: *const z_put_options_t,
+    attachment: &mut Option<MovedBytes<'static>>,
+) -> PublishOptions<'_> {
     let opts = put_options();
     if options.is_null() {
         return opts;
@@ -2468,7 +2494,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
         attachment: (*options).attachment,
         source_info,
     }
-    .fold(opts);
+    .fold(opts, attachment);
     StatedQos {
         priority: (*options).priority,
         congestion_control: (*options).congestion_control,
@@ -2484,7 +2510,7 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
 ///
 /// # Safety
 /// `options` must be null or a valid delete-options struct.
-unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishOptions {
+unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishOptions<'static> {
     let mut opts = put_options();
     opts.kind = SampleKind::Del;
     if options.is_null() {
@@ -2569,7 +2595,8 @@ pub unsafe extern "C" fn z_put(
     options: *const z_put_options_t,
 ) -> ZResult {
     guarded(|| {
-        let resolved = session_put_options(options);
+        let mut attachment = None;
+        let resolved = session_put_options(options, &mut attachment);
         let Some(buf) = read_moved_bytes(payload) else {
             return Z_ERR_NULL;
         };
@@ -2772,7 +2799,8 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        state.publish(&buf, publisher_put_options(options))
+        let mut attachment = None;
+        state.publish(&buf, publisher_put_options(options, &mut attachment))
     })
 }
 

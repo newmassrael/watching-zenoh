@@ -114,7 +114,7 @@ const KEYEXPR: &str = "demo/udp-chaos";
 /// it is full (see the module note): the scenarios send two oversize Puts back to
 /// back through a lane that holds two datagrams, and the loss they study is the
 /// injected one alone.
-fn lossless_put() -> PublishOptions {
+fn lossless_put() -> PublishOptions<'static> {
     PublishOptions::put().with_congestion_control(CongestionControl::Block)
 }
 

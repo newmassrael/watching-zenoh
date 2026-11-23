@@ -751,7 +751,7 @@ pub fn build_push_literal_with_meta(
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -825,7 +825,7 @@ pub fn build_push_shm_literal(
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -874,7 +874,7 @@ pub fn build_push_shm_aliased(
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -911,7 +911,7 @@ pub fn build_push_aliased_with_meta(
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -939,7 +939,7 @@ pub fn build_push_del_literal_with_meta(
         body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -973,7 +973,7 @@ pub fn build_push_del_aliased_with_meta(
         body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -1813,7 +1813,7 @@ mod tests {
                 schema: Some("text/plain".into()),
             }),
             source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
-            attachment: Some(b"attach".to_vec()),
+            attachment: Some(b"attach"),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
@@ -1900,7 +1900,7 @@ mod tests {
                 schema: Some("ignored".into()),
             }),
             source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
-            attachment: Some(b"del-att".to_vec()),
+            attachment: Some(b"del-att"),
             qos: Some(QosLevel::from_raw(0x10)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

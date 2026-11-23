@@ -1670,7 +1670,7 @@ mod tests {
                 eid: u32::MAX,
                 sn: u32::MAX,
             }),
-            attachment: Some(vec![7; 300]),
+            attachment: Some(&[7; 300]),
             qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

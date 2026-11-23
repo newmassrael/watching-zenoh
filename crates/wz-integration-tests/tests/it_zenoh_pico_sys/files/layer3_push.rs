@@ -206,7 +206,7 @@ fn layer3_push_with_timestamp_and_attachment_byte_equivalent() {
                 time: TS_TIME,
                 zid: TS_ZID.to_vec(),
             }),
-            attachment: Some(ATTACHMENT.to_vec()),
+            attachment: Some(ATTACHMENT),
             ..Default::default()
         },
     )

@@ -28,7 +28,7 @@ use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 /// locality predicates, and the session module owns the conversion
 /// via `PublishOptions::push_metadata`.
 #[derive(Debug, Clone, Default)]
-pub struct PushMetadata {
+pub struct PushMetadata<'a> {
     /// Body-level timestamp (zenoh-pico `_z_m_push_commons_t._timestamp`,
     /// gated by `_Z_FLAG_Z_P_T` for Put / `_Z_FLAG_Z_D_T` for Del).
     pub timestamp: Option<TimestampHint>,
@@ -38,8 +38,9 @@ pub struct PushMetadata {
     pub encoding: Option<EncodingHint>,
     /// Body-level source identification (ext_id=0x01 ENC_ZBUF).
     pub source_info: Option<SourceInfo>,
-    /// Body-level attachment blob (ext_id=0x03 ENC_ZBUF).
-    pub attachment: Option<Vec<u8>>,
+    /// Body-level attachment blob (ext_id=0x03 ENC_ZBUF), borrowed from what the publish was
+    /// handed: the encoder writes it where it lies.
+    pub attachment: Option<&'a [u8]>,
     /// Outer-level QoS metadata (Push extension ext_id=0x01 ENC_ZINT).
     pub qos: Option<QosLevel>,
     /// Outer-level timestamp stack (Push extension ext_id=0x07 ENC_ZBUF), which the node that
@@ -48,7 +49,7 @@ pub struct PushMetadata {
     pub ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
-impl PushMetadata {
+impl PushMetadata<'_> {
     /// `true` when the metadata starts no timestamp stack, which a build without
     /// `pubsub-ts-stack` has no slot for.
     fn carries_no_ts_stack(&self) -> bool {

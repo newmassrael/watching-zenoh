@@ -24,8 +24,6 @@
 //! are features of this crate; the runtime's features of the same names forward to them, so the
 //! answer in a tokio build is the answer it always was.
 
-use alloc::vec::Vec;
-
 use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
@@ -53,7 +51,7 @@ use crate::send_wire_error::SendWireError;
 /// contract holds.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct PublishOptions {
+pub struct PublishOptions<'a> {
     /// Publisher-side locality predicate (zenoh-pico `allowed_destination` parameter to
     /// `_z_write`). `Any` routes to both wire and loopback branches; `Remote` to wire only;
     /// `SessionLocal` to loopback only. Default: `Any`.
@@ -115,8 +113,10 @@ pub struct PublishOptions {
     /// one, which is R2370's repair; this field feeds BOTH, so the single id this comment used to
     /// name was wrong for one of them and foreign-proven — R311y209
     /// (`wz_attachment_to_pico_zsub`, ze_serializer kv-pairs decoded by pico); loopback honours
-    /// it from R232.
-    pub attachment: Option<Vec<u8>>,
+    /// it from R232. Borrowed for the publish, as its payload is: the bytes are written into the
+    /// slot the link lends, and a holder that keeps the options past the call keeps the bytes
+    /// itself ([`Self::into_owned_parts`]).
+    pub attachment: Option<&'a [u8]>,
     /// R232 — outer-level QoS metadata propagated to `Sample.qos`. zenoh-pico mirror: the Push
     /// outer `_Z_MSG_EXT_ENC_ZINT | 0x01` extension carrying priority + congestion-control +
     /// express packed into one byte. Wire-side propagation is built (R233,
@@ -141,7 +141,51 @@ pub struct PublishOptions {
     stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
 }
 
-impl PublishOptions {
+impl<'a> PublishOptions<'a> {
+    /// These options without their attachment, and the attachment they borrowed: what a holder
+    /// that keeps the options past the call they were made for keeps, the bytes copied by it.
+    pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
+        let Self {
+            allowed_destination,
+            links,
+            admission_retry,
+            atomic_tx,
+            reliability,
+            kind,
+            timestamp,
+            encoding,
+            source_info,
+            attachment,
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack,
+            stamp_timestamp,
+        } = self;
+        (
+            PublishOptions {
+                allowed_destination,
+                links,
+                admission_retry,
+                atomic_tx,
+                reliability,
+                kind,
+                timestamp,
+                encoding,
+                source_info,
+                attachment: None,
+                qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
+                #[cfg(feature = "pubsub-ts-stack")]
+                wire_ts_stack,
+                stamp_timestamp,
+            },
+            attachment,
+        )
+    }
+
     /// Whether a publisher declared with these options takes a time per message and stamps it (the
     /// publisher's `put_at` and `delete_at`). The publisher supplies its own node's identity beside
     /// the caller's time, so a caller cannot sign a message as another node. When it does not stamp,
@@ -267,7 +311,7 @@ impl PublishOptions {
     /// setter would silently drop the blob. The `attachment` field itself stays (struct
     /// stability); only the populator gates.
     #[cfg(feature = "pubsub-attachment")]
-    pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
+    pub fn with_attachment(mut self, attachment: &'a [u8]) -> Self {
         self.attachment = Some(attachment);
         self
     }
@@ -435,12 +479,12 @@ impl PublishOptions {
     /// `priority_band` deliberately still reads `self.qos` ungated — that is the independent
     /// `transport-qos` conduit axis (R311y307), whose real gate is the runtime-negotiated
     /// `is_qos()`, not a compile feature.
-    pub fn push_metadata(&self) -> PushMetadata {
+    pub fn push_metadata(&self) -> PushMetadata<'a> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.clone()),
             encoding: gated_encoding(self.encoding.clone()),
             source_info: gated_source_info(self.source_info.clone()),
-            attachment: gated_attachment(self.attachment.clone()),
+            attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: self.wire_ts_stack.clone().or_else(|| self.ts_stack.clone()),
@@ -751,7 +795,7 @@ macro_rules! metadata_gated {
 metadata_gated!(gated_timestamp, "pubsub-timestamp", TimestampHint);
 metadata_gated!(gated_encoding, "pubsub-encoding", EncodingHint);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
-metadata_gated!(gated_attachment, "pubsub-attachment", Vec<u8>);
+metadata_gated!(gated_attachment, "pubsub-attachment", &[u8]);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
 
 #[cfg(test)]

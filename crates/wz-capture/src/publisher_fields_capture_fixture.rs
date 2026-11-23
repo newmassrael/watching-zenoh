@@ -103,7 +103,7 @@ fn encoding_id() -> u16 {
 
 /// What `PublishOptions` would project for the publish with all three set:
 /// `with_priority`, `with_encoding`, `with_timestamp`.
-fn full_metadata() -> PushMetadata {
+fn full_metadata() -> PushMetadata<'static> {
     PushMetadata {
         timestamp: Some(TimestampHint {
             time: TIMESTAMP_TIME,

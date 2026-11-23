@@ -76,7 +76,7 @@ pub struct PublicationDefaults {
 
 impl PublicationDefaults {
     /// `options` with what these defaults state written over it.
-    pub fn apply_to(&self, options: PublishOptions) -> PublishOptions {
+    pub fn apply_to<'a>(&self, options: PublishOptions<'a>) -> PublishOptions<'a> {
         let mut options = options;
         if let Some(congestion) = self.congestion_control {
             options = options.with_congestion_control(congestion);
@@ -165,7 +165,7 @@ impl PublicationQos {
 
     /// `options` of a publication on `key`, with what the configuration sets for that key
     /// written over them.
-    pub fn apply(&self, key: &str, options: PublishOptions) -> PublishOptions {
+    pub fn apply<'a>(&self, key: &str, options: PublishOptions<'a>) -> PublishOptions<'a> {
         if self.is_empty() {
             return options;
         }

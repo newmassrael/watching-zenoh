@@ -2000,7 +2000,7 @@ fn publish_options_with_metadata_setters_chain() {
             schema: Some("application/json".into()),
         })
         .with_source_info(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42))
-        .with_attachment(b"meta".to_vec())
+        .with_attachment(b"meta")
         .with_qos(QosLevel::from_raw(0b0001_1010));
     let ts = opts.timestamp.as_ref().unwrap();
     assert_eq!(ts.time, 0x1122_3344_5566_7788);
@@ -2012,7 +2012,7 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
     assert_eq!(si.sn, 42);
-    assert_eq!(opts.attachment.as_deref(), Some(&b"meta"[..]));
+    assert_eq!(opts.attachment, Some(&b"meta"[..]));
     assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
 }
 
@@ -2102,7 +2102,7 @@ fn loopback_drops_source_info_when_feature_off() {
 #[test]
 fn loopback_drops_attachment_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.attachment = Some(b"meta".to_vec());
+    opts.attachment = Some(b"meta");
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.attachment.is_none(),
@@ -2455,7 +2455,7 @@ fn publish_loopback_propagates_attachment_to_sample() {
 
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
-        .with_attachment(b"attach-payload".to_vec());
+        .with_attachment(b"attach-payload");
     session.publish("home/temp", b"22.5", opts).unwrap();
 
     let s = captured.lock().unwrap();
@@ -2664,7 +2664,7 @@ fn publish_loopback_propagates_all_metadata_in_one_chain() {
             schema: None,
         })
         .with_source_info(SourceInfo::new(&[0xAA, 0xBB], 1, 2))
-        .with_attachment(vec![0xCC, 0xDD])
+        .with_attachment(&[0xCC, 0xDD])
         .with_qos(QosLevel::from_raw(0x10));
     session.publish("home/temp", b"payload", opts).unwrap();
 
@@ -3108,7 +3108,7 @@ fn publish_aliased_loopback_propagates_metadata_to_sample() {
             time: 0xAABB_CCDD,
             zid: vec![0x42],
         })
-        .with_attachment(b"aliased-meta".to_vec());
+        .with_attachment(b"aliased-meta");
     let fired = session
         .publish_aliased(7, None, "home/temp", b"x", opts)
         .unwrap();
@@ -18038,7 +18038,7 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
             schema: Some(b"text/plain".to_vec()),
         }),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
-        attachment: Some(b"attached".to_vec()),
+        attachment: Some(b"attached"),
         qos: Some(QosLevel::from_raw(0x05)),
         #[cfg(feature = "pubsub-ts-stack")]
         ts_stack: None,

@@ -1147,7 +1147,8 @@ impl Engine {
                 tokio_engine::router_publish(&router.node, publication)
             }
             Engine::Tokio(state) => {
-                let options = tokio_engine::publish_options(publication);
+                let attachment = tokio_engine::attachment_bytes(publication);
+                let options = tokio_engine::publish_options(publication, attachment.as_deref());
                 let wire = tokio_engine::wire_key(publication);
                 // A put whose payload is a buffer of shared memory is sent as the buffer: its
                 // descriptor to a peer that negotiated shared memory, its bytes to any other.
@@ -2426,11 +2427,27 @@ mod tokio_engine {
             .map_or_else(|| "[]".to_owned(), |peers| format!("{peers:?}"))
     }
 
-    /// The options of the engine's publication that `publication` asks for.
+    /// The bytes of the attachment `publication` carries, read where they lie when it is one
+    /// slice, which [`publish_options`] borrows.
+    pub(super) fn attachment_bytes<'p>(
+        publication: &'p Publication<'_>,
+    ) -> Option<std::borrow::Cow<'p, [u8]>> {
+        publication
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.to_bytes())
+    }
+
+    /// The options of the engine's publication that `publication` asks for, carrying
+    /// `attachment`, the bytes of its attachment, which the caller holds while the publish
+    /// borrows them ([`attachment_bytes`]).
     ///
     /// The engine stamps a publication that carries no time with the node's clock when the node
     /// holds one, as upstream's session does, so an absent timestamp is left absent.
-    pub(super) fn publish_options(publication: &Publication<'_>) -> PublishOptions {
+    pub(super) fn publish_options<'a>(
+        publication: &Publication<'_>,
+        attachment: Option<&'a [u8]>,
+    ) -> PublishOptions<'a> {
         let mut options = match publication.kind {
             SampleKind::Put => PublishOptions::put(),
             SampleKind::Delete => PublishOptions::del(),
@@ -2475,8 +2492,8 @@ mod tokio_engine {
         if let Some(info) = &publication.source_info {
             options = options.with_source_info(source_info_hint_of(info));
         }
-        if let Some(attachment) = &publication.attachment {
-            options = options.with_attachment(attachment.to_bytes().into_owned());
+        if let Some(attachment) = attachment {
+            options = options.with_attachment(attachment);
         }
         #[cfg(feature = "unstable")]
         if publication.ts_stack.is_some() {
@@ -2699,7 +2716,8 @@ mod tokio_engine {
         let forwarder = node.forwarder();
         // The metadata of the publication rides the push to the other faces and the sample the
         // session's own subscribers are handed, as the options of a session describe them.
-        let options = publish_options(publication);
+        let attachment = attachment_bytes(publication);
+        let options = publish_options(publication, attachment.as_deref());
         // The node records its own routing on the stack of each face it hands the message to,
         // as upstream's dispatcher does, so the stack that leaves is the one the send started and
         // not the one this crate adds its routing to for an engine that records none.
@@ -9096,7 +9114,9 @@ mod tests {
             sample::QosLevel,
         };
 
-        let options = tokio_engine::publish_options(&stated_publication(SampleKind::Put));
+        let publication = stated_publication(SampleKind::Put);
+        let attachment = tokio_engine::attachment_bytes(&publication);
+        let options = tokio_engine::publish_options(&publication, attachment.as_deref());
         assert_eq!(options.allowed_destination, EngineLocality::Remote);
         assert_eq!(
             options.qos,
@@ -9121,7 +9141,7 @@ mod tests {
             vec![0xab, 0xcd],
             "the id as many bytes as it has"
         );
-        assert_eq!(options.attachment.as_deref(), Some(&b"attached"[..]));
+        assert_eq!(options.attachment, Some(&b"attached"[..]));
         assert_eq!(options.kind, wz_capi_core::runtime::sample::SampleKind::Put);
     }
 
@@ -9131,7 +9151,7 @@ mod tests {
         publication.encoding = Encoding::default();
         publication.timestamp = None;
         publication.attachment = None;
-        let options = tokio_engine::publish_options(&publication);
+        let options = tokio_engine::publish_options(&publication, None);
         assert!(
             options.encoding.is_none(),
             "the default is the absence of one"
@@ -9145,7 +9165,7 @@ mod tests {
 
     #[test]
     fn a_delete_carries_no_encoding() {
-        let options = tokio_engine::publish_options(&stated_publication(SampleKind::Delete));
+        let options = tokio_engine::publish_options(&stated_publication(SampleKind::Delete), None);
         assert!(options.encoding.is_none());
         assert_eq!(options.kind, wz_capi_core::runtime::sample::SampleKind::Del);
     }
@@ -9186,12 +9206,12 @@ mod tests {
     fn a_publication_asks_the_engine_for_the_links_it_states() {
         let mut publication = stated_publication(SampleKind::Put);
         assert_eq!(
-            tokio_engine::publish_options(&publication).links,
+            tokio_engine::publish_options(&publication, None).links,
             Links::Any
         );
         publication.links = some_links();
         assert_eq!(
-            tokio_engine::publish_options(&publication).links,
+            tokio_engine::publish_options(&publication, None).links,
             some_links()
         );
     }
@@ -9623,12 +9643,12 @@ mod tests {
     #[test]
     fn a_publication_asks_the_engine_for_the_all_or_none_form_it_states() {
         let mut publication = stated_publication(SampleKind::Put);
-        assert!(!tokio_engine::publish_options(&publication).atomic_tx);
+        assert!(!tokio_engine::publish_options(&publication, None).atomic_tx);
         publication.atomic = true;
-        assert!(tokio_engine::publish_options(&publication).atomic_tx);
+        assert!(tokio_engine::publish_options(&publication, None).atomic_tx);
         publication.kind = SampleKind::Delete;
         assert!(
-            tokio_engine::publish_options(&publication).atomic_tx,
+            tokio_engine::publish_options(&publication, None).atomic_tx,
             "a delete states all-or-none as a put does"
         );
     }
@@ -9638,17 +9658,17 @@ mod tests {
         let mut publication = stated_publication(SampleKind::Put);
         publication.retry = Some(some_retry());
         publication.atomic = true;
-        let options = tokio_engine::publish_options(&publication);
+        let options = tokio_engine::publish_options(&publication, None);
         assert_eq!(options.admission_retry, Some(some_retry()));
         assert!(options.atomic_tx);
         // Each is read on its own: stating one does not state the other.
         publication.atomic = false;
-        let options = tokio_engine::publish_options(&publication);
+        let options = tokio_engine::publish_options(&publication, None);
         assert_eq!(options.admission_retry, Some(some_retry()));
         assert!(!options.atomic_tx);
         publication.atomic = true;
         publication.retry = NO_RETRY;
-        let options = tokio_engine::publish_options(&publication);
+        let options = tokio_engine::publish_options(&publication, None);
         assert_eq!(options.admission_retry, None);
         assert!(options.atomic_tx);
     }
@@ -9657,17 +9677,17 @@ mod tests {
     fn a_publication_asks_the_engine_for_the_retry_it_states() {
         let mut publication = stated_publication(SampleKind::Put);
         assert_eq!(
-            tokio_engine::publish_options(&publication).admission_retry,
+            tokio_engine::publish_options(&publication, None).admission_retry,
             None
         );
         publication.retry = Some(some_retry());
         assert_eq!(
-            tokio_engine::publish_options(&publication).admission_retry,
+            tokio_engine::publish_options(&publication, None).admission_retry,
             Some(some_retry())
         );
         publication.kind = SampleKind::Delete;
         assert_eq!(
-            tokio_engine::publish_options(&publication).admission_retry,
+            tokio_engine::publish_options(&publication, None).admission_retry,
             Some(some_retry()),
             "a delete states a retry as a put does"
         );

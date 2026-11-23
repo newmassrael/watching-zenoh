@@ -78,7 +78,7 @@ impl std::error::Error for StampedPutError {}
 pub struct Publisher<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
-    pub(super) options: PublishOptions,
+    pub(super) options: PublishOptions<'static>,
     /// Whether this publisher stamps the messages it is given a time for: the declaration's
     /// choice, or the session's `entity-timestamp-opt-in` when it states none, resolved by the
     /// session at declare ([`PublishOptions::stamp_timestamp_by`]).
@@ -512,7 +512,7 @@ pub struct PublisherAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = To
     pub(super) session: Session<R, T, Unicast>,
     pub(super) mapping_id: wz_session_core::wire_id::ExprId,
     pub(super) inline_suffix: Option<String>,
-    pub(super) options: PublishOptions,
+    pub(super) options: PublishOptions<'static>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for PublisherAliased<R, T> {

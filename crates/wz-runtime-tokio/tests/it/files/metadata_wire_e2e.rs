@@ -164,7 +164,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
                         packed_id: TEXT_PLAIN_PACKED_ID,
                         schema: None,
                     })
-                    .with_attachment(ATTACHMENT.to_vec())
+                    .with_attachment(ATTACHMENT)
                     .with_timestamp(TimestampHint {
                         time: TS_TIME,
                         zid: vec![0xAB],

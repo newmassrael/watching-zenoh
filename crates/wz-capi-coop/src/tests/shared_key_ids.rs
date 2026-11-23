@@ -160,7 +160,7 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
     heard
 }
 
-fn remote() -> PublishOptions {
+fn remote() -> PublishOptions<'static> {
     PublishOptions::put().with_locality(Locality::Remote)
 }
 

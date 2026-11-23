@@ -389,7 +389,7 @@ impl<'m> BodyParts<'m> {
             #[cfg(not(feature = "pubsub-source-info"))]
             source_info: None,
             #[cfg(feature = "pubsub-attachment")]
-            attachment: meta.attachment.as_deref().map(|bytes| {
+            attachment: meta.attachment.map(|bytes| {
                 let id = if put {
                     crate::attachment::ATTACHMENT_EXT_ID_PUSH
                 } else {
@@ -898,7 +898,7 @@ mod tests {
                 }),
                 source_info: (fields & 8 != 0)
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
-                attachment: (fields & 16 != 0).then(|| alloc::vec![3u8; 200]),
+                attachment: (fields & 16 != 0).then_some(&[3u8; 200] as &[u8]),
                 qos: (fields & 32 != 0).then(|| QosLevel::from_raw(0x1a)),
                 // A publication starts no timestamp stack; a build with the slot states it empty.
                 #[cfg(feature = "pubsub-ts-stack")]
