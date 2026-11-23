@@ -1666,6 +1666,24 @@ pub trait MakeRouter<R> {
     fn make_in(self, place: &mut MaybeUninit<R>) -> &mut R;
 }
 
+/// A handle on the one Router a session's links share is its own maker: the pump holds the handle,
+/// and the Router stays the session's.
+#[cfg(all(
+    feature = "reassembly",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl<D> MakeRouter<wz_session_core::unicast_rx::SharedReassembly<D>>
+    for wz_session_core::unicast_rx::SharedReassembly<D>
+{
+    fn make_in(
+        self,
+        place: &mut MaybeUninit<wz_session_core::unicast_rx::SharedReassembly<D>>,
+    ) -> &mut wz_session_core::unicast_rx::SharedReassembly<D> {
+        place.write(self)
+    }
+}
+
 /// [`spawn_session`] over a reassembly Router its maker builds: a session whose fragment chains
 /// stage into buffers its session's arena lent.
 ///

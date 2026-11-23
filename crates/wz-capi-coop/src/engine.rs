@@ -75,7 +75,7 @@ use wz_runtime_coop::faces::{
     Dial, DialEndpoint, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor, Moved,
 };
 use wz_runtime_coop::reassembly_rx::{
-    LentChains, LentReassembly, LentReassemblyMaker, LENT_CHAINS,
+    session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
 use wz_runtime_coop::session_drive::LinkOpenError;
 #[cfg(feature = "time-base")]
@@ -119,6 +119,7 @@ use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms,
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
+use wz_session_core::unicast_rx::SharedReassembly;
 use wz_session_core::wire_id::{next_u32_id, u32_id_taken, EntityId, ExprId};
 use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 use wz_session_core::WhatAmI;
@@ -1408,6 +1409,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's delivery lane, which every link's gate asks before it reads a batch
     /// (`crate::lane::LaneGate`).
     lane: Arc<SharedLane>,
+    /// The one reassembly Router the session's links share, each link's receive holding a handle:
+    /// its chains are keyed by their peers, staged in `reassembly`. Before the buffers, so it lets
+    /// them go first.
+    router: SharedReassembly<SessionReassembly>,
     /// The buffers the session's links stage the chains of their fragmented messages in, each
     /// claimed by a chain while it is open, lent from the arena (`ArenaPlan::reassembly`).
     reassembly: LentByteCells,
@@ -1954,14 +1959,15 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
-/// link's gates, the session's lent reassembly and `FaceDispatch`. What each cell the open
-/// reserves for a link holds, so a link's session is never refused a cell for its size.
+/// link's gates, a handle on the session's one reassembly Router and `FaceDispatch`. What each
+/// cell the open reserves for a link holds, so a link's session is never refused a cell for its
+/// size.
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
         Rc<dyn SessionDatagramLink>,
-        LentReassembly,
-        LentReassemblyMaker,
+        SharedReassembly<SessionReassembly>,
+        SharedReassembly<SessionReassembly>,
         FaceDispatch<C>,
     >()
 }
@@ -2301,12 +2307,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             #[cfg(debug_assertions)]
             lane: self.lane.clone(),
         };
-        // The link's fragmented messages are staged in buffers of the session's one table, which
-        // its links share: a chain claims one when its first fragment arrives and gives it back
-        // when it ends, so no buffer is held while no chain is open, and a chain that finds none
-        // free is refused and counted. The Router over them is written in the pump's own field
-        // when the task first runs, so its slot machines are not a value on this call's stack.
-        let chains = LentChains::over(&self.reassembly, LENT_CHAINS);
+        // The link's fragmented messages are staged by the session's one Router, which its links
+        // share, keyed by their peers, in buffers of the session's one table: a chain claims one
+        // when its first fragment arrives and gives it back when it ends, and a chain that finds
+        // none free is refused and counted. The link's task holds a handle on it.
         let spawned = spawn_session_with_router(
             &self.local,
             link.clone(),
@@ -2317,10 +2321,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 role,
                 max_iters: None,
             },
-            LentReassemblyMaker {
-                policy: self.policy,
-                chains,
-            },
+            self.router.clone(),
             dispatch,
         );
         // The runtime's cells were reserved at the open, one for each link the config admits: a
@@ -2531,10 +2532,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // `return _zp_unicast_failed_result(ztu, executor);`).
             Moved::Lost => {
                 // The face is read before the wire goes: what it was is what a watcher is told.
-                let snapshot = self.links.faces()[at]
-                    .link
-                    .wire()
-                    .and_then(|wire| self.face_of(&wire.actions));
+                let lost = self.links.faces()[at].link.wire();
+                let snapshot = lost.and_then(|wire| self.face_of(&wire.actions));
+                // The peer's chains end with its link: the Router the session's links share would
+                // otherwise splice its next link's fragments onto them.
+                if let Some(zid) = lost.and_then(|wire| wire.actions.peer_zid()) {
+                    self.router.with(|router| router.abort_peer(&zid));
+                }
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
                 self.lose_link(id);
                 self.report_face(FaceEventKind::Down, snapshot);
@@ -3451,6 +3455,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
+        let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
         // and given back only when the session is let go, after its last delivery.
         let samples =
@@ -3596,6 +3601,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
+            router,
             reassembly,
             arena,
         };
