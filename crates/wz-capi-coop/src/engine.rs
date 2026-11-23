@@ -5136,7 +5136,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
                 continue;
             };
-            if let Some(tables) = registry.faces().find(|tables| tables.id == face.id) {
+            if let Some(tables) = registry.tables_of(face.id) {
                 self.decl_watches
                     .tell_held(id, plane, tables, || wire.actions.peer_zid());
             }
