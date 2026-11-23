@@ -10250,9 +10250,7 @@ mod face_up_order_tests {
             "no set: every link is asked"
         );
 
-        let sink: SubscriberSink = Arc::new(|| {
-            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
-        });
+        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let limited = SessionEngine::declare_subscriber_on_link_set(
             engine,
             "wz/link/sub",

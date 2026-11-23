@@ -27,15 +27,18 @@ impl Drop for Dropped {
     }
 }
 
-/// What became of the callbacks one test handed out: how many a factory minted, and how many
-/// callbacks were let go of.
+/// What became of the callbacks one test handed out: how many a factory minted (the planes whose
+/// sink is a factory: liveliness subscribers and queryables), and how many callbacks were let go
+/// of.
 #[derive(Default)]
 struct Counts {
+    #[cfg(any(feature = "liveliness", feature = "queryable"))]
     minted: Arc<AtomicUsize>,
     callbacks_dropped: Arc<AtomicUsize>,
 }
 
 impl Counts {
+    #[cfg(any(feature = "liveliness", feature = "queryable"))]
     fn minted(&self) -> usize {
         self.minted.load(Ordering::SeqCst)
     }

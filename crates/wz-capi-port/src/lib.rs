@@ -124,8 +124,12 @@ pub enum SubscriberSink {
     /// heap ([`Self::raw`]).
     Raw(RawSampleCallback),
     /// A Rust program's closure, shared ([`Self::shared`]).
-    Shared(Arc<dyn Fn(&dyn SampleView) + Send + Sync>),
+    Shared(Arc<SharedSampleFn>),
 }
+
+/// A Rust program's subscriber callback, as [`SubscriberSink::Shared`] shares it: upstream zenoh's
+/// `Callback<Sample>` shape.
+pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
 
 /// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
 /// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
