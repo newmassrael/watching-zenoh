@@ -2772,6 +2772,29 @@ value = 8
 reason = "zenoh-pico's map of keys is bounded by no count; the preset holds the keys of its examples without TLS: the mode and the three scouting keys its default config inserts (`vendor/zenoh-pico/src/net/config.c` @ `_zp_config_insert(ps, Z_CONFIG_MULTICAST_LOCATOR_KEY, Z_CONFIG_MULTICAST_LOCATOR_DEFAULT),`), a connect and a listen locator, the session id and what to scout for, eight, as the text of CONFIG_TEXT_BYTES's preset does."
 
 [[limit]]
+id = "CONFIG_DOCUMENT_DEPTH"
+kconfig = "WZ_LIMIT_CONFIG_DOCUMENT_DEPTH"
+kind = "parameter"
+range = [3, 64]
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How deep the zenoh JSON5 document a config of the pico C ABI is handed
+(wz_ext_config_document) may nest, the outermost object being 1: the reader
+walks the document keeping no tree, and this bounds the values it steps over.
+A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
+keeps what it held. From 3, which the wz member's policies and limits take.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh reads its configuration into a tree of its own depth. The default holds zenoh's reference configuration, which nests seven deep (crates/wz-zenoh/DEFAULT_CONFIG.json5, wz-zenoh's byte copy of it), with room."
+
+[[limit]]
 id = "CONFIG_TEXT_BYTES"
 kconfig = "WZ_LIMIT_CONFIG_TEXT_BYTES"
 kind = "parameter"

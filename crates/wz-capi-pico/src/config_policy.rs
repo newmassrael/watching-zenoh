@@ -43,17 +43,27 @@
 use core::ffi::{c_char, CStr};
 
 #[cfg(feature = "config-document")]
-use wz_session_core::json5::{self, Json5Value};
+use wz_session_core::caps;
 #[cfg(feature = "config-document")]
-use wz_session_core::limits::RuntimeLimits;
+use wz_session_core::json5::{self, number_as_u64, Json5Value};
+#[cfg(feature = "config-document")]
+use wz_session_core::json5_lex::{Json5Error, Json5Keyword, Json5Str, Lexer};
+#[cfg(feature = "config-document")]
+use wz_session_core::limit_binding::{LimitValue, UNBOUNDED};
 use wz_session_core::limits::SessionLimits;
+#[cfg(feature = "config-document")]
+use wz_session_core::limits::{RuntimeLimits, SESSION_LIMITS, SESSION_LIMIT_COUNT};
 use wz_session_core::policy::SessionPolicy;
+#[cfg(feature = "config-document")]
+use wz_session_core::policy::PROFILES;
 #[cfg(feature = "config-policy")]
 use wz_session_core::policy::{POLICIES, POLICY_COUNT};
-#[cfg(test)]
+#[cfg(any(test, feature = "config-document"))]
 use wz_session_core::policy_document::Resolved;
 #[cfg(feature = "config-policy")]
 use wz_session_core::policy_document::{self, Overrides, Profile, Statement};
+#[cfg(feature = "config-document")]
+use wz_session_core::policy_document::{DocumentLayers, LimitStatement};
 
 #[cfg(feature = "config-policy")]
 use crate::abi::z_loaned_config_t;
@@ -120,10 +130,9 @@ pub(crate) struct PolicyStatements {
     /// The id of the profile `wz_ext_config_profile` named; it replaces the profile the document
     /// names.
     profile: Option<&'static str>,
-    /// The `wz` members of the document `wz_ext_config_document` was handed, gathered as the
-    /// members of a document of their own.
+    /// What the `wz` member of the document `wz_ext_config_document` was handed states.
     #[cfg(feature = "config-document")]
-    document: Option<Json5Value>,
+    document: DocumentRows,
     /// The statements of `wz_ext_config_policy`.
     api: ApiStatements,
 }
@@ -151,6 +160,12 @@ impl Default for ApiStatements {
 impl ApiStatements {
     fn as_slice(&self) -> &[Statement<'static>] {
         &self.rows[..self.held]
+    }
+
+    /// Whether a statement of `policy` is held.
+    #[cfg(feature = "config-document")]
+    fn holds(&self, policy: &str) -> bool {
+        self.as_slice().iter().any(|held| held.policy == policy)
     }
 
     /// `statement` in place of a held statement of its policy, or after the others. A policy is
@@ -202,17 +217,16 @@ impl PolicyStatements {
             statements: self.api.as_slice(),
             limits: &[],
         };
-        // The reader of a document resolves into a record of where each value came from; the
-        // two snapshots are taken from it.
+        // The layers of a document resolve into a record of where each value came from; the two
+        // snapshots are taken from it.
         #[cfg(feature = "config-document")]
-        if let Some(document) = &self.document {
+        if !self.document.states_nothing() {
             let base = policy_document::Base {
                 policy: *policy,
                 session_limits: *limits,
                 runtime_limits: None,
             };
-            let resolved = policy_document::resolve_document_under(base, document, overrides)
-                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+            let resolved = self.document.resolve_under(base, overrides)?;
             *policy = resolved.policy;
             *limits = resolved.limits.session;
             return Ok(());
@@ -235,9 +249,8 @@ impl PolicyStatements {
             limits: &[],
         };
         #[cfg(feature = "config-document")]
-        if let Some(document) = &self.document {
-            return policy_document::resolve_document_under(base, document, overrides)
-                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE);
+        if !self.document.states_nothing() {
+            return self.document.resolve_under(base, overrides);
         }
         // A config handed no document is resolved as one with no `wz` member, without the reader
         // of a document (`policy_document::resolve_under`), which a build with no document door
@@ -246,20 +259,16 @@ impl PolicyStatements {
     }
 
     /// The key ids the `wz/key-ids` of the document `wz_ext_config_document` was handed states,
-    /// read by the reader that composes its policies, or none when the config was handed no
-    /// document. The door kept the document only when that reader took it whole, so a refusal
-    /// here is of a config no door made, and `Z_ERR_CONFIG_INVALID_VALUE` like the policies'.
+    /// which its door read, or none when the config was handed no document.
     #[cfg(feature = "shared-key-ids")]
     pub(crate) fn document_key_ids(
         &self,
     ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ZResult> {
         #[cfg(feature = "config-document")]
-        if let Some(document) = &self.document {
-            return policy_document::statements_from_json5(document)
-                .map(|read| read.key_ids)
-                .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE);
-        }
-        Ok(Default::default())
+        let stated = self.document.key_ids.clone();
+        #[cfg(not(feature = "config-document"))]
+        let stated = Default::default();
+        Ok(stated)
     }
 
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
@@ -313,6 +322,341 @@ fn wz_members(text: &str) -> Result<Json5Value, ZResult> {
             .filter(|(key, value)| key == WZ_MEMBER && !matches!(value, Json5Value::Null))
             .collect(),
     ))
+}
+
+/// The statements of a document's `wz/limits`, each a limit of a session by the build's own id
+/// and its value, in the document's order: at most one row for each such limit.
+#[cfg(feature = "config-document")]
+#[derive(Clone, Copy)]
+struct LimitRows {
+    rows: [LimitStatement<'static>; SESSION_LIMIT_COUNT],
+    held: usize,
+}
+
+#[cfg(feature = "config-document")]
+impl Default for LimitRows {
+    fn default() -> Self {
+        Self {
+            rows: [LimitStatement::new("", LimitValue::Unbounded); SESSION_LIMIT_COUNT],
+            held: 0,
+        }
+    }
+}
+
+#[cfg(feature = "config-document")]
+impl LimitRows {
+    fn as_slice(&self) -> &[LimitStatement<'static>] {
+        &self.rows[..self.held]
+    }
+
+    /// `statement` after the others, or `Refused` for a limit already stated, as the document's
+    /// resolution refuses one stated twice. A limit is held once, so the rows hold every limit of
+    /// a session.
+    fn push(&mut self, statement: LimitStatement<'static>) -> Result<(), Refused> {
+        if self
+            .as_slice()
+            .iter()
+            .any(|held| held.limit == statement.limit)
+        {
+            return Err(Refused);
+        }
+        self.rows[self.held] = statement;
+        self.held += 1;
+        Ok(())
+    }
+}
+
+/// What the `wz` member of the document `wz_ext_config_document` was handed states, read by the
+/// door into rows of the build's own ids with no tree kept: the profile, the statements of
+/// `wz/policies` and those of `wz/limits`, each in the document's order, and the key ids of
+/// `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
+#[cfg(feature = "config-document")]
+#[derive(Clone, Default)]
+struct DocumentRows {
+    profile: Option<&'static str>,
+    statements: ApiStatements,
+    limits: LimitRows,
+    #[cfg(feature = "shared-key-ids")]
+    key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+}
+
+/// A document the reader refuses: `Z_ERR_CONFIG_INVALID_VALUE` at the door.
+#[cfg(feature = "config-document")]
+struct Refused;
+
+#[cfg(feature = "config-document")]
+impl From<Json5Error> for Refused {
+    fn from(_: Json5Error) -> Self {
+        Self
+    }
+}
+
+/// The members of the `wz` member already read, so a second one is refused.
+#[cfg(feature = "config-document")]
+#[derive(Default)]
+struct Seen {
+    profile: bool,
+    policies: bool,
+    limits: bool,
+    key_ids: bool,
+}
+
+/// The first reading of a member: a second one is refused, as the document's resolution refuses
+/// a member stated twice.
+#[cfg(feature = "config-document")]
+fn first(seen: &mut bool) -> Result<(), Refused> {
+    if core::mem::replace(seen, true) {
+        Err(Refused)
+    } else {
+        Ok(())
+    }
+}
+
+/// Into an object whose `{` is next, or `Refused` for a value that is not an object.
+#[cfg(feature = "config-document")]
+fn open_object(lex: &mut Lexer<'_>) -> Result<(), Refused> {
+    if lex.peek() != Some(b'{') {
+        return Err(Refused);
+    }
+    lex.bump();
+    Ok(())
+}
+
+/// The name of the next member of an open object, past its `:`, or `None` past the object's `}`.
+#[cfg(feature = "config-document")]
+fn next_member<'t>(lex: &mut Lexer<'t>) -> Result<Option<Json5Str<'t>>, Refused> {
+    lex.skip_trivia()?;
+    match lex.peek() {
+        Some(b'}') => {
+            lex.bump();
+            return Ok(None);
+        }
+        None => return Err(Refused),
+        _ => {}
+    }
+    let name = lex.member_name()?;
+    lex.skip_trivia()?;
+    lex.expect(b':', ": after a member name")?;
+    lex.skip_trivia()?;
+    Ok(Some(name))
+}
+
+/// Past a member's value: its `,`, or the object's `}`, which the next [`next_member`] reads.
+#[cfg(feature = "config-document")]
+fn after_member(lex: &mut Lexer<'_>) -> Result<(), Refused> {
+    lex.skip_trivia()?;
+    match lex.peek() {
+        Some(b',') => {
+            lex.bump();
+            Ok(())
+        }
+        Some(b'}') => Ok(()),
+        _ => Err(Refused),
+    }
+}
+
+/// The key ids `member`, the text of a document's `wz/key-ids`, states, read by the reader the
+/// other ABIs read them with: a member the door reads apart, as the only one with a shape of its
+/// own.
+#[cfg(all(feature = "config-document", feature = "shared-key-ids"))]
+fn key_ids_of(member: &str) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, Refused> {
+    let value = json5::parse(member)?;
+    let tree = Json5Value::Object(alloc::vec![(
+        alloc::string::String::from(WZ_MEMBER),
+        Json5Value::Object(alloc::vec![(alloc::string::String::from("key-ids"), value)]),
+    )]);
+    policy_document::statements_from_json5(&tree)
+        .map(|read| read.key_ids)
+        .map_err(|_| Refused)
+}
+
+#[cfg(feature = "config-document")]
+impl DocumentRows {
+    /// Whether the document states nothing, so a config resolves as one handed none.
+    fn states_nothing(&self) -> bool {
+        let stated = self.profile.is_some() || self.statements.held > 0 || self.limits.held > 0;
+        #[cfg(feature = "shared-key-ids")]
+        let stated =
+            stated || self.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
+        !stated
+    }
+
+    /// `base` with the document's layers and `overrides` over them
+    /// ([`policy_document::resolve_layers_under`]), and the key ids it states counted against the
+    /// limits that resolves, or `Z_ERR_CONFIG_INVALID_VALUE`.
+    fn resolve_under(
+        &self,
+        base: policy_document::Base,
+        overrides: Overrides<'_, 'static>,
+    ) -> Result<Resolved, ZResult> {
+        let layers = DocumentLayers {
+            profile: self.profile,
+            statements: self.statements.as_slice(),
+            limits: self.limits.as_slice(),
+        };
+        let resolved = policy_document::resolve_layers_under(base, layers, overrides)
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+        #[cfg(feature = "shared-key-ids")]
+        self.key_ids
+            .check_limits(&resolved.limits.session)
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
+        Ok(resolved)
+    }
+
+    /// The rows the zenoh document `text` states, in place of what they held, or
+    /// `Z_ERR_CONFIG_INVALID_VALUE`: the document is walked once, keeping no tree, and only its
+    /// `wz` member is read; every other member is stepped over and still checked, at most
+    /// `CONFIG_DOCUMENT_DEPTH` deep, the outermost object being 1.
+    fn read(&mut self, text: &str) -> Result<(), ZResult> {
+        self.profile = None;
+        self.statements.held = 0;
+        self.limits.held = 0;
+        #[cfg(feature = "shared-key-ids")]
+        {
+            self.key_ids = Default::default();
+        }
+        self.read_document(&mut Lexer::new(text), text)
+            .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
+    }
+
+    /// The whole document: an object, each of whose `wz` members is read, and nothing after it.
+    fn read_document(&mut self, lex: &mut Lexer<'_>, text: &str) -> Result<(), Refused> {
+        lex.skip_trivia()?;
+        open_object(lex)?;
+        let mut seen_wz = false;
+        while let Some(name) = next_member(lex)? {
+            if name.eq_str(WZ_MEMBER) {
+                self.read_wz(lex, text, &mut seen_wz)?;
+            } else {
+                lex.skip_value(caps::CONFIG_DOCUMENT_DEPTH - 1)?;
+            }
+            after_member(lex)?;
+        }
+        lex.skip_trivia()?;
+        if lex.at_end() {
+            Ok(())
+        } else {
+            Err(Refused)
+        }
+    }
+
+    /// One `wz` member: an object, or `null`, zenoh's spelling of a member left unset, which
+    /// states nothing as the zenoh-c ABI's reader of the same document takes it.
+    fn read_wz(
+        &mut self,
+        lex: &mut Lexer<'_>,
+        text: &str,
+        seen_wz: &mut bool,
+    ) -> Result<(), Refused> {
+        if lex.peek() != Some(b'{') {
+            let unset = !lex.at_string()
+                && !lex.at_number()
+                && lex.peek() != Some(b'[')
+                && lex.keyword()? == Json5Keyword::Null;
+            return if unset { Ok(()) } else { Err(Refused) };
+        }
+        first(seen_wz)?;
+        open_object(lex)?;
+        let mut seen = Seen::default();
+        while let Some(name) = next_member(lex)? {
+            if name.eq_str("profile") {
+                first(&mut seen.profile)?;
+                self.read_profile(lex)?;
+            } else if name.eq_str("policies") {
+                first(&mut seen.policies)?;
+                self.read_policies(lex)?;
+            } else if name.eq_str("limits") {
+                first(&mut seen.limits)?;
+                self.read_limits(lex)?;
+            } else if name.eq_str("key-ids") {
+                first(&mut seen.key_ids)?;
+                #[cfg(feature = "shared-key-ids")]
+                {
+                    let start = lex.pos();
+                    lex.skip_value(caps::CONFIG_DOCUMENT_DEPTH - 2)?;
+                    self.key_ids = key_ids_of(&text[start..lex.pos()])?;
+                }
+                // A build without the capability refuses the member by name.
+                #[cfg(not(feature = "shared-key-ids"))]
+                {
+                    let _ = text;
+                    return Err(Refused);
+                }
+            } else {
+                return Err(Refused);
+            }
+            after_member(lex)?;
+        }
+        Ok(())
+    }
+
+    /// `wz/profile`: the id of a profile of the build.
+    fn read_profile(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+        if !lex.at_string() {
+            return Err(Refused);
+        }
+        let id = lex.string()?;
+        let profile = PROFILES
+            .iter()
+            .find(|profile| id.eq_str(profile.id))
+            .ok_or(Refused)?;
+        self.profile = Some(profile.id);
+        Ok(())
+    }
+
+    /// `wz/policies`: an object of a policy's id and a value's id, each a string, each policy of
+    /// the build once.
+    fn read_policies(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+        open_object(lex)?;
+        while let Some(policy) = next_member(lex)? {
+            if !lex.at_string() {
+                return Err(Refused);
+            }
+            let value = lex.string()?;
+            let entry = POLICIES
+                .iter()
+                .find(|entry| policy.eq_str(entry.id()))
+                .ok_or(Refused)?;
+            let value = entry
+                .values()
+                .iter()
+                .copied()
+                .find(|known| value.eq_str(known))
+                .ok_or(Refused)?;
+            if self.statements.holds(entry.id()) {
+                return Err(Refused);
+            }
+            self.statements.state(Statement::new(entry.id(), value));
+            after_member(lex)?;
+        }
+        Ok(())
+    }
+
+    /// `wz/limits`: an object of a limit of a session's id and its value, a whole number a
+    /// `usize` holds or `unbounded`, each limit once. A limit of a runtime is refused, as a
+    /// session holds none.
+    fn read_limits(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+        open_object(lex)?;
+        while let Some(limit) = next_member(lex)? {
+            let value = if lex.at_number() {
+                number_as_u64(lex.number()?)
+                    .and_then(|number| usize::try_from(number).ok())
+                    .map(LimitValue::Integer)
+                    .ok_or(Refused)?
+            } else if lex.at_string() && lex.string()?.eq_str(UNBOUNDED) {
+                LimitValue::Unbounded
+            } else {
+                return Err(Refused);
+            };
+            let entry = SESSION_LIMITS
+                .iter()
+                .find(|entry| limit.eq_str(entry.id()))
+                .ok_or(Refused)?;
+            self.limits.push(LimitStatement::new(entry.id(), value))?;
+            after_member(lex)?;
+        }
+        Ok(())
+    }
 }
 
 /// `change` made to the policies `config` states, kept only when the open would compose the
@@ -415,6 +759,10 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 /// refused part of `wz/key-ids` are refused with `Z_ERR_CONFIG_INVALID_VALUE`, and the config is
 /// left as it was.
 ///
+/// The door walks the document once and keeps no tree: what the `wz` member states is kept as
+/// the build's own ids, and a document nested deeper than `CONFIG_DOCUMENT_DEPTH` (the outermost
+/// object being 1) is refused with `Z_ERR_CONFIG_INVALID_VALUE`.
+///
 /// In a build with the `config-document` capability alone: the door links a JSON5 reader that a
 /// build stating its policies through [`wz_ext_config_policy`] and [`wz_ext_config_profile`] does
 /// not need.
@@ -429,8 +777,7 @@ pub unsafe extern "C" fn wz_ext_config_document(
 ) -> ZResult {
     guarded(|| {
         amend(config, |statements| {
-            statements.document = Some(wz_members(text_of(json5)?)?);
-            Ok(())
+            statements.document.read(text_of(json5)?)
         })
     })
 }
@@ -871,6 +1218,76 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// The door keeps what a document's `wz` member states as rows of the build's own ids and no
+    /// tree: the policy's and the limit's ids are the build's, not the document's text, and a limit
+    /// stated twice is refused with the config kept as it was. Turned red by a door that keeps the
+    /// document, or copies its text.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_document_is_kept_as_the_builds_own_ids() {
+        let (entry, value) = one_allowed();
+        let mut config = Config::new();
+        let text = format!(
+            "{{ mode: \"peer\", connect: {{ endpoints: [\"tcp/10.0.0.1:7447\"] }}, \
+             wz: {{ policies: {{ \"{}\": \"{value}\" }}, limits: {{ MAX_SUBSCRIPTIONS: 1 }} }} }}",
+            entry.id()
+        );
+        assert_eq!(config.document(&text), Z_OK);
+        let document = &config.state().policies.document;
+        let statement = document.statements.as_slice()[0];
+        assert!(core::ptr::eq(statement.policy, entry.id()));
+        assert!(entry
+            .values()
+            .iter()
+            .any(|known| core::ptr::eq(*known, statement.value)));
+        let limit = document.limits.as_slice()[0];
+        let declared = SESSION_LIMITS
+            .iter()
+            .find(|limit| limit.id() == "MAX_SUBSCRIPTIONS")
+            .expect("declared");
+        assert!(core::ptr::eq(limit.limit, declared.id()));
+        assert_eq!(limit.value, LimitValue::Integer(1));
+        assert_eq!(
+            config.document("{ wz: { limits: { MAX_SUBSCRIPTIONS: 1, MAX_SUBSCRIPTIONS: 1 } } }"),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        let kept = &config.state().policies.document;
+        assert_eq!(kept.statements.len(), 1, "the config keeps what it held");
+        assert_eq!(kept.limits.as_slice().len(), 1);
+    }
+
+    /// A document nested `CONFIG_DOCUMENT_DEPTH` deep is read, and one a level deeper is refused
+    /// with the config kept as it was, though the nesting is in a member the door does not read.
+    /// Turned red by a reader that steps over a member with no bound, or with another.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn a_document_past_its_depth_is_refused() {
+        // The outermost object is 1, and each `{ a: .. }` in the member's value one more.
+        let nested = |depth: usize| {
+            format!(
+                "{{ mode: \"peer\", deep: {}{{}}{} }}",
+                "{ a: ".repeat(depth - 2),
+                " }".repeat(depth - 2)
+            )
+        };
+        let mut config = Config::new();
+        assert_eq!(config.document(&nested(caps::CONFIG_DOCUMENT_DEPTH)), Z_OK);
+        let (entry, value) = one_allowed();
+        assert_eq!(
+            config.document(&policies_document(&[(entry.id(), value)])),
+            Z_OK
+        );
+        assert_eq!(
+            config.document(&nested(caps::CONFIG_DOCUMENT_DEPTH + 1)),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(
+            config.state().policies.document.statements.len(),
+            1,
+            "the config keeps what it held"
+        );
     }
 
     /// The door's statement wins over the document's, the document's over the profile's, whatever

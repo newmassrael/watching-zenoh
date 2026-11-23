@@ -266,6 +266,15 @@ pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
 /// one text fixed in the config object. A value that finds no room is refused at its insert.
 pub const CONFIG_TEXT_BYTES: usize = generated::CONFIG_TEXT_BYTES;
 
+/// How deep the JSON5 document a config of the pico C ABI is handed may nest, the outermost object
+/// being 1. A deeper document is refused at its door.
+pub const CONFIG_DOCUMENT_DEPTH: usize = generated::CONFIG_DOCUMENT_DEPTH;
+
+const _: () = assert!(
+    CONFIG_DOCUMENT_DEPTH >= 3,
+    "a document's wz member reaches its policies and limits at a depth of 3"
+);
+
 const _: () = assert!(
     CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
     "a config holds at least one key, at most one row for each key but one, and some text"
