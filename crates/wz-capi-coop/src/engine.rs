@@ -59,9 +59,9 @@ use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, StatementNotHonoured, SubId,
-    SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyNotHeld,
+    MatchId, MatchingSink, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
+    SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -943,7 +943,9 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // inside it: no clone of any of them is ever handed out of the lock (deliveries leave as bytes
 // of the delivery lane and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc`
 // moves with the `Core` when another thread takes the lock, and none is used by two threads at
-// once.
+// once. A key of the session's key arena handed out of it to an object of the program
+// (`HeldKey`, `SessionKeys`) is shared and let go of only under this lock, and read outside it
+// only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
 /// The id space of one link: the key expressions this session declared to it, read through the
@@ -1808,7 +1810,42 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if !self.config.limits.max_keyexpr_bytes().admits(keyexpr.len()) {
             return None;
         }
+        if let Some(kept) = self.kept_key(keyexpr) {
+            return Some(kept);
+        }
         self.keys.key(keyexpr).ok()
+    }
+
+    /// Let go of a removed row's key here, under the session's lock: a row that leaves the lock to
+    /// be dropped after it (for what else it holds, whose drop may reach the session) keeps the
+    /// empty key, which holds no block, as the arena's counts are touched only under the lock.
+    fn let_go_of_key(&self, key: &mut RowKey) {
+        if let Ok(empty) = self.keys.key("") {
+            drop(core::mem::replace(key, empty));
+        }
+    }
+
+    /// The block of a row of the session's own record that keeps `keyexpr` already, shared: a key
+    /// the session's declarations and the program's objects name alike (a publisher's key, its write
+    /// filter's and its Interest's) takes one block, whichever of them came first.
+    fn kept_key(&self, keyexpr: &str) -> Option<RowKey> {
+        let found = self
+            .keyexprs
+            .iter()
+            .map(|e| &e.keyexpr)
+            .chain(self.subscribers.iter().map(|e| &e.keyexpr))
+            .chain(self.filters.iter().map(|e| &e.keyexpr))
+            .chain(self.interests.iter().map(|e| &e.keyexpr))
+            .chain(self.matches.iter().map(|e| &e.keyexpr))
+            .find(|key| key.as_str() == keyexpr);
+        #[cfg(feature = "queryable")]
+        let found = found.or_else(|| {
+            self.queryables
+                .iter()
+                .map(|e| &e.keyexpr)
+                .find(|key| key.as_str() == keyexpr)
+        });
+        found.cloned()
     }
 
     /// The dial role's face, which the session holds for its whole life.
@@ -3545,6 +3582,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ([`ArenaPlan::reserved_bytes`]).
     pub fn arena_bytes(&self) -> usize {
         self.arena_bytes
+    }
+
+    /// What the session's key arena holds now, closed or not.
+    #[cfg(test)]
+    pub(crate) fn key_counts(&self) -> wz_session_core::key_arena::KeyCounts {
+        lock(&self.core).0.keys.counts()
     }
 
     /// The samples the session's delivery lane did not hand a subscriber, by why
@@ -5285,7 +5328,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.live_subs.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::LiveSub, at);
-            let entry = core.live_subs.remove(at);
+            let mut entry = core.live_subs.remove(at);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
             for group in &core.groups {
@@ -5299,6 +5342,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 actions.send_interest_final(u64::from(id));
             }
+            core.let_go_of_key(&mut entry.keyexpr);
             Some(entry)
         });
         #[cfg(feature = "liveliness")]
@@ -5311,7 +5355,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.subscribers.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::Subscriber, at);
-            let entry = core.subscribers.remove(at);
+            let mut entry = core.subscribers.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -5332,6 +5376,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
+            core.let_go_of_key(&mut entry.keyexpr);
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
@@ -5418,6 +5463,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 group.retract_keyexpr(mapping_id);
             }
         }
+    }
+
+    fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        Some(self)
     }
 
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
@@ -6254,7 +6303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.queryables.iter().position(|q| q.id == id)?;
             let links = core.retract(Kind::Queryable, at);
-            let entry = core.queryables.remove(at);
+            let mut entry = core.queryables.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -6268,6 +6317,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
             Self::reevaluate_queryable_matching(core);
+            core.let_go_of_key(&mut entry.keyexpr);
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Queryable(id));
@@ -6330,7 +6380,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.tokens.iter().position(|t| t.id == id)?;
             let links = core.retract(Kind::Token, at);
-            let entry = core.tokens.remove(at);
+            let mut entry = core.tokens.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -6341,6 +6391,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 entry.retract(&actions);
             }
+            core.let_go_of_key(&mut entry.keyexpr);
             Some(entry)
         });
         // Its key may hold a declaration whose release reaches the session: after the lock.
@@ -6421,6 +6472,50 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         drop(guard);
         self.deliver();
         Some(id)
+    }
+}
+
+/// The keys the C ABI's objects hold, in the session's key arena. A closed session makes no key
+/// and gives no block back: its close emptied the record, and its arena is given back whole when
+/// the engine goes, which a holder's hold on the engine keeps from happening first. So a key shared
+/// or let go of after the close takes no lock, and a holder the close itself lets go of, under the
+/// lock, does not wait on it.
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
+    fn hold_key(&self, text: &str) -> Result<HeldKey, KeyNotHeld> {
+        let Some(core) = self.live() else {
+            return Err(KeyNotHeld::Closed);
+        };
+        let core = &core.0;
+        if !core.config.limits.max_keyexpr_bytes().admits(text.len()) {
+            return Err(KeyNotHeld::TooLong);
+        }
+        let key = core.row_key(text).ok_or(KeyNotHeld::NoRoom)?;
+        // SAFETY: the session's lock is held (`core`), the key is its arena's, and the arena is
+        // given back only when the engine goes, which the holder's hold on it keeps from happening.
+        Ok(unsafe { HeldKey::new(key) })
+    }
+
+    fn share_key(&self, key: &HeldKey) -> HeldKey {
+        if !self.closed.load(Ordering::Acquire) {
+            let _session = lock(&self.core);
+            if !self.closed.load(Ordering::Acquire) {
+                // SAFETY: the session's lock is held (`_session`).
+                return unsafe { key.share() };
+            }
+        }
+        // SAFETY: the session is closed, so its arena makes no key and gives no block back.
+        unsafe { key.uncounted() }
+    }
+
+    fn release_key(&self, key: HeldKey) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let _session = lock(&self.core);
+        if !self.closed.load(Ordering::Acquire) {
+            // SAFETY: the session's lock is held (`_session`).
+            unsafe { key.release() };
+        }
     }
 }
 
