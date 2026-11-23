@@ -3108,7 +3108,7 @@ mod tests {
     /// where the panic actually fires now.
     #[cfg(feature = "codec-request")]
     #[test]
-    #[should_panic(expected = "QueryBuilder::parameters")]
+    #[should_panic(expected = "QueryBuilder::parameters requires a non-empty params slice")]
     fn request_query_builder_parameters_rejects_empty() {
         let _ = RequestQueryBuilder::new(
             42,
