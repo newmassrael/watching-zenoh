@@ -10,6 +10,8 @@ use alloc::sync::Arc;
 use core::ptr::NonNull;
 use std::sync::Mutex;
 
+use wz_session_core::bounded::ARENA_ALIGN;
+use wz_session_core::caps;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::reliability::Reliability;
@@ -19,21 +21,36 @@ use wz_session_core::sample::{
 use wz_session_core::sink::{BorrowedSample, SampleView};
 
 use super::entity_tables::lowered;
+use crate::arena::{AllocatorMemory, SessionArena};
 use crate::engine::{LiveCallback, SubscriberCallback};
-use crate::round::{ReadRoom, Round, RoundCounts, RoundGate};
+use crate::round::{
+    ReadRoom, Round, RoundCounts, RoundGate, RoundRowCounts, RoundRows, CALLBACK_BYTES,
+    RECORD_BYTES,
+};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
 
-/// A round over an area of `bytes` the test leaks, holding `events` records at once.
+/// A round over an area of `bytes` the test leaks, holding `events` records at once, its tables
+/// lent from an arena the test leaks too, so both outlive the round.
 fn round(bytes: usize, events: usize) -> Arc<Round> {
-    let limits = lowered(|l| {
-        l.select_delivery_lane_bytes(bytes)?;
-        l.select_delivery_lane_events(Quota::at_most(events))
-    });
+    let counts = RoundRowCounts {
+        records: events,
+        callbacks: caps::DELIVERY_LANE_CALLBACKS,
+        longest_key: caps::MAX_KEYEXPR_BYTES,
+    };
+    // Each table on a span of its own, rounded up to the next start of one.
+    let bytes_of_rows = events * RECORD_BYTES
+        + counts.callbacks * CALLBACK_BYTES
+        + counts.key_bytes()
+        + 3 * ARENA_ALIGN;
+    let arena: &'static mut SessionArena = Box::leak(Box::new(
+        SessionArena::of_bytes(bytes_of_rows, &AllocatorMemory).expect("the host has the memory"),
+    ));
+    let rows = RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows");
     let area: &'static mut [u8] = vec![0u8; bytes].leak();
     // SAFETY: the area is leaked, so it outlives the round, and nothing else uses it.
-    unsafe { Round::shared_over(NonNull::from(area).cast::<u8>(), bytes, &limits) }
+    unsafe { Round::shared_over(NonNull::from(area).cast::<u8>(), bytes, rows) }
 }
 
 /// The room of a record of `bytes` bytes for one subscriber.
@@ -254,6 +271,66 @@ fn a_rejoined_message_is_read_where_its_chain_lies() {
         "CONTROL: the round lent the chain, so the datagram's record was copied"
     );
     assert_eq!(round.samples_lent(), 1);
+}
+
+/// A round let go of at its session's end lets go of the callbacks its records owe, before the
+/// arena that lent its tables, and hands nothing after; the subscriber's row is its callback's
+/// one holder again. The CONTROL is the count while the record waits.
+#[test]
+fn a_round_let_go_of_lets_go_of_the_callbacks_its_records_owe() {
+    let round = round(1024, 4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
+    unsafe { round.offer_sample(1, Some(&first), &filled(4, 1)) };
+    unsafe { round.seal() };
+    assert_eq!(
+        Arc::strong_count(&first),
+        2,
+        "CONTROL: the waiting record owes it"
+    );
+    unsafe { round.let_go() };
+    assert_eq!(
+        Arc::strong_count(&first),
+        1,
+        "let go of with the round's tables"
+    );
+    assert!(!round.deliver(), "nothing is left to hand");
+    assert!(seen.lock().unwrap().is_empty(), "and nothing was handed");
+}
+
+/// A round is handed to one delivery at a time: a delivery asked for from inside a callback of
+/// the one running hands nothing, and each record is handed once. The CONTROL is the delivery
+/// after it, which finds the round emptied.
+#[test]
+fn a_round_is_handed_to_one_delivery_at_a_time() {
+    let round = round(1024, 4);
+    let inner: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let again = Arc::downgrade(&round);
+    let noted = inner.clone();
+    let callback: SubscriberCallback = Arc::new(LiveCallback::new(
+        wz_capi_port::SubscriberSink::shared(move |_: &dyn SampleView| {
+            let handed = again.upgrade().is_some_and(|round| round.deliver());
+            noted.lock().unwrap().push(handed);
+        }),
+        true,
+    ));
+    // SAFETY (each call): this thread is the round's one writer, and no delivery runs.
+    unsafe { round.offer_sample(1, Some(&callback), &filled(4, 1)) };
+    unsafe { round.offer_sample(1, Some(&callback), &filled(4, 2)) };
+    unsafe { round.seal() };
+    assert!(round.deliver(), "the sealed round is handed out");
+    assert_eq!(
+        *inner.lock().unwrap(),
+        [false, false],
+        "each record handed once, and no delivery inside the one running"
+    );
+    assert!(!round.deliver(), "CONTROL: the round was emptied");
+    assert_eq!(
+        Arc::strong_count(&callback),
+        1,
+        "the row holds its callback alone"
+    );
 }
 
 /// A sample offered again for a subscriber it is for already is a record of its own, handed to
@@ -583,7 +660,6 @@ fn a_reply_is_handed_where_it_lies_or_from_the_round() {
 #[test]
 fn the_builds_area_holds_the_builds_largest_message() {
     use crate::round::{holds_a_read, read_bytes, sample_overhead};
-    use wz_session_core::caps;
 
     assert!(holds_a_read::<
         { caps::DELIVERY_LANE_BYTES },
@@ -630,7 +706,6 @@ fn the_speed_images_area_is_the_room_of_one_record() {
 #[test]
 fn an_area_is_sized_from_the_sessions_message() {
     use crate::round::{holding_a_read, sample_overhead};
-    use wz_session_core::caps;
 
     let frag = caps::PICO_FRAG_MAX_BYTES / 4;
     let short = lowered(|l| {

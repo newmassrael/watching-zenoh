@@ -32,6 +32,7 @@ use super::{
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
+use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -366,6 +367,52 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
                 ceiling: caps::PICO_UNICAST_BATCH_BYTES,
             },
         })
+    );
+}
+
+/// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
+/// `DELIVERY_LANE_CALLBACKS` state and two of its longest key, each lowered with its limit, and are
+/// laid out right after the lane's area, the order the open lends them in.
+#[test]
+fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        built.round(),
+        RoundRowCounts {
+            records: caps::DELIVERY_LANE_EVENTS,
+            callbacks: caps::DELIVERY_LANE_CALLBACKS,
+            longest_key: caps::MAX_KEYEXPR_BYTES,
+        }
+    );
+    assert_eq!(
+        row(&built, "delivery records").count,
+        caps::DELIVERY_LANE_EVENTS
+    );
+    assert_eq!(
+        row(&built, "delivery callbacks").count,
+        caps::DELIVERY_LANE_CALLBACKS
+    );
+    let lowered = lowered(|l| {
+        l.select_delivery_lane_events(Quota::at_most(4))?;
+        l.select_max_keyexpr_bytes(Quota::at_most(32))
+    });
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(row(&plan, "delivery records").count, 4);
+    assert_eq!(row(&plan, "delivery keys").count, 1);
+    assert_eq!(row(&plan, "delivery keys").entry_bytes, 64);
+    assert!(
+        plan.reserved_bytes() < built.reserved_bytes(),
+        "the lowered limits lower the arena"
+    );
+    let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
+    let lane = parts
+        .iter()
+        .position(|part| *part == "delivery lane")
+        .expect("the plan has the lane");
+    assert_eq!(
+        parts[lane + 1..lane + 4],
+        ["delivery records", "delivery callbacks", "delivery keys"]
     );
 }
 

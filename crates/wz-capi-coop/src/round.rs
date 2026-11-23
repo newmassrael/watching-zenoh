@@ -44,7 +44,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::{AtomicU64, AtomicU8};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
-use wz_session_core::bounded::{BoundedVec, Static};
+#[cfg(feature = "local-subscriber")]
+use wz_session_core::bounded::Static;
+use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -459,6 +461,55 @@ const fn key_bytes<const KEY: usize>() -> usize {
     KEY.saturating_mul(2)
 }
 
+/// How many rows of each table of a round its session's arena lends: its records
+/// (`DELIVERY_LANE_EVENTS`), the callbacks they owe (`DELIVERY_LANE_CALLBACKS`) and its longest
+/// key (`MAX_KEYEXPR_BYTES`), two of which its keys hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoundRowCounts {
+    /// The records a round holds at once.
+    pub records: usize,
+    /// The callbacks those records owe together.
+    pub callbacks: usize,
+    /// The longest key a record names.
+    pub longest_key: usize,
+}
+
+impl RoundRowCounts {
+    /// The bytes of the keys a round writes: two of the longest, as a key the session resolved
+    /// and the one before it may both be held.
+    pub const fn key_bytes(&self) -> usize {
+        self.longest_key.saturating_mul(2)
+    }
+}
+
+/// The bytes of one record of a round.
+pub(crate) const RECORD_BYTES: usize = core::mem::size_of::<Entry>();
+
+/// The bytes of one callback a record of a round owes.
+pub(crate) const CALLBACK_BYTES: usize = core::mem::size_of::<Owed>();
+
+/// The tables of a round, lent from its session's arena ([`RoundRows::lent`]).
+pub(crate) struct RoundRows {
+    records: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
+    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
+    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
+    longest_key: usize,
+}
+
+impl RoundRows {
+    /// The tables of a round of `counts`, lent from `arena` in the order the plan counts them:
+    /// the records, the callbacks, the keys. Refused past the build's bound of a table or past what
+    /// the arena has left.
+    pub(crate) fn lent(arena: &mut Arena, counts: RoundRowCounts) -> Result<Self, LendRefused> {
+        Ok(Self {
+            records: arena.lend(counts.records)?,
+            callbacks: arena.lend(counts.callbacks)?,
+            keys: arena.lend(counts.key_bytes())?,
+            longest_key: counts.longest_key,
+        })
+    }
+}
+
 /// The table holds nothing; the session may write it.
 const EMPTY: u8 = 0;
 /// The session writes it.
@@ -474,12 +525,15 @@ struct Table {
     datagram: (*const u8, usize),
     /// Whether a part lies in it: its link is held back from its next receive.
     lends: bool,
-    /// As many records as the build's `DELIVERY_LANE_EVENTS`, which the session's limits hold to
-    /// fewer.
-    entries: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Static>,
-    /// The callbacks the records owe at most, one for each subscriber each of them reaches.
-    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Static>,
-    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Static>,
+    /// As many records as the session's `DELIVERY_LANE_EVENTS`, rows its arena lent.
+    entries: BoundedVec<Entry, { caps::DELIVERY_LANE_EVENTS }, Lent>,
+    /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
+    /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows its arena lent.
+    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
+    /// The keys written, two of the session's longest, bytes its arena lent.
+    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
+    /// The session's longest key: the room a record's key may take of `keys`.
+    longest_key: usize,
     /// The key written last, which the records on it that follow share.
     key: Option<Span>,
     /// The area the parts that lie nowhere the callbacks can read them are written into, and how
@@ -670,9 +724,6 @@ pub(crate) type Captured =
 pub(crate) struct Round {
     state: AtomicU8,
     table: UnsafeCell<Table>,
-    /// The records and the callbacks a round holds at most, as the session's limits state.
-    events: Quota,
-    callbacks: Quota,
     /// Whether a record lies in the datagram a link lent ([`Self::lends_a_datagram`]): set by the
     /// session's writes, cleared as a delivery empties the table.
     lends: AtomicBool,
@@ -730,7 +781,7 @@ impl Round {
     pub(crate) unsafe fn shared_over(
         area: NonNull<u8>,
         area_bytes: usize,
-        limits: &SessionLimits,
+        rows: RoundRows,
     ) -> Arc<Self> {
         // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
         // an `Arc` is the same allocation, and the optimiser writes nothing into it.
@@ -738,7 +789,7 @@ impl Round {
         // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
         // is valid and nothing else reads or writes it while it is written; the rest is the
         // caller's.
-        unsafe { Self::write_in((*raw).as_mut_ptr(), area, area_bytes, limits) };
+        unsafe { Self::write_in((*raw).as_mut_ptr(), area, area_bytes, rows) };
         // SAFETY: `write_in` wrote every field into the allocation, and a `MaybeUninit<T>` has
         // the size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
         unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
@@ -750,12 +801,7 @@ impl Round {
     /// `at` is valid for writes of a `Self`, and what it held is overwritten without a drop; the
     /// area is as [`Self::shared_over`] says.
     #[inline(never)]
-    unsafe fn write_in(
-        at: *mut Self,
-        area: NonNull<u8>,
-        area_bytes: usize,
-        limits: &SessionLimits,
-    ) {
+    unsafe fn write_in(at: *mut Self, area: NonNull<u8>, area_bytes: usize, rows: RoundRows) {
         // SAFETY: the caller's contract; an `UnsafeCell<T>` is laid out as the `T` it holds, and
         // each field is written once through a pointer to it. `every_field_is_written` names
         // every field, so the round is whole when it is shared.
@@ -764,18 +810,14 @@ impl Round {
             let table = addr_of_mut!((*at).table).cast::<Table>();
             ptr::write(addr_of_mut!((*table).datagram), (ptr::null(), 0));
             ptr::write(addr_of_mut!((*table).lends), false);
-            ptr::write(addr_of_mut!((*table).entries), BoundedVec::new_static());
-            ptr::write(addr_of_mut!((*table).callbacks), BoundedVec::new_static());
-            ptr::write(addr_of_mut!((*table).keys), BoundedVec::new_static());
+            ptr::write(addr_of_mut!((*table).entries), rows.records);
+            ptr::write(addr_of_mut!((*table).callbacks), rows.callbacks);
+            ptr::write(addr_of_mut!((*table).keys), rows.keys);
+            ptr::write(addr_of_mut!((*table).longest_key), rows.longest_key);
             ptr::write(addr_of_mut!((*table).key), None);
             ptr::write(addr_of_mut!((*table).area), area);
             ptr::write(addr_of_mut!((*table).area_bytes), area_bytes);
             ptr::write(addr_of_mut!((*table).written), 0);
-            ptr::write(addr_of_mut!((*at).events), limits.delivery_lane_events());
-            ptr::write(
-                addr_of_mut!((*at).callbacks),
-                limits.delivery_lane_callbacks(),
-            );
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
@@ -804,8 +846,6 @@ impl Round {
         let Self {
             state: _,
             table,
-            events: _,
-            callbacks: _,
             lends: _,
             owes: _,
             lending: _,
@@ -829,6 +869,7 @@ impl Round {
             entries: _,
             callbacks: _,
             keys: _,
+            longest_key: _,
             key: _,
             area: _,
             area_bytes: _,
@@ -868,21 +909,13 @@ impl Round {
     }
 
     /// Whether `table` takes one more record, owing `callbacks` callbacks.
-    fn takes(&self, table: &Table, callbacks: usize) -> bool {
-        table.entries.free_slots() > 0
-            && self.events.admits(table.entries.len().saturating_add(1))
-            && table.callbacks.free_slots() >= callbacks
-            && self
-                .callbacks
-                .admits(table.callbacks.len().saturating_add(callbacks))
+    fn takes(table: &Table, callbacks: usize) -> bool {
+        table.entries.free_slots() > 0 && table.callbacks.free_slots() >= callbacks
     }
 
     /// Whether `table` takes one more callback of the record it holds last.
-    fn joins(&self, table: &Table) -> bool {
+    fn joins(table: &Table) -> bool {
         table.callbacks.free_slots() > 0
-            && self
-                .callbacks
-                .admits(table.callbacks.len().saturating_add(1))
     }
 
     /// Count a record that found no room, apart when it holds its sender. A record a link's gate
@@ -966,7 +999,7 @@ impl Round {
             self.filled(table);
             return;
         }
-        if !self.takes(table, 1) {
+        if !Self::takes(table, 1) {
             self.refuse(holds_sender);
             return;
         }
@@ -1043,7 +1076,7 @@ impl Round {
                 .iter()
                 .filter_map(Owed::subscriber)
                 .any(|held| Arc::ptr_eq(held, callback));
-        if !joins || !self.joins(table) {
+        if !joins || !Self::joins(table) {
             return false;
         }
         if table
@@ -1101,7 +1134,7 @@ impl Round {
                     .iter()
                     .filter_map(Owed::liveliness)
                     .any(|held| Arc::ptr_eq(held, callback));
-            if joins && self.joins(table) {
+            if joins && Self::joins(table) {
                 if table
                     .callbacks
                     .push(Owed::Liveliness(Arc::clone(callback)))
@@ -1117,7 +1150,7 @@ impl Round {
                 return;
             }
         }
-        if !self.takes(table, 1) {
+        if !Self::takes(table, 1) {
             self.refuse(true);
             return;
         }
@@ -1161,7 +1194,7 @@ impl Round {
             self.refuse(true);
             return;
         };
-        if !self.takes(table, 1) {
+        if !Self::takes(table, 1) {
             self.refuse(true);
             return;
         }
@@ -1310,16 +1343,33 @@ impl Round {
             FILLING => {
                 // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
                 let table = unsafe { &*self.table.get() };
-                let keys = table.keys.free_slots() >= caps::MAX_KEYEXPR_BYTES;
-                self.takes(table, room.callbacks)
+                let keys = table.keys.free_slots() >= table.longest_key;
+                Self::takes(table, room.callbacks)
                     && table
                         .area_bytes
                         .checked_sub(table.written)
                         .and_then(|left| left.checked_sub(room.bytes))
-                        .is_some_and(|spare| keys || spare >= caps::MAX_KEYEXPR_BYTES)
+                        .is_some_and(|spare| keys || spare >= table.longest_key)
             }
             _ => false,
         }
+    }
+
+    /// Let go of the round's tables, their records and the callbacks those owe, before the arena
+    /// that lent them: what the session's end does. The tables left are lent nothing, so the
+    /// round's own drop, which may come after the arena's, reads none of the arena.
+    ///
+    /// # Safety
+    /// No delivery runs and none starts: the session's last handle is being let go of.
+    pub(crate) unsafe fn let_go(&self) {
+        // SAFETY: the caller's contract: nothing else reaches the table now.
+        let table = unsafe { &mut *self.table.get() };
+        table.clear();
+        drop(core::mem::take(&mut table.entries));
+        drop(core::mem::take(&mut table.callbacks));
+        drop(core::mem::take(&mut table.keys));
+        self.lends.store(false, Ordering::Release);
+        self.state.store(EMPTY, Ordering::Release);
     }
 
     /// Whether the table holds nothing: what a leg's end waits for, so that it is told after every

@@ -114,6 +114,7 @@ use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
 use crate::engine::{CoopTables, EntryBytes, LegSink, SubscriberRow};
+use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -146,7 +147,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 30;
+pub const ARENA_ROWS: usize = 32;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -278,6 +279,8 @@ pub struct ArenaPlan {
     link_bytes: usize,
     /// The bytes of the session's round of deliveries (`crate::round`).
     lane_bytes: usize,
+    /// The rows of the round's tables.
+    round: RoundRowCounts,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
     /// How many such buffers, in the one table the session's links share.
@@ -324,6 +327,20 @@ impl ArenaPlan {
                 "DELIVERY_LANE_BYTES",
                 Quota::at_most(limits.delivery_lane_bytes()),
             )?,
+            round: RoundRowCounts {
+                records: lent::<{ caps::DELIVERY_LANE_EVENTS }>(
+                    "DELIVERY_LANE_EVENTS",
+                    limits.delivery_lane_events(),
+                )?,
+                callbacks: lent::<{ caps::DELIVERY_LANE_CALLBACKS }>(
+                    "DELIVERY_LANE_CALLBACKS",
+                    limits.delivery_lane_callbacks(),
+                )?,
+                longest_key: lent::<{ caps::MAX_KEYEXPR_BYTES }>(
+                    "MAX_KEYEXPR_BYTES",
+                    limits.max_keyexpr_bytes(),
+                )?,
+            },
             reassembly_bytes,
             reassembly_chains: LENT_CHAINS,
             entities: EntityRows::default(),
@@ -370,6 +387,25 @@ impl ArenaPlan {
             LentByteCells::FLAG_BYTES,
         )?;
         plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes)?;
+        // The round's tables, lent after its area (`crate::round::RoundRows::lent`).
+        plan.put(
+            "delivery records",
+            "DELIVERY_LANE_EVENTS",
+            plan.round.records,
+            RECORD_BYTES,
+        )?;
+        plan.put(
+            "delivery callbacks",
+            "DELIVERY_LANE_CALLBACKS",
+            plan.round.callbacks,
+            CALLBACK_BYTES,
+        )?;
+        plan.put(
+            "delivery keys",
+            "MAX_KEYEXPR_BYTES",
+            1,
+            plan.round.key_bytes(),
+        )?;
         // The session's reassembly buffers, which its links share, lent next
         // (`SessionArena::lend_reassembly`).
         plan.put(
@@ -568,6 +604,11 @@ impl ArenaPlan {
             KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
         )?;
         Ok(())
+    }
+
+    /// How many rows each table of the session's round of deliveries is lent.
+    pub fn round(&self) -> RoundRowCounts {
+        self.round
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
@@ -1203,6 +1244,7 @@ mod tests {
             links: 0,
             link_bytes: 0,
             lane_bytes: 0,
+            round: RoundRowCounts::default(),
             reassembly_bytes: 0,
             reassembly_chains: 0,
             entities: EntityRows::default(),

@@ -47,7 +47,7 @@ use crate::prelude::*;
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, SessionArena,
 };
-use crate::round::{Round, RoundCounts, RoundGate};
+use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::key_arena::{KeyRef, KeySpace};
@@ -3652,11 +3652,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
+        let round_rows = RoundRows::lent(arena.arena_mut(), plan.round())
+            .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         // SAFETY: the area is the arena's, lent to the lane alone, and the arena is the session's
-        // and given back only when the session is let go, after its last delivery.
-        let samples =
-            unsafe { Round::shared_over(lane_area, lane_bytes, &resolve_limits(&config)) };
+        // and given back only when the session is let go, after its last delivery; the round's
+        // tables are let go of before it (`Round::let_go`, in the engine's drop).
+        let samples = unsafe { Round::shared_over(lane_area, lane_bytes, round_rows) };
         let mut entropy = SharedEntropy::new(entropy);
         let wire = match (&config.zid, policy.zid_derivation()) {
             (Some(zid), _) => wire_zid(zid)?,
@@ -7133,6 +7135,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.dropping().end_links();
+        // The round's tables lie in the session's arena, which the state's drop gives back: they
+        // are let go of first, with the callbacks their records owe.
+        // SAFETY: the last handle is gone, so no delivery runs or starts.
+        unsafe { self.samples.let_go() };
     }
 }
 
