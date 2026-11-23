@@ -45,7 +45,7 @@ use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::send_declare_error::SendDeclareError;
 use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::slot_observer::{NoSink, ObserverSinks};
+use wz_session_core::slot_observer::{NoSink, ObserverSinks, RegistryTables};
 use wz_session_core::wire_id::{listed_entity_id, EntityId};
 
 use crate::connect_manager::{
@@ -982,8 +982,9 @@ pub struct DocumentSinks;
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
     type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type QueryableId = wz_session_core::query::QueryableId;
     type Delivery = ();
-    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;

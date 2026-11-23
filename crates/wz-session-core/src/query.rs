@@ -679,9 +679,18 @@ impl QueryableRef<'_> {
 pub(crate) trait QueryableRows {
     /// What a matched queryable is asked through.
     type Sink;
+    /// The id the table gives a queryable's row, which a delivery names it by.
+    type RowId: Copy;
 
-    /// Hand `f` each row with its sink, in the table's order.
-    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut Self::Sink)>(&mut self, f: F);
+    /// Hand `f` each row with its id and its sink, in the table's order: the sink shared where
+    /// calls of the row read it where it lies, exclusively where only the table's holder reaches
+    /// it ([`RowAccess`](crate::sink::RowAccess)).
+    fn each_row_mut<
+        F: FnMut(QueryableRef<'_>, Self::RowId, crate::sink::RowAccess<'_, Self::Sink>),
+    >(
+        &mut self,
+        f: F,
+    );
 
     /// Whether `f` holds for any row, asked in the table's order until it does.
     #[cfg(feature = "storage-profile")]
@@ -690,8 +699,12 @@ pub(crate) trait QueryableRows {
 
 impl<C, P: Storage> QueryableRows for BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P> {
     type Sink = C;
+    type RowId = QueryableId;
 
-    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut C)>(&mut self, mut f: F) {
+    fn each_row_mut<F: FnMut(QueryableRef<'_>, QueryableId, crate::sink::RowAccess<'_, C>)>(
+        &mut self,
+        mut f: F,
+    ) {
         for queryable in self.iter_mut() {
             let row = QueryableRef {
                 #[cfg(feature = "alloc")]
@@ -701,7 +714,11 @@ impl<C, P: Storage> QueryableRows for BoundedVec<Queryable<C, P>, { caps::MAX_QU
                 origin: queryable.allowed_origin,
                 complete: queryable.complete,
             };
-            f(row, &mut queryable.sink);
+            f(
+                row,
+                queryable.id,
+                crate::sink::RowAccess::Held(&mut queryable.sink),
+            );
         }
     }
 
@@ -720,9 +737,12 @@ impl<C, P: Storage> QueryableRows for BoundedVec<Queryable<C, P>, { caps::MAX_QU
     }
 }
 
-/// Hand `deliver` the sink of each row of `rows` a query on `keyexpr` reaches
+/// Hand `deliver` the id and the sink of each row of `rows` a query on `keyexpr` reaches
 /// ([`QueryableRef::reaches`]), in the table's order: how many.
-pub(crate) fn fire_queryables<R: QueryableRows, D: FnMut(&mut R::Sink)>(
+pub(crate) fn fire_queryables<
+    R: QueryableRows,
+    D: FnMut(R::RowId, crate::sink::RowAccess<'_, R::Sink>),
+>(
     rows: &mut R,
     keyexpr: &str,
     keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -731,9 +751,9 @@ pub(crate) fn fire_queryables<R: QueryableRows, D: FnMut(&mut R::Sink)>(
     mut deliver: D,
 ) -> usize {
     let mut fired: usize = 0;
-    rows.each_row_mut(|row, sink| {
+    rows.each_row_mut(|row, id, sink| {
         if row.reaches(keyexpr, keyexpr_facts, is_remote, target) {
-            deliver(sink);
+            deliver(id, sink);
             fired = fired.saturating_add(1);
         }
     });
@@ -834,8 +854,11 @@ pub(crate) fn stage_queryable_interest<R: QueryableRows>(
 /// ([`crate::session_tables::SessionTables`]), over the same functions, so the fan-out a query
 /// is delivered by serves either.
 pub trait LocalQueryables {
-    /// What a matched queryable is asked through.
+    /// What a matched queryable is asked through, with the context the dispatch is handed
+    /// ([`QueryDelivery`]): the row's own record of its queryable.
     type Sink;
+    /// The id the table gives a queryable's row, which a delivery names it by.
+    type RowId: Copy;
 
     /// Whether a queryable a query of the session itself on `query_keyexpr` would reach is held,
     /// under the querier's `require_complete`
@@ -854,12 +877,12 @@ pub trait LocalQueryables {
         staged: &mut Vec<QueryableInterestReply>,
     ) -> usize;
 
-    /// Hand `deliver` the sink of each queryable a query on `keyexpr` (whose [`KeyFacts`] are
-    /// `keyexpr_facts`) reaches from a peer (`is_remote`) or the session itself, under the
-    /// query's `target`, in the table's order: how many.
+    /// Hand `deliver` the id and the sink of each queryable a query on `keyexpr` (whose
+    /// [`KeyFacts`] are `keyexpr_facts`) reaches from a peer (`is_remote`) or the session itself,
+    /// under the query's `target`, in the table's order: how many.
     ///
     /// [`KeyFacts`]: crate::keyexpr_match::KeyFacts
-    fn fire_matching_queryables<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching_queryables<D: FnMut(Self::RowId, crate::sink::RowAccess<'_, Self::Sink>)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -873,6 +896,7 @@ pub trait LocalQueryables {
 
 impl<C, P: Storage> LocalQueryables for QueryableRegistry<C, P> {
     type Sink = C;
+    type RowId = QueryableId;
 
     #[cfg(feature = "storage-profile")]
     fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool {
@@ -890,7 +914,7 @@ impl<C, P: Storage> LocalQueryables for QueryableRegistry<C, P> {
         stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
     }
 
-    fn fire_matching_queryables<D: FnMut(&mut C)>(
+    fn fire_matching_queryables<D: FnMut(QueryableId, crate::sink::RowAccess<'_, C>)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -2353,6 +2377,43 @@ impl<S> ResponderSink for S where
 {
 }
 
+/// What a matched queryable row is asked through: the context the dispatch is handed with the
+/// query, so a row holds its own facts and no reference to the state its queries go to. Each call
+/// names the row by the id its table gives it (`Id`) and hands it as its table holds it
+/// ([`RowAccess`](crate::sink::RowAccess)), as [`crate::sink::SampleDelivery`] does for a
+/// subscriber's row.
+///
+/// `()` is the context of a row that answers itself (`Row: ResponderSink`), which the table holds
+/// alone: the heap profile's closures and a node's closed sinks. A row read in place is asked by
+/// a context of its own; `()` asks it nothing.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+pub trait QueryDelivery<Row, Id> {
+    /// Ask `row`, the row `id`, the query `query`, its replies staged through `responder`. Both
+    /// are borrowed for the call.
+    fn ask(
+        &mut self,
+        id: Id,
+        row: crate::sink::RowAccess<'_, Row>,
+        query: &crate::query_sink::ProvenQuery<'_>,
+        responder: &mut QueryResponder<'_>,
+    );
+}
+
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+impl<Row: ResponderSink, Id> QueryDelivery<Row, Id> for () {
+    fn ask(
+        &mut self,
+        _id: Id,
+        row: crate::sink::RowAccess<'_, Row>,
+        query: &crate::query_sink::ProvenQuery<'_>,
+        responder: &mut QueryResponder<'_>,
+    ) {
+        if let Some(row) = row.held() {
+            crate::query_sink::QuerySinkOf::handle_typed(row, query, responder);
+        }
+    }
+}
+
 /// One staged element of the interest-response chain a peer's QUERYABLE
 /// `Interest` is owed (see [`QueryableRegistry::respond_to_queryable_interest`]).
 /// Owned, unlike the id-only liveliness items, because an AGGREGATE reply names
@@ -2902,7 +2963,11 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             keyexpr_facts,
             is_remote,
             target,
-            |sink| sink.handle(view, reply_out),
+            |_, sink| {
+                if let Some(sink) = sink.held() {
+                    sink.handle(view, reply_out);
+                }
+            },
         )
     }
 }
@@ -3167,7 +3232,18 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             #[cfg(feature = "pubsub-ts-stack")]
             None,
         );
-        fire_query(self, None, envelope, keyexpr, projection, replies, false)
+        fire_query(
+            self,
+            &mut (),
+            Asker {
+                remote: false,
+                requester: None,
+            },
+            envelope,
+            keyexpr,
+            projection,
+            replies,
+        )
     }
 
     /// [`Self::local_query_with_value`] for a query that is instrumented: every matched queryable
@@ -3185,7 +3261,18 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         replies: &mut ReplyStage<S>,
     ) -> usize {
         let projection = project_owned_query(query, value, ts_stack);
-        fire_query(self, None, envelope, keyexpr, projection, replies, false)
+        fire_query(
+            self,
+            &mut (),
+            Asker {
+                remote: false,
+                requester: None,
+            },
+            envelope,
+            keyexpr,
+            projection,
+            replies,
+        )
     }
 }
 
@@ -3236,6 +3323,24 @@ impl QueryPeer {
     where
         L::Sink: ResponderSink,
     {
+        self.dispatch_request_with(queryables, &mut (), request, peer_keyexpr_table, replies)
+    }
+
+    /// [`Self::dispatch_request`], each matched row asked through `cx` ([`QueryDelivery`]).
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_request_with<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
+        &mut self,
+        queryables: &mut L,
+        cx: &mut X,
+        request: &RequestOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        replies: &mut ReplyStage<S>,
+    ) -> DispatchOutcome {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // Only the Query body arm triggers application-visible
         // dispatch — see scope note above. zenoh's wire entry never enters its
@@ -3337,7 +3442,7 @@ impl QueryPeer {
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack.as_ref(),
         );
-        let matched = self.fire_projection(queryables, envelope, resolved, projection, replies);
+        let matched = self.fire_projection(queryables, cx, envelope, resolved, projection, replies);
         DispatchOutcome::routed(matched)
     }
 
@@ -3396,17 +3501,15 @@ impl QueryPeer {
     /// routed (the caller owes its final, as for one that matched nobody), so the asker's query
     /// ends with no reply and does not wait out its timeout. The one body both receive paths fire
     /// through is the one place the bound is read.
-    fn fire_projection<L: LocalQueryables, S: Storage>(
+    fn fire_projection<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
         &mut self,
         queryables: &mut L,
+        cx: &mut X,
         envelope: QueryEnvelope,
         keyexpr: &str,
         projection: QueryProjection<'_>,
         replies: &mut ReplyStage<S>,
-    ) -> usize
-    where
-        L::Sink: ResponderSink,
-    {
+    ) -> usize {
         let (max_parameters, max_attachment) = self.query_size_bounds();
         if request_past_bounds(
             projection.parameters,
@@ -3419,12 +3522,15 @@ impl QueryPeer {
         }
         fire_query(
             queryables,
-            self.requester,
+            cx,
+            Asker {
+                remote: true,
+                requester: self.requester,
+            },
             envelope,
             keyexpr,
             projection,
             replies,
-            true,
         )
     }
 
@@ -3475,6 +3581,32 @@ impl QueryPeer {
     ) where
         L::Sink: ResponderSink,
     {
+        self.dispatch_messages_with(
+            queryables,
+            &mut (),
+            messages,
+            peer_keyexpr_table,
+            pending_replies,
+            pending_final_rids,
+        );
+    }
+
+    /// [`Self::dispatch_messages`], each matched row asked through `cx` ([`QueryDelivery`]).
+    #[cfg(feature = "alloc")]
+    pub fn dispatch_messages_with<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
+        &mut self,
+        queryables: &mut L,
+        cx: &mut X,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
+        pending_replies: &mut ReplyStage<S>,
+        pending_final_rids: &mut FinalStage<S>,
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
         // `NetworkMessage::Request` (itself a `codec-request` variant) is
@@ -3525,8 +3657,13 @@ impl QueryPeer {
                     pending_final_rids.refuse_request();
                     continue;
                 }
-                let outcome =
-                    self.dispatch_request(queryables, req, peer_keyexpr_table, pending_replies);
+                let outcome = self.dispatch_request_with(
+                    queryables,
+                    cx,
+                    req,
+                    peer_keyexpr_table,
+                    pending_replies,
+                );
                 if outcome.owes_final(self.answers_unresolved_queries()) {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
@@ -3549,23 +3686,28 @@ impl QueryPeer {
     // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
-    pub fn dispatch_iteration_event<'a, L: LocalQueryables, S: Storage>(
+    pub fn dispatch_iteration_event<
+        'a,
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: Storage,
+    >(
         &mut self,
         queryables: &mut L,
+        cx: &mut X,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) where
-        L::Sink: ResponderSink,
-    {
+    ) {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 if let Some(messages) = crate::driver_loop::owned_records(messages) {
-                    self.dispatch_messages(
+                    self.dispatch_messages_with(
                         queryables,
+                        cx,
                         messages,
                         peer_keyexpr_table,
                         pending_replies,
@@ -3579,6 +3721,7 @@ impl QueryPeer {
                 if let Some(request) = record.request() {
                     self.dispatch_request_in_place(
                         queryables,
+                        cx,
                         request,
                         peer_keyexpr_table,
                         pending_replies,
@@ -3660,24 +3803,37 @@ fn project_owned_query<'q>(
     }
 }
 
+/// Who asks a query a fan-out delivers ([`fire_query`]).
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+#[derive(Clone, Copy)]
+struct Asker {
+    /// This face's peer, and not the session itself, whose queryables that answer only the
+    /// session's own queries are not reached by it.
+    remote: bool,
+    /// Who the link proved the peer to be (decision D12): `None` when it proved no one, and for
+    /// the session's own query.
+    requester: Option<[u8; 16]>,
+}
+
 /// The fan-out itself, over a query already projected into what a queryable is shown
 /// ([`QueryProjection`]): the owned query's projection and the one a Request read where its frame
 /// lies makes are fired through this one body, over the queryables of either table, so the match,
-/// the responder and the view a handler gets cannot differ between them. `requester` is who the
-/// link proved the asker to be (decision D12), `None` for the session's own query.
+/// the responder and the view a handler gets cannot differ between them. `cx` is what each
+/// matched row is asked through ([`QueryDelivery`]).
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-fn fire_query<L: LocalQueryables, S: Storage>(
+fn fire_query<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
     queryables: &mut L,
-    requester: Option<[u8; 16]>,
+    cx: &mut X,
+    asker: Asker,
     envelope: QueryEnvelope,
     keyexpr: &str,
     projection: QueryProjection<'_>,
     replies: &mut ReplyStage<S>,
-    is_remote: bool,
-) -> usize
-where
-    L::Sink: ResponderSink,
-{
+) -> usize {
+    let Asker {
+        remote: is_remote,
+        requester,
+    } = asker;
     let QueryEnvelope { rid, target, qos } = envelope;
     let QueryProjection {
         parameters: parameters_view,
@@ -3708,7 +3864,7 @@ where
     let accept_mode = ReplyKeyExpr::from_parameter_bytes(parameters_view);
     // The query's key is read once for every queryable it is matched against.
     let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
-    queryables.fire_matching_queryables(keyexpr, keyexpr_facts, is_remote, target, |sink| {
+    queryables.fire_matching_queryables(keyexpr, keyexpr_facts, is_remote, target, |id, row| {
         // R311y834 — the acceptance mode comes from the QUERY's own
         // selector parameters, the same token the requester's gate
         // reads (R311y833). `parameters_view` is already the
@@ -3761,8 +3917,9 @@ where
                     #[cfg(feature = "pubsub-ts-stack")]
                     ts_stack,
                 };
-                crate::query_sink::QuerySinkOf::handle_typed(
-                    sink,
+                cx.ask(
+                    id,
+                    row,
                     &crate::query_sink::ProvenQuery {
                         inner: &shared,
                         peer: requester,
@@ -3770,8 +3927,9 @@ where
                     &mut responder,
                 )
             } else {
-                crate::query_sink::QuerySinkOf::handle_typed(
-                    sink,
+                cx.ask(
+                    id,
+                    row,
                     &crate::query_sink::ProvenQuery {
                         inner: &query_view,
                         peer: requester,
@@ -3783,8 +3941,9 @@ where
         // The view and the responder are handed over as their own types: a sink of one
         // closed type is called without a vtable (`ResponderSink`).
         #[cfg(not(feature = "alloc"))]
-        crate::query_sink::QuerySinkOf::handle_typed(
-            sink,
+        cx.ask(
+            id,
+            row,
             &crate::query_sink::ProvenQuery {
                 inner: &query_view,
                 peer: requester,

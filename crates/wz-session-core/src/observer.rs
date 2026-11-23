@@ -394,7 +394,7 @@ impl ApplicationLayerObserver {
         allowed_origin: crate::locality::Locality,
         sink: crate::sink::BoxedSink,
     ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
-        self.app.subscribers.register_sink_for(
+        self.app.tables.subscribers.register_sink_for(
             &mut self.peers.subscribers,
             keyexpr_pattern,
             allowed_origin,
@@ -432,6 +432,7 @@ impl ApplicationLayerObserver {
     /// Whether it was registered.
     pub fn unregister_subscriber(&mut self, id: crate::pubsub::SubscriptionId) -> bool {
         self.app
+            .tables
             .subscribers
             .unregister_for(&mut self.peers.subscribers, id)
     }
@@ -443,11 +444,11 @@ impl ApplicationLayerObserver {
         let requesters = &mut self.requesters;
         (
             ObserverApp {
-                subscribers: &mut app.subscribers,
+                subscribers: &mut app.tables.subscribers,
                 #[cfg(feature = "switchboard")]
                 switchboard: &mut app.switchboard,
                 #[cfg(feature = "query-queryable")]
-                queryables: &mut app.queryables,
+                queryables: &mut app.tables.queryables,
                 #[cfg(feature = "declare-subscriber")]
                 remote_subscribers: &mut app.remote_subscribers,
                 #[cfg(feature = "declare-queryable")]
@@ -484,11 +485,11 @@ impl ApplicationLayerObserver {
         let requesters = &self.requesters;
         (
             ObserverAppRef {
-                subscribers: &app.subscribers,
+                subscribers: &app.tables.subscribers,
                 #[cfg(feature = "switchboard")]
                 switchboard: &app.switchboard,
                 #[cfg(feature = "query-queryable")]
-                queryables: &app.queryables,
+                queryables: &app.tables.queryables,
                 #[cfg(feature = "declare-subscriber")]
                 remote_subscribers: &app.remote_subscribers,
                 #[cfg(feature = "declare-queryable")]
@@ -669,7 +670,7 @@ impl ApplicationLayerObserver {
             for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                 if let crate::network_message::NetworkMessage::Interest(interest) = message {
                     Self::stage_queryable_interest(
-                        &self.app.queryables,
+                        &self.app.tables.queryables,
                         &mut self.pending_queryable_replies,
                         interest,
                         self.peers.subscribers.mapping_spaces(),
@@ -687,7 +688,7 @@ impl ApplicationLayerObserver {
         if let IterationEvent::InPlace(record) = event {
             if let Some(interest) = record.interest() {
                 Self::stage_queryable_interest_view(
-                    &self.app.queryables,
+                    &self.app.tables.queryables,
                     &mut self.pending_queryable_replies,
                     interest,
                     self.peers.subscribers.mapping_spaces(),
@@ -1035,9 +1036,9 @@ mod tests {
     #[test]
     fn new_observer_starts_empty() {
         let observer = ApplicationLayerObserver::new();
-        assert_eq!(observer.app.subscribers.len(), 0);
+        assert_eq!(observer.app.tables.subscribers.len(), 0);
         #[cfg(feature = "query-queryable")]
-        assert_eq!(observer.app.queryables.len(), 0);
+        assert_eq!(observer.app.tables.queryables.len(), 0);
         #[cfg(feature = "declare-subscriber")]
         assert_eq!(observer.app.remote_subscribers.on_decl_len(), 0);
         #[cfg(feature = "declare-queryable")]
@@ -1604,6 +1605,7 @@ mod tests {
             let mut observer = ApplicationLayerObserver::new();
             observer
                 .app
+                .tables
                 .queryables
                 .register("home/temp", |_query, responder| {
                     responder.reply(b"21.0");
@@ -1981,6 +1983,7 @@ mod sub_interest_reply_tests {
             .expect("no quota is stated on this table");
         let count = observer
             .app
+            .tables
             .subscribers
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
@@ -2158,7 +2161,7 @@ mod sub_interest_reply_tests {
                 let resolved = observer
                     .peers
                     .subscribers
-                    .sub_interest_reply(&observer.app.subscribers, item);
+                    .sub_interest_reply(&observer.app.tables.subscribers, item);
                 match item {
                     SubInterestReply::Aggregate { .. } => {
                         reached_aggregate += 1;
@@ -2277,6 +2280,7 @@ mod sub_interest_reply_tests {
             .expect("no quota is stated on this table");
         let staged_count = observer
             .app
+            .tables
             .subscribers
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
@@ -2337,6 +2341,7 @@ mod sub_interest_reply_tests {
             .expect("no quota is stated on this table");
         observer
             .app
+            .tables
             .subscribers
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
@@ -2426,6 +2431,7 @@ mod sub_interest_reply_tests {
             .expect("no quota is stated on this table");
         observer
             .app
+            .tables
             .subscribers
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
@@ -2697,6 +2703,7 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         let id = observer
             .app
+            .tables
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table")
@@ -2749,6 +2756,7 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         let id = observer
             .app
+            .tables
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table")
@@ -2773,6 +2781,7 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         observer
             .app
+            .tables
             .queryables
             .register("other/key", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -2796,17 +2805,20 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         let first = observer
             .app
+            .tables
             .queryables
             .register("demo/**", |_q, _out| {})
             .expect("no quota is stated on this table")
             .as_u64();
         observer
             .app
+            .tables
             .queryables
             .register("demo/a", |_q, _out| {})
             .expect("no quota is stated on this table");
         observer
             .app
+            .tables
             .queryables
             .register("elsewhere/x", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -2827,12 +2839,14 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         let a = observer
             .app
+            .tables
             .queryables
             .register("demo/*", |_q, _out| {})
             .expect("no quota is stated on this table")
             .as_u64();
         let b = observer
             .app
+            .tables
             .queryables
             .register_sink(
                 "demo/b",
@@ -2865,6 +2879,7 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         observer
             .app
+            .tables
             .queryables
             .register_with_locality("lat", Locality::SessionLocal, |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -2882,6 +2897,7 @@ mod queryable_interest_reply_tests {
         let mut observer = ApplicationLayerObserver::new();
         observer
             .app
+            .tables
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -2932,10 +2948,10 @@ mod accessor_tests {
         let id = observer
             .with_app(|app| app.subscribers.register("demo/a", |_| {}))
             .unwrap();
-        assert_eq!(observer.app.subscribers.len(), 1);
+        assert_eq!(observer.app.tables.subscribers.len(), 1);
         assert_eq!(observer.read_app(|app| app.subscribers.len()), 1);
         assert!(observer.with_app(|app| app.subscribers.unregister(id)));
-        assert!(observer.app.subscribers.is_empty());
+        assert!(observer.app.tables.subscribers.is_empty());
     }
 
     /// Registering through the observer reaches the same table as the half does, and retiring an
@@ -2982,6 +2998,6 @@ mod accessor_tests {
         });
         assert!(registered);
         assert_eq!(pending, 0);
-        assert_eq!(observer.app.subscribers.len(), 1);
+        assert_eq!(observer.app.tables.subscribers.len(), 1);
     }
 }
