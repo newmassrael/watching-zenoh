@@ -2125,8 +2125,6 @@ pub mod peer_tables;
 // (always compiled) the storage-replication classification, the AP wall-clock
 // source, and the advanced-cache `_time` resolver all build on, so the
 // magnitude is no longer stated four ways.
-// Totality debt TD-092 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod ntp64;
 
 /// Round 311wa — the shared no_std bincode-1.3 wire primitives (the single
