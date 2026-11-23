@@ -612,20 +612,24 @@ impl LinkReadiness for SocketReadiness {
         others: &[alloc::sync::Arc<dyn LinkReadiness>],
         timeout_ms: u32,
     ) {
-        let mut fds = alloc::vec![wait_entry(self.0, room)];
+        let mut fds = [wait_entry(self.0, room); crate::WAIT_SET_SOCKETS];
+        let mut count = 1;
         for other in others {
-            match other.handle() {
-                Some(socket) => fds.push(wait_entry(socket, other.wants_room())),
-                // A wait this cannot name to the system: the bounded look, so it is not starved
-                // behind a wait on the others.
-                None => return self.wait_ready(room, timeout_ms.min(1)),
+            match (other.handle(), fds.get_mut(count)) {
+                (Some(socket), Some(entry)) => {
+                    *entry = wait_entry(socket, other.wants_room());
+                    count += 1;
+                }
+                // A wait this cannot name to the system, or one past the set: the bounded look, so
+                // it is not starved behind a wait on the others.
+                _ => return self.wait_ready(room, timeout_ms.min(1)),
             }
         }
-        // SAFETY: `fds` is live for the call and its length is the count passed; every socket is
-        // a duplicate its owner holds open for as long as the wait is held, and the timeout
-        // bounds the wait. A failed wait is a quiet socket: the step that follows reads and
-        // reports the error.
-        unsafe { ws::WSAPoll(fds.as_mut_ptr(), fds.len() as u32, wait_ms(timeout_ms)) };
+        // SAFETY: the first `count` entries of `fds` are written and live for the call; every
+        // socket is a duplicate its owner holds open for as long as the wait is held, and the
+        // timeout bounds the wait. A failed wait is a quiet socket: the step that follows reads
+        // and reports the error.
+        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) };
     }
 }
 

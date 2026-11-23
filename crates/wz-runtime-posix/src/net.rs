@@ -176,32 +176,36 @@ impl LinkReadiness for FdReadiness {
         others: &[alloc::sync::Arc<dyn LinkReadiness>],
         timeout_ms: u32,
     ) {
-        let mut fds = alloc::vec![libc::pollfd {
+        let mut fds = [libc::pollfd {
             fd: self.0,
             events: wait_events(room),
             revents: 0,
-        }];
+        }; crate::WAIT_SET_SOCKETS];
+        let mut count = 1;
         for other in others {
-            match other
+            let fd = other
                 .handle()
-                .and_then(|handle| c_int::try_from(handle).ok())
-            {
-                Some(fd) => fds.push(libc::pollfd {
-                    fd,
-                    events: wait_events(other.wants_room()),
-                    revents: 0,
-                }),
-                // A wait this cannot name to the kernel: the bounded look, so it is not starved
-                // behind a wait on the others.
-                None => return self.wait_ready(room, timeout_ms.min(1)),
+                .and_then(|handle| c_int::try_from(handle).ok());
+            match (fd, fds.get_mut(count)) {
+                (Some(fd), Some(entry)) => {
+                    *entry = libc::pollfd {
+                        fd,
+                        events: wait_events(other.wants_room()),
+                        revents: 0,
+                    };
+                    count += 1;
+                }
+                // A wait this cannot name to the kernel, or one past the set: the bounded look, so
+                // it is not starved behind a wait on the others.
+                _ => return self.wait_ready(room, timeout_ms.min(1)),
             }
         }
         let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
-        // SAFETY: `fds` is live for the call and its length is the count passed; every descriptor
-        // is a duplicate its owner holds open for as long as the wait is held, and the timeout
-        // bounds the wait. A failed or interrupted wait is a quiet socket: the step that follows
-        // reads and reports the error.
-        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+        // SAFETY: the first `count` entries of `fds` are written and live for the call; every
+        // descriptor is a duplicate its owner holds open for as long as the wait is held, and the
+        // timeout bounds the wait. A failed or interrupted wait is a quiet socket: the step that
+        // follows reads and reports the error.
+        unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) };
     }
 }
 
@@ -1165,6 +1169,61 @@ mod tests {
             Err(PosixNetError::Bind(e)) => assert_eq!(e, libc::EADDRINUSE),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("a second bind on a taken port must fail"),
+        }
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// A wait over several sockets names each of them to the system, the set's last one too:
+        /// a datagram queued there ends it at once. A wait over more sockets than the set holds is
+        /// the bounded look, which ends within a millisecond. CONTROL: a wait over quiet sockets
+        /// that fill the set sleeps its time. Turned red by a set that keeps only the first socket,
+        /// or one that waits on part of a larger set for the whole time.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_wait_over_several_sockets_names_each_and_one_past_its_set_looks() {
+            use std::sync::Arc;
+            use std::time::{Duration, Instant};
+            use std::vec::Vec;
+            use wz_runtime_coop::session_drive::LinkReadiness;
+
+            let (quiet, sender) = pair();
+            let ready = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+            let wait_on = |socket: &PosixUdpSocket| -> Arc<dyn LinkReadiness> {
+                Arc::new(FdReadiness::duplicate(socket.fd).expect("a duplicate"))
+            };
+            let first = FdReadiness::duplicate(quiet.fd).expect("a duplicate");
+            let mut others: Vec<Arc<dyn LinkReadiness>> = (1..crate::WAIT_SET_SOCKETS)
+                .map(|_| wait_on(&quiet))
+                .collect();
+
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 100);
+            assert!(
+                started.elapsed() >= Duration::from_millis(80),
+                "CONTROL: quiet sockets that fill the set sleep the wait's time"
+            );
+
+            others.push(wait_on(&quiet));
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a wait past the set is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            others.pop();
+            others.pop();
+            others.push(wait_on(&ready));
+            assert_eq!(others.len() + 1, crate::WAIT_SET_SOCKETS, "the set is full");
+            sender.send_to(ready.local(), b"wake").expect("a send");
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(2_500),
+                "the datagram on the set's last socket ended the wait, took {:?}",
+                started.elapsed()
+            );
         }
     }
 }

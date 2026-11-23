@@ -654,4 +654,59 @@ mod tests {
         v6.set_multicast_hops(6).expect("a hop limit");
         assert_eq!(option(&v6, ws::IPPROTO_IPV6, ws::IPV6_MULTICAST_HOPS), 6);
     }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// A wait over several sockets names each of them to the system, the set's last one too:
+        /// a datagram queued there ends it at once. A wait over more sockets than the set holds is
+        /// the bounded look, which ends within a millisecond. CONTROL: a wait over quiet sockets
+        /// that fill the set sleeps its time. Turned red by a set that keeps only the first socket,
+        /// or one that waits on part of a larger set for the whole time.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_wait_over_several_sockets_names_each_and_one_past_its_set_looks() {
+            use std::sync::Arc;
+            use std::time::{Duration, Instant};
+            use std::vec::Vec;
+            use wz_runtime_coop::session_drive::LinkReadiness;
+
+            let (quiet, sender) = pair();
+            let ready = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
+            let wait_on = |socket: &WindowsUdpSocket| -> Arc<dyn LinkReadiness> {
+                Arc::new(super::super::SocketReadiness::duplicate(socket.socket).expect("a duplicate"))
+            };
+            let first = super::super::SocketReadiness::duplicate(quiet.socket).expect("a duplicate");
+            let mut others: Vec<Arc<dyn LinkReadiness>> = (1..crate::WAIT_SET_SOCKETS)
+                .map(|_| wait_on(&quiet))
+                .collect();
+
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 100);
+            assert!(
+                started.elapsed() >= Duration::from_millis(80),
+                "CONTROL: quiet sockets that fill the set sleep the wait's time"
+            );
+
+            others.push(wait_on(&quiet));
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a wait past the set is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            others.pop();
+            others.pop();
+            others.push(wait_on(&ready));
+            assert_eq!(others.len() + 1, crate::WAIT_SET_SOCKETS, "the set is full");
+            sender.send_to(ready.local(), b"wake").expect("a send");
+            let started = Instant::now();
+            first.wait_ready_among(false, &others, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(2_500),
+                "the datagram on the set's last socket ended the wait, took {:?}",
+                started.elapsed()
+            );
+        }
+    }
 }
