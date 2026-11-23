@@ -84,6 +84,7 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
+use crate::engine::SubscriberCallback;
 use crate::prelude::*;
 
 /// The handle the lane's queues carry: the event slot a sample holds and where its bytes start,
@@ -1690,6 +1691,411 @@ impl SampleLane {
     }
 }
 
+/// How many samples of one datagram the pending table holds: as many as the lane has event slots,
+/// which the session's limits size. A datagram that carries more has the rest kept by its link
+/// and handed out in the next round.
+const PENDING_SAMPLES: usize = caps::DELIVERY_LANE_EVENTS;
+
+/// How many callbacks the samples of the pending table owe at most, one for each subscriber each
+/// of them reaches.
+const PENDING_CALLBACKS: usize = caps::DELIVERY_LANE_CALLBACKS;
+
+/// The callbacks one sample owes at most: one for each subscriber of the session.
+const SAMPLE_CALLBACKS: usize = if caps::MAX_SUBSCRIPTIONS < PENDING_CALLBACKS {
+    caps::MAX_SUBSCRIPTIONS
+} else {
+    PENDING_CALLBACKS
+};
+
+/// The bytes of the keys the pending table writes: a key the session resolved from an alias lies
+/// in a frame of the dispatch, gone when the callbacks run.
+const PENDING_KEY_BYTES: usize = 2 * caps::MAX_KEYEXPR_BYTES;
+
+/// The pending table holds nothing; the session may write it.
+const EMPTY: u8 = 0;
+/// The session writes the samples of the datagram a link lends its step now.
+const FILLING: u8 = 1;
+/// The samples wait for their callbacks; nothing joins them.
+const SEALED: u8 = 2;
+/// A delivery hands them to their callbacks.
+const DELIVERING: u8 = 3;
+
+/// A sample of the pending table: where its parts lie, and the place of its first callback.
+struct PendingEntry {
+    head: EntryHead,
+    rest: Option<EntryRest>,
+    first: usize,
+}
+
+/// What the pending table holds: the datagram its samples lie in, the samples, the callbacks
+/// they owe, in order, and the keys it wrote.
+struct PendingTable {
+    datagram: (*const u8, usize),
+    entries: BoundedVec<PendingEntry, PENDING_SAMPLES, Static>,
+    callbacks: BoundedVec<(SubId, SubscriberCallback), PENDING_CALLBACKS, Static>,
+    keys: BoundedVec<u8, PENDING_KEY_BYTES, Static>,
+    /// The key written last, which the samples on it that follow share.
+    key: Option<Span>,
+}
+
+impl PendingTable {
+    /// The part at `span` of the datagram the samples lie in.
+    fn lent(&self, span: Span) -> &[u8] {
+        if span.bytes() == 0 {
+            return &[];
+        }
+        // SAFETY: the part lies in the datagram (`Span::of`), which its link leaves where it lies
+        // while the table holds anything (`SharedLane::lends_a_datagram`).
+        unsafe { core::slice::from_raw_parts(self.datagram.0.add(span.first()), span.bytes()) }
+    }
+
+    /// The part at `span` of the keys the table wrote.
+    fn written(&self, span: Span) -> &[u8] {
+        self.keys
+            .get(span.first()..span.first() + span.bytes())
+            .unwrap_or(&[])
+    }
+
+    /// The key of the sample `head` names.
+    fn key_of(&self, head: &EntryHead) -> &[u8] {
+        match head.key {
+            KeyAt::Lent(span) => self.lent(span),
+            KeyAt::Written(span) => self.written(span),
+        }
+    }
+
+    /// Hold nothing, for the next datagram.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.callbacks.clear();
+        self.keys.clear();
+        self.key = None;
+        self.datagram = (ptr::null(), 0);
+    }
+}
+
+/// The samples of one datagram a link lends the session's step, read where they lie, each with
+/// the callbacks of the subscribers whose rows it matched, copied out of those rows under the
+/// session's lock and called after it is let go, as zenoh-pico copies its subscriptions' callbacks
+/// out of its session mutex before it calls them. One datagram at a time: while the table holds
+/// anything the links are read no further and their datagram stays where it lies, so a callback
+/// that waits for what the same link brings next waits for itself.
+///
+/// The session writes the table under its lock while it is empty or filling; the end of the
+/// datagram's walk, or anything handed to the lane after it, seals it; one delivery takes it,
+/// hands every sample to its callbacks in order and empties it. The state word orders the two
+/// sides: the seal is a release the delivery's take acquires, and the delivery's emptying is a
+/// release the session's next write acquires.
+pub(crate) struct Pending {
+    state: portable_atomic::AtomicU8,
+    table: UnsafeCell<PendingTable>,
+    /// The rounds handed out and the samples in them, which the tests count.
+    #[cfg(all(test, feature = "std"))]
+    rounds: AtomicUsize,
+    #[cfg(all(test, feature = "std"))]
+    samples: AtomicUsize,
+}
+
+impl Pending {
+    /// An empty table, as a value, for a lane a test holds.
+    #[cfg(all(test, feature = "std"))]
+    fn new() -> Self {
+        Self {
+            state: portable_atomic::AtomicU8::new(EMPTY),
+            table: UnsafeCell::new(PendingTable {
+                datagram: (ptr::null(), 0),
+                entries: BoundedVec::new_static(),
+                callbacks: BoundedVec::new_static(),
+                keys: BoundedVec::new_static(),
+                key: None,
+            }),
+            #[cfg(all(test, feature = "std"))]
+            rounds: AtomicUsize::new(0),
+            #[cfg(all(test, feature = "std"))]
+            samples: AtomicUsize::new(0),
+        }
+    }
+
+    /// An empty table written where `at` points, field by field: its rows are kilobytes, which
+    /// a value of the whole would lay in the frame of the session's open.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, and what it held is overwritten without a drop.
+    unsafe fn write_in(at: *mut Self) {
+        // SAFETY: the caller's contract; an `UnsafeCell<T>` is laid out as the `T` it holds, and
+        // each field is written once through a pointer to it.
+        unsafe {
+            ptr::write(
+                addr_of_mut!((*at).state),
+                portable_atomic::AtomicU8::new(EMPTY),
+            );
+            let table = addr_of_mut!((*at).table).cast::<PendingTable>();
+            ptr::write(addr_of_mut!((*table).datagram), (ptr::null(), 0));
+            ptr::write(addr_of_mut!((*table).entries), BoundedVec::new_static());
+            ptr::write(addr_of_mut!((*table).callbacks), BoundedVec::new_static());
+            ptr::write(addr_of_mut!((*table).keys), BoundedVec::new_static());
+            ptr::write(addr_of_mut!((*table).key), None);
+            #[cfg(all(test, feature = "std"))]
+            ptr::write(addr_of_mut!((*at).rounds), AtomicUsize::new(0));
+            #[cfg(all(test, feature = "std"))]
+            ptr::write(addr_of_mut!((*at).samples), AtomicUsize::new(0));
+        }
+    }
+
+    /// A field added to [`Pending`] or its table and not written by [`Self::write_in`] would be
+    /// read uninitialised. This destructures both with no `..`, so adding a field without naming
+    /// it here (and so without writing it there) does not compile.
+    #[allow(dead_code)]
+    fn every_field_is_written(pending: Self) {
+        let Self {
+            state: _,
+            table,
+            #[cfg(all(test, feature = "std"))]
+                rounds: _,
+            #[cfg(all(test, feature = "std"))]
+                samples: _,
+        } = pending;
+        let PendingTable {
+            datagram: _,
+            entries: _,
+            callbacks: _,
+            keys: _,
+            key: _,
+        } = table.into_inner();
+    }
+
+    /// Whether the table holds anything: its datagram is held where it lies.
+    fn holds(&self) -> bool {
+        self.state.load(Ordering::Acquire) != EMPTY
+    }
+
+    /// Whether the table takes one more record of the datagram its link lends now: empty, or
+    /// filling with the room of a sample that reaches every subscriber and has a key of its own.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    unsafe fn has_room(&self) -> bool {
+        match self.state.load(Ordering::Acquire) {
+            EMPTY => true,
+            FILLING => {
+                // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
+                let table = unsafe { &*self.table.get() };
+                table.entries.free_slots() > 0
+                    && table.callbacks.free_slots() >= SAMPLE_CALLBACKS
+                    && table.keys.free_slots() >= caps::MAX_KEYEXPR_BYTES
+            }
+            _ => false,
+        }
+    }
+
+    /// Take no more samples: what is handed to the lane after this is handed out after them.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    unsafe fn seal(&self) {
+        let _ = self
+            .state
+            .compare_exchange(FILLING, SEALED, Ordering::AcqRel, Ordering::Relaxed);
+    }
+
+    /// Hold `sample` of `datagram` for `callback`, subscriber `subscriber`'s: whether it was
+    /// taken. Refused, holding nothing more, when the table is sealed or holds another datagram's
+    /// samples, when a part of the sample but its key lies outside the datagram, or when it has
+    /// not the room.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, and the link leaves `datagram` where it lies until it
+    /// is next asked to receive.
+    unsafe fn offer(
+        &self,
+        subscriber: SubId,
+        callback: &SubscriberCallback,
+        sample: &dyn SampleView,
+        datagram: (*const u8, usize),
+    ) -> bool {
+        let state = self.state.load(Ordering::Acquire);
+        if state != EMPTY && state != FILLING {
+            return false;
+        }
+        // SAFETY: an empty or filling table is the lock holder's, and the caller holds the lock.
+        let table = unsafe { &mut *self.table.get() };
+        if state == FILLING && table.datagram != datagram {
+            return false;
+        }
+        let Some(lent) = LentEntry::of(subscriber, sample, datagram) else {
+            return false;
+        };
+        if state == EMPTY {
+            table.clear();
+            table.datagram = datagram;
+        }
+        let key = sample.keyexpr().as_bytes();
+        // The sample offered last, for one more of its subscribers.
+        if let Some(last) = table.entries.last() {
+            let joins = last.head.same_sample(&lent.head)
+                && last.rest == lent.rest
+                && table.key_of(&last.head) == key
+                && !table
+                    .callbacks
+                    .get(last.first..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|(_, held)| Arc::ptr_eq(held, callback));
+            if joins {
+                if table
+                    .callbacks
+                    .push((subscriber, Arc::clone(callback)))
+                    .is_err()
+                {
+                    return false;
+                }
+                if let Some(last) = table.entries.last_mut() {
+                    last.head.subscribers += 1;
+                }
+                return true;
+            }
+        }
+        if table.entries.free_slots() == 0 || table.callbacks.free_slots() == 0 {
+            return false;
+        }
+        let mut head = lent.head;
+        if let Some(outside) = lent.key {
+            let span = match table.key {
+                Some(span) if table.written(span) == outside => span,
+                _ => {
+                    let at = table.keys.len();
+                    let (Ok(first), Ok(len)) = (u32::try_from(at), u32::try_from(outside.len()))
+                    else {
+                        return false;
+                    };
+                    if table.keys.extend_from_slice(outside).is_err() {
+                        return false;
+                    }
+                    let span = Span { at: first, len };
+                    table.key = Some(span);
+                    span
+                }
+            };
+            head.key = KeyAt::Written(span);
+        }
+        let first = table.callbacks.len();
+        let kept = table
+            .entries
+            .push(PendingEntry {
+                head,
+                rest: lent.rest,
+                first,
+            })
+            .is_ok()
+            && table
+                .callbacks
+                .push((subscriber, Arc::clone(callback)))
+                .is_ok();
+        debug_assert!(kept, "the table had the room its checks found");
+        if state == EMPTY {
+            self.state.store(FILLING, Ordering::Release);
+        }
+        kept
+    }
+
+    /// Hand each sample the table holds, sealed, to its callbacks in order, `hand` making each
+    /// call, and empty it: whether there was anything to hand. Nothing of the session is held;
+    /// a delivery that finds the table not sealed, or taken by another, hands nothing.
+    fn deliver(&self, mut hand: impl FnMut(SubId, &SubscriberCallback, &dyn SampleView)) -> bool {
+        if self
+            .state
+            .compare_exchange(SEALED, DELIVERING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let emptied = Emptied(self);
+        // SAFETY: a table being delivered is this delivery's alone until `emptied` empties it.
+        let table = unsafe { &*self.table.get() };
+        for entry in table.entries.iter() {
+            let sample = PendingSample {
+                head: entry.head,
+                rest: entry.rest.as_ref(),
+                table,
+            };
+            let owed = entry.first..entry.first + entry.head.subscribers as usize;
+            for (subscriber, callback) in table.callbacks.get(owed).unwrap_or(&[]) {
+                hand(*subscriber, callback, &sample);
+            }
+        }
+        #[cfg(all(test, feature = "std"))]
+        {
+            self.rounds.fetch_add(1, Ordering::SeqCst);
+            self.samples
+                .fetch_add(table.entries.len(), Ordering::SeqCst);
+        }
+        drop(emptied);
+        true
+    }
+}
+
+/// A delivery of the pending table ends, a callback's unwinding included: the table is emptied,
+/// its callbacks let go of with no lock of the session held, and given back to the session.
+struct Emptied<'p>(&'p Pending);
+
+impl Drop for Emptied<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the table is this delivery's until the store below gives it back.
+        unsafe { (*self.0.table.get()).clear() };
+        self.0.state.store(EMPTY, Ordering::Release);
+    }
+}
+
+/// A sample of the pending table, read where its datagram and the table's keys hold it: what each
+/// of its subscribers' callbacks is handed.
+struct PendingSample<'t> {
+    head: EntryHead,
+    rest: Option<&'t EntryRest>,
+    table: &'t PendingTable,
+}
+
+impl SampleView for PendingSample<'_> {
+    fn keyexpr(&self) -> &str {
+        // SAFETY: the bytes were a `&str`'s (`SampleView::keyexpr`), so they are UTF-8.
+        unsafe { core::str::from_utf8_unchecked(self.table.key_of(&self.head)) }
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.table.lent(self.head.payload)
+    }
+
+    fn kind(&self) -> SampleKind {
+        self.head.kind
+    }
+
+    fn reliability(&self) -> Reliability {
+        self.head.reliability
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        self.head.qos
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        let span = self.rest?.attachment?;
+        Some(self.table.lent(span))
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.rest?.source_info.as_ref()
+    }
+
+    fn timestamp_parts(&self) -> Option<(u64, &[u8])> {
+        let (time, zid) = self.rest?.timestamp?;
+        Some((time, self.table.lent(zid)))
+    }
+
+    fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
+        let (id, schema) = self.rest?.encoding?;
+        Some((id, schema.map(|span| self.table.lent(span))))
+    }
+}
+
 /// The session's lane, handed between the session and its deliveries with no lock: the session
 /// writes it under its own lock ([`Self::held`]), and each sample it publishes is handed to the
 /// deliveries through a queue of the sample's handles (`handed`), the event slot it holds and
@@ -1750,6 +2156,9 @@ pub(crate) struct SharedLane {
     /// How many holds of the lane were taken ([`Self::held`]), which the tests count.
     #[cfg(all(test, feature = "std"))]
     holds: AtomicUsize,
+    /// The samples of the datagram a link lends the step that the lane holds nothing ahead of,
+    /// handed to their callbacks before anything the lane holds ([`Pending`]).
+    pending: Pending,
 }
 
 // SAFETY: the lane is reached by the holder of the session's lock alone (`Self::held`), the
@@ -1799,6 +2208,7 @@ impl SharedLane {
             lent_count: AtomicUsize::new(0),
             #[cfg(all(test, feature = "std"))]
             holds: AtomicUsize::new(0),
+            pending: Pending::new(),
         }
     }
 
@@ -1871,6 +2281,7 @@ impl SharedLane {
             ptr::write(addr_of_mut!((*at).lent_count), AtomicUsize::new(0));
             #[cfg(all(test, feature = "std"))]
             ptr::write(addr_of_mut!((*at).holds), AtomicUsize::new(0));
+            Pending::write_in(addr_of_mut!((*at).pending));
         }
     }
 
@@ -1901,6 +2312,7 @@ impl SharedLane {
                 lent_count: _,
             #[cfg(all(test, feature = "std"))]
                 holds: _,
+            pending: _,
         } = shared;
     }
 
@@ -1921,7 +2333,8 @@ impl SharedLane {
     /// until the callbacks of every such sample have returned. Asked by the session's step, which
     /// holds the session's lock, under which `lying_handed` and `lying_open` are written.
     pub(crate) fn lends_a_datagram(&self) -> bool {
-        self.lying_open.load(Ordering::Acquire)
+        self.pending.holds()
+            || self.lying_open.load(Ordering::Acquire)
             || self.lying_handed.load(Ordering::SeqCst) != self.lying_back.load(Ordering::SeqCst)
     }
 
@@ -1941,6 +2354,9 @@ impl SharedLane {
     pub(crate) unsafe fn held(&self) -> LaneHeld<'_> {
         #[cfg(all(test, feature = "std"))]
         self.holds.fetch_add(1, Ordering::SeqCst);
+        // What the lane is handed under this hold is handed out after the pending samples.
+        // SAFETY: the caller's contract: the session's lock is held.
+        unsafe { self.pending.seal() };
         let mut held = LaneHeld { shared: self };
         #[cfg(debug_assertions)]
         held.offering_gated(self.gated.load(Ordering::Acquire));
@@ -1973,6 +2389,81 @@ impl SharedLane {
         offer_into(self, lane, subscriber, sample);
         self.reads
             .store(lane.takes_a_link_read(), Ordering::Release);
+    }
+
+    /// Hold `sample` for `callback`, subscriber `subscriber`'s, in the pending table when it lies
+    /// in the datagram a link lends the step and the lane holds nothing to be handed out before
+    /// it ([`Pending`]); queue it in the lane otherwise ([`Self::offer_sample`]), after which the
+    /// pending table takes no more.
+    ///
+    /// # Safety
+    /// As [`Self::held`]'s.
+    pub(crate) unsafe fn offer_to(
+        &self,
+        subscriber: SubId,
+        callback: Option<&SubscriberCallback>,
+        sample: &dyn SampleView,
+    ) {
+        // SAFETY: the caller's contract: written under the session's lock, which is held.
+        let lending = unsafe { *self.lending.get() };
+        if let (Some(datagram), Some(callback)) = (lending, callback) {
+            // SAFETY: the caller's contract, and the link leaves the datagram where it lies while
+            // the table holds it (`Self::lends_a_datagram`).
+            if unsafe { self.quiet() && self.pending.offer(subscriber, callback, sample, datagram) }
+            {
+                return;
+            }
+        }
+        // SAFETY: the caller's contract.
+        unsafe {
+            self.pending.seal();
+            self.offer_sample(subscriber, sample);
+        }
+    }
+
+    /// Whether the lane holds nothing to be handed out and no delivery of it runs: what a sample
+    /// is held in the pending table after, so the samples are handed out in the order they came.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    unsafe fn quiet(&self) -> bool {
+        // SAFETY: the caller holds the session's lock, under which the lane is reached, and holds
+        // no hold of it.
+        let lane = unsafe { &*self.lane.get() };
+        lane.open.is_none()
+            && lane.published.front().is_none()
+            && !self.owes_a_delivery()
+            && !self.delivering.load(Ordering::SeqCst)
+            && !self.lying_open.load(Ordering::Acquire)
+            && self.lying_handed.load(Ordering::SeqCst) == self.lying_back.load(Ordering::SeqCst)
+    }
+
+    /// Whether the pending table takes one more record of the datagram a link lends the step.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub(crate) unsafe fn pending_room(&self) -> bool {
+        // SAFETY: the caller's contract.
+        unsafe { self.pending.has_room() }
+    }
+
+    /// Hand the pending samples to their callbacks ([`Pending::deliver`]), with nothing of the
+    /// session held: whether there were any.
+    pub(crate) fn deliver_pending(
+        &self,
+        hand: impl FnMut(SubId, &SubscriberCallback, &dyn SampleView),
+    ) -> bool {
+        self.pending.deliver(hand)
+    }
+
+    /// How many rounds of pending samples were handed out, and how many samples were in them,
+    /// which the tests of the cost of one sample count.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn pending_counts(&self) -> (usize, usize) {
+        (
+            self.pending.rounds.load(Ordering::SeqCst),
+            self.pending.samples.load(Ordering::SeqCst),
+        )
     }
 
     /// How many holds of the lane were taken since it was made, which the tests of the cost of
@@ -2791,8 +3282,12 @@ impl<P> LaneGate<P> {
     }
 
     /// Whether the lane has the room of a record, once what the deliveries gave back is taken
-    /// back.
+    /// back, and the pending table the room of one more record of the datagram lent now.
     fn has_room(&self) -> bool {
+        // SAFETY: asked by the session's step alone, under the session's lock (`Self::new`).
+        if !unsafe { self.lane.pending_room() } {
+            return false;
+        }
         if self.lane.takes_a_link_read() {
             return true;
         }

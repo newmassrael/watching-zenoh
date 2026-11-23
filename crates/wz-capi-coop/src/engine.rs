@@ -1044,9 +1044,39 @@ unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
 /// What a subscriber's sink mints: the callback a sample is handed to.
 type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
 
-/// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
-/// from the read task and one from the program's own `zp_read` never overlap.
-type SubscriberCallback = Arc<Mutex<SubscriberCallbackFn>>;
+/// A subscriber's callback, as the ABI's sink minted it: locked while it runs, so a delivery from
+/// the read task and one from the program's own `zp_read` never overlap, and retired when its
+/// subscriber is undeclared or its session closed, so a delivery that copied it out of the
+/// subscriber's row before hands it nothing more.
+pub(crate) struct LiveCallback {
+    live: AtomicBool,
+    call: Mutex<SubscriberCallbackFn>,
+}
+
+impl LiveCallback {
+    pub(crate) fn new(call: SubscriberCallbackFn) -> Self {
+        Self {
+            live: AtomicBool::new(true),
+            call: Mutex::new(call),
+        }
+    }
+
+    /// Hand `sample` to the callback, unless it was retired.
+    pub(crate) fn hand(&self, sample: &dyn SampleView) {
+        if self.live.load(Ordering::Acquire) {
+            (lock(&self.call))(sample);
+        }
+    }
+
+    /// Hand nothing more: its subscriber is gone.
+    fn retire(&self) {
+        self.live.store(false, Ordering::Release);
+    }
+}
+
+/// A subscriber's callback, shared by its row, the table of callbacks and the deliveries that
+/// copied it out of the row.
+pub(crate) type SubscriberCallback = Arc<LiveCallback>;
 
 /// How many subscribers of one sample a delivery keeps the callbacks of ([`Resolved`]): a sample
 /// for more is handed to the ones past these by a look in the table each.
@@ -1521,6 +1551,9 @@ pub(crate) struct SubscriberRow {
     wire: WireKey,
     /// Where a sample the row matches is offered, under the subscriber's id.
     lane: Arc<SharedLane>,
+    /// The callback the samples the row matches are handed to, copied out of the row with each
+    /// of them. Set once the row is registered, so a refused registration mints none.
+    callback: Option<SubscriberCallback>,
 }
 
 impl SubscriberRow {
@@ -1553,7 +1586,7 @@ impl SampleSink for SubscriberRow {
     fn deliver(&mut self, sample: &dyn SampleView) {
         // SAFETY: the session core's table hands its sinks a sample under the session's lock: it
         // is the registry's, which only `Core` holds.
-        unsafe { self.lane.offer_sample(self.id, sample) }
+        unsafe { self.lane.offer_to(self.id, self.callback.as_ref(), sample) }
     }
 }
 
@@ -3955,14 +3988,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn lane_handed(&self) -> usize {
-        self.samples.handed_on()
+        self.samples.handed_on() + self.samples.pending_counts().0
     }
 
     /// How many samples the session's delivery lane handed to their callbacks where their
     /// datagram lies since the open: what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn lane_lent(&self) -> usize {
-        self.samples.lent_count()
+        self.samples.lent_count() + self.samples.pending_counts().1
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
@@ -4194,7 +4227,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// and the queries each say without their locks whether they hold anything, so a pass that
     /// finds nothing, which every delivery's last pass is, takes none of their locks.
     fn hand_out(&self) -> bool {
-        let mut handed = self.samples.owes_a_delivery() && self.hand_out_lane();
+        // The pending samples came before anything the lane holds (`SharedLane::offer_to`).
+        let mut handed = self.hand_out_pending();
+        handed |= self.samples.owes_a_delivery() && self.hand_out_lane();
         // A face that came up or went down, told to each watcher as it stands now: the list is
         // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
         #[cfg(feature = "connectivity")]
@@ -4225,6 +4260,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let asked = self.hand_queries();
         handed || asked
+    }
+
+    /// Hand the samples of the datagram a link lent the last step to the callbacks their rows
+    /// matched, each copied out of its row under the session's lock (`lane::Pending`), with no
+    /// lock of the library held. Whether anything was handed.
+    fn hand_out_pending(&self) -> bool {
+        self.samples
+            .deliver_pending(|subscriber, callback, sample| {
+                #[cfg(feature = "local-subscriber")]
+                let _running = self.deliveries.run(TargetKey::Subscriber(subscriber));
+                #[cfg(not(feature = "local-subscriber"))]
+                let _ = subscriber;
+                callback.hand(sample);
+            })
     }
 
     /// Hand what the session's lane holds to the callbacks it is for, the oldest first. Whether
@@ -4306,7 +4355,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let _running = self.deliveries.run(TargetKey::Subscriber(id));
             #[cfg(not(feature = "local-subscriber"))]
             let _ = id;
-            (lock(callback))(sample);
+            callback.hand(sample);
         };
         for (at, id) in subscribers.enumerate() {
             if at < RESOLVED_SUBSCRIBERS {
@@ -4717,7 +4766,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             for id in reached.iter().filter(|id| !inside(id)) {
                 if let Some(callback) = self.subscriber_callback(*id) {
                     let _running = self.deliveries.run(TargetKey::Subscriber(*id));
-                    (lock(&callback))(&sample);
+                    callback.hand(&sample);
                 }
             }
         }
@@ -5499,6 +5548,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             retraction,
             wire,
             lane: self.samples.clone(),
+            callback: None,
         };
         // A registration the table refuses (a key longer than a row holds or with no room in the
         // key arena) is a refused declaration, told as one: an id answered for it would name a
@@ -5514,11 +5564,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let callback = sample_shown(exposed_by(&core.policy), sink());
-        lock(&self.targets).push((
-            TargetKey::Subscriber(id),
-            Target::Subscriber(Arc::new(Mutex::new(callback))),
-        ));
+        let callback: SubscriberCallback = Arc::new(LiveCallback::new(sample_shown(
+            exposed_by(&core.policy),
+            sink(),
+        )));
+        if let Some((_, row)) = core.registry.borrow_mut().app.subscribers.row_at_mut(at) {
+            row.callback = Some(Arc::clone(&callback));
+        }
+        lock(&self.targets).push((TargetKey::Subscriber(id), Target::Subscriber(callback)));
         // Each link is told it from the row, which names the key as the table keeps it.
         core.announce_subscriber(at);
         #[cfg(feature = "group")]
@@ -5601,6 +5654,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Some(row)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
+        // A delivery that copied the callback out of the row before hands it nothing more.
+        if let Some(Target::Subscriber(callback)) = &callback {
+            callback.retire();
+        }
         drop((entry, callback));
         #[cfg(feature = "local-subscriber")]
         self.deliver();
@@ -6817,6 +6874,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             core::mem::take(&mut *targets)
         };
         self.forget_resolved();
+        for (_, target) in &taken {
+            if let Target::Subscriber(callback) = target {
+                callback.retire();
+            }
+        }
         drop(taken);
     }
 

@@ -1279,6 +1279,13 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             .map(|subscriber| (&*subscriber.pattern, &subscriber.sink))
     }
 
+    /// [`Self::row_at`], the sink to write: what its registration could not say yet.
+    pub fn row_at_mut(&mut self, at: usize) -> Option<(&str, &mut C)> {
+        self.subscribers
+            .get_mut(at)
+            .map(|subscriber| (&*subscriber.pattern, &mut subscriber.sink))
+    }
+
     /// The place, in the table's order, of the first subscription whose sink `found` picks.
     pub fn position_of(&self, found: impl Fn(&C) -> bool) -> Option<usize> {
         self.subscribers
