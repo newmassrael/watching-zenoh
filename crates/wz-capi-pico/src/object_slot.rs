@@ -54,6 +54,10 @@ pub(crate) enum Kind {
     // Without the pools a kept hello is the heap's copy (`crate::scout`).
     #[cfg(all(wz_process_pools, any(feature = "scout", feature = "scout-mcu")))]
     Hello = 11,
+    #[cfg(feature = "query")]
+    Querier = 12,
+    /// A key expression the program holds declared (`z_declare_keyexpr`).
+    Keyexpr = 13,
 }
 
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.

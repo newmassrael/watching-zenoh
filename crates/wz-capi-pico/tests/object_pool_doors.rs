@@ -87,6 +87,40 @@ unsafe fn publisher(session: &z_owned_session_t, key: &CStr) -> (z_owned_publish
     (publisher, code)
 }
 
+/// A key expression `key` declared on `session`, and the code its declaration answered.
+unsafe fn declared_keyexpr(
+    session: &z_owned_session_t,
+    key: &CStr,
+) -> (wz_capi_pico::abi::z_owned_keyexpr_t, i8) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut declared: wz_capi_pico::abi::z_owned_keyexpr_t = std::mem::zeroed();
+    let code = wz_capi_pico::z_declare_keyexpr(
+        z_session_loan(session),
+        &mut declared,
+        z_view_keyexpr_loan(&ke),
+    );
+    (declared, code)
+}
+
+/// A querier declared on `key`, and the code its declaration answered.
+#[cfg(feature = "query")]
+unsafe fn querier(
+    session: &z_owned_session_t,
+    key: &CStr,
+) -> (wz_capi_pico::z_owned_querier_t, i8) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+    let code = wz_capi_pico::z_declare_querier(
+        z_session_loan(session),
+        &mut querier,
+        z_view_keyexpr_loan(&ke),
+        std::ptr::null_mut(),
+    );
+    (querier, code)
+}
+
 #[test]
 fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_when_empty() {
     // SAFETY: every owned value below is made and dropped through the library's own doors, once.
@@ -159,6 +193,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             bytes: 2,
             configs: 1,
             payload_bytes: 128,
+            queriers: 1,
+            keyexprs: 1,
             ..Default::default()
         };
         let mut bytes = 0usize;
@@ -193,8 +229,11 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             "reserved once"
         );
         let held_by_plane = usize::from(cfg!(feature = "queryable"))
-            + 2 * usize::from(cfg!(feature = "liveliness"));
-        let reported = 1 + 1 + 1 + held_by_plane + 2 + configs_reported;
+            + 2 * usize::from(cfg!(feature = "liveliness"))
+            + usize::from(cfg!(feature = "query"));
+        // The session, the publisher, the subscriber, the planes', the two payloads, the declared
+        // key expression and the config.
+        let reported = 1 + 1 + 1 + held_by_plane + 2 + 1 + configs_reported;
         assert_eq!(slots(), reported);
         let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
@@ -269,6 +308,39 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (mut redeclared, code) = publisher(&session, c"wz/pool/b");
         assert_eq!(code, Z_OK);
         assert_eq!(in_use(), 4);
+
+        // ARM 8b: the one declared key expression's place is taken; a second declaration is
+        // refused, left null, and the place of an undeclared one goes back.
+        let (mut key, code) = declared_keyexpr(&session, c"wz/pool/key/a");
+        assert_eq!(code, Z_OK);
+        assert_eq!(in_use(), 5);
+        let (refused_key, code) = declared_keyexpr(&session, c"wz/pool/key/b");
+        assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(!wz_capi_pico::z_internal_keyexpr_check(&refused_key));
+        assert_eq!(
+            wz_capi_pico::z_undeclare_keyexpr(
+                z_session_loan(&session),
+                wz_capi_pico::z_keyexpr_move(&mut key)
+            ),
+            Z_OK
+        );
+        assert_eq!(in_use(), 4, "an undeclared key gives its place back");
+
+        // ARM 8c: the one querier's place likewise.
+        #[cfg(feature = "query")]
+        {
+            let (mut querier, code) = querier(&session, c"wz/pool/ask/a");
+            assert_eq!(code, Z_OK);
+            assert_eq!(in_use(), 5);
+            let (refused_querier, code) = querier(&session, c"wz/pool/ask/b");
+            assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+            assert!(!wz_capi_pico::z_internal_querier_check(&refused_querier));
+            assert_eq!(
+                wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(&mut querier)),
+                Z_OK
+            );
+            assert_eq!(in_use(), 4, "an undeclared querier gives its place back");
+        }
 
         // ARM 9: everything let go, the pools are given up, and the next object reserves the
         // build's pools again: three payloads fit where the program's pools held two.

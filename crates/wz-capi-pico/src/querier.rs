@@ -323,9 +323,9 @@ impl z_owned_querier_t {
 }
 
 /// # Safety
-/// `h` must be a live `Box::into_raw::<QuerierState>` pointer.
+/// `h` must be a live handle a querier's slot was filled for.
 unsafe fn free_querier(h: *mut c_void) {
-    drop(Box::from_raw(h as *mut QuerierState));
+    crate::object_slot::release(h as *mut QuerierState);
 }
 
 impl_handle_ownership7!(
@@ -372,8 +372,9 @@ pub unsafe extern "C" fn z_declare_querier(
             return Z_ERR_NULL;
         };
         let engine = engine_of(handle);
+        // Read where the caller's key lies: the declaration below keeps its own.
         let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
-            Ok(k) => k.to_owned(),
+            Ok(k) => k,
             Err(code) => return code,
         };
         // pico dereferences `options` only when non-null and otherwise takes the
@@ -405,7 +406,12 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
         // and its gets are issued on that declaration.
-        let key = match DeclaredKeyexpr::declare(&engine, &ke, declared_of(keyexpr)) {
+        // The querier's place is taken before anything is declared, so a full pool refuses the
+        // querier and nothing is declared.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Querier) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
+        let key = match DeclaredKeyexpr::declare(&engine, ke, declared_of(keyexpr)) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
@@ -435,7 +441,7 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(filter) => filter,
             Err(rc) => return rc,
         };
-        let mut boxed = Box::new(QuerierState {
+        let state = slot.fill(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid,
             shared: engine,
@@ -451,9 +457,9 @@ pub unsafe extern "C" fn z_declare_querier(
             gets: crate::ffi::LatchList::default(),
             cancel: wz_capi_port::cancellation::CancellationToken::new(),
         });
-        boxed.bind();
+        (*state).bind();
         *querier = z_owned_querier_t {
-            handle: Box::into_raw(boxed) as *mut c_void,
+            handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 22],
         };
         Z_OK
@@ -470,8 +476,8 @@ pub unsafe extern "C" fn z_undeclare_querier(querier: *mut z_moved_querier_t) ->
         let handle = (*querier)._this.handle;
         if !handle.is_null() {
             (*querier)._this = z_owned_querier_t::null_value();
-            // The `Drop` impl retracts this querier's matching listeners.
-            drop(Box::from_raw(handle as *mut QuerierState));
+            // The `Drop` impl retracts this querier's matching listeners; its place goes back.
+            crate::object_slot::release(handle as *mut QuerierState);
         }
         Z_OK
     })

@@ -734,9 +734,14 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         let Some(literal) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
+        // The key's place is taken before it is declared, so a full pool refuses the key and
+        // nothing is declared.
+        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Keyexpr) else {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        };
         match DeclaredKeyexpr::declare(&engine_of(state), literal, declared_of(keyexpr)) {
             Ok(key) => {
-                store_owned_keyexpr(declared, key);
+                owned_keyexpr_at(declared, slot.fill(key));
                 Z_OK
             }
             Err(rc) => rc,
@@ -771,7 +776,10 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         if handle.is_null() {
             return Z_ERR_INVALID;
         }
-        let key = Box::from_raw(handle as *mut DeclaredKeyexpr);
+        // Its place goes back as `key` drops, wherever it lies.
+        let Some(key) = crate::object_slot::Placed::from_raw(handle as *mut DeclaredKeyexpr) else {
+            return Z_ERR_INVALID;
+        };
         let Some(state) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
@@ -858,7 +866,9 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
         }
         let handle = (*obj)._this._handle;
         if !handle.is_null() {
-            drop(Box::from_raw(handle as *mut DeclaredKeyexpr));
+            // A declared key's place is a pool's, another's the heap's: `release` gives it back to
+            // whichever it lies in.
+            crate::object_slot::release(handle as *mut DeclaredKeyexpr);
         }
         (*obj)._this = z_owned_keyexpr_t::null_value();
         Z_OK
@@ -897,13 +907,21 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// asked of the key ([`wire_key_of`]), which is the only place that can tell a
 /// whole-key declaration from a prefix one.
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
-    let boxed = Box::new(key);
-    let start = boxed.literal().as_ptr();
-    let len = boxed.literal().len();
+    owned_keyexpr_at(dst, Box::into_raw(Box::new(key)));
+}
+
+/// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot
+/// for a key the program declared (`z_declare_keyexpr`), the heap's for the rest.
+///
+/// # Safety
+/// `dst` is valid and writable; `key` is a live key a [`crate::object_slot::Slot`] was filled
+/// with or a `Box` made, which `dst` then owns.
+unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexpr) {
+    let literal = (*key).literal();
     *dst = z_owned_keyexpr_t {
-        _start: start,
-        _len: len,
-        _handle: Box::into_raw(boxed) as *mut c_void,
+        _start: literal.as_ptr(),
+        _len: literal.len(),
+        _handle: key as *mut c_void,
         _mapping: 0,
         _pad: [0usize; 2],
     };

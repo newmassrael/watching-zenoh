@@ -1929,11 +1929,13 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * largest block, or one no free block holds, is refused.
  *
  * THE COUNTS. The program states how many of each object it holds at once.
- * The entity counts (publishers to liveliness_subscribers) are per session
- * and are multiplied by sessions; the rest are for all sessions together. A
- * session's subscribers, queryables, liveliness tokens and liveliness
- * subscribers are bounded by the limits it opens under (MAX_SUBSCRIPTIONS,
- * MAX_QUERYABLES, MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS): a count of
+ * The entity counts (publishers to liveliness_subscribers, queriers and
+ * keyexprs) are per session and are multiplied by sessions; the rest are for
+ * all sessions together. A session's subscribers, queryables, liveliness
+ * tokens, liveliness subscribers, queriers and declared key expressions are
+ * bounded by the limits it opens under (MAX_SUBSCRIPTIONS, MAX_QUERYABLES,
+ * MAX_LOCAL_TOKENS, MAX_LIVELINESS_SUBSCRIPTIONS, MAX_QUERIERS,
+ * MAX_DECLARED_KEYEXPRS): a count of
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
@@ -1952,12 +1954,13 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * wanted it answers _Z_ERR_SYSTEM_OUT_OF_MEMORY having made, opened, declared
  * or held nothing (z_config_default, z_config_clone, z_hello_clone, z_open,
  * z_declare_publisher, z_declare_subscriber, z_declare_queryable,
- * z_liveliness_declare_token, z_liveliness_declare_subscriber, the clone and
+ * z_declare_querier, z_declare_keyexpr, z_liveliness_declare_token,
+ * z_liveliness_declare_subscriber, the clone and
  * take_from_loaned of a sample, reply, reply error or query, and the
  * constructors and copies of a payload, a string or a slice, which leave it
- * null). An object let go frees its slot. Key expressions, the handles of
- * strings, slices, string arrays and encodings, closures and the handles of
- * the other wz_ext doors are the heap's in either build. */
+ * null). An object let go frees its slot. Key expressions not declared, the
+ * handles of strings, slices, string arrays and encodings, closures and the
+ * handles of the other wz_ext doors are the heap's in either build. */
 #define WZ_EXT_OBJECT_POOL_CLASSES 11
 
 typedef struct wz_ext_object_pool_counts_t {
@@ -1974,6 +1977,8 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t configs;
   size_t hellos;
   size_t payload_bytes;
+  size_t queriers;
+  size_t keyexprs;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

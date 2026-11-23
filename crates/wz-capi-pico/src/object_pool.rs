@@ -52,8 +52,8 @@ pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 
 /// How many of each object the program holds at once, as it states them to reserve the pools.
 ///
-/// The entity counts (`publishers` to `liveliness_subscribers`) are per session; the rest are for
-/// all sessions together. Zero is read as the module says: the bound of the session's limit where
+/// The entity counts (`publishers` to `liveliness_subscribers`, `queriers` and `keyexprs`) are per
+/// session; the rest are for all sessions together. Zero is read as the module says: the bound of the session's limit where
 /// one bounds the object, none where none does.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,6 +87,11 @@ pub struct wz_ext_object_pool_counts_t {
     /// The bytes the payloads, strings and slices the program holds carry together, in blocks of
     /// power-of-two sizes from 32 bytes, each the smallest that holds its bytes and a 16-byte head.
     pub payload_bytes: usize,
+    /// Queriers of each session, at most its `MAX_QUERIERS`.
+    pub queriers: usize,
+    /// Key expressions of each session the program holds declared (`z_declare_keyexpr`), at most
+    /// its `MAX_DECLARED_KEYEXPRS`.
+    pub keyexprs: usize,
 }
 
 impl wz_ext_object_pool_counts_t {
@@ -105,6 +110,8 @@ impl wz_ext_object_pool_counts_t {
             bytes: self.bytes,
             configs: self.configs,
             hellos: self.hellos,
+            queriers: self.queriers,
+            keyexprs: self.keyexprs,
             payload_bytes: self.payload_bytes,
         }
     }
@@ -293,6 +300,8 @@ mod tests {
             configs: 11,
             hellos: 12,
             payload_bytes: 13,
+            queriers: 14,
+            keyexprs: 15,
         };
         assert_eq!(
             stated.counts(),
@@ -309,6 +318,8 @@ mod tests {
                 bytes: 10,
                 configs: 11,
                 hellos: 12,
+                queriers: 14,
+                keyexprs: 15,
                 payload_bytes: 13,
             }
         );

@@ -96,6 +96,10 @@ pub(crate) struct Counts {
     pub(crate) configs: usize,
     /// Hellos a program keeps (`z_hello_clone`).
     pub(crate) hellos: usize,
+    /// Queriers of each session.
+    pub(crate) queriers: usize,
+    /// Key expressions of each session a program holds declared (`z_declare_keyexpr`).
+    pub(crate) keyexprs: usize,
     /// The bytes the payloads, strings and slices carry, their blocks' heads included.
     pub(crate) payload_bytes: usize,
 }
@@ -165,6 +169,8 @@ pub(crate) struct Bounds {
     queryables: Option<usize>,
     liveliness_tokens: Option<usize>,
     liveliness_subscribers: Option<usize>,
+    queriers: Option<usize>,
+    keyexprs: Option<usize>,
 }
 
 impl Bounds {
@@ -176,6 +182,8 @@ impl Bounds {
             queryables: limits.max_queryables().most(),
             liveliness_tokens: limits.max_local_tokens().most(),
             liveliness_subscribers: limits.max_liveliness_subscriptions().most(),
+            queriers: limits.max_queriers().most(),
+            keyexprs: limits.max_declared_keyexprs().most(),
         }
     }
 }
@@ -267,13 +275,20 @@ pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, 
         } else {
             0
         },
+        queriers: planned!(bounded(
+            cfg!(feature = "query"),
+            sessions,
+            stated.queriers,
+            bounds.queriers,
+        )),
+        keyexprs: planned!(bounded(true, sessions, stated.keyexprs, bounds.keyexprs)),
         payload_bytes: stated.payload_bytes,
     })
 }
 
 /// How many kinds of object have a pool: the variants of `Kind`, those a build has none of
 /// included, so each keeps its index in every build.
-const KINDS: usize = 12;
+const KINDS: usize = 14;
 
 /// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +344,11 @@ impl Plan {
         {
             plan = plan.with::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
         }
+        #[cfg(feature = "query")]
+        {
+            plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
+        }
+        plan = plan.with::<crate::keyexpr::DeclaredKeyexpr>(Kind::Keyexpr, objects.keyexprs);
         let mut kind = 0;
         let mut holds = plan.area != 0;
         while kind < KINDS {
@@ -835,6 +855,8 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         liveliness_subscribers: each::<{ caps::MAX_LIVELINESS_SUBSCRIPTIONS }>(
             limits.max_liveliness_subscriptions(),
         ),
+        queriers: each::<{ caps::MAX_QUERIERS }>(limits.max_queriers()),
+        keyexprs: each::<{ caps::MAX_DECLARED_KEYEXPRS }>(limits.max_declared_keyexprs()),
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
@@ -853,6 +875,9 @@ const fn built_counts() -> Result<Counts, Unplanned> {
         bytes: caps::HELD_PAYLOADS,
         configs: caps::HELD_CONFIGS,
         hellos: caps::HELD_HELLOS,
+        // At the bound of their limits, as the entities above.
+        queriers: 0,
+        keyexprs: 0,
         payload_bytes: caps::HELD_PAYLOAD_BYTES,
     };
     resolve(&built, &bounds)
@@ -1092,12 +1117,16 @@ mod tests {
         queryables: Some(3),
         liveliness_tokens: Some(2),
         liveliness_subscribers: Some(5),
+        queriers: Some(6),
+        keyexprs: Some(7),
     };
 
     const UNBOUNDED: Bounds = Bounds {
         subscribers: None,
         queryables: None,
         liveliness_tokens: None,
+        queriers: None,
+        keyexprs: None,
         liveliness_subscribers: None,
     };
 
@@ -1141,11 +1170,19 @@ mod tests {
             subscribers: 0,
             queryables: 9,
             liveliness_tokens: 1,
+            queriers: 0,
+            keyexprs: 2,
             ..counts()
         };
         let objects = resolve(&stated, &BOUNDED).expect("every count is bounded");
         assert_eq!(objects.sessions, 2);
         assert_eq!(objects.subscribers, 8, "the bound, four, per session");
+        assert_eq!(objects.keyexprs, 4, "two under the bound, per session");
+        if cfg!(feature = "query") {
+            assert_eq!(objects.queriers, 12, "the bound, six, per session");
+        } else {
+            assert_eq!(objects.queriers, 0, "a build that asks nothing holds none");
+        }
         if cfg!(feature = "queryable") {
             assert_eq!(objects.queryables, 6, "nine held to three, per session");
         } else {
@@ -1183,6 +1220,8 @@ mod tests {
             bytes: 8,
             configs: 9,
             hellos: 10,
+            queriers: 1,
+            keyexprs: 1,
             payload_bytes: 11,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
@@ -1531,6 +1570,17 @@ mod tests {
             Kind::Hello,
             core::mem::size_of::<crate::scout::KeptHello>(),
         );
+        #[cfg(feature = "query")]
+        row(
+            "querier",
+            Kind::Querier,
+            core::mem::size_of::<crate::querier::QuerierState>(),
+        );
+        row(
+            "keyexpr",
+            Kind::Keyexpr,
+            core::mem::size_of::<crate::keyexpr::DeclaredKeyexpr>(),
+        );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.
         let config = crate::config::ConfigState::default();
@@ -1703,6 +1753,9 @@ mod tests {
         check(Kind::Config);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         check(Kind::Hello);
+        #[cfg(feature = "query")]
+        check(Kind::Querier);
+        check(Kind::Keyexpr);
         assert_eq!(pools.held(), 0);
     }
 
@@ -1718,6 +1771,8 @@ mod tests {
             bounds.liveliness_subscribers,
             limits.max_liveliness_subscriptions().most()
         );
+        assert_eq!(bounds.queriers, limits.max_queriers().most());
+        assert_eq!(bounds.keyexprs, limits.max_declared_keyexprs().most());
     }
 
     /// The free blocks of `order`, by their offsets, first to last.
