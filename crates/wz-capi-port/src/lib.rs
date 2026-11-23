@@ -93,7 +93,9 @@ pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
-pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
+pub use peers::{
+    each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
+};
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 pub use refusal::Refusal;
 

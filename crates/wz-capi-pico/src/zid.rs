@@ -294,26 +294,26 @@ unsafe fn enumerate_peers(
             };
             let engine = crate::session::engine_ref(state);
             // Each identity is copied out of the session before the callback runs, so no C
-            // callback runs under the session's lock and the list is never held whole.
-            wz_capi_port::each_peer(engine, |peer| {
-                if (peer.whatami == WHATAMI_WIRE_ROUTER) != routers {
-                    return;
-                }
-                let id = z_id_t::from_wire(&peer.zid);
+            // callback runs under the session's lock and the list is never held whole. The
+            // established peers come first, then the members of the groups the session joined.
+            wz_capi_port::each_known_node(engine, |node| {
+                let zid = match node {
+                    wz_capi_port::KnownNode::Peer(peer)
+                        if (peer.whatami == WHATAMI_WIRE_ROUTER) == routers =>
+                    {
+                        peer.zid
+                    }
+                    // Open-debt item 913 — a session on a multicast group is a peer, and pico
+                    // lists every member of its group as a peer whatever role the member
+                    // announced (`vendor/zenoh-pico/src/api/api.c` @
+                    // `_zp_multicast_fetch_zid(`), and none as a router, its routers being a
+                    // client's alone. An engine that joins no group has no member.
+                    wz_capi_port::KnownNode::GroupMember(zid) if !routers => zid,
+                    _ => return,
+                };
+                let id = z_id_t::from_wire(&zid);
                 call(&id, taken.context);
             });
-            // Open-debt item 913 — a session on a multicast group is a peer, and pico lists
-            // every member of its group as a peer whatever role the member announced
-            // (`vendor/zenoh-pico/src/api/api.c` @ `_zp_multicast_fetch_zid(`), and none as a
-            // router, its routers being a client's alone.
-            #[cfg(feature = "multicast-transport")]
-            if !routers {
-                // Either engine's groups, through the port.
-                wz_capi_port::each_group_member(engine, |zid| {
-                    let id = z_id_t::from_wire(&zid);
-                    call(&id, taken.context);
-                });
-            }
             Z_OK
         })();
         if let Some(dropfn) = taken.drop {
