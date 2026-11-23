@@ -177,8 +177,6 @@ pub mod namespace;
 /// names one backing-agnostic container regardless of the `alloc`
 /// feature. First step of the session-core no-alloc gating: provides
 /// the seam the 25 currently alloc-gated modules migrate onto.
-// Totality debt TD-019 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod bounded;
 
 /// The key arena of a session: one span of its arena that the rows of its tables keep their keys
