@@ -43,6 +43,40 @@ fn a_listener_reserves_a_cell_for_each_face_it_admits() {
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3));
 }
 
+/// A session that listens with the peers zenoh-pico takes (its ten, `Z_LISTEN_MAX_CONNECTION_NB`)
+/// runs a task for each and for its dial: eleven cells, and the eighth to the eleventh session are
+/// spawned as the first is. Only a twelfth, a link past the faces it admits, finds no cell.
+#[test]
+fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 10,
+        accept_pending: 1,
+        ..client_config()
+    });
+    assert_eq!(tables.rows.tasks, 11, "the dial role's and ten faces");
+    let runtime = tables.runtime(PosixClock);
+    let local = CoopLocalSet::new(&runtime);
+    let sessions: Vec<_> = (0..11u8)
+        .map(|at| {
+            local
+                .try_spawn_local(async move { at })
+                .unwrap_or_else(|_| panic!("the session of link {at} has a cell"))
+        })
+        .collect();
+    assert!(
+        matches!(
+            local
+                .try_spawn_local(async { 0u8 })
+                .map(|_| ())
+                .map_err(|refused| refused.why),
+            Err(SpawnRefusal::NoTaskCell)
+        ),
+        "a link past the faces finds no cell"
+    );
+    drop(sessions);
+}
+
 /// The cells are held to the build's `MAX_TASKS` whatever the config admits, a count past the
 /// address space too: a face past them is refused as one past `max_faces` is.
 #[test]
