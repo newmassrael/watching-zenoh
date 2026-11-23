@@ -4762,6 +4762,76 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.end_leg_now(leg);
     }
 
+    /// Let go of the rows of the session's own declarations, which its close emptied: each row is
+    /// taken out under the session's lock, its callback retired, and the row let go of after the
+    /// lock, one at a time, so the last holder of a callback, a C program's `drop`, never runs
+    /// under it.
+    fn let_go_of_rows(&self) {
+        loop {
+            let row = {
+                let guard = self.core.lock();
+                let mut registry = guard.0.registry.borrow_mut();
+                let subscribers = &mut registry.app.subscribers;
+                let Some(last) = subscribers.len().checked_sub(1) else {
+                    break;
+                };
+                subscribers.take_at(last)
+            };
+            if let Some(callback) = row.as_ref().and_then(|row| row.callback.as_ref()) {
+                callback.retire();
+            }
+            drop(row);
+        }
+        loop {
+            let sink = {
+                let mut guard = self.core.lock();
+                let Some(entry) = guard.0.matches.pop() else {
+                    break;
+                };
+                entry.sink
+            };
+            drop(sink);
+        }
+        #[cfg(feature = "queryable")]
+        loop {
+            let entry = {
+                let mut guard = self.core.lock();
+                let core = &mut guard.0;
+                let Some(mut entry) = core.queryables.pop() else {
+                    break;
+                };
+                core.registry
+                    .borrow_mut()
+                    .app
+                    .queryables
+                    .unregister(entry.registration);
+                entry.callback.live.store(false, Ordering::Release);
+                // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+                entry.keyexpr.let_go();
+                entry
+            };
+            drop(entry);
+        }
+        #[cfg(feature = "liveliness")]
+        loop {
+            let callback = {
+                let mut guard = self.core.lock();
+                let core = &mut guard.0;
+                let Some(entry) = core.live_subs.pop() else {
+                    break;
+                };
+                core.registry
+                    .borrow_mut()
+                    .app
+                    .liveliness_subscribers
+                    .unregister(u64::from(entry.id));
+                entry.callback.retire();
+                entry.callback
+            };
+            drop(callback);
+        }
+    }
+
     /// Drop leg `leg`'s callback here, its end decided by the session itself (cancelled, or never
     /// sent), and leave no end of it waiting for a delivery.
     #[cfg(feature = "query")]
@@ -5784,11 +5854,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, keyexpr);
         // Each change carries the listener's callback with it, so a registration that already
-        // matches, and reports it as it registers, hands a change a delivery can call at once.
+        // matches, and reports it as it registers, hands a change a delivery can call at once. The
+        // registry's watch reaches the callback through the row and holds no count of it, so the
+        // row's end (undeclared, or the session closed) is the callback's end.
         let queue = self.matching.clone();
-        let reported = Arc::clone(&sink);
-        let report =
-            BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching, &reported));
+        let reported = Arc::downgrade(&sink);
+        let report = BoxedMatchingSink::new(move |matching| {
+            if let Some(sink) = reported.upgrade() {
+                queue.lock().flip(id, matching, &sink);
+            }
+        });
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         // An already-matching registration is told so by the registry as it registers, as
@@ -6802,42 +6877,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         }
         let core = &mut guard.0;
         core.end_links();
-        // The rows go back to their tables with the session: a table lent from its arena keeps
-        // its rows. Their callbacks are taken out of them, retired, and let go of with no lock
-        // held, below.
-        let mut subscribers_gone = Vec::new();
-        {
-            let mut registry = core.registry.borrow_mut();
-            let subscribers = &mut registry.app.subscribers;
-            subscribers_gone.reserve_exact(subscribers.len());
-            while let Some(last) = subscribers.len().checked_sub(1) {
-                if let Some(mut row) = subscribers.take_at(last) {
-                    if let Some(callback) = row.callback.take() {
-                        callback.retire();
-                        subscribers_gone.push(callback);
-                    }
-                }
-            }
-        }
-        let mut listeners_gone = Vec::with_capacity(core.matches.len());
-        while let Some(entry) = core.matches.pop() {
-            listeners_gone.push(entry.sink);
-        }
-        // A queryable's callback is retired and its row let go of with no lock held, below: the
-        // registry's sink is unregistered here, so the row and the queries still queued are its
-        // last holders.
-        #[cfg(feature = "queryable")]
-        let queryables_gone = {
-            let mut gone = Vec::with_capacity(core.queryables.len());
-            let mut registry = core.registry.borrow_mut();
-            while let Some(mut entry) = core.queryables.pop() {
-                registry.app.queryables.unregister(entry.registration);
-                entry.callback.live.store(false, Ordering::Release);
-                entry.keyexpr.let_go();
-                gone.push(entry);
-            }
-            gone
-        };
+        // The rows of the session's own declarations, and the callbacks they hold, go after the
+        // lock is let go of, one row at a time (`Self::let_go_of_rows`).
         // A get still pending ends with its session: its entry goes here, its leg's callback with
         // the table.
         #[cfg(feature = "query")]
@@ -6847,27 +6888,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                 pending.unregister(&mut registry);
             }
         }
-        // The session's tokens end with its link, and its liveliness subscribers with it.
-        // Their registrations go under the lock; their callbacks are retired, taken out of their
-        // rows and let go of with no lock held, below.
+        // The session's tokens end with its link.
         #[cfg(feature = "liveliness")]
-        let mut live_gone = Vec::with_capacity(core.live_subs.len());
-        #[cfg(feature = "liveliness")]
-        {
-            core.tokens.clear();
-            let mut registry = core.registry.borrow_mut();
-            for entry in core.live_subs.iter() {
-                registry
-                    .app
-                    .liveliness_subscribers
-                    .unregister(u64::from(entry.id));
-            }
-            drop(registry);
-            while let Some(entry) = core.live_subs.pop() {
-                entry.callback.retire();
-                live_gone.push(entry.callback);
-            }
-        }
+        core.tokens.clear();
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
         // of with no lock held.
         #[cfg(any(
@@ -6901,20 +6924,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             }
             drop(self.gets.take_all_held());
         }
+        self.let_go_of_rows();
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
-        {
-            drop(core::mem::take(&mut *self.plane.queries.lock()));
-            drop(queryables_gone);
+        drop(core::mem::take(&mut *self.plane.queries.lock()));
+        // The changes still owed hold their listeners' callbacks: let go of with them.
+        loop {
+            let next = self.matching.lock().next();
+            let Some(change) = next else {
+                break;
+            };
+            drop(change);
         }
-        // Every callback the session held goes with it, in one take of the table: the ones of the
-        // rows emptied above, and one whose row went before its callback (a get's leg whose link
-        // was lost, its end not handed out yet). The removal is counted under the table's lock,
-        // so what the deliveries kept is let go of first, and the rest with no lock held.
-        drop((subscribers_gone, listeners_gone));
-        #[cfg(feature = "liveliness")]
-        drop(live_gone);
     }
 
     fn is_closed(&self) -> bool {
