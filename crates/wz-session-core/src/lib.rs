@@ -563,8 +563,6 @@ pub mod interval_meter;
 /// half-window `precedes` ordering every RX SN gate shares. First
 /// consumer is the multicast data plane's per-peer Frame admission.
 /// Pure no_std + no_alloc; unconditional.
-// Totality debt TD-089 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod sn;
 
 /// R311gb-2 — `SampleKind` discriminant (Put/Del), hoisted out of the

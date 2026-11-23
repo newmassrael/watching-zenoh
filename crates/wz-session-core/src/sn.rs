@@ -45,7 +45,7 @@ pub const fn mask_from_res(seq_num_res: u8) -> u64 {
 pub const fn narrowest_mask_covering(sn: u64) -> u64 {
     let mut res = 0u8;
     while res < 3 && mask_from_res(res) < sn {
-        res += 1;
+        res = res.saturating_add(1);
     }
     mask_from_res(res)
 }
@@ -207,7 +207,7 @@ impl RxSn {
                 *slot = Some(sn);
                 if distance > 1 {
                     RxAdmit::Gap {
-                        missing: u32::try_from(distance - 1).unwrap_or(u32::MAX),
+                        missing: u32::try_from(distance.saturating_sub(1)).unwrap_or(u32::MAX),
                     }
                 } else {
                     RxAdmit::Accept
@@ -303,7 +303,7 @@ impl RxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut RxSn {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            conduit_mut(&mut self.conduits, _priority)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -427,7 +427,7 @@ impl MulticastTxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            conduit_mut(&mut self.conduits, _priority)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -464,7 +464,7 @@ impl MulticastTxConduits {
     pub fn advertise_default(&self) -> TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            self.conduits[crate::qos::Priority::DEFAULT as usize]
+            *conduit(&self.conduits, crate::qos::Priority::DEFAULT)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -532,7 +532,7 @@ impl MulticastRxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut MulticastRxPair {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            conduit_mut(&mut self.conduits, _priority)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -605,6 +605,46 @@ impl MulticastRxConduits {
             pair.best_effort = sn;
         }
         true
+    }
+}
+
+/// The conduit of `priority` among one per priority, by the priority itself: every priority
+/// names one of the eight, so none is out of range.
+#[cfg(feature = "transport-qos")]
+fn conduit<T>(conduits: &[T; crate::qos::Priority::NUM], priority: crate::qos::Priority) -> &T {
+    use crate::qos::Priority;
+    let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
+        conduits;
+    match priority {
+        Priority::Control => control,
+        Priority::RealTime => real_time,
+        Priority::InteractiveHigh => interactive_high,
+        Priority::InteractiveLow => interactive_low,
+        Priority::DataHigh => data_high,
+        Priority::Data => data,
+        Priority::DataLow => data_low,
+        Priority::Background => background,
+    }
+}
+
+/// [`conduit`], to write.
+#[cfg(feature = "transport-qos")]
+fn conduit_mut<T>(
+    conduits: &mut [T; crate::qos::Priority::NUM],
+    priority: crate::qos::Priority,
+) -> &mut T {
+    use crate::qos::Priority;
+    let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
+        conduits;
+    match priority {
+        Priority::Control => control,
+        Priority::RealTime => real_time,
+        Priority::InteractiveHigh => interactive_high,
+        Priority::InteractiveLow => interactive_low,
+        Priority::DataHigh => data_high,
+        Priority::Data => data,
+        Priority::DataLow => data_low,
+        Priority::Background => background,
     }
 }
 
