@@ -209,8 +209,8 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> Option<FilterId> {
-        Some(0)
+    ) -> Result<FilterId, Refusal> {
+        Ok(0)
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false

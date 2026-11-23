@@ -144,7 +144,7 @@ impl AdvancedPublisherPlane for CPlane {
                     }),
                     options.allowed_destination.allows_local(),
                 )
-                .ok_or_else(|| Self::refusal("publisher"))?;
+                .map_err(|_| Self::refusal("publisher"))?;
             Some(asked)
         } else {
             None

@@ -7392,6 +7392,36 @@ mod matching_aggregate_tests {
         assert!(!shared.has_router_peer(), "no face, so no router peer");
     }
 
+    /// Through the engine port a write filter is refused by its cause: for want of an entity id,
+    /// and on a closed session, which the registry alone would still number a filter on.
+    #[test]
+    fn the_port_refuses_a_write_filter_by_its_cause() {
+        use wz_capi_port::{Refusal, SessionEngine};
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let declare = |shared: &SharedSession| {
+            SessionEngine::declare_write_filter(
+                shared,
+                FilterPlane::Subscribers,
+                "wz/wf/port",
+                &WireKey::literal(),
+                None,
+                false,
+            )
+        };
+        assert!(
+            declare(&shared).is_ok(),
+            "CONTROL: an open session with ids left declares"
+        );
+        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(declare(&shared), Err(Refusal::Closed));
+    }
+
     /// The session numbers every declaration from one `u32` space, upstream's `EntityId`: it
     /// hands out `u32::MAX`, and from then on refuses every declaration that needs an id, with
     /// nothing recorded, where upstream's counter would wrap onto an id a live one holds.

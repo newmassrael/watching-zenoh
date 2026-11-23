@@ -386,8 +386,14 @@ impl SessionEngine for SharedSession {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, Refusal> {
+        // A closed session declares nothing: a filter on it would hold every write back for good.
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        // The registry refuses a filter for want of an entity id alone.
         SharedSession::declare_write_filter(self, plane, keyexpr.to_owned(), wire, ask, count_local)
+            .ok_or(Refusal::NoEntityId)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {

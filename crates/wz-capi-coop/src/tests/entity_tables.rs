@@ -72,7 +72,7 @@ fn declare_subscriber(engine: &Engine, key: &str, minted: &Arc<AtomicUsize>) -> 
 }
 
 /// A write filter that asks for `key`, on `plane`.
-fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Option<FilterId> {
+fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Result<FilterId, Refusal> {
     engine.declare_write_filter(
         plane,
         key,
@@ -84,6 +84,22 @@ fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Option<FilterId> {
         }),
         false,
     )
+}
+
+/// A write filter asked of a closed session is refused as closed: no id stands for it.
+#[test]
+fn a_write_filter_on_a_closed_session_is_refused_as_closed() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    assert!(
+        filter(&engine, FilterPlane::Subscribers, "demo/c/1").is_ok(),
+        "CONTROL: the open session declares"
+    );
+    SessionDrive::close(&*engine);
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, "demo/c/2"),
+        Err(Refusal::Closed)
+    );
 }
 
 /// The plan lends each table of the session's own declarations the value of its limit the open
@@ -236,7 +252,10 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     });
     let asked = router.seen(|s| s.interests);
 
-    assert_eq!(filter(&engine, FilterPlane::Subscribers, "demo/p/2"), None);
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, "demo/p/2"),
+        Err(Refusal::TableFull)
+    );
     settle(&engine);
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 
@@ -245,21 +264,24 @@ fn a_write_filter_past_its_planes_count_is_refused_and_asks_nothing() {
     };
     if cfg!(any(feature = "query", feature = "queryable")) {
         assert!(
-            filter(&engine, querier, "demo/q/1").is_some(),
+            filter(&engine, querier, "demo/q/1").is_ok(),
             "a querier's row is its own"
         );
-        assert_eq!(filter(&engine, querier, "demo/q/2"), None);
+        assert_eq!(
+            filter(&engine, querier, "demo/q/2"),
+            Err(Refusal::TableFull)
+        );
     } else {
         assert_eq!(
             filter(&engine, querier, "demo/q/1"),
-            None,
+            Err(Refusal::NotBuilt),
             "a build without the queryables plane holds no querier's filter"
         );
     }
 
     engine.undeclare_write_filter(publisher);
     assert!(
-        filter(&engine, FilterPlane::Subscribers, "demo/p/2").is_some(),
+        filter(&engine, FilterPlane::Subscribers, "demo/p/2").is_ok(),
         "the row the undeclaration gave back takes the next publisher"
     );
 }
@@ -443,7 +465,10 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
     let before = router.seen(|s| s.declares);
     assert_eq!(declare_subscriber(&engine, &past, &minted), None);
     assert_eq!(engine.acquire_keyexpr(&past), None);
-    assert_eq!(filter(&engine, FilterPlane::Subscribers, &past), None);
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, &past),
+        Err(Refusal::KeyTooLong)
+    );
     settle(&engine);
     assert_eq!(
         minted.load(Ordering::SeqCst),
@@ -472,7 +497,10 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
     let before = router.seen(|s| s.declares);
     assert_eq!(declare_subscriber(&engine, past, &minted), None);
     assert_eq!(engine.acquire_keyexpr(past), None);
-    assert_eq!(filter(&engine, FilterPlane::Subscribers, past), None);
+    assert_eq!(
+        filter(&engine, FilterPlane::Subscribers, past),
+        Err(Refusal::KeyTooLong)
+    );
     let listener: MatchingSink = Arc::new(|_matching: bool| {});
     assert_eq!(
         engine.declare_matching_listener(FilterPlane::Subscribers, past, listener, false),

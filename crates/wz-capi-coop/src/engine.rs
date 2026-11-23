@@ -5997,13 +5997,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
         count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, Declined> {
         if !counts(plane) {
-            return None;
+            return Err(Declined::NotBuilt);
         }
-        let Some(mut core) = self.live() else {
-            return Some(0);
-        };
+        let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
         // A publisher's filter is held to MAX_PUBLISHERS and a querier's to MAX_QUERIERS, in the
         // one table lent for both: one past its plane's count is refused before its Interest is
@@ -6018,35 +6016,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .filter(|f| f.plane.same_kind(plane))
             .count();
         if held_of_plane >= most || core.filters.free_slots() == 0 {
-            return None;
+            return Err(Declined::TableFull);
         }
-        // So is a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
+        // So is a key the session cannot hold.
+        let Some(key) = core.row_key(keyexpr) else {
+            return Err(core.key_refusal(keyexpr));
+        };
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let mut spent = None;
-        let held = match &ask {
+        // A filter whose Interest the session cannot hold, or that finds no id left, is refused
+        // and spends no filter id.
+        match &ask {
             Some(form) => {
                 let before = core.interests.len();
-                let held = self.acquire_interest(core, plane, keyexpr, form).is_ok();
-                if held && core.interests.len() > before {
+                self.acquire_interest(core, plane, keyexpr, form)?;
+                if core.interests.len() > before {
                     spent = core.interests.last().map(|hold| hold.interest_id);
                 }
-                held
             }
             // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
             // `_z_add_interest` takes it before it decides.
-            None => match self.next_entity_id() {
-                Some(taken) => {
-                    spent = Some(u64::from(taken));
-                    true
-                }
-                None => false,
-            },
-        };
-        // A session with no id left refuses the filter, and spends no filter id on it.
-        if !held {
-            return None;
+            None => {
+                let taken = self.next_entity_id().ok_or(Declined::NoEntityId)?;
+                spent = Some(u64::from(taken));
+            }
         }
         let id = core.next_filter;
         core.next_filter += 1;
@@ -6078,7 +6072,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 peers: Cell::new(None),
             },
         );
-        Some(id)
+        Ok(id)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {

@@ -340,8 +340,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     ///
     /// The filter's Interest takes the session's next entity id whether it is sent or not, as
     /// zenoh-pico's does (`vendor/zenoh-pico/src/net/primitives.c` @
-    /// `intr._id = _z_get_entity_id(zn);`), so `None` once the session has handed out every id
-    /// ([`Self::next_entity_id`]): a filter that could not ask would hold every write back.
+    /// `intr._id = _z_get_entity_id(zn);`), so it is refused once the session has handed out every
+    /// id ([`Self::next_entity_id`]): a filter that could not ask would hold every write back. A
+    /// refused filter answers why, with nothing held, asked or numbered.
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -349,7 +350,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> Option<FilterId>;
+    ) -> Result<FilterId, Refusal>;
 
     /// Whether filter `id` says nothing matches, so a write is not sent (zenoh-pico's
     /// `_z_write_filter_active`).

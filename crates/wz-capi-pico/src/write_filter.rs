@@ -57,7 +57,7 @@ use wz_session_core::WhatAmI;
 use crate::ffi::{LatchList, ReleaseLatch};
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::prelude::*;
-use crate::result::{ZResult, Z_ERR_SYSTEM_OUT_OF_MEMORY};
+use crate::result::{refusal_code, Door, ZResult};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -148,9 +148,9 @@ impl WriteFilter {
     /// declaration's id and the rest of the key, or the literal when nothing covers it. The
     /// entity makes it once and keeps it for what it sends.
     ///
-    /// Refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as pico refuses an entity it cannot hold, when
-    /// the session holds no more: its table of the entity's filters is at the limit it opened
-    /// under, or it has no entity id left for the filter's Interest. Nothing was sent.
+    /// Refused with the code pico's filter answers for the cause ([`Door::WriteFilter`]): the
+    /// session holds no more, its table of the entity's filters at the limit it opened under or
+    /// no entity id left for the filter's Interest, or the session is closed. Nothing was sent.
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
@@ -163,7 +163,7 @@ impl WriteFilter {
         let keyexpr = key.share_text();
         let id = shared
             .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
-            .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+            .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok(Self {
             shared,
             id,

@@ -1295,7 +1295,7 @@ impl Engine {
                         ask,
                         destination != Locality::Remote,
                     )
-                    .ok_or_else(|| zerror!("the engine has no entity id left for a publisher"))?;
+                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a publisher {id}, which is more than an id holds")
                         .into()
@@ -1502,7 +1502,7 @@ impl Engine {
                         ask,
                         destination != Locality::Remote,
                     )
-                    .ok_or_else(|| zerror!("the engine has no entity id left for a querier"))?;
+                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a querier {id}, which is more than an id holds")
                         .into()

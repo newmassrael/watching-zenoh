@@ -1359,7 +1359,7 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
             }),
             false,
         ),
-        None
+        Err(wz_capi_port::Refusal::NotBuilt)
     );
     let (sink, subscribers) = heard();
     assert!(

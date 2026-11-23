@@ -365,10 +365,10 @@ impl SessionEngine for RouterState {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
         // nothing, so the filter takes no entity id.
-        Some(self.engine.local_id())
+        Ok(self.engine.local_id())
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {

@@ -225,6 +225,9 @@ pub(crate) enum Door {
     /// (`z_publisher_declare_matching_listener`, `z_querier_declare_matching_listener` and their
     /// `_background_` forms).
     MatchingListener,
+    /// The write filter a publisher or a querier is declared with (`z_declare_publisher`,
+    /// `z_declare_querier`, the advanced publisher's), made after the entity's key is declared.
+    WriteFilter,
 }
 
 /// The code of a declaration the engine refused at `door`: this ABI's one table for the port's
@@ -246,6 +249,15 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
             Refusal::Closed => Z_ERR_GENERIC,
             _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         },
+        // A filter pico has no room for is `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, and one on a session that
+        // is closed is the generic error: its Interest is not registered on a closed session, and
+        // the filter reads the Interest id 0 it is handed back as a failure
+        // (`vendor/zenoh-pico/src/net/filtering.c` @ `if (filter->_interest_id == 0) {`). A key the
+        // session must declare first is refused before the filter, by the key's own door.
+        Door::WriteFilter => match refusal {
+            Refusal::Closed => Z_ERR_GENERIC,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
     }
 }
 
@@ -256,6 +268,17 @@ mod tests {
     /// Each refusal at a matching listener's door answers the code pico's door answers, and every
     /// code is a failure to a caller's `< 0` test: none reads as the `Z_OK` of a declaration
     /// that was never made.
+    #[test]
+    fn each_refusal_of_a_write_filter_answers_picos_code() {
+        let at = |refusal| refusal_code(refusal, Door::WriteFilter);
+        assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::KeyTooLong), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::NoEntityId), Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert_eq!(at(Refusal::Closed), Z_ERR_GENERIC);
+        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+    }
+
+    /// See [`each_refusal_of_a_write_filter_answers_picos_code`].
     #[test]
     fn each_refusal_of_a_matching_listener_answers_picos_code() {
         let at = |refusal| refusal_code(refusal, Door::MatchingListener);
