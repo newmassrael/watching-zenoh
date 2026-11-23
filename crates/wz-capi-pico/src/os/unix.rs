@@ -121,10 +121,12 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
         Unit::Milli => (1_000, 1_000_000),
         Unit::Second => (1, 0),
     };
-    let secs = wide(instant.tv_sec).saturating_sub(wide(epoch.tv_sec));
+    // Two readings of one clock differ by far less than an `i64` spans, as their nanoseconds,
+    // each below a second, do.
+    let secs = wide(instant.tv_sec).wrapping_sub(wide(epoch.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
     // The seconds unit has no divisor: it drops the sub-second part.
-    let nsecs = wide(instant.tv_nsec).saturating_sub(wide(epoch.tv_nsec));
+    let nsecs = wide(instant.tv_nsec).wrapping_sub(wide(epoch.tv_nsec));
     if let Some(part) = nsecs.checked_div(nsec_div) {
         elapsed = elapsed.saturating_add(part);
     }
@@ -195,10 +197,11 @@ pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
         Unit::Second => (1, 0),
     };
     let now = wall_now();
-    let secs = wide(now.tv_sec).saturating_sub(wide(time.tv_sec));
+    // As in `clock_elapsed_between`: the differences of two readings fit an `i64`.
+    let secs = wide(now.tv_sec).wrapping_sub(wide(time.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
     // The seconds unit has no divisor: it drops the sub-second part.
-    let usecs = wide(now.tv_usec).saturating_sub(wide(time.tv_usec));
+    let usecs = wide(now.tv_usec).wrapping_sub(wide(time.tv_usec));
     if let Some(part) = usecs.checked_div(usec_div) {
         elapsed = elapsed.saturating_add(part);
     }
