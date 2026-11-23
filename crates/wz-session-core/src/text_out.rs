@@ -109,7 +109,9 @@ pub trait TextOut: fmt::Write {
     }
 
     /// Append `at` as `{at}` prints it, without going through `core::fmt`: `a.b.c.d:port` for
-    /// IPv4, `[ip]:port` for IPv6 and `[ip%scope]:port` when it names a scope.
+    /// IPv4, `[ip]:port` for IPv6 and `[ip%scope]:port` when it names a scope. Out of line, so
+    /// a writer of a locator calls the one writer of an address and carries no copy of it.
+    #[inline(never)]
     fn push_socket_addr(&mut self, at: SocketAddr) {
         match at {
             SocketAddr::V4(v4) => push_ipv4(self, *v4.ip()),
