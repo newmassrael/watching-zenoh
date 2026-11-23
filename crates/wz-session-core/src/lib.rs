@@ -1235,8 +1235,6 @@ pub mod driver_loop;
 /// (`multicast_dispatch` is a code span, not an intra-doc link: it is
 /// `session-multicast`-gated and absent from the default-feature rustdoc run
 /// Layer C1bz measures.)
-// Totality debt TD-105 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod multicast_peer_lost;
 
 /// R2728 (§5.21 `router-multicast-faces`) — the multicast ARRIVAL observer
