@@ -218,7 +218,7 @@ impl core::fmt::Debug for StaticConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("StaticConfig")
             .field("listen", &self.listen)
-            .field("connect", &&self.connect[..])
+            .field("connect", &&*self.connect)
             .finish()
     }
 }

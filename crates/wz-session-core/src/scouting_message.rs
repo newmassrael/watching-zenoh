@@ -144,7 +144,7 @@ pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), 
                     body,
                     extensions,
                 },
-                bytes.len() - cursor.remaining(),
+                bytes.len().saturating_sub(cursor.remaining()),
             ))
         }
         #[cfg(feature = "codec-hello")]
@@ -167,7 +167,7 @@ pub fn parse_scouting_consuming(bytes: &[u8]) -> Result<(ScoutingFrame, usize), 
                     body,
                     extensions,
                 },
-                bytes.len() - cursor.remaining(),
+                bytes.len().saturating_sub(cursor.remaining()),
             ))
         }
         other => Ok((ScoutingFrame::Unknown { mid: other }, 1)),

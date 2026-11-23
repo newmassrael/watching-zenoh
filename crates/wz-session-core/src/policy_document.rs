@@ -161,14 +161,17 @@ impl PolicySet {
     /// holds the value, the resolution judges, as it judges a statement of a slice.
     pub fn state<'a>(&mut self, statement: Statement<'a>) -> Result<(), Reason<'a>> {
         let (policy, value) = (statement.policy, statement.value);
-        let Some(index) = POLICIES.iter().position(|entry| entry.id() == policy) else {
+        let Some((entry, held)) = POLICIES
+            .iter()
+            .zip(self.values.iter_mut())
+            .find(|(entry, _)| entry.id() == policy)
+        else {
             return Err(Reason::UnknownPolicy { policy, value });
         };
-        let entry = &POLICIES[index];
         let place = entry.values().iter().position(|known| *known == value);
-        match place.and_then(|place| u8::try_from(place + 1).ok()) {
-            Some(held) => {
-                self.values[index] = held;
+        match place.and_then(|place| u8::try_from(place.checked_add(1)?).ok()) {
+            Some(place) => {
+                *held = place;
                 Ok(())
             }
             None => Err(Reason::UnknownValue {
@@ -190,9 +193,12 @@ impl PolicySet {
     /// The id of the value the set states for the policy whose id is `policy`, which is the
     /// build's own; `None` when it states none.
     pub fn value_of(&self, policy: &str) -> Option<&'static str> {
-        self.stated()
-            .find(|(index, _)| POLICIES[*index].id() == policy)
-            .map(|(index, value)| POLICIES[index].values()[value])
+        let (entry, held) = POLICIES
+            .iter()
+            .zip(self.values.iter())
+            .find(|(entry, _)| entry.id() == policy)?;
+        let place = usize::from(*held).checked_sub(1)?;
+        entry.values().get(place).copied()
     }
 
     /// Whether the set states nothing.
@@ -203,16 +209,6 @@ impl PolicySet {
     /// How many policies the set states.
     pub fn len(&self) -> usize {
         self.values.iter().filter(|held| **held != 0).count()
-    }
-
-    /// Each policy the set states, in the order of [`POLICIES`]: its place there and the place of
-    /// its value among its values.
-    fn stated(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
-        self.values
-            .iter()
-            .enumerate()
-            .filter(|(_, held)| **held != 0)
-            .map(|(index, held)| (index, usize::from(*held) - 1))
     }
 }
 
@@ -246,14 +242,15 @@ impl LimitSet {
     /// slice.
     pub fn state<'a>(&mut self, statement: LimitStatement<'a>) -> Result<(), Reason<'a>> {
         let limit = statement.limit;
-        let Some(index) = SESSION_LIMITS.iter().position(|entry| entry.id() == limit) else {
+        let Some((entry, held)) = SESSION_LIMITS
+            .iter()
+            .zip(self.values.iter_mut())
+            .find(|(entry, _)| entry.id() == limit)
+        else {
             return Err(Reason::UnknownLimit { limit });
         };
-        let held = &mut self.values[index];
         if held.is_some() {
-            return Err(Reason::LimitStatedTwice {
-                limit: SESSION_LIMITS[index].id(),
-            });
+            return Err(Reason::LimitStatedTwice { limit: entry.id() });
         }
         *held = Some(statement.value);
         Ok(())
@@ -261,23 +258,16 @@ impl LimitSet {
 
     /// The value the set states for the limit whose id is `limit`; `None` when it states none.
     pub fn value_of(&self, limit: &str) -> Option<LimitValue> {
-        self.stated()
-            .find(|(index, _)| SESSION_LIMITS[*index].id() == limit)
-            .map(|(_, value)| value)
+        SESSION_LIMITS
+            .iter()
+            .zip(self.values.iter())
+            .find(|(entry, _)| entry.id() == limit)
+            .and_then(|(_, held)| *held)
     }
 
     /// Whether the set states nothing.
     pub fn is_empty(&self) -> bool {
         self.values.iter().all(Option::is_none)
-    }
-
-    /// Each limit the set states, in the order of [`SESSION_LIMITS`]: its place there and the
-    /// value it is to take.
-    fn stated(&self) -> impl Iterator<Item = (usize, LimitValue)> + '_ {
-        self.values
-            .iter()
-            .enumerate()
-            .filter_map(|(index, held)| held.map(|value| (index, value)))
     }
 }
 
@@ -425,8 +415,9 @@ impl Provenance {
     pub fn origin(&self, policy: &str) -> Option<Origin> {
         POLICIES
             .iter()
-            .position(|entry| entry.id() == policy)
-            .map(|index| self.origins[index])
+            .zip(self.origins)
+            .find(|(entry, _)| entry.id() == policy)
+            .map(|(_, origin)| origin)
     }
 
     /// Each policy with the origin of its value, in the order of the generated `POLICIES`.
@@ -500,8 +491,8 @@ impl LimitProvenance {
     /// names no limit of either snapshot.
     pub fn origin(&self, limit: &str) -> Option<Origin> {
         match FoundLimit::find(limit)? {
-            FoundLimit::Session(index) => Some(self.session[index].origin()),
-            FoundLimit::Runtime(index) => Some(self.runtime[index].origin()),
+            FoundLimit::Session(index, _) => self.session.get(index).map(|held| held.origin()),
+            FoundLimit::Runtime(index, _) => self.runtime.get(index).map(|held| held.origin()),
             FoundLimit::Capacity(_) => None,
         }
     }
@@ -1029,7 +1020,7 @@ impl<'a> Refusals<'a> {
         if let Some(slot) = self.reported.get_mut(self.found) {
             *slot = Some(refusal);
         }
-        self.found += 1;
+        self.found = self.found.saturating_add(1);
     }
 
     /// How many refusals were found, those held and those only counted.
@@ -1103,7 +1094,13 @@ fn compose<'a>(
         } = &mut resolved;
         let _ = select_each(table, policy, layer.statements, |outcome| {
             match outcome {
-                Ok(index) => provenance.origins[index] = layer.origin,
+                // The place of a policy in `table`, which the provenance has one origin for each
+                // of.
+                Ok(index) => {
+                    if let Some(held) = provenance.origins.get_mut(index) {
+                        *held = layer.origin;
+                    }
+                }
                 Err(reason) => refusals.push(Refusal {
                     layer: layer.origin,
                     reason,
@@ -1129,13 +1126,20 @@ fn select_each<'a>(
     match stated {
         Stated::Read(statements) => {
             for (at, statement) in statements.iter().enumerate() {
-                outcome(select_policy(table, snapshot, &statements[..at], statement))?;
+                let earlier = statements.get(..at).unwrap_or_default();
+                outcome(select_policy(table, snapshot, earlier, statement))?;
             }
         }
         Stated::Set(set) => {
-            for (index, value) in set.stated() {
-                let value = table[index].values()[value];
-                outcome(select_at(table, snapshot, index, value))?;
+            for (index, (entry, held)) in table.iter().zip(set.values.iter()).enumerate() {
+                // A place of `0` states nothing; one past the policy's values none either.
+                let Some(value) = usize::from(*held)
+                    .checked_sub(1)
+                    .and_then(|place| entry.values().get(place))
+                else {
+                    continue;
+                };
+                outcome(select_at(index, entry, snapshot, value))?;
             }
         }
     }
@@ -1151,27 +1155,30 @@ fn select_policy<'a>(
     statement: &Statement<'a>,
 ) -> Result<usize, Reason<'a>> {
     let (policy, value) = (statement.policy, statement.value);
-    let Some(index) = table.iter().position(|entry| entry.id() == policy) else {
+    let Some((index, entry)) = table
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.id() == policy)
+    else {
         return Err(Reason::UnknownPolicy { policy, value });
     };
     if earlier.iter().any(|stated| stated.policy == policy) {
         return Err(Reason::StatedTwice {
-            policy: table[index].id(),
+            policy: entry.id(),
             value,
         });
     }
-    select_at(table, snapshot, index, value)
+    select_at(index, entry, snapshot, value)
 }
 
-/// The value whose id is `value` for the policy at `index` of `table`, which its layer states
-/// once, selected in `snapshot`, which a refusal leaves as it was: `index`.
+/// The value whose id is `value` for the policy `entry`, at `index` of its table, which its layer
+/// states once, selected in `snapshot`, which a refusal leaves as it was: `index`.
 fn select_at<'a>(
-    table: &[PolicyEntry; POLICY_COUNT],
-    snapshot: &mut SessionPolicy,
     index: usize,
+    entry: &PolicyEntry,
+    snapshot: &mut SessionPolicy,
     value: &'a str,
 ) -> Result<usize, Reason<'a>> {
-    let entry = &table[index];
     let id = entry.id();
     if entry.binding() == Binding::Build {
         return Err(Reason::BuildBound { policy: id, value });
@@ -1192,22 +1199,30 @@ fn select_at<'a>(
 }
 
 /// Where a limit's id is found: a field of one of the two snapshots, by its place in that
-/// snapshot's table, or a capacity alone, which neither holds.
+/// snapshot's table and the entry there, or a capacity alone, which neither holds.
 #[derive(Clone, Copy)]
 enum FoundLimit {
-    Session(usize),
-    Runtime(usize),
+    Session(usize, &'static LimitEntry<SessionLimits>),
+    Runtime(usize, &'static LimitEntry<RuntimeLimits>),
     Capacity(&'static str),
 }
 
 impl FoundLimit {
     /// Where the limit whose id is `id` is, or `None` for an id the build has no limit of.
     fn find(id: &str) -> Option<Self> {
-        if let Some(index) = SESSION_LIMITS.iter().position(|entry| entry.id() == id) {
-            return Some(Self::Session(index));
+        if let Some((index, entry)) = SESSION_LIMITS
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.id() == id)
+        {
+            return Some(Self::Session(index, entry));
         }
-        if let Some(index) = RUNTIME_LIMITS.iter().position(|entry| entry.id() == id) {
-            return Some(Self::Runtime(index));
+        if let Some((index, entry)) = RUNTIME_LIMITS
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.id() == id)
+        {
+            return Some(Self::Runtime(index, entry));
         }
         CAPACITY_LIMITS
             .iter()
@@ -1219,8 +1234,8 @@ impl FoundLimit {
     /// The limit's id, as the declaration spells it.
     fn id(self) -> &'static str {
         match self {
-            Self::Session(index) => SESSION_LIMITS[index].id(),
-            Self::Runtime(index) => RUNTIME_LIMITS[index].id(),
+            Self::Session(_, entry) => entry.id(),
+            Self::Runtime(_, entry) => entry.id(),
             Self::Capacity(id) => id,
         }
     }
@@ -1229,8 +1244,8 @@ impl FoundLimit {
     /// in no snapshot, so it is read from the build.
     fn is_read(self) -> bool {
         match self {
-            Self::Session(index) => SESSION_LIMITS[index].read_from_snapshot(),
-            Self::Runtime(index) => RUNTIME_LIMITS[index].read_from_snapshot(),
+            Self::Session(_, entry) => entry.read_from_snapshot(),
+            Self::Runtime(_, entry) => entry.read_from_snapshot(),
             Self::Capacity(_) => false,
         }
     }
@@ -1255,8 +1270,18 @@ fn compose_limits<'a>(
         let runtime = holds_runtime.then_some(runtime);
         let _ = select_limit_each(session, runtime, statements, |outcome| {
             match outcome {
-                Ok(FoundLimit::Session(index)) => provenance.session[index] = origin,
-                Ok(FoundLimit::Runtime(index)) => provenance.runtime[index] = origin,
+                // The place of a limit in its table, which the provenance has one origin for each
+                // of.
+                Ok(FoundLimit::Session(index, _)) => {
+                    if let Some(held) = provenance.session.get_mut(index) {
+                        *held = origin;
+                    }
+                }
+                Ok(FoundLimit::Runtime(index, _)) => {
+                    if let Some(held) = provenance.runtime.get_mut(index) {
+                        *held = origin;
+                    }
+                }
                 // A capacity is refused before anything is selected, so it is never what was
                 // selected.
                 Ok(FoundLimit::Capacity(_)) => {}
@@ -1286,17 +1311,20 @@ fn select_limit_each<'a>(
                 outcome(select_stated_limit(
                     session,
                     runtime.as_deref_mut(),
-                    &statements[..at],
+                    statements.get(..at).unwrap_or_default(),
                     statement,
                 ))?;
             }
         }
         StatedLimits::Set(set) => {
-            for (index, value) in set.stated() {
+            for (index, (entry, held)) in SESSION_LIMITS.iter().zip(set.values.iter()).enumerate() {
+                let Some(value) = *held else {
+                    continue;
+                };
                 outcome(select_found(
                     session,
                     runtime.as_deref_mut(),
-                    FoundLimit::Session(index),
+                    FoundLimit::Session(index, entry),
                     value,
                 ))?;
             }
@@ -1337,9 +1365,9 @@ fn select_found<'a>(
         FoundLimit::Capacity(_) => return Err(Reason::LimitBuildOnly { limit: id }),
         // Before the scope and the value: a limit no machine reads is refused whatever is stated.
         _ if !found.is_read() => return Err(Reason::LimitNotRead { limit: id }),
-        FoundLimit::Session(index) => select_limit(&SESSION_LIMITS[index], session, value)?,
-        FoundLimit::Runtime(index) => match runtime {
-            Some(runtime) => select_limit(&RUNTIME_LIMITS[index], runtime, value)?,
+        FoundLimit::Session(_, entry) => select_limit(entry, session, value)?,
+        FoundLimit::Runtime(_, entry) => match runtime {
+            Some(runtime) => select_limit(entry, runtime, value)?,
             None => {
                 return Err(Reason::LimitWrongScope {
                     limit: id,

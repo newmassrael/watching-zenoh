@@ -29,10 +29,10 @@
 //!
 //! # A bad table is a build error
 //!
-//! [`KeyCatalogue::new`] is a `const fn` that checks every property above, so a table the generator
-//! wrote wrongly stops the build that contains it, and a [`KeyCatalogue`] that exists is one whose
-//! reads cannot go out of range. [`KeyCatalogue::try_new`] is the same check that answers with the
-//! reason, for a test.
+//! [`KeyCatalogue::try_new`] is a `const fn` that checks every property above and answers with the
+//! reason, so a [`KeyCatalogue`] that exists is one whose reads cannot go out of range. The generated
+//! table is built by it in a `const` of the image's own crate, which stops the build on a refusal:
+//! a table the generator wrote wrongly is a build error there, and this crate holds no panic for it.
 
 /// How many [`EntityKind`]s there are: the width of a key's row of the selection table.
 pub const KINDS: usize = 5;
@@ -240,20 +240,14 @@ impl<'a> KeyCatalogue<'a> {
         }
     }
 
-    /// The table over the generated arrays. A bad table panics, and in a `const` it stops the
-    /// build, which is where the generated one is built.
-    pub const fn new(
-        text: &'a str,
-        ends: &'a [u16],
-        offsets: &'a [u16],
-        members: &'a [EntityId],
-        entities: &'a [EntityRow],
-    ) -> Self {
-        match Self::try_new(text, ends, offsets, members, entities) {
-            Ok(table) => table,
-            Err(error) => panic!("{}", error.describe()),
-        }
-    }
+    /// The table of no key: one row of offsets and nothing else, which every property holds.
+    pub const EMPTY: KeyCatalogue<'static> = KeyCatalogue {
+        text: "",
+        ends: &[],
+        offsets: &[0],
+        members: &[],
+        entities: &[],
+    };
 
     /// How many keys the set has.
     pub const fn key_count(&self) -> usize {
@@ -515,7 +509,10 @@ pub(crate) mod tests {
     ];
     /// The three-key table of these tests, for the tests of what is built on a catalogue.
     pub(crate) const TABLE: KeyCatalogue<'static> =
-        KeyCatalogue::new(TEXT, &ENDS, &OFFSETS, &MEMBERS, &ENTITIES);
+        match KeyCatalogue::try_new(TEXT, &ENDS, &OFFSETS, &MEMBERS, &ENTITIES) {
+            Ok(table) => table,
+            Err(_) => panic!("the test table is a table"),
+        };
 
     fn rebuilt(
         text: &str,

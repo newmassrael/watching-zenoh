@@ -128,7 +128,11 @@ impl DirectoryRow {
 
     /// Whether `source` confirms the hint at `now_ms`.
     pub fn confirmed_by(&self, source: LocatorSource, now_ms: u64) -> bool {
-        self.expires_ms[source.index()].is_some_and(|end| now_ms < end)
+        self.expires_ms
+            .get(source.index())
+            .copied()
+            .flatten()
+            .is_some_and(|end| now_ms < end)
     }
 
     fn is_live(&self, now_ms: u64) -> bool {
@@ -136,7 +140,9 @@ impl DirectoryRow {
     }
 
     fn is_declared(&self) -> bool {
-        self.expires_ms[LocatorSource::Declared.index()].is_some()
+        self.expires_ms
+            .get(LocatorSource::Declared.index())
+            .is_some_and(Option::is_some)
     }
 
     /// The instant the last of its confirmations ends.
@@ -200,7 +206,7 @@ impl<const N: usize> LocatorDirectory<N> {
         let end = match (source, lifetime) {
             (LocatorSource::Declared, Lifetime::Millis(_))
             | (LocatorSource::Hello, Lifetime::Permanent) => {
-                self.refused += 1;
+                self.refused = self.refused.saturating_add(1);
                 return Err(DirectoryRefusal::LifetimeOfAnotherSource);
             }
             (_, Lifetime::Permanent) => u64::MAX,
@@ -210,15 +216,15 @@ impl<const N: usize> LocatorDirectory<N> {
             Some(at) => self.rows.remove(at),
             None => {
                 if !self.locator_len.admits(locator.len()) {
-                    self.refused += 1;
+                    self.refused = self.refused.saturating_add(1);
                     return Err(DirectoryRefusal::LocatorTooLong);
                 }
                 let Ok(text) = LocatorText::try_from(locator) else {
-                    self.refused += 1;
+                    self.refused = self.refused.saturating_add(1);
                     return Err(DirectoryRefusal::LocatorTooLong);
                 };
                 if self.rows.is_full() && !self.make_room(now_ms) {
-                    self.refused += 1;
+                    self.refused = self.refused.saturating_add(1);
                     return Err(DirectoryRefusal::Full);
                 }
                 DirectoryRow {
@@ -229,7 +235,9 @@ impl<const N: usize> LocatorDirectory<N> {
                 }
             }
         };
-        row.expires_ms[source.index()] = Some(end);
+        if let Some(expires) = row.expires_ms.get_mut(source.index()) {
+            *expires = Some(end);
+        }
         row.confirmed_ms = row.confirmed_ms.max(now_ms);
         // The row came out of the table or there is room for it, so this push
         // cannot fail.
@@ -242,7 +250,9 @@ impl<const N: usize> LocatorDirectory<N> {
     /// another source still confirms stays.
     pub fn withdraw(&mut self, zid: &DirectoryZid, source: LocatorSource) {
         for row in self.rows.iter_mut().filter(|row| row.zid == *zid) {
-            row.expires_ms[source.index()] = None;
+            if let Some(expires) = row.expires_ms.get_mut(source.index()) {
+                *expires = None;
+            }
         }
         self.rows
             .retain(|row| row.expires_ms.iter().any(Option::is_some));
@@ -260,7 +270,8 @@ impl<const N: usize> LocatorDirectory<N> {
         }
         self.rows
             .retain(|row| row.expires_ms.iter().any(Option::is_some));
-        before - self.rows.len()
+        // A retain only removes.
+        before.saturating_sub(self.rows.len())
     }
 
     /// The live candidates for `zid` at `now_ms`, in the order to try them: the

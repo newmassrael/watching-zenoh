@@ -1260,7 +1260,11 @@ fn a_query_routed_from_a_face_is_held_behind_the_data_its_destination_holds() {
     );
     rig.link.set_full(true);
     let baseline = rig.link.sent();
-    let mut request = build_request_query(5, 0, Some("demo/asked")).expect("request");
+    let mut request = build_request_query(
+        5,
+        wz_session_core::wire_key::WireKey::literal("demo/asked").expect("a literal key"),
+    )
+    .expect("request");
     wz_session_core::declare_ext_qos::set_request_qos(
         &mut request,
         QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
@@ -1307,16 +1311,27 @@ fn a_query_routed_from_a_face_is_held_behind_the_data_its_destination_holds() {
 #[test]
 fn a_request_and_a_response_are_probed_and_come_back_whole_when_there_is_no_room() {
     use wz_session_core::request_build::build_request_query;
-    use wz_session_core::response_build::build_response_reply_literal;
+    use wz_session_core::response_build::build_response_reply;
     use wz_session_core::session_actions::Unsent;
 
     let messages = || {
         vec![
             NetworkMessage::Request(Box::new(
-                build_request_query(5, 0, Some("demo/asked")).expect("request"),
+                build_request_query(
+                    5,
+                    wz_session_core::wire_key::WireKey::literal("demo/asked")
+                        .expect("a literal key"),
+                )
+                .expect("request"),
             )),
             NetworkMessage::Response(Box::new(
-                build_response_reply_literal(5, "demo/asked", b"answer").expect("response"),
+                build_response_reply(
+                    5,
+                    wz_session_core::wire_key::WireKey::literal("demo/asked")
+                        .expect("a literal key"),
+                    b"answer",
+                )
+                .expect("response"),
             )),
         ]
     };

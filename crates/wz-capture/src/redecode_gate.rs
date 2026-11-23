@@ -172,7 +172,10 @@ fn read_whole(what: &str, file: &[u8]) -> Dissection {
 /// read: two readings alive at once are two frames, where a row the list keeps
 /// whole is the same one both times.
 fn read_again(list: Messages<'_>, position: usize) -> bool {
-    let (first, second) = (list.row(position), list.row(position));
+    let (first, second) = (
+        list.get(position).expect("a message the list holds"),
+        list.get(position).expect("a message the list holds"),
+    );
     !core::ptr::eq::<PassiveFrame>(&*first, &*second)
 }
 
@@ -230,7 +233,10 @@ fn assert_reads_as<'d>(
         assert_eq!(heads, heads_w, "{what}: list {n}, heads");
         for (position, want) in expected.iter().enumerate() {
             assert_eq!(
-                &format!("{:?}", *list.row(position)),
+                &format!(
+                    "{:?}",
+                    *list.get(position).expect("a message the list holds")
+                ),
                 want,
                 "{what}: list {n}, row {position} by position"
             );
@@ -1163,7 +1169,6 @@ fn a_decrypted_tls_flows_entries_read_again_from_its_kept_plaintext() {
 /// so a flow whose container is taken away has nothing to read a row from. A
 /// list that had logged a copy would read on.
 #[test]
-#[should_panic(expected = "bytes of a datagram a list holds are not at Container")]
 fn a_lent_datagram_keeps_no_copy_of_its_payload() {
     let (name, file) = tracked_captures()[2];
     let mut lent = Dissection::new();
@@ -1177,7 +1182,15 @@ fn a_lent_datagram_keeps_no_copy_of_its_payload() {
         .find(|flow| !flow.frames().is_empty())
         .unwrap_or_else(|| unreachable!("{name}: a UDP flow carries messages"));
     flow.lent = None;
-    let _ = flow.frames().row(0);
+    let frames = flow.frames();
+    assert!(
+        matches!(
+            frames.try_get(0),
+            Err(crate::messages::ReadAgainRefused::LogGone { .. })
+        ),
+        "{name}: a row whose container is gone reads as refused, its bytes not copied"
+    );
+    assert!(frames.get(0).is_none(), "{name}: and as no message");
 }
 
 /// A CONTAINER REFUSED AS SHRUNK IS NOT LENT: after a shorter prefix is refused,

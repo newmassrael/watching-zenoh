@@ -303,6 +303,15 @@ pub struct QosLevel {
     pub raw: u8,
 }
 
+/// `bit` when `set`, and no bit otherwise: a flag of a packed byte.
+const fn bit_if(set: bool, bit: u8) -> u8 {
+    if set {
+        bit
+    } else {
+        0
+    }
+}
+
 impl QosLevel {
     /// Construct from the raw QoS byte (typically `(ExtZint.value as u8)`
     /// after the dispatcher has located the matching `ExtEntry`).
@@ -368,8 +377,8 @@ impl QosLevel {
     pub const fn with_congestion(self, congestion: crate::qos::CongestionControl) -> Self {
         Self {
             raw: (self.raw & !(Self::NODROP_BIT | Self::BLOCK_FIRST_BIT))
-                | ((congestion.nodrop_flag() as u8) * Self::NODROP_BIT)
-                | ((congestion.block_first_flag() as u8) * Self::BLOCK_FIRST_BIT),
+                | bit_if(congestion.nodrop_flag(), Self::NODROP_BIT)
+                | bit_if(congestion.block_first_flag(), Self::BLOCK_FIRST_BIT),
         }
     }
 
@@ -377,7 +386,7 @@ impl QosLevel {
     /// congestion bits. The pack twin of [`Self::is_express`].
     pub const fn with_express(self, express: bool) -> Self {
         Self {
-            raw: (self.raw & !Self::EXPRESS_BIT) | ((express as u8) * Self::EXPRESS_BIT),
+            raw: (self.raw & !Self::EXPRESS_BIT) | bit_if(express, Self::EXPRESS_BIT),
         }
     }
 
@@ -482,7 +491,9 @@ impl SourceInfo {
              (zenoh-pico _Z_ID_LENGTH wire constraint)"
         );
         let mut zid = [0u8; 16];
-        zid[..zid_bytes.len()].copy_from_slice(zid_bytes);
+        if let Some(into) = zid.get_mut(..zid_bytes.len()) {
+            into.copy_from_slice(zid_bytes);
+        }
         Self {
             zid,
             zid_len: zid_bytes.len() as u8,
@@ -498,12 +509,8 @@ impl SourceInfo {
     /// checks against an `own_zid` slice cannot accidentally match the
     /// all-zero default.
     pub fn zid_prefix(&self) -> &[u8] {
-        let len = self.zid_len as usize;
-        if (1..=16).contains(&len) {
-            &self.zid[..len]
-        } else {
-            &[]
-        }
+        // A length past the buffer has no prefix, and a length of 0 is the empty one.
+        self.zid.get(..usize::from(self.zid_len)).unwrap_or(&[])
     }
 
     /// The `(zid, eid)` half of this record as ONE value — upstream's
@@ -554,7 +561,7 @@ impl EntityGlobalId {
             return None;
         }
         let mut padded = [0u8; 16];
-        padded[..zid.len()].copy_from_slice(zid);
+        padded.get_mut(..zid.len())?.copy_from_slice(zid);
         Some(Self {
             zid: padded,
             zid_len: zid.len() as u8,
@@ -566,10 +573,8 @@ impl EntityGlobalId {
     /// refused: a [`SessionZid`](crate::session_zid::SessionZid) is already in
     /// the range [`Self::new`] checks.
     pub fn of_session(zid: crate::session_zid::SessionZid, eid: u32) -> Self {
-        let mut padded = [0u8; 16];
-        padded[..zid.len()].copy_from_slice(&zid);
         Self {
-            zid: padded,
+            zid: zid.to_padded(),
             zid_len: zid.len() as u8,
             eid,
         }
@@ -577,7 +582,8 @@ impl EntityGlobalId {
 
     /// The entity's session zid — the meaningful prefix only.
     pub fn zid(&self) -> &[u8] {
-        &self.zid[..self.zid_len as usize]
+        // `zid_len` is 1 to 16, set where the identity was made.
+        self.zid.get(..usize::from(self.zid_len)).unwrap_or(&[])
     }
 
     /// The entity id within that session.
@@ -1024,18 +1030,12 @@ pub fn extract_source_info_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
 /// directly when it already holds the slice; external callers route
 /// through [`extract_source_info`].
 fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let header = bytes[0];
-    let zidlen = ((header >> 4) as usize) + 1;
+    let (&header, body) = bytes.split_first()?;
     // zidlen ranges 1..=16 because the header's high nibble is 4 bits.
-    if zidlen > 16 || bytes.len() < 1 + zidlen {
-        return None;
-    }
+    let zidlen = usize::from(header >> 4).saturating_add(1);
+    let (zid_bytes, rest) = body.split_at_checked(zidlen)?;
     let mut zid = [0u8; 16];
-    zid[..zidlen].copy_from_slice(&bytes[1..1 + zidlen]);
-    let rest = &bytes[1 + zidlen..];
+    zid.get_mut(..zidlen)?.copy_from_slice(zid_bytes);
     let (eid_val, eid_consumed) = read_vle_u64(rest)?;
     if eid_val > u32::MAX as u64 {
         return None;

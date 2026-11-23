@@ -117,8 +117,22 @@ impl StatsDirection {
         }
     }
 
-    const fn index(self) -> usize {
-        self as usize
+    /// This direction's side of a pair kept in [`Self::ALL`]'s order.
+    fn of<T>(self, sides: &[T; 2]) -> &T {
+        let [tx, rx] = sides;
+        match self {
+            StatsDirection::Tx => tx,
+            StatsDirection::Rx => rx,
+        }
+    }
+
+    /// [`Self::of`], to write.
+    fn of_mut<T>(self, sides: &mut [T; 2]) -> &mut T {
+        let [tx, rx] = sides;
+        match self {
+            StatsDirection::Tx => tx,
+            StatsDirection::Rx => rx,
+        }
     }
 }
 
@@ -458,7 +472,9 @@ impl PayloadHistogram {
             .iter()
             .position(|bound| size <= *bound)
             .unwrap_or(PAYLOAD_SIZE_BUCKETS.len());
-        self.counts[bucket] = self.counts[bucket].wrapping_add(1);
+        if let Some(count) = self.counts.get_mut(bucket) {
+            *count = count.wrapping_add(1);
+        }
         self.sum = self.sum.wrapping_add(size);
     }
 
@@ -719,10 +735,10 @@ fn bytes_cells(m: &TransportMetrics, d: StatsDirection) -> Cells<'_, BytesLabels
             let labels = BytesLabels {
                 protocol: link.protocol.clone(),
             };
-            (Some(&link.labels), labels, link.directions[d.index()].bytes)
+            (Some(&link.labels), labels, d.of(&link.directions).bytes)
         })
         .collect();
-    let own = &m.directions[d.index()].bytes;
+    let own = &d.of(&m.directions).bytes;
     cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
     cells
 }
@@ -737,11 +753,11 @@ fn transport_message_cells(
             let labels = TransportMessageLabels {
                 protocol: link.protocol.clone(),
             };
-            let value = link.directions[d.index()].transport_message;
+            let value = d.of(&link.directions).transport_message;
             (Some(&link.labels), labels, value)
         })
         .collect();
-    let own = &m.directions[d.index()].transport_message;
+    let own = &d.of(&m.directions).transport_message;
     cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
     cells
 }
@@ -752,7 +768,7 @@ fn network_message_cells(
 ) -> Cells<'_, NetworkMessageLabels, u64> {
     let mut cells = Vec::new();
     for link in m.open_links() {
-        for ((priority, message, shm), value) in &link.directions[d.index()].network_message {
+        for ((priority, message, shm), value) in &d.of(&link.directions).network_message {
             let labels = NetworkMessageLabels {
                 priority: *priority,
                 message: *message,
@@ -762,7 +778,7 @@ fn network_message_cells(
             cells.push((Some(&link.labels), labels, *value));
         }
     }
-    let own = &m.directions[d.index()].network_message;
+    let own = &d.of(&m.directions).network_message;
     cells.extend(own.iter().map(|(l, v)| (None, l.clone(), *v)));
     cells
 }
@@ -777,21 +793,21 @@ fn payload_cells(
     m: &TransportMetrics,
     d: StatsDirection,
 ) -> Cells<'_, NetworkMessagePayloadLabels, PayloadHistogram> {
-    own_cells(&m.directions[d.index()].network_message_payload)
+    own_cells(&d.of(&m.directions).network_message_payload)
 }
 
 fn dropped_payload_cells(
     m: &TransportMetrics,
     d: StatsDirection,
 ) -> Cells<'_, NetworkMessageDroppedPayloadLabels, PayloadHistogram> {
-    own_cells(&m.directions[d.index()].network_message_dropped_payload)
+    own_cells(&d.of(&m.directions).network_message_dropped_payload)
 }
 
 fn payload_per_key_cells(
     m: &TransportMetrics,
     d: StatsDirection,
 ) -> Cells<'_, NetworkMessagePayloadLabels, PerKeyHistogram> {
-    own_cells(&m.directions[d.index()].network_message_payload_per_key)
+    own_cells(&d.of(&m.directions).network_message_payload_per_key)
 }
 
 /// One transport's counters in both directions: what a session records into.
@@ -866,26 +882,33 @@ impl TransportMetrics {
         link.open = false;
         let protocol = link.protocol.clone();
         let drained = core::mem::take(&mut link.directions);
+        // Counters wrap, as every counter of this registry does.
         for (own, link_side) in self.directions.iter_mut().zip(drained.iter()) {
-            *own.bytes
+            let bytes = own
+                .bytes
                 .entry(BytesLabels {
                     protocol: protocol.clone(),
                 })
-                .or_default() += link_side.bytes;
-            *own.transport_message
+                .or_default();
+            *bytes = bytes.wrapping_add(link_side.bytes);
+            let transport_message = own
+                .transport_message
                 .entry(TransportMessageLabels {
                     protocol: protocol.clone(),
                 })
-                .or_default() += link_side.transport_message;
+                .or_default();
+            *transport_message = transport_message.wrapping_add(link_side.transport_message);
             for ((priority, message, shm), value) in &link_side.network_message {
-                *own.network_message
+                let count = own
+                    .network_message
                     .entry(NetworkMessageLabels {
                         priority: *priority,
                         message: *message,
                         shm: *shm,
                         protocol: protocol.clone(),
                     })
-                    .or_default() += value;
+                    .or_default();
+                *count = count.wrapping_add(*value);
             }
         }
     }
@@ -900,7 +923,7 @@ impl TransportMetrics {
     /// Count `bytes` wire bytes on the link in `slot`.
     pub fn inc_bytes(&mut self, direction: StatsDirection, slot: LinkSlot, bytes: u64) {
         if let Some(link) = self.link_mut(slot) {
-            let cell = &mut link.directions[direction.index()].bytes;
+            let cell = &mut direction.of_mut(&mut link.directions).bytes;
             *cell = cell.wrapping_add(bytes);
         }
     }
@@ -908,7 +931,7 @@ impl TransportMetrics {
     /// Count `count` transport messages on the link in `slot`.
     pub fn inc_transport_message(&mut self, direction: StatsDirection, slot: LinkSlot, count: u64) {
         if let Some(link) = self.link_mut(slot) {
-            let cell = &mut link.directions[direction.index()].transport_message;
+            let cell = &mut direction.of_mut(&mut link.directions).transport_message;
             *cell = cell.wrapping_add(count);
         }
     }
@@ -923,7 +946,8 @@ impl TransportMetrics {
         shm: bool,
     ) {
         if let Some(link) = self.link_mut(slot) {
-            let cell = link.directions[direction.index()]
+            let cell = direction
+                .of_mut(&mut link.directions)
                 .network_message
                 .entry((priority, message, shm))
                 .or_default();
@@ -952,7 +976,7 @@ impl TransportMetrics {
             message,
             shm,
         };
-        let own = &mut self.directions[direction.index()];
+        let own = direction.of_mut(&mut self.directions);
         own.network_message_payload
             .entry(labels.clone())
             .or_default()
@@ -980,7 +1004,7 @@ impl TransportMetrics {
             shm,
         };
         let size = payload.pl_bytes as u64;
-        let own = &mut self.directions[direction.index()];
+        let own = direction.of_mut(&mut self.directions);
         own.network_message_payload
             .entry(labels.clone())
             .or_default()
@@ -1008,7 +1032,8 @@ impl TransportMetrics {
         let protocol = link
             .and_then(|slot| self.links.get(slot.0))
             .map(|link| link.protocol.clone());
-        self.directions[direction.index()]
+        direction
+            .of_mut(&mut self.directions)
             .network_message_dropped_payload
             .entry(NetworkMessageDroppedPayloadLabels {
                 priority,
@@ -1363,7 +1388,8 @@ impl StatsRegistry {
 
     fn register(&mut self, labels: TransportLabels) -> StatsTransportId {
         let id = StatsTransportId(self.next_id);
-        self.next_id += 1;
+        // A 64-bit count of registrations does not come back round.
+        self.next_id = self.next_id.wrapping_add(1);
         self.transports.insert(
             id,
             RegisteredTransport {
@@ -1382,13 +1408,13 @@ impl StatsRegistry {
         whatami: WhatAmI,
         cn: Option<&str>,
     ) -> StatsTransportId {
-        self.transports_opened += 1;
+        self.transports_opened = self.transports_opened.wrapping_add(1);
         self.register(TransportLabels::unicast(zid, whatami, cn))
     }
 
     /// Register an opened multicast transport on `group`.
     pub fn open_multicast_transport(&mut self, group: &str) -> StatsTransportId {
-        self.transports_opened += 1;
+        self.transports_opened = self.transports_opened.wrapping_add(1);
         self.register(TransportLabels::multicast(group))
     }
 
@@ -1456,7 +1482,8 @@ impl StatsRegistry {
                 continue;
             }
             for (protocol, open) in entry.metrics.link_protocols() {
-                *gauge.entry(protocol).or_insert(0) += i64::from(open);
+                let open_links = gauge.entry(protocol).or_insert(0);
+                *open_links = open_links.wrapping_add(i64::from(open));
             }
         }
         gauge
@@ -1474,7 +1501,7 @@ impl StatsRegistry {
         if let Some(entry) = self.transports.get_mut(&transport) {
             if entry.disconnected_at.is_none() {
                 entry.disconnected_at = Some(now_ms);
-                self.transports_opened -= 1;
+                self.transports_opened = self.transports_opened.wrapping_sub(1);
             }
         }
     }
@@ -1518,18 +1545,20 @@ impl StatsRegistry {
 
     /// A resource was declared.
     pub fn inc_resource_declared(&mut self, resource: ResourceLabel, locality: LocalityLabel) {
-        *self
+        let declared = self
             .resources_declared
             .entry((resource, locality))
-            .or_insert(0) += 1;
+            .or_insert(0);
+        *declared = declared.wrapping_add(1);
     }
 
     /// A resource was undeclared.
     pub fn dec_resource_declared(&mut self, resource: ResourceLabel, locality: LocalityLabel) {
-        *self
+        let declared = self
             .resources_declared
             .entry((resource, locality))
-            .or_insert(0) -= 1;
+            .or_insert(0);
+        *declared = declared.wrapping_sub(1);
     }
 
     /// Write the whole OpenMetrics document, `# EOF` included, as upstream's
@@ -1543,7 +1572,7 @@ impl StatsRegistry {
         }
         // The fragment writer always leads with a comma; the constant labels
         // open the brace, so the first comma is dropped here once.
-        let head = &head[1..];
+        let head = head.get(1..).unwrap_or_default();
 
         push_build_info(
             out,
@@ -1729,20 +1758,20 @@ impl<'a> EncodeCtx<'a> {
                     transports: Vec::new(),
                 });
                 collected.total.merge_from(&metric);
-                let share = match collected.transports.last_mut() {
-                    Some(share) if *share.labels == entry.labels => share,
-                    _ => {
-                        collected.transports.push(TransportShare {
-                            labels: &entry.labels,
-                            disconnected,
-                            total: M::default(),
-                            links: Vec::new(),
-                        });
-                        collected
-                            .transports
-                            .last_mut()
-                            .expect("a share was pushed on the line above")
-                    }
+                let shared = matches!(
+                    collected.transports.last(),
+                    Some(share) if *share.labels == entry.labels
+                );
+                if !shared {
+                    collected.transports.push(TransportShare {
+                        labels: &entry.labels,
+                        disconnected,
+                        total: M::default(),
+                        links: Vec::new(),
+                    });
+                }
+                let Some(share) = collected.transports.last_mut() else {
+                    continue;
                 };
                 share.total.merge_from(&metric);
                 if let Some(link) = link {
@@ -1855,7 +1884,7 @@ pub fn push_build_info(out: &mut String, zid: &str, whatami: &str, version: &str
         w.label("local_whatami", whatami);
         w.label("version", version);
     }
-    out.push_str(&labels[1..]);
+    out.push_str(labels.get(1..).unwrap_or_default());
     out.push_str("} 1\n");
 }
 

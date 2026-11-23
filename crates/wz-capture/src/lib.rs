@@ -1519,7 +1519,8 @@ impl<'a> RowCursor<'a> {
         Self { frames, walk: None }
     }
 
-    /// The message at `position`; panics past the end, as [`messages::Messages::row`] does.
+    /// The message at `position`; panics past the end, or where the list could not
+    /// read it again ([`messages::Messages::try_get`]).
     pub(crate) fn row(&mut self, position: usize) -> messages::Row<'a> {
         let frames = self.frames;
         let (next, rows) = match &mut self.walk {
@@ -1533,7 +1534,7 @@ impl<'a> RowCursor<'a> {
         *next = position + 1;
         match rows.nth(skip) {
             Some(row) => row,
-            None => frames.row(position),
+            None => frames.get(position).expect("a message the list holds"),
         }
     }
 }
@@ -3272,7 +3273,9 @@ impl FlowDissection {
             ..
         } = self;
         if plaintext.is_none() {
-            frames.keep_whole_before(
+            // A unit the stream had already let go of reads as no message
+            // whichever way this answers: there is nothing left to keep of it.
+            let _ = frames.keep_whole_before(
                 direction,
                 offset,
                 &Streams {
@@ -4504,9 +4507,12 @@ impl FlowDissection {
                         (true, [one]) => self
                             .frames
                             .push_datagram_in_stream(unit, one.at, &payload, one.masked, handshake),
-                        (true, _) => self
-                            .frames
-                            .push_datagram_in_frames(unit, spans, &payload, handshake),
+                        (true, _) => match messages::Stretches::new(spans) {
+                            Some(stretches) => self
+                                .frames
+                                .push_datagram_in_frames(unit, stretches, &payload, handshake),
+                            None => self.frames.push_datagram(unit, &payload, None, handshake),
+                        },
                         (false, _) => self.frames.push_datagram(unit, &payload, None, handshake),
                     }
                 }
@@ -5675,7 +5681,10 @@ mod live_tap_tests {
                 "{limits:?}: the retained stream follows the held messages, held {}",
                 flow.low_to_high.retained_len()
             );
-            for frame in [&flow.frames().row(0), &flow.frames().row(99)] {
+            for frame in [
+                &flow.frames().get(0).expect("a message the list holds"),
+                &flow.frames().get(99).expect("a message the list holds"),
+            ] {
                 assert_eq!(
                     flow.message_bytes(frame).as_deref().ok(),
                     Some(&keepalive[..]),
@@ -8472,8 +8481,16 @@ impl Dissection {
         let mut walk_from = window_start;
         let mut offered: Option<(&[u8], usize)> = None;
         while walk_from < stream.frames.len() {
-            let head_direction = stream.frames().row(walk_from).direction;
-            let head = stream.frames().row(walk_from).stream_offset;
+            let head_direction = stream
+                .frames()
+                .get(walk_from)
+                .expect("a message the list holds")
+                .direction;
+            let head = stream
+                .frames()
+                .get(walk_from)
+                .expect("a message the list holds")
+                .stream_offset;
             if head_direction == direction {
                 if head as u64 >= base {
                     offered = Some((bytes, base as usize));
@@ -13929,11 +13946,17 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it stays on the transport side");
         assert!(
             matches!(
-                flow.frames().row(0).frame,
+                flow.frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame,
                 Ok(wz_session_core::inbound::InboundFrame::Open { .. })
             ),
             "an unsolicited 0x02 is an Open: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
     }
 
@@ -14052,14 +14075,23 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it must still be SHOWN");
         assert!(
             matches!(
-                flow.frames().row(0).frame,
+                flow.frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "the bytes decode — that was never the problem: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
         assert!(
-            flow.frames().row(0).inadmissible_on_link,
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .inadmissible_on_link,
             "and the report must say the link cannot carry it"
         );
         assert!(
@@ -14097,9 +14129,16 @@ mod datagram_tests {
         let flow = &d.datagram_flows()[0];
         assert_eq!(flow.frames.len(), 1);
         assert!(
-            !flow.frames().row(0).inadmissible_on_link,
+            !flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .inadmissible_on_link,
             "a JOIN is exactly what this link exists to carry: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
     }
 
@@ -14167,7 +14206,13 @@ mod datagram_tests {
         d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
 
         let flow = &d.datagram_flows()[0];
-        assert!(!flow.frames().row(0).inadmissible_on_link);
+        assert!(
+            !flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .inadmissible_on_link
+        );
         assert!(
             !matches!(
                 flow.session.context().phase,
@@ -14196,11 +14241,17 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames().row(0).frame,
+                flow.frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "a unicast 0x01 is an Init: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
     }
 
@@ -14239,11 +14290,17 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames().row(0).frame,
+                flow.frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame,
                 Ok(wz_session_core::inbound::InboundFrame::Join { .. })
             ),
             "the multicast JOIN must still decode as a Join: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
     }
 
@@ -14526,7 +14583,12 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            match &flow.frames().row(0).frame {
+            match &flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
+            {
                 Ok(InboundFrame::Unknown { mid }) => panic!(
                     "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
                      cannot name it — a codec is missing from wz-capture's \
@@ -14594,7 +14656,7 @@ mod datagram_tests {
                  is one the decoder names and the credible-header gate refuses"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames().row(0);
+            let f = &flow.frames().get(0).expect("a message the list holds");
             assert_eq!(f.prefix_width, 2, "{name} read the wrong framing");
             assert_eq!(
                 f.reserved_header_bits, 0,
@@ -14964,7 +15026,12 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames().row(0).carried {
+            match &flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .carried
+            {
                 Carried::Batch(batch) => {
                     assert_eq!(
                         batch.halt, None,
@@ -15014,7 +15081,12 @@ mod datagram_tests {
                 "{name} desynchronised a synchronised stream reader"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames().row(0).carried {
+            match &flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .carried
+            {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -15285,7 +15357,14 @@ mod datagram_tests {
         );
         // Positioned at the packet that COMPLETED it, not at the first piece.
         // `stream_offset` is where the datagram path records the packet index.
-        assert_eq!(d.datagram_flows()[0].frames().row(0).stream_offset, 1);
+        assert_eq!(
+            d.datagram_flows()[0]
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .stream_offset,
+            1
+        );
     }
 
     /// R311y924 (open-debt item 247) — THE TWO FRAGMENT SKIP COUNTERS STAY AT
@@ -15571,8 +15650,22 @@ mod datagram_tests {
         // and a rendered comparison is the right one anyway: it fails with both
         // frames printed, which is what a byte-for-byte claim wants to show.
         assert_eq!(
-            alloc::format!("{:?}", split.datagram_flows()[0].frames().row(0).frame),
-            alloc::format!("{:?}", whole.datagram_flows()[0].frames().row(0).frame),
+            alloc::format!(
+                "{:?}",
+                split.datagram_flows()[0]
+                    .frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame
+            ),
+            alloc::format!(
+                "{:?}",
+                whole.datagram_flows()[0]
+                    .frames()
+                    .get(0)
+                    .expect("a message the list holds")
+                    .frame
+            ),
             "reassembly must reproduce the datagram byte for byte"
         );
         assert_eq!(
@@ -17975,7 +18068,12 @@ mod datagram_tests {
             1,
             "the message must decode, not merely the file parse"
         );
-        assert!(d.datagram_flows()[0].frames().row(0).frame.is_ok());
+        assert!(d.datagram_flows()[0]
+            .frames()
+            .get(0)
+            .expect("a message the list holds")
+            .frame
+            .is_ok());
         #[cfg(feature = "reassembly")]
         assert_eq!(
             d.datagram_flows()[0].session.now_ms(),
@@ -18160,7 +18258,11 @@ mod datagram_tests {
         let mut stamped = Dissection::new();
         stamped.push_packet_at(LINKTYPE_ETHERNET, 0, Some(4_242), &pkt);
         assert_eq!(
-            stamped.datagram_flows()[0].frames().row(0).observed_at_ms,
+            stamped.datagram_flows()[0]
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .observed_at_ms,
             Some(4_242),
             "the instant handed to push_packet_at must reach the frame"
         );
@@ -18168,7 +18270,11 @@ mod datagram_tests {
         let mut unstamped = Dissection::new();
         unstamped.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
         assert_eq!(
-            unstamped.datagram_flows()[0].frames().row(0).observed_at_ms,
+            unstamped.datagram_flows()[0]
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .observed_at_ms,
             None,
             "a source with no clock must not produce a plausible one"
         );
@@ -18281,14 +18387,26 @@ mod datagram_tests {
 
         let frames = d.datagram_flows()[0].frames();
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames.row(0).observed_at_ms, Some(1_000));
         assert_eq!(
-            frames.row(1).observed_at_ms,
+            frames
+                .get(0)
+                .expect("a message the list holds")
+                .observed_at_ms,
+            Some(1_000)
+        );
+        assert_eq!(
+            frames
+                .get(1)
+                .expect("a message the list holds")
+                .observed_at_ms,
             Some(1_000),
             "the unstamped packet reports a time it was never given"
         );
         assert_eq!(
-            frames.row(2).observed_at_ms,
+            frames
+                .get(2)
+                .expect("a message the list holds")
+                .observed_at_ms,
             Some(3_000),
             "and a later stamp moves the clock on"
         );
@@ -18389,11 +18507,24 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         // The packet index rides through as the frame's anchor — there is no
         // stream for an offset to point into.
-        assert_eq!(flow.frames().row(0).stream_offset, 11);
+        assert_eq!(
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .stream_offset,
+            11
+        );
         assert!(
-            flow.frames().row(0).frame.is_ok(),
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
+                .is_ok(),
             "decode failed: {:?}",
-            flow.frames().row(0).frame
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame
         );
     }
 
@@ -18442,7 +18573,11 @@ mod datagram_tests {
 
         assert!(d.skipped().is_empty(), "{:?}", d.skipped());
         assert_eq!(d.datagram_flows().len(), 1);
-        let frame = &d.datagram_flows()[0].frames().row(0).frame;
+        let frame = &d.datagram_flows()[0]
+            .frames()
+            .get(0)
+            .expect("a message the list holds")
+            .frame;
         match frame {
             Ok(InboundFrame::Join { body, has_ext, .. }) => {
                 assert!(!has_ext, "this JOIN carries no ext chain");
@@ -18650,7 +18785,7 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames().row(0);
+            let f = &flow.frames().get(0).expect("a message the list holds");
             assert_eq!(
                 f.prefix_width, 0,
                 "{name}: a ws message carries no length prefix"
@@ -18822,7 +18957,10 @@ mod ws_flow_tests {
         );
         let upgrade_len = upgrade.len();
         assert_eq!(
-            flow.frames().row(0).wire_end,
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .wire_end,
             Some(upgrade_len + first.len()),
             "the first message ends where its frame does"
         );
@@ -18885,7 +19023,12 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames().row(0).carried {
+            match &flow
+                .frames()
+                .get(0)
+                .expect("a message the list holds")
+                .carried
+            {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted over ws");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -19153,7 +19296,10 @@ mod ws_flow_tests {
         assert!(!flow.framing().is_websocket());
         assert_eq!(flow.frames.len(), 1, "the stream path still decodes it");
         assert_eq!(
-            flow.frames().row(0).prefix_width,
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .prefix_width,
             2,
             "and still reports the 2-byte prefix it actually read"
         );
@@ -21940,7 +22086,7 @@ mod tls_flow_tests {
             }
             reached.push(origin_class(origin));
             for index in 0..list.len() {
-                let space = anchor_space_of(&list.row(index));
+                let space = anchor_space_of(&list.get(index).expect("a message the list holds"));
                 let answer = d.message_bytes_at(flow, origin, index);
                 let has_bytes = matches!(answer, MessageBytes::Retained(_));
                 grid[usize::from(space == AnchorSpace::StreamBytes) * 2
@@ -21975,7 +22121,8 @@ mod tls_flow_tests {
                             )
                         });
                     let expected = list
-                        .row(index)
+                        .get(index)
+                        .expect("a message the list holds")
                         .frame
                         .as_ref()
                         .expect("this corpus decodes every message it pushes")

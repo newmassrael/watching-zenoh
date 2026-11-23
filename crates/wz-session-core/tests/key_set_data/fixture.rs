@@ -5,7 +5,7 @@
 // Do not edit: `wz_key_set.py --check` fails when this file is stale.
 
 /// The key catalogue of the declaration, as `KeyCatalogue` reads it. A bad table is a build
-/// error: `KeyCatalogue::new` checks every property in a `const`.
+/// error: `KeyCatalogue::try_new` checks every property in a `const` and a refusal stops it.
 pub mod key_set {
     #![allow(dead_code)]
     use wz_session_core::key_catalogue::{EntityId, EntityKind, EntityRow, KeyCatalogue, KeyId};
@@ -106,7 +106,10 @@ pub mod key_set {
 
     #[rustfmt::skip]
     pub const CATALOGUE: KeyCatalogue<'static> =
-        KeyCatalogue::new(KEY_TEXT, &KEY_ENDS, &OFFSETS, &MEMBERS, &ENTITIES);
+        match KeyCatalogue::try_new(KEY_TEXT, &KEY_ENDS, &OFFSETS, &MEMBERS, &ENTITIES) {
+            Ok(table) => table,
+            Err(error) => panic!("{}", error.describe()),
+        };
 
     /// The table of a node that states a closed key set; `None` for one that does not.
     pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);
@@ -127,7 +130,10 @@ pub mod key_set {
 
     #[rustfmt::skip]
     pub const PEER_ALLOWANCE: wz_session_core::key_allowance::PeerAllowance<'static> =
-        wz_session_core::key_allowance::PeerAllowance::new(&PEER_ZIDS, 18, &PEER_BITS);
+        match wz_session_core::key_allowance::PeerAllowance::try_new(&PEER_ZIDS, 18, &PEER_BITS) {
+            Ok(table) => table,
+            Err(error) => panic!("{}", error.describe()),
+        };
 
     #[rustfmt::skip]
     pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> =

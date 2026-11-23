@@ -16930,7 +16930,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendWireError> {
         #[cfg(all(feature = "codec-request", feature = "alloc"))]
         {
-            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            let request = build_request_query(rid, key)?;
             self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }
@@ -17061,8 +17063,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // split), so the seam-routed z_get path and this send_* wrapper
             // share one builder SSOT. This method keeps the dispatch half
             // (reliable, no batch flush — a Query carries no express window).
-            let request =
-                build_request_query_with_meta(rid, keyexpr_mapping_id, keyexpr_suffix, meta)?;
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            let request = build_request_query_with_meta(rid, key, meta)?;
             self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }

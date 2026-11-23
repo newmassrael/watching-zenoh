@@ -104,8 +104,8 @@ pub fn encode_shm_descriptor(d: &ShmDescriptor) -> Vec<u8> {
 pub fn decode_shm_descriptor(bytes: &[u8]) -> Option<ShmDescriptor> {
     let (data_len, n0) = read_vle_u64(bytes)?;
     let (metadata_id, n1) = read_vle_u64(bytes.get(n0..)?)?;
-    let (metadata_index, n2) = read_vle_u64(bytes.get(n0 + n1..)?)?;
-    let (generation, _n3) = read_vle_u64(bytes.get(n0 + n1 + n2..)?)?;
+    let (metadata_index, n2) = read_vle_u64(bytes.get(n0.saturating_add(n1)..)?)?;
+    let (generation, _n3) = read_vle_u64(bytes.get(n0.saturating_add(n1).saturating_add(n2)..)?)?;
     if data_len == 0 {
         return None;
     }
@@ -261,19 +261,19 @@ impl ShmProtocolList {
             if list.as_slice().contains(&id) {
                 continue;
             }
-            let slot = usize::from(list.len);
-            if slot == SHM_PROTOCOL_SLOTS {
+            // The next slot, or none past the last: the list is full.
+            let Some(cell) = list.ids.get_mut(usize::from(list.len)) else {
                 return Err(TooManyShmProtocols { asked: ids.len() });
-            }
-            list.ids[slot] = id;
-            list.len += 1;
+            };
+            *cell = id;
+            list.len = list.len.saturating_add(1);
         }
         Ok(list)
     }
 
     /// The ids, in order.
     pub fn as_slice(&self) -> &[u32] {
-        &self.ids[..usize::from(self.len)]
+        self.ids.get(..usize::from(self.len)).unwrap_or_default()
     }
 }
 
@@ -390,11 +390,12 @@ fn decode_shm_handoff_counters(bytes: &[u8]) -> Option<(ShmHandoffCounters, usiz
         return Some((ShmHandoffCounters::Disabled, 1));
     }
     let mut ids = [0u16; SHM_PRIORITY_BANDS];
-    let mut used = 1;
+    let mut used = 1usize;
     for slot in ids.iter_mut() {
-        let (v, n) = read_vle_u64(rest.get(used - 1..)?)?;
+        // `used` counts the status byte `rest` starts after.
+        let (v, n) = read_vle_u64(rest.get(used.saturating_sub(1)..)?)?;
         *slot = u16::try_from(v).ok()?;
-        used += n;
+        used = used.saturating_add(n);
     }
     Some((ShmHandoffCounters::PerPriority(ids), used))
 }
@@ -1131,7 +1132,7 @@ impl ShmReceiveState {
         // hand the application a few bytes of struct in place of its data, which is
         // worse than a counted drop.
         if !self.negotiated {
-            self.unnegotiated_drops += 1;
+            self.unnegotiated_drops = self.unnegotiated_drops.saturating_add(1);
             return None;
         }
         let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
@@ -1145,7 +1146,7 @@ impl ShmReceiveState {
                 // An unresolvable descriptor (no resolver, or a stale or foreign
                 // segment) or a slice kind this node does not know: drop the
                 // message, but COUNT it so the misconfiguration is observable.
-                self.unresolved_drops += 1;
+                self.unresolved_drops = self.unresolved_drops.saturating_add(1);
                 None
             }
         }
@@ -1175,7 +1176,7 @@ impl ShmReceiveState {
         band: usize,
     ) -> Option<crate::link::RxBytes> {
         if !self.negotiated {
-            self.unnegotiated_drops += 1;
+            self.unnegotiated_drops = self.unnegotiated_drops.saturating_add(1);
             return None;
         }
         let (resolver, handoff) = (self.resolver.as_deref(), self.handoff.as_deref());
@@ -1186,7 +1187,7 @@ impl ShmReceiveState {
         }) {
             Ok(bytes) => Some(bytes),
             Err(_) => {
-                self.unresolved_drops += 1;
+                self.unresolved_drops = self.unresolved_drops.saturating_add(1);
                 None
             }
         }

@@ -192,8 +192,11 @@ impl NamedKeyexpr {
             header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
             body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
                 value_len: self.len as u64,
-                value: Bounded::new(&self.body[..self.len])
-                    .expect("a named key's body is within the u32 length"),
+                value: self
+                    .body
+                    .get(..self.len)
+                    .and_then(Bounded::new)
+                    .expect("the length is the sink's position, in a body within the u32 length"),
             }),
         }
     }

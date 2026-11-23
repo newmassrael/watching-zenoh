@@ -104,7 +104,10 @@ impl<const B: usize> IntervalMeter<B> {
         let Some(interval) = interval_between(previous as u32, now_us) else {
             return;
         };
-        self.counts[bucket_of(interval, B)].fetch_add(1, Ordering::Relaxed);
+        // `bucket_of` answers below `B`.
+        if let Some(count) = self.counts.get(bucket_of(interval, B)) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
         self.interval_sum_us
             .fetch_add(u64::from(interval), Ordering::Relaxed);
     }

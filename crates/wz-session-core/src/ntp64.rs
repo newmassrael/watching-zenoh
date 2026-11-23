@@ -62,7 +62,8 @@ impl Ntp64 {
     /// replaces did; `subsec_nanos < 1e9` keeps `nanos * 2^32 < 2^62` (no u64
     /// overflow).
     pub fn from_unix(secs: u64, subsec_nanos: u32) -> Self {
-        let frac = (subsec_nanos as u64 * Self::FRAC_PER_SEC) / 1_000_000_000;
+        // Below 1e9 times 2^32, under 2^62: the product is exact.
+        let frac = (subsec_nanos as u64).saturating_mul(Self::FRAC_PER_SEC) / 1_000_000_000;
         Self((secs << Self::FRAC_BITS) | frac)
     }
 
@@ -120,8 +121,12 @@ impl Ntp64 {
         const NANO_PER_SEC: u64 = 1_000_000_000;
         let secs = self.whole_secs() as u128;
         // frac < 2^32, so frac * 1e9 < 2^62 — no overflow in u64.
-        let subsec_nanos = (self.frac() * NANO_PER_SEC).div_ceil(Self::FRAC_PER_SEC) as u128;
-        secs * 1000 + subsec_nanos / 1_000_000
+        let subsec_nanos = self
+            .frac()
+            .saturating_mul(NANO_PER_SEC)
+            .div_ceil(Self::FRAC_PER_SEC) as u128;
+        secs.saturating_mul(1000)
+            .saturating_add(subsec_nanos / 1_000_000)
     }
 }
 

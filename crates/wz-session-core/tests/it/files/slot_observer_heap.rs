@@ -79,7 +79,11 @@ fn push_on(id: wz_session_core::wire_id::ExprId) -> NetworkMessage {
 
 fn ask(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
-        build_request_query(rid, 0, Some(keyexpr)).expect("build the request"),
+        build_request_query(
+            rid,
+            crate::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+        )
+        .expect("build the request"),
     ))
 }
 

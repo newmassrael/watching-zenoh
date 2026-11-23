@@ -314,29 +314,32 @@ fn exceeds_byte_bound<P: Storage, const CAPACITY: usize>(input: &str) -> bool {
 /// substring-level and does not see chunk boundaries, but a `$*` holds no `/`, so a run is
 /// always inside one chunk.
 fn collapsed_len(input: &str) -> usize {
-    let bytes = input.as_bytes();
-    let mut len = 0;
-    let mut i = 0;
+    // At most the input's length, so neither sum saturates.
+    let mut len = 0usize;
+    let mut rest = input.as_bytes();
     let mut after_token = false;
-    while i < bytes.len() {
-        if is_dollar_star_at(bytes, i) {
-            if !after_token {
-                len += 2;
+    loop {
+        match rest {
+            [b'$', b'*', tail @ ..] => {
+                if !after_token {
+                    len = len.saturating_add(2);
+                }
+                after_token = true;
+                rest = tail;
             }
-            after_token = true;
-            i += 2;
-        } else {
-            len += 1;
-            after_token = false;
-            i += 1;
+            [_, tail @ ..] => {
+                len = len.saturating_add(1);
+                after_token = false;
+                rest = tail;
+            }
+            [] => return len,
         }
     }
-    len
 }
 
 /// Whether a `$*` token starts at byte `i` of `bytes`.
 fn is_dollar_star_at(bytes: &[u8], i: usize) -> bool {
-    bytes.get(i) == Some(&b'$') && bytes.get(i + 1) == Some(&b'*')
+    bytes.get(i..).is_some_and(|rest| rest.starts_with(b"$*"))
 }
 
 /// Whether `chunk` is one or more `$*` tokens and nothing else: the chunk whose collapsed
@@ -400,7 +403,7 @@ fn walk_canonical(
             _ => false,
         };
         if folds_into_run {
-            run_single_stars += 1;
+            run_single_stars = run_single_stars.saturating_add(1);
             continue;
         }
         if shape == ChunkShape::DoubleStar {
@@ -467,28 +470,31 @@ fn write_chunk(
     if *written > 0 {
         sink("/")?;
     }
-    *written += 1;
+    // At most `MAX_KEYEXPR_CHUNKS` where it is bounded, and a count of chunks of a text.
+    *written = written.saturating_add(1);
     let bytes = chunk.as_bytes();
     // `from` is where the text not yet written starts; a run of `$*` is written up to its
-    // first token and the rest of the run is stepped over.
-    let mut from = 0;
-    let mut i = 0;
+    // first token and the rest of the run is stepped over. Every position below is inside the
+    // chunk, at an ASCII byte, so the sums do not saturate and each cut is a char boundary.
+    let mut from = 0usize;
+    let mut i = 0usize;
     while i < bytes.len() {
         if is_dollar_star_at(bytes, i) {
-            let mut end = i + 2;
+            let first_end = i.saturating_add(2);
+            let mut end = first_end;
             while is_dollar_star_at(bytes, end) {
-                end += 2;
+                end = end.saturating_add(2);
             }
-            if end > i + 2 {
-                sink(&chunk[from..i + 2])?;
+            if end > first_end {
+                sink(chunk.get(from..first_end).unwrap_or_default())?;
                 from = end;
             }
             i = end;
         } else {
-            i += 1;
+            i = i.saturating_add(1);
         }
     }
-    sink(&chunk[from..])
+    sink(chunk.get(from..).unwrap_or_default())
 }
 
 /// Per-chunk validation + shape classification, of the chunk as the text holds it: a `$*`
@@ -513,16 +519,17 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
     if is_dollar_star_run(chunk) {
         return Ok(ChunkShape::LoneDollarStar);
     }
-    let bytes = chunk.as_bytes();
+    let mut rest = chunk.as_bytes();
     let mut state: u8 = 0;
-    let mut i = 0;
-    while i < bytes.len() {
+    while let [byte, tail @ ..] = rest {
         // The rest of a `$*` run, which the canonical form writes once.
-        if state == 3 && is_dollar_star_at(bytes, i) {
-            i += 2;
-            continue;
+        if state == 3 {
+            if let [b'$', b'*', after @ ..] = rest {
+                rest = after;
+                continue;
+            }
         }
-        match bytes[i] {
+        match *byte {
             b'#' | b'?' => return Err(KeyexprCanonError::ContainsSharpOrQmark),
             b'$' => {
                 if state != 0 {
@@ -543,7 +550,7 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
                 state = 0;
             }
         }
-        i += 1;
+        rest = tail;
     }
     if state == 1 {
         return Err(KeyexprCanonError::ContainsUnboundDollar);
@@ -729,14 +736,17 @@ pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
             fault,
         })
     };
-    while i < bytes.len() {
-        match bytes[i] {
+    // Offsets and counts below are of the text's bytes and chunks, so no sum saturates; a read
+    // past the end is `None` from `get`.
+    let at = |i: usize, ahead: usize| bytes.get(i.saturating_add(ahead)).copied();
+    while let Some(byte) = bytes.get(i) {
+        match *byte {
             // `/` closes the chunk; at the start of one it closes an empty one.
             b'/' if i == chunk_start => return refuse(chunk, i, Fault::EmptyChunk),
             b'/' => {
-                i += 1;
+                i = i.saturating_add(1);
                 chunk_start = i;
-                chunk += 1;
+                chunk = chunk.saturating_add(1);
             }
             // A `*` after a `$` is consumed together with it by the `$` arm,
             // so one that arrives here mid-chunk has nothing to bind to.
@@ -744,49 +754,47 @@ pub fn validate_keyexpr(text: &str) -> Result<(), KeyexprRefusal> {
             // A `*` at the start of a chunk must be the whole chunk, `*` or
             // `**`, and a `**` may not be followed by a chunk that is `*` or
             // `**` (those are spelled `*/**` and `**`).
-            b'*' => match bytes.get(i + 1) {
+            b'*' => match at(i, 1) {
                 None => break,
-                Some(&b'/') => {
-                    i += 2;
+                Some(b'/') => {
+                    i = i.saturating_add(2);
                     chunk_start = i;
-                    chunk += 1;
+                    chunk = chunk.saturating_add(1);
                 }
-                Some(&b'*') => match bytes.get(i + 2) {
+                Some(b'*') => match at(i, 2) {
                     None => break,
-                    Some(&b'/') if bytes.get(i + 3) == Some(&b'*') => {
+                    Some(b'/') if at(i, 3) == Some(b'*') => {
                         // The chunk after `**/` starts with a `*`; which of
                         // three faults it is depends on what follows it.
-                        let fault = match (bytes.get(i + 4), bytes.get(i + 5)) {
-                            (None | Some(&b'/'), _) => Fault::SingleStarAfterDoubleStar,
-                            (Some(&b'*'), None | Some(&b'/')) => Fault::DoubleStarAfterDoubleStar,
+                        let fault = match (at(i, 4), at(i, 5)) {
+                            (None | Some(b'/'), _) => Fault::SingleStarAfterDoubleStar,
+                            (Some(b'*'), None | Some(b'/')) => Fault::DoubleStarAfterDoubleStar,
                             _ => Fault::StarInChunk,
                         };
-                        return refuse(chunk + 1, i + 3, fault);
+                        return refuse(chunk.saturating_add(1), i.saturating_add(3), fault);
                     }
-                    Some(&b'/') => {
-                        i += 3;
+                    Some(b'/') => {
+                        i = i.saturating_add(3);
                         chunk_start = i;
-                        chunk += 1;
+                        chunk = chunk.saturating_add(1);
                     }
                     Some(_) => return refuse(chunk, i, Fault::StarInChunk),
                 },
                 Some(_) => return refuse(chunk, i, Fault::StarInChunk),
             },
             // A `$` must start a `$*`.
-            b'$' if bytes.get(i + 1) != Some(&b'*') => {
-                return refuse(chunk, i, Fault::UnboundDollar)
-            }
-            b'$' => match bytes.get(i + 2) {
-                Some(&b'$') => return refuse(chunk, i + 2, Fault::DollarAfterDollar),
+            b'$' if at(i, 1) != Some(b'*') => return refuse(chunk, i, Fault::UnboundDollar),
+            b'$' => match at(i, 2) {
+                Some(b'$') => return refuse(chunk, i.saturating_add(2), Fault::DollarAfterDollar),
                 // A `$*` that is a whole chunk.
-                Some(&b'/') | None if i == chunk_start => {
+                Some(b'/') | None if i == chunk_start => {
                     return refuse(chunk, chunk_start, Fault::LoneDollarStar)
                 }
                 None => break,
-                Some(_) => i += 2,
+                Some(_) => i = i.saturating_add(2),
             },
             b'#' | b'?' => return refuse(chunk, i, Fault::SharpOrQuestionMark),
-            _ => i += 1,
+            _ => i = i.saturating_add(1),
         }
     }
     // The last byte was a `/` (or there are no bytes): the chunk it opens is
@@ -838,12 +846,13 @@ fn diagnostic_text(text: &str) -> DiagnosticText {
 #[cfg(all(feature = "storage-profile", not(feature = "alloc")))]
 fn diagnostic_text(text: &str) -> DiagnosticText {
     let mut end = text.len().min(DIAGNOSTIC_TEXT_BYTES);
+    // 0 is a boundary, so the walk stops there at the latest.
     while !text.is_char_boundary(end) {
-        end -= 1;
+        end = end.saturating_sub(1);
     }
     let mut out = DiagnosticText::new();
     // Cannot fail: `end` is at most the capacity.
-    let _ = out.push_str(&text[..end]);
+    let _ = out.push_str(text.get(..end).unwrap_or_default());
     out
 }
 

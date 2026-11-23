@@ -3,10 +3,10 @@
 
 //! Response-builder cluster — runtime-agnostic wire-record construction
 //! for the queryable reply path. The minimal one-shot helpers
-//! (`build_response_{reply,err}_{literal,aliased}`) plus the fluent
+//! (`build_response_{reply,err}`) plus the fluent
 //! [`ResponseReplyBuilder`] / [`ResponseErrBuilder`] compose a
-//! `Response(Reply|Err)` network message from a `request_id`, a keyexpr
-//! (literal or peer-aliased), and a payload — mirroring zenoh-pico's
+//! `Response(Reply|Err)` network message from a `request_id`, a key
+//! ([`WireKey`]: literal, peer-aliased, or aliased with a suffix), and a payload — mirroring zenoh-pico's
 //! `_z_response_encode -> _z_{reply,err}_encode` chain.
 //!
 //! R311dv — lifted verbatim from `wz-runtime-tokio::session_glue`.
@@ -19,7 +19,6 @@
 //! tests) resolve unchanged. The whole module gates on `codec-response`
 //! — without the Response codec there is no wire frame to build.
 
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 // R3011 — a Response is built at the wire profile (`crate::wire`); see
@@ -29,7 +28,7 @@ use crate::wire::parts::{
     EncodingOwned, ErrOwned, ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned, MsgDelOwned,
     ReplyOwned, ReplyOwnedVariant, WireexprLocalOwned, WireexprOwned, WireexprOwnedVariant,
 };
-use crate::wire::{wire_bytes as owned_bytes, wire_string as owned_string};
+use crate::wire::wire_bytes as owned_bytes;
 use crate::wire::{ResponseOwned, ResponseOwnedVariant};
 use sce_forge_runtime::codec::CodecError;
 // R311ek — the source_info ext encoder + the shared VLE primitive moved
@@ -38,47 +37,8 @@ use sce_forge_runtime::codec::CodecError;
 // responder encoder below keeps borrowing the VLE helper from there.
 use crate::source_info_ext::encode_source_info_ext_entry;
 use crate::vle::encode_vle_u64_into;
+use crate::wire_key::{WireKey, WireKeyBuf};
 
-/// R121j-3 — build a `Response(Reply(MsgPut))` network-message in
-/// the minimal AP MVP shape (no Response-level exts, no Reply-level
-/// consolidation, no Reply-level exts, no MsgPut timestamp /
-/// encoding / exts). The wire is the queryable's data response to
-/// an earlier `Request(Query)` keyed by `request_id`.
-///
-/// Mirrors the zenoh-pico encoder chain
-/// `_z_response_encode -> _z_reply_encode -> _z_push_body_encode ->
-/// _z_msg_put_encode`
-/// (vendor/zenoh-pico/src/protocol/codec/network.c:241-304 +
-/// vendor/zenoh-pico/src/protocol/codec/message.c:507-543 +
-/// the put-encode at message.c:259-310).
-///
-/// Wire shape (literal-keyexpr case — `id=0 + suffix`):
-///
-/// ```text
-///   [Response.header = _Z_MID_N_RESPONSE(0x1B)
-///                       | _Z_FLAG_N_RESPONSE_N(0x20)         // suffix present
-///                       | _Z_FLAG_N_RESPONSE_M(0x40)         // wireexpr Local arm (codegen-derived)
-///                       | Z(0x00)]                           // no Response exts
-///   VLE(request_id)
-///   wireexpr Local: VLE(id=0), VLE(suffix.len()), suffix bytes
-///   [Reply.header = _Z_MID_Z_REPLY(0x04)]                    // no C, no Z
-///   [MsgPut.header = _Z_MID_Z_PUT(0x01)]                     // no T, no E, no Z
-///   VLE(payload.len())
-///   payload bytes
-/// ```
-///
-/// `keyexpr_suffix` is required (no `Option<&str>`): the literal
-/// shape's whole point is to carry the keyexpr inline, so an
-/// empty / None literal would be a bug. For aliased-keyexpr replies
-/// (publisher sent the matching Query through a mapped id), use
-/// [`build_response_reply_aliased`].
-///
-/// Future R121j-3 sub-helpers (audit-traced carry):
-/// `_with_consolidation(mode)` sets Reply.header.C(0x20) + 1-byte
-/// consolidation; `_with_responder(zid, eid)` sets Response.header.Z
-/// and emits the Responder ext (ext_id=0x03 ZBUF, zid+eid encoding
-/// per network.c:281-291); `_with_reply_del(...)` swaps the MsgPut
-/// arm for a MsgDel arm (delete instead of put as the reply payload).
 /// Re-express a `Response`'s keyexpr as the literal `suffix` (c3c-3 B1
 /// normalize) — the Response twin of
 /// [`set_request_keyexpr_literal`](crate::request_build::set_request_keyexpr_literal)
@@ -204,87 +164,46 @@ pub fn relay_response_shm(
     }
 }
 
+/// R121j-3 — build a `Response(Reply(MsgPut))` naming `key`: a queryable's answer to a
+/// `Request(Query)`, in the minimal shape (no Response-level extensions). The key is a literal
+/// (its text inline under the id `0`), the peer's mapping for an id (the id the query's keyexpr
+/// resolved through, so the requester's table resolves the reply to its query's keyexpr), or that
+/// mapping and a suffix after it; [`WireKey`] has no value for no key, so none is built. Mirrors
+/// the zenoh-pico encoder chain `_z_response_encode -> _z_reply_encode -> _z_push_body_encode ->
+/// _z_msg_put_encode` (vendor/zenoh-pico/src/protocol/codec/network.c:241-304 +
+/// vendor/zenoh-pico/src/protocol/codec/message.c:507-543 + the put-encode at message.c:259-310).
+///
+/// Wire shape (literal-keyexpr case — `id=0 + suffix`):
+///
+/// ```text
+///   [Response.header = _Z_MID_N_RESPONSE(0x1B)
+///                       | _Z_FLAG_N_RESPONSE_N(0x20)         // suffix present
+///                       | _Z_FLAG_N_RESPONSE_M(0x40)         // wireexpr Local arm (codegen-derived)
+///                       | Z(0x00)]                           // no Response exts
+///   VLE(request_id)
+///   wireexpr Local: VLE(id=0), VLE(suffix.len()), suffix bytes
+///   [Reply.header = _Z_MID_Z_REPLY(0x04)]                    // no C, no Z
+///   [MsgPut.header = _Z_MID_Z_PUT(0x01)]                     // no T, no E, no Z
+///   VLE(payload.len())
+///   payload bytes
+/// ```
 #[cfg(feature = "codec-response")]
-pub fn build_response_reply_literal(
+pub fn build_response_reply(
     request_id: crate::wire_id::RequestId,
-    keyexpr_suffix: &str,
+    key: WireKey<'_>,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
-    assert!(
-        !keyexpr_suffix.is_empty(),
-        "build_response_reply_literal requires a non-empty keyexpr suffix; \
-         the literal shape's purpose is to carry the keyexpr inline",
-    );
-    let suffix_len = Some(keyexpr_suffix.len() as u64);
-    // W3 (SCE 7a94d084a): the codec owned mirror's bounded suffix / payload
-    // fields are no-alloc inline (`heapless::String<N>` / `heapless::Vec<u8,
-    // N>`); copy the caller data in, fallible past the declared capacity (the
-    // same bound decode enforces).
-    Ok(ResponseOwned {
-        // MID 0x1B | N 0x20 (suffix present) | M codegen-derived
-        // (Local arm sets 0x40). Z stays clear (no Response exts).
-        header: 0x1B | 0x20,
+    response_naming(
         request_id,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: 0,
-                suffix_len,
-                suffix: Some(owned_string(keyexpr_suffix)?),
-            }),
-        },
-        extensions: None,
-        body: reply_body(payload)?,
-    })
+        key,
+        ResponseOwnedVariant::CodecZenohReply(reply_owned(payload)?),
+    )
 }
 
-/// R121j-3 — build a `Response(Reply(MsgPut))` for a peer-declared
-/// keyexpr mapping (aliased path). Mirror of
-/// [`build_response_reply_literal`] for the case where the original
-/// `Request(Query)` keyexpr resolved via a `Declare(DeclKexpr)`
-/// previously sent in this session. The queryable replies referencing
-/// the same mapping_id so the requester's wireexpr table resolves
-/// the response to the original query keyexpr.
-///
-/// Convention matches the DECLARE / Request builders:
-///   - `(N, None)`: pure alias — Reply targets peer's mapping for `N`.
-///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
-///
-/// Panics on `mapping_id == 0` — id=0 is the literal-keyexpr sentinel;
-/// for literal replies use [`build_response_reply_literal`].
-#[cfg(feature = "codec-response")]
-pub fn build_response_reply_aliased(
-    request_id: crate::wire_id::RequestId,
-    mapping_id: crate::wire_id::ExprId,
-    suffix: Option<&str>,
-    payload: &[u8],
-) -> Result<ResponseOwned, CodecError> {
-    assert!(
-        mapping_id != 0,
-        "build_response_reply_aliased requires a non-zero mapping id; \
-         use build_response_reply_literal for the literal keyexpr case",
-    );
-    let suffix_len = suffix.map(|s| s.len() as u64);
-    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    // W3: bounded suffix / payload copy in, fallible past declared capacity.
-    Ok(ResponseOwned {
-        header: 0x1B | n_flag,
-        request_id,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: mapping_id,
-                suffix_len,
-                suffix: suffix.map(owned_string).transpose()?,
-            }),
-        },
-        extensions: None,
-        body: reply_body(payload)?,
-    })
-}
-
-/// R121j-4 — build a `Response(Err)` network-message in the minimal
+/// R121j-4 — build a `Response(Err)` naming `key` in the minimal
 /// AP MVP shape (no Response-level exts, no Err encoding, no Err
 /// exts). The wire is the queryable's error response to a Query that
-/// it could not service — mirror of [`build_response_reply_literal`]
+/// it could not service — mirror of [`build_response_reply`]
 /// with the inner body arm swapped from `Reply` (MID 0x04) to `Err`
 /// (MID 0x05). Same Response envelope shape: a peer expecting either
 /// a Reply or Err discriminates on the inner MID byte after the
@@ -315,65 +234,33 @@ pub fn build_response_reply_aliased(
 /// The minimal helper here emits only the always-present pair — no
 /// encoding hint, no source-info, no attachment.
 #[cfg(feature = "codec-response")]
-pub fn build_response_err_literal(
+pub fn build_response_err(
     request_id: crate::wire_id::RequestId,
-    keyexpr_suffix: &str,
+    key: WireKey<'_>,
     payload: &[u8],
 ) -> Result<ResponseOwned, CodecError> {
-    assert!(
-        !keyexpr_suffix.is_empty(),
-        "build_response_err_literal requires a non-empty keyexpr suffix; \
-         the literal shape's purpose is to carry the keyexpr inline",
-    );
-    let suffix_len = Some(keyexpr_suffix.len() as u64);
-    // W3: bounded suffix / payload copy in, fallible past declared capacity.
-    Ok(ResponseOwned {
-        header: 0x1B | 0x20, // MID | N (M codegen-derived from Local)
+    response_naming(
         request_id,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: 0,
-                suffix_len,
-                suffix: Some(owned_string(keyexpr_suffix)?),
-            }),
-        },
-        extensions: None,
-        body: err_body(payload)?,
-    })
+        key,
+        ResponseOwnedVariant::CodecZenohErr(err_owned(payload)?),
+    )
 }
 
-/// R121j-4 — build a `Response(Err)` for a peer-declared keyexpr
-/// mapping (aliased path). Mirror of [`build_response_err_literal`]
-/// for the aliased case — same convention as the other DECLARE /
-/// Request / Reply aliased builders ((N,None) pure alias /
-/// (N,Some) compound). Panics on mapping_id=0.
+/// The Response envelope naming `key` around `body`: MID `0x1B` with `N` when text follows the
+/// key's id (`M` is the codec's, from the `Local` arm), and no envelope extension until one is
+/// stamped.
 #[cfg(feature = "codec-response")]
-pub fn build_response_err_aliased(
+fn response_naming(
     request_id: crate::wire_id::RequestId,
-    mapping_id: crate::wire_id::ExprId,
-    suffix: Option<&str>,
-    payload: &[u8],
+    key: WireKey<'_>,
+    body: ResponseOwnedVariant,
 ) -> Result<ResponseOwned, CodecError> {
-    assert!(
-        mapping_id != 0,
-        "build_response_err_aliased requires a non-zero mapping id; \
-         use build_response_err_literal for the literal keyexpr case",
-    );
-    let suffix_len = suffix.map(|s| s.len() as u64);
-    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    // W3: bounded suffix / payload copy in, fallible past declared capacity.
     Ok(ResponseOwned {
-        header: 0x1B | n_flag,
+        header: 0x1B | crate::wireexpr_build::key_flags(key),
         request_id,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: mapping_id,
-                suffix_len,
-                suffix: suffix.map(owned_string).transpose()?,
-            }),
-        },
+        keyexpr: crate::wireexpr_build::key_wireexpr(key)?,
         extensions: None,
-        body: err_body(payload)?,
+        body,
     })
 }
 
@@ -442,7 +329,7 @@ pub fn build_response_err_empty(
             }),
         },
         extensions: None,
-        body: err_body(payload)?,
+        body: ResponseOwnedVariant::CodecZenohErr(err_owned(payload)?),
     })
 }
 
@@ -472,19 +359,17 @@ pub fn build_response_timeout_err(
 }
 
 /// The wz minimal `Reply(MsgPut)` BODY — Reply MID `0x04` (no C/Z) wrapping a
-/// Put MID `0x01` (no T/E/Z), payload only. The SSOT the literal / aliased reply
-/// builders share (the [`err_body`] twin on the Reply side); each public reply
-/// builder differs only in its Response ENVELOPE (header N flag + keyexpr), not
-/// the body.
+/// Put MID `0x01` (no T/E/Z), payload only: the body [`build_response_reply`] and
+/// [`ResponseReplyBuilder`] start from (the [`err_owned`] twin on the Reply side).
 #[cfg(feature = "codec-response")]
-fn reply_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
+fn reply_owned(payload: &[u8]) -> Result<ReplyOwned, CodecError> {
     // W3: bounded payload copy in, fallible past declared capacity.
-    Ok(ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
+    Ok(ReplyOwned {
         header: 0x04,
         consolidation: None,
         extensions: None,
         body: ReplyOwnedVariant::CodecZenohMsgPut(crate::put_payload::inline(payload)?),
-    }))
+    })
 }
 
 /// R311va — SSOT for the reply-side `pubsub-timestamp` gate: convert a
@@ -654,27 +539,21 @@ fn gated_reply_source_info(
 /// authored ONCE; each public builder differs only in its Response ENVELOPE
 /// (header N flag + keyexpr), not in the body.
 #[cfg(feature = "codec-response")]
-fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
+fn err_owned(payload: &[u8]) -> Result<ErrOwned, CodecError> {
     // W3: bounded payload copy in, fallible past declared capacity.
-    Ok(ResponseOwnedVariant::CodecZenohErr(ErrOwned {
+    Ok(ErrOwned {
         header: 0x05,
         encoding: None,
         extensions: None,
         payload_len: payload.len() as u64,
         payload: owned_bytes(payload)?,
-    }))
+    })
 }
 
 /// R121j-2b — fluent builder for `Response(Reply)` that composes the
 /// Reply-layer + Response-layer options on top of the minimal-shape
-/// baseline provided by [`build_response_reply_literal`] /
-/// [`build_response_reply_aliased`]. Mirror of `RequestQueryBuilder`
-/// on the Response side.
-///
-/// Keyexpr convention (matches the rest of the wz builder family):
-///   - `(0, Some(s))`: literal — Reply carries inline keyexpr suffix `s`.
-///   - `(N, None)`: pure alias — Reply targets peer's mapping for `N`.
-///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
+/// baseline provided by [`build_response_reply`]. Mirror of `RequestQueryBuilder`
+/// on the Response side. The key is a [`WireKey`], held as a [`WireKeyBuf`] until the build.
 ///
 /// Reply-layer setters today: `consolidation` (R121j-3a), `reply_del`
 /// body-arm swap (R121j-3d), `responder` envelope-level ext (R121j-3c),
@@ -695,8 +574,7 @@ fn err_body(payload: &[u8]) -> Result<ResponseOwnedVariant, CodecError> {
 #[cfg(feature = "codec-response")]
 pub struct ResponseReplyBuilder {
     request_id: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<String>,
+    key: WireKeyBuf,
     payload: Vec<u8>,
     // Reply-body-arm selector. Default false = MsgPut (the put-data
     // reply); .reply_del() flips to MsgDel (the delete-keyexpr reply).
@@ -814,21 +692,9 @@ fn stamp_envelope_extensions(
 #[cfg(feature = "codec-response")]
 impl ResponseReplyBuilder {
     /// Begin a builder rooted in the same baseline contract as
-    /// [`build_response_reply_literal`] / [`build_response_reply_aliased`]:
-    /// minimal Response(Reply) envelope with the keyexpr arm
-    /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
-    pub fn new(
-        request_id: crate::wire_id::RequestId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
-        payload: &[u8],
-    ) -> Self {
-        Self::from_owned(
-            request_id,
-            keyexpr_mapping_id,
-            keyexpr_suffix.map(str::to_string),
-            payload.to_vec(),
-        )
+    /// [`build_response_reply`]: the minimal Response(Reply) envelope naming `key`.
+    pub fn new(request_id: crate::wire_id::RequestId, key: WireKey<'_>, payload: &[u8]) -> Self {
+        Self::from_owned(request_id, WireKeyBuf::from(key), payload.to_vec())
     }
 
     /// [`Self::new`] for a caller that already owns the suffix and the payload: they are moved
@@ -836,14 +702,12 @@ impl ResponseReplyBuilder {
     /// copying them again was two allocations per reply for bytes that were about to be dropped.
     pub fn from_owned(
         request_id: crate::wire_id::RequestId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<String>,
+        key: WireKeyBuf,
         payload: Vec<u8>,
     ) -> Self {
         Self {
             request_id,
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key,
             payload,
             body_kind_del: false,
             consolidation: None,
@@ -1034,154 +898,136 @@ impl ResponseReplyBuilder {
         // the two is ever consumed, since exactly one inner arm survives.
         let reply_del_attachment = gated_reply_del_attachment(self.attachment.as_deref())?;
         let reply_source_info = gated_reply_source_info(self.source_info.as_ref())?;
-        let mut response = if self.keyexpr_mapping_id == 0 {
-            let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
-                panic!(
-                    "ResponseReplyBuilder literal path (mapping_id=0) requires \
-                     a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
-                )
+        let mut reply = reply_owned(&self.payload)?;
+        if self.body_kind_del {
+            // Swap MsgPut arm for MsgDel arm. The MsgPut allocated
+            // by reply_owned gets dropped
+            // here — the perf cost is one wasted MsgPut struct per
+            // del-reply build, acceptable for the additive shape
+            // of this round. A future refactor can split the
+            // baseline helpers to expose envelope-only construction
+            // without the put body, but the present additive
+            // shape keeps the one-shot helpers unchanged.
+            reply.body = ReplyOwnedVariant::CodecZenohMsgDel(MsgDelOwned {
+                header: 0x02, // _Z_MID_Z_DEL
+                timestamp: None,
+                extensions: None,
             });
-            build_response_reply_literal(self.request_id, suffix, &self.payload)?
-        } else {
-            build_response_reply_aliased(
-                self.request_id,
-                self.keyexpr_mapping_id,
-                self.keyexpr_suffix.as_deref(),
-                &self.payload,
-            )?
-        };
-
-        if let ResponseOwnedVariant::CodecZenohReply(ref mut reply) = response.body {
-            if self.body_kind_del {
-                // Swap MsgPut arm for MsgDel arm. The MsgPut allocated
-                // by build_response_reply_literal/aliased gets dropped
-                // here — the perf cost is one wasted MsgPut struct per
-                // del-reply build, acceptable for the additive shape
-                // of this round. A future refactor can split the
-                // baseline helpers to expose envelope-only construction
-                // without the put body, but the present additive
-                // shape keeps the one-shot helpers unchanged.
-                reply.body = ReplyOwnedVariant::CodecZenohMsgDel(MsgDelOwned {
-                    header: 0x02, // _Z_MID_Z_DEL
-                    timestamp: None,
-                    extensions: None,
-                });
-            }
-            if let Some(mode) = self.consolidation {
-                reply.header |= 0x20; // _Z_FLAG_Z_R_C
-                reply.consolidation = Some(u64::from(mode.wire_byte()));
-            }
-            // Stamp the inner body's value timestamp + T-flag (0x20), on
-            // whichever arm survived the del-swap above. Mirrors the Push
-            // path's `build_msg_put_with_meta` header OR (bit 0x20 = MsgPut
-            // `set_t` / MsgDel D_T). `None` leaves the body un-timestamped.
-            if let Some(ts) = reply_timestamp {
-                match &mut reply.body {
-                    ReplyOwnedVariant::CodecZenohMsgPut(put) => {
-                        put.timestamp = Some(ts);
-                        put.header |= 0x20; // _Z_FLAG_Z_P_T
-                    }
-                    ReplyOwnedVariant::CodecZenohMsgDel(del) => {
-                        del.timestamp = Some(ts);
-                        del.header |= 0x20; // _Z_FLAG_Z_D_T
-                    }
-                    _ => {}
-                }
-            }
-            // Stamp the inner-MsgPut value encoding + E-flag (0x40). Put-only
-            // — a Reply Del body carries no encoding (zenoh-pico), so a
-            // `.encoding()` on a `.reply_del()` builder is dropped here.
-            // Mirrors the Push path's `build_msg_put_with_meta` E-flag OR.
-            if let Some(enc) = reply_encoding {
-                if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
-                    put.encoding = Some(enc);
-                    put.header |= 0x40; // _Z_FLAG_Z_P_E
-                }
-            }
-            // Stamp the inner body's source_info (ext 0x01) + attachment as a
-            // combined body ext chain + the Z (0x80) body-ext-chain header
-            // bit. Emit order is source_info THEN attachment, matching
-            // zenoh-pico's `_z_push_body_encode` (message.c:291-298). BOTH
-            // apply to BOTH arms as of R311y769 — source_info because it lives
-            // in the shared push-body `_commons`, attachment because zenoh's
-            // `Del` declares its own `ext_attachment`. The ATTACHMENT EXT ID
-            // is the one thing the arms do not share: Put `0x03`, Del `0x02`
-            // (zenoh `put.rs:78` vs `del.rs:60`), which is why two gated
-            // builders feed this match. The per-entry Z chain-continuation bits are
-            // normalised by the `apply_chain_z_bits` SSOT (source_info gets
-            // Z-continuation when an attachment follows; the last entry
-            // terminates with Z clear), exactly as the Push path's
-            // `build_body_extensions` does. The body header Z bit signals
-            // chain presence. Both gates default OFF, so a storage / query
-            // reply with neither stays byte-unchanged.
+        }
+        if let Some(mode) = self.consolidation {
+            reply.header |= 0x20; // _Z_FLAG_Z_R_C
+            reply.consolidation = Some(u64::from(mode.wire_byte()));
+        }
+        // Stamp the inner body's value timestamp + T-flag (0x20), on
+        // whichever arm survived the del-swap above. Mirrors the Push
+        // path's `build_msg_put_with_meta` header OR (bit 0x20 = MsgPut
+        // `set_t` / MsgDel D_T). `None` leaves the body un-timestamped.
+        if let Some(ts) = reply_timestamp {
             match &mut reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => {
-                    let mut exts: Vec<ExtEntryOwned> = Vec::new();
-                    if let Some(si_ext) = reply_source_info {
-                        exts.push(si_ext);
-                    }
-                    if let Some(att_ext) = reply_attachment {
-                        exts.push(att_ext);
-                    }
-                    // R3062 -- the payload is a buffer of shared memory: the marker closes the
-                    // chain, as `build_msg_put_shm` puts it after the same two entries for a
-                    // Push, and the payload fields take the sliced layout. The marker is what
-                    // makes the payload sliced, and a Put holds its chain and its payload
-                    // layout together, so the layout is set first and the chain, marker and
-                    // all, goes in through the setter that refuses one that disagrees.
-                    #[cfg(feature = "transport-shm")]
-                    if let Some(descriptor) = self.shm.as_ref() {
-                        let sliced = crate::put_payload::shm::<crate::wire::WireStorage>(
-                            &crate::extshm::encode_shm_descriptor(descriptor),
-                        )?;
-                        put.extensions_has_0x12 = sliced.extensions_has_0x12;
-                        put.payload_len = sliced.payload_len;
-                        put.slice_count = sliced.slice_count;
-                        exts.push(crate::extshm::encode_shm_marker_ext());
-                    }
-                    if !exts.is_empty() {
-                        crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-                        // Sets the body header's `Z` bit (_Z_FLAG_Z_Z) with the chain.
-                        crate::put_payload::set_chain(put, exts)?;
-                    }
+                    put.timestamp = Some(ts);
+                    put.header |= 0x20; // _Z_FLAG_Z_P_T
                 }
                 ReplyOwnedVariant::CodecZenohMsgDel(del) => {
-                    // R311y769 — the Del arm carries BOTH now. The prose here
-                    // used to say a Del body has no attachment slot, citing
-                    // pico's `has_attachment = _is_put && ..`
-                    // (`message.c:263`). That is true of pico's EMIT and false
-                    // of the protocol: zenoh's `ReplyBody` is a `PushBody` and
-                    // its `Del` declares `ext_attachment` outright
-                    // (`zenoh-protocol/src/zenoh/del.rs:47,60`), so a Del reply
-                    // that drops the attachment loses data a zenoh querier
-                    // would have read.
-                    //
-                    // The id is the Del's OWN `0x02`, not the Put's `0x03` —
-                    // the one thing this arm cannot borrow from the Put arm
-                    // above. Emit order is source_info THEN attachment, the
-                    // same as the Put arm and the same as pico's
-                    // `_z_push_body_encode`.
-                    let mut exts: Vec<ExtEntryOwned> = Vec::new();
-                    if let Some(si_ext) = reply_source_info {
-                        exts.push(si_ext);
-                    }
-                    if let Some(att_ext) = reply_del_attachment {
-                        exts.push(att_ext);
-                    }
-                    if !exts.is_empty() {
-                        crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-                        del.extensions = Some(crate::held_list::held(exts)?);
-                        del.header |= 0x80; // _Z_FLAG_Z_Z
-                    }
+                    del.timestamp = Some(ts);
+                    del.header |= 0x20; // _Z_FLAG_Z_D_T
                 }
                 _ => {}
             }
-        } else {
-            unreachable!(
-                "build_response_reply_* must produce a CodecZenohReply body — \
-                 the layered builder relies on this invariant"
-            );
         }
+        // Stamp the inner-MsgPut value encoding + E-flag (0x40). Put-only
+        // — a Reply Del body carries no encoding (zenoh-pico), so a
+        // `.encoding()` on a `.reply_del()` builder is dropped here.
+        // Mirrors the Push path's `build_msg_put_with_meta` E-flag OR.
+        if let Some(enc) = reply_encoding {
+            if let ReplyOwnedVariant::CodecZenohMsgPut(put) = &mut reply.body {
+                put.encoding = Some(enc);
+                put.header |= 0x40; // _Z_FLAG_Z_P_E
+            }
+        }
+        // Stamp the inner body's source_info (ext 0x01) + attachment as a
+        // combined body ext chain + the Z (0x80) body-ext-chain header
+        // bit. Emit order is source_info THEN attachment, matching
+        // zenoh-pico's `_z_push_body_encode` (message.c:291-298). BOTH
+        // apply to BOTH arms as of R311y769 — source_info because it lives
+        // in the shared push-body `_commons`, attachment because zenoh's
+        // `Del` declares its own `ext_attachment`. The ATTACHMENT EXT ID
+        // is the one thing the arms do not share: Put `0x03`, Del `0x02`
+        // (zenoh `put.rs:78` vs `del.rs:60`), which is why two gated
+        // builders feed this match. The per-entry Z chain-continuation bits are
+        // normalised by the `apply_chain_z_bits` SSOT (source_info gets
+        // Z-continuation when an attachment follows; the last entry
+        // terminates with Z clear), exactly as the Push path's
+        // `build_body_extensions` does. The body header Z bit signals
+        // chain presence. Both gates default OFF, so a storage / query
+        // reply with neither stays byte-unchanged.
+        match &mut reply.body {
+            ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                let mut exts: Vec<ExtEntryOwned> = Vec::new();
+                if let Some(si_ext) = reply_source_info {
+                    exts.push(si_ext);
+                }
+                if let Some(att_ext) = reply_attachment {
+                    exts.push(att_ext);
+                }
+                // R3062 -- the payload is a buffer of shared memory: the marker closes the
+                // chain, as `build_msg_put_shm` puts it after the same two entries for a
+                // Push, and the payload fields take the sliced layout. The marker is what
+                // makes the payload sliced, and a Put holds its chain and its payload
+                // layout together, so the layout is set first and the chain, marker and
+                // all, goes in through the setter that refuses one that disagrees.
+                #[cfg(feature = "transport-shm")]
+                if let Some(descriptor) = self.shm.as_ref() {
+                    let sliced = crate::put_payload::shm::<crate::wire::WireStorage>(
+                        &crate::extshm::encode_shm_descriptor(descriptor),
+                    )?;
+                    put.extensions_has_0x12 = sliced.extensions_has_0x12;
+                    put.payload_len = sliced.payload_len;
+                    put.slice_count = sliced.slice_count;
+                    exts.push(crate::extshm::encode_shm_marker_ext());
+                }
+                if !exts.is_empty() {
+                    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+                    // Sets the body header's `Z` bit (_Z_FLAG_Z_Z) with the chain.
+                    crate::put_payload::set_chain(put, exts)?;
+                }
+            }
+            ReplyOwnedVariant::CodecZenohMsgDel(del) => {
+                // R311y769 — the Del arm carries BOTH now. The prose here
+                // used to say a Del body has no attachment slot, citing
+                // pico's `has_attachment = _is_put && ..`
+                // (`message.c:263`). That is true of pico's EMIT and false
+                // of the protocol: zenoh's `ReplyBody` is a `PushBody` and
+                // its `Del` declares `ext_attachment` outright
+                // (`zenoh-protocol/src/zenoh/del.rs:47,60`), so a Del reply
+                // that drops the attachment loses data a zenoh querier
+                // would have read.
+                //
+                // The id is the Del's OWN `0x02`, not the Put's `0x03` —
+                // the one thing this arm cannot borrow from the Put arm
+                // above. Emit order is source_info THEN attachment, the
+                // same as the Put arm and the same as pico's
+                // `_z_push_body_encode`.
+                let mut exts: Vec<ExtEntryOwned> = Vec::new();
+                if let Some(si_ext) = reply_source_info {
+                    exts.push(si_ext);
+                }
+                if let Some(att_ext) = reply_del_attachment {
+                    exts.push(att_ext);
+                }
+                if !exts.is_empty() {
+                    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
+                    del.extensions = Some(crate::held_list::held(exts)?);
+                    del.header |= 0x80; // _Z_FLAG_Z_Z
+                }
+            }
+            _ => {}
+        }
+        let mut response = response_naming(
+            self.request_id,
+            self.key.as_key(),
+            ResponseOwnedVariant::CodecZenohReply(reply),
+        )?;
 
         // Envelope-level extensions (Response.extensions): qos, then the
         // responder (R121j-3c), through the one chain body both builders share.
@@ -1199,7 +1045,7 @@ impl ResponseReplyBuilder {
 
 /// R121j-2b — fluent builder for `Response(Err)` that composes the
 /// Err-layer options on top of the minimal-shape baseline provided by
-/// [`build_response_err_literal`] / [`build_response_err_aliased`].
+/// [`build_response_err`].
 /// Mirror of [`ResponseReplyBuilder`] for the Err inner-body arm.
 ///
 /// Err-layer setters today: `encoding(id, schema)` (R121j-4a),
@@ -1213,8 +1059,7 @@ impl ResponseReplyBuilder {
 #[cfg(feature = "codec-response")]
 pub struct ResponseErrBuilder {
     request_id: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<String>,
+    key: WireKeyBuf,
     payload: Vec<u8>,
     // Err-layer settings. Tuple = (id, optional schema). packed_id =
     // (id << 1) | has_schema computed at build() time.
@@ -1242,19 +1087,11 @@ pub struct ResponseErrBuilder {
 #[cfg(feature = "codec-response")]
 impl ResponseErrBuilder {
     /// Begin a builder rooted in the same baseline contract as
-    /// [`build_response_err_literal`] / [`build_response_err_aliased`]:
-    /// minimal Response(Err) envelope with the keyexpr arm
-    /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
-    pub fn new(
-        request_id: crate::wire_id::RequestId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
-        payload: &[u8],
-    ) -> Self {
+    /// [`build_response_err`]: the minimal Response(Err) envelope naming `key`.
+    pub fn new(request_id: crate::wire_id::RequestId, key: WireKey<'_>, payload: &[u8]) -> Self {
         Self {
             request_id,
-            keyexpr_mapping_id,
-            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
+            key: WireKeyBuf::from(key),
             payload: payload.to_vec(),
             encoding: None,
             source_info: None,
@@ -1348,53 +1185,35 @@ impl ResponseErrBuilder {
     /// Err-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
     pub fn build(self) -> Result<ResponseOwned, CodecError> {
-        let mut response = if self.keyexpr_mapping_id == 0 {
-            let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
-                panic!(
-                    "ResponseErrBuilder literal path (mapping_id=0) requires \
-                     a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
-                )
+        let mut err = err_owned(&self.payload)?;
+        if let Some((id, schema)) = self.encoding {
+            err.header |= 0x40; // _Z_FLAG_Z_E (Err encoding present)
+            let has_schema = schema.is_some();
+            let packed = (id << 1) | if has_schema { 1 } else { 0 };
+            err.encoding = Some(EncodingOwned {
+                packed_id: packed,
+                schema_len: schema.as_ref().map(|s| s.len() as u64),
+                schema: schema.as_deref().map(owned_bytes).transpose()?,
             });
-            build_response_err_literal(self.request_id, suffix, &self.payload)?
-        } else {
-            build_response_err_aliased(
-                self.request_id,
-                self.keyexpr_mapping_id,
-                self.keyexpr_suffix.as_deref(),
-                &self.payload,
-            )?
-        };
-
-        if let ResponseOwnedVariant::CodecZenohErr(ref mut err) = response.body {
-            if let Some((id, schema)) = self.encoding {
-                err.header |= 0x40; // _Z_FLAG_Z_E (Err encoding present)
-                let has_schema = schema.is_some();
-                let packed = (id << 1) | if has_schema { 1 } else { 0 };
-                err.encoding = Some(EncodingOwned {
-                    packed_id: packed,
-                    schema_len: schema.as_ref().map(|s| s.len() as u64),
-                    schema: schema.as_deref().map(owned_bytes).transpose()?,
-                });
-            }
-            if let Some((zid, eid, sn)) = self.source_info {
-                // _Z_FLAG_Z_Z(0x80) signals ext-chain presence to the
-                // peer's `_z_err_decode` (message.c:594-595).
-                err.header |= 0x80;
-                // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
-                // ExtZbuf wrap). Sole Err ext today, so no Z chain-continuation
-                // (the chain-plumb step lands once a second Err ext exists,
-                // mirroring RequestQueryBuilder.build at
-                // session_glue.rs:2772-2782).
-                err.extensions = Some(crate::held_list::one_entry(encode_source_info_ext_entry(
-                    &zid, eid, sn,
-                )?));
-            }
-        } else {
-            unreachable!(
-                "build_response_err_* must produce a CodecZenohErr body — \
-                 the layered builder relies on this invariant"
-            );
         }
+        if let Some((zid, eid, sn)) = self.source_info {
+            // _Z_FLAG_Z_Z(0x80) signals ext-chain presence to the
+            // peer's `_z_err_decode` (message.c:594-595).
+            err.header |= 0x80;
+            // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
+            // ExtZbuf wrap). Sole Err ext today, so no Z chain-continuation
+            // (the chain-plumb step lands once a second Err ext exists,
+            // mirroring RequestQueryBuilder.build at
+            // session_glue.rs:2772-2782).
+            err.extensions = Some(crate::held_list::one_entry(encode_source_info_ext_entry(
+                &zid, eid, sn,
+            )?));
+        }
+        let mut response = response_naming(
+            self.request_id,
+            self.key.as_key(),
+            ResponseOwnedVariant::CodecZenohErr(err),
+        )?;
 
         // Envelope-level extensions (Response.extensions). The same chain body
         // as [`ResponseReplyBuilder::build`] — qos and the responder are shared
@@ -1451,8 +1270,8 @@ pub fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
         "responder zid length must be 1..=16 (zenoh-pico ZenohId wire constraint)"
     );
     // Capacity = 1 leading byte + zid + VLE(u32) worst-case (5 bytes).
-    let mut out = Vec::with_capacity(1 + zid.len() + 5);
-    out.push(((zid.len() as u8) - 1) << 4);
+    let mut out = Vec::with_capacity(zid.len().saturating_add(6));
+    out.push((zid.len() as u8).saturating_sub(1) << 4);
     out.extend_from_slice(zid);
     encode_vle_u64_into(&mut out, eid as u64);
     out
@@ -1474,6 +1293,11 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    /// The key an id and a suffix name; every pair these tests pass names one.
+    fn key(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireKey<'_> {
+        WireKey::from_parts(id, suffix).expect("the pair names a key")
+    }
+
     // R311fu — the owned->wire `TestWire` projection moved to the
     // wz-codecs-tier `wz-codecs-test-support` sibling (SSOT). This
     // module compiles only under `codec-response`, which forwards
@@ -1482,7 +1306,7 @@ mod tests {
     use wz_codecs_test_support::TestWire;
 
     /// R121j-3 — Wire-byte regression gate for
-    /// `build_response_reply_literal`. The minimal Response(Reply(MsgPut))
+    /// `build_response_reply` of a literal key. The minimal Response(Reply(MsgPut))
     /// chain wire shape after the inner `_z_msg_put_encode` arm — no
     /// Response-level exts, no Reply-level consolidation/exts, no
     /// MsgPut timestamp/encoding/exts. Two vectors lock the alias
@@ -1499,7 +1323,7 @@ mod tests {
         //   MsgPut.header = 0x01
         //   MsgPut.payload_len(11) → 0x0B
         //   payload "hello-reply"
-        let small = build_response_reply_literal(42, "demo/test", b"hello-reply").unwrap();
+        let small = build_response_reply(42, key(0, Some("demo/test")), b"hello-reply").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, // Response: MID | N | M
@@ -1520,7 +1344,7 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE boundary on rid (200 = 0xC8 0x01).
-        let large = build_response_reply_literal(200, "k", b"v").unwrap();
+        let large = build_response_reply(200, key(0, Some("k")), b"v").unwrap();
         let large_wire = large.wire();
         let large_expected = vec![
             0x7B, 0xC8, // VLE(200) low + cont
@@ -1560,15 +1384,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(expected = "build_response_reply_literal requires a non-empty keyexpr suffix")]
-    fn build_response_reply_literal_rejects_empty_suffix() {
-        let _ = build_response_reply_literal(42, "", b"v");
-    }
-
     /// R121j-3 — Wire-byte regression gate for
-    /// `build_response_reply_aliased`. Three vectors lock the
+    /// `build_response_reply` of an aliased key. Three vectors lock the
     /// aliased / composite / aliased-large-VLE shapes.
     #[cfg(feature = "codec-response")]
     #[test]
@@ -1582,7 +1399,7 @@ mod tests {
         //   MsgPut.header = 0x01
         //   payload_len(1) → 0x01
         //   payload "v"
-        let alias = build_response_reply_aliased(42, 7, None, b"v").unwrap();
+        let alias = build_response_reply(42, key(7, None), b"v").unwrap();
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
@@ -1602,7 +1419,7 @@ mod tests {
         // payload "data"). Wire:
         //   Response.header = MID | N | M = 0x7B
         //   wireexpr Local: id=7 + suffix_len(4) + "tail"
-        let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data").unwrap();
+        let composite = build_response_reply(42, key(7, Some("tail")), b"data").unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, 0x2A, 0x07, // wireexpr.id
@@ -1620,7 +1437,7 @@ mod tests {
         );
 
         // Case 3 — multi-byte VLE alias (mapping_id=200).
-        let large = build_response_reply_aliased(42, 200, None, b"x").unwrap();
+        let large = build_response_reply(42, key(200, None), b"x").unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -1633,15 +1450,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(expected = "build_response_reply_aliased requires a non-zero mapping id")]
-    fn build_response_reply_aliased_rejects_zero_mapping_id() {
-        let _ = build_response_reply_aliased(42, 0, Some("any"), b"v");
-    }
-
     /// R121j-4 — Wire-byte regression gate for
-    /// `build_response_err_literal`. Mirror of the Reply byte-compare
+    /// `build_response_err` of a literal key. Mirror of the Reply byte-compare
     /// with the inner body MID swap (0x04 → 0x05) and structural diff
     /// (Err has no payload prefix beyond payload_len; Reply wraps a
     /// MsgPut which itself has a MID byte before payload_len).
@@ -1657,7 +1467,7 @@ mod tests {
         //   Err.header = 0x05
         //   payload_len(4) = 0x04
         //   "fail"
-        let small = build_response_err_literal(42, "k", b"fail").unwrap();
+        let small = build_response_err(42, key(0, Some("k")), b"fail").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, 0x2A, 0x00, // wireexpr id=0
@@ -1673,7 +1483,7 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE rid (200).
-        let large = build_response_err_literal(200, "x", b"e").unwrap();
+        let large = build_response_err(200, key(0, Some("x")), b"e").unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -1739,21 +1549,14 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(expected = "build_response_err_literal requires a non-empty keyexpr suffix")]
-    fn build_response_err_literal_rejects_empty_suffix() {
-        let _ = build_response_err_literal(42, "", b"v");
-    }
-
     /// R121j-4 — Wire-byte regression gate for
-    /// `build_response_err_aliased`. Mirror of the Reply aliased
+    /// `build_response_err` of an aliased key. Mirror of the Reply aliased
     /// byte-compare with inner body MID swap.
     #[cfg(feature = "codec-response")]
     #[test]
     fn build_response_err_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Pure alias: rid=42, mapping_id=7, no suffix, payload "e".
-        let alias = build_response_err_aliased(42, 7, None, b"e").unwrap();
+        let alias = build_response_err(42, key(7, None), b"e").unwrap();
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
@@ -1770,7 +1573,7 @@ mod tests {
         );
 
         // Composite: rid=42, mapping_id=7, suffix "tail", payload "data".
-        let composite = build_response_err_aliased(42, 7, Some("tail"), b"data").unwrap();
+        let composite = build_response_err(42, key(7, Some("tail")), b"data").unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, // Response: MID | N | M
@@ -1787,13 +1590,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(expected = "build_response_err_aliased requires a non-zero mapping id")]
-    fn build_response_err_aliased_rejects_zero_mapping_id() {
-        let _ = build_response_err_aliased(42, 0, Some("any"), b"v");
-    }
-
     /// R121j-2b — ResponseReplyBuilder with no setters must emit the
     /// exact same wire bytes as the baseline aliased helper. The
     /// builder is a strictly additive surface; it cannot silently
@@ -1801,16 +1597,16 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_reply_aliased(42, 7, None, b"hello")
+        let direct = build_response_reply(42, key(7, None), b"hello")
             .unwrap()
             .wire();
-        let built = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let built = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .build()
             .unwrap()
             .wire();
         assert_eq!(
             direct, built,
-            "ReplyBuilder.new+build must match build_response_reply_aliased byte-for-byte"
+            "ReplyBuilder.new+build must match build_response_reply byte-for-byte"
         );
     }
 
@@ -1821,10 +1617,10 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_consolidation_sets_r_c_flag_and_byte() {
-        let baseline = build_response_reply_aliased(42, 7, None, b"hello")
+        let baseline = build_response_reply(42, key(7, None), b"hello")
             .unwrap()
             .wire();
-        let with_c = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let with_c = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .consolidation(ConsolidationMode::Latest)
             .build()
             .unwrap()
@@ -1865,16 +1661,16 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_err_aliased(42, 7, None, b"oops")
+        let direct = build_response_err(42, key(7, None), b"oops")
             .unwrap()
             .wire();
-        let built = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let built = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .build()
             .unwrap()
             .wire();
         assert_eq!(
             direct, built,
-            "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte"
+            "ErrBuilder.new+build must match build_response_err byte-for-byte"
         );
     }
 
@@ -1884,7 +1680,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_encoding_no_schema_packs_id_left_shift_one() {
-        let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let with_enc = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .encoding(4, None) // 4 = application/json prefix
             .build()
             .unwrap()
@@ -1909,7 +1705,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_encoding_with_schema_sets_lsb_and_emits_suffix() {
-        let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let with_enc = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .encoding(4, Some(&b"schema_v1"[..]))
             .build()
             .unwrap()
@@ -1936,29 +1732,6 @@ mod tests {
         );
     }
 
-    /// R121j-2b — ResponseReplyBuilder literal path requires a
-    /// non-empty keyexpr_suffix; (mapping_id=0, suffix=None) panics
-    /// with the builder's diagnostic message at build() time.
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(
-        expected = "ResponseReplyBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
-    )]
-    fn response_reply_builder_literal_rejects_none_suffix() {
-        let _ = ResponseReplyBuilder::new(42, 0, None, b"hello").build();
-    }
-
-    /// R121j-2b — ResponseErrBuilder literal path requires a
-    /// non-empty keyexpr_suffix.
-    #[cfg(feature = "codec-response")]
-    #[test]
-    #[should_panic(
-        expected = "ResponseErrBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
-    )]
-    fn response_err_builder_literal_rejects_none_suffix() {
-        let _ = ResponseErrBuilder::new(42, 0, None, b"oops").build();
-    }
-
     /// R121j-4b — ResponseErrBuilder.source_info sets `Err.header.Z(0x80)`
     /// and emits a single `ExtZbuf` ext entry with header
     /// `ENC_ZBUF(0x40) | id_source_info(0x01) = 0x41`. The value body is
@@ -1968,7 +1741,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_source_info_emits_zbuf_ext_entry() {
-        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let wire = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .source_info(&[0xAA; 4], 11, 17)
             .build()
             .unwrap()
@@ -2030,7 +1803,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_source_info_composes_with_encoding() {
-        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let wire = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .encoding(4, None)
             .source_info(&[0xBB; 1], 1, 2)
             .build()
@@ -2074,7 +1847,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_zid_too_long() {
-        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[0; 17], 0, 0);
+        let _ = ResponseErrBuilder::new(42, key(7, None), b"oops").source_info(&[0; 17], 0, 0);
     }
 
     /// R121j-4b — empty zid is also rejected (lower bound of 1..=16).
@@ -2082,7 +1855,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_empty_zid() {
-        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[], 0, 0);
+        let _ = ResponseErrBuilder::new(42, key(7, None), b"oops").source_info(&[], 0, 0);
     }
 
     /// R121j-3c — ResponseReplyBuilder.responder sets
@@ -2096,11 +1869,11 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_responder_emits_envelope_zbuf_ext_entry() {
-        let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let baseline = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .build()
             .unwrap()
             .wire();
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .responder(&[0xAA; 4], 11)
             .build()
             .unwrap()
@@ -2152,13 +1925,13 @@ mod tests {
         let block = QosLevel::from_parts(Priority::Data, CongestionControl::Block, false);
         assert_eq!(block.raw, 13, "Data | nodrop, the QoSType::REQUEST byte");
 
-        let reply = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let reply = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .responder(&[0xAA; 1], 11)
             .qos(block)
             .build()
             .unwrap()
             .wire();
-        let err = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let err = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .qos(block)
             .responder(&[0xAA; 1], 11)
             .build()
@@ -2176,24 +1949,24 @@ mod tests {
         for (arm, with_default, without) in [
             (
                 "reply",
-                ResponseReplyBuilder::new(42, 7, None, b"hello")
+                ResponseReplyBuilder::new(42, key(7, None), b"hello")
                     .qos(QosLevel::DEFAULT)
                     .build()
                     .unwrap()
                     .wire(),
-                ResponseReplyBuilder::new(42, 7, None, b"hello")
+                ResponseReplyBuilder::new(42, key(7, None), b"hello")
                     .build()
                     .unwrap()
                     .wire(),
             ),
             (
                 "err",
-                ResponseErrBuilder::new(42, 7, None, b"oops")
+                ResponseErrBuilder::new(42, key(7, None), b"oops")
                     .qos(QosLevel::DEFAULT)
                     .build()
                     .unwrap()
                     .wire(),
-                ResponseErrBuilder::new(42, 7, None, b"oops")
+                ResponseErrBuilder::new(42, key(7, None), b"oops")
                     .build()
                     .unwrap()
                     .wire(),
@@ -2211,7 +1984,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_responder_composes_with_consolidation() {
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .responder(&[0xBB; 1], 1)
             .consolidation(ConsolidationMode::Latest)
             .build()
@@ -2255,11 +2028,11 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_responder_emits_envelope_zbuf_ext_entry() {
-        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let baseline = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .build()
             .unwrap()
             .wire();
-        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let wire = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .responder(&[0xCC; 2], 5)
             .build()
             .unwrap()
@@ -2295,7 +2068,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_responder_composes_with_source_info() {
-        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+        let wire = ResponseErrBuilder::new(42, key(7, None), b"oops")
             .responder(&[0xDD; 1], 9)
             .source_info(&[0xEE; 1], 3, 4)
             .build()
@@ -2337,7 +2110,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ResponseReplyBuilder::responder requires zid length 1..=16")]
     fn response_reply_builder_responder_rejects_zid_too_long() {
-        let _ = ResponseReplyBuilder::new(42, 7, None, b"hello").responder(&[0; 17], 0);
+        let _ = ResponseReplyBuilder::new(42, key(7, None), b"hello").responder(&[0; 17], 0);
     }
 
     /// R121j-3c — ResponseErrBuilder.responder shares the same wire
@@ -2346,7 +2119,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::responder requires zid length 1..=16")]
     fn response_err_builder_responder_rejects_empty_zid() {
-        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").responder(&[], 0);
+        let _ = ResponseErrBuilder::new(42, key(7, None), b"oops").responder(&[], 0);
     }
 
     /// R121j-3c — direct check on the helper that builds the
@@ -2416,11 +2189,11 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
-        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let put_wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .build()
             .unwrap()
             .wire();
-        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let del_wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .reply_del()
             .build()
             .unwrap()
@@ -2460,12 +2233,12 @@ mod tests {
     #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
     #[test]
     fn a_del_reply_carries_its_attachment_under_the_del_ext_id() {
-        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let put_wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .attachment(&[0xDE, 0xAD])
             .build()
             .unwrap()
             .wire();
-        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let del_wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .reply_del()
             .attachment(&[0xDE, 0xAD])
             .build()
@@ -2511,7 +2284,7 @@ mod tests {
     #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
     #[test]
     fn a_del_reply_without_an_attachment_emits_no_body_ext_chain() {
-        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let del_wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .reply_del()
             .build()
             .unwrap()
@@ -2531,7 +2304,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_reply_del_composes_with_consolidation() {
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .reply_del()
             .consolidation(ConsolidationMode::Latest)
             .build()
@@ -2563,7 +2336,7 @@ mod tests {
             time: 0xDEAD_BEEF,
             zid: vec![0xAA, 0xBB],
         };
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .timestamp(&ts)
             .build()
             .unwrap();
@@ -2591,7 +2364,7 @@ mod tests {
             packed_id: 13,
             schema: Some("application/json".into()),
         };
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .encoding(&enc)
             .build()
             .unwrap();
@@ -2618,7 +2391,7 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_without_timestamp_leaves_t_flag_clear() {
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .build()
             .unwrap();
         if let ResponseOwnedVariant::CodecZenohReply(reply) = &response.body {
@@ -2643,7 +2416,7 @@ mod tests {
     #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
     #[test]
     fn response_reply_builder_attachment_sets_msgput_body_ext_and_z_flag() {
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .attachment(b"align-reply-bytes")
             .build()
             .unwrap();
@@ -2674,11 +2447,11 @@ mod tests {
     #[test]
     fn response_reply_builder_attachment_emits_push_body_ext_on_wire() {
         let att: &[u8] = b"abcde";
-        let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let baseline = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .build()
             .unwrap()
             .wire();
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"hello")
             .attachment(att)
             .build()
             .unwrap()
@@ -2708,7 +2481,7 @@ mod tests {
     fn response_reply_builder_attachment_carries_aligner_sized_payload() {
         let big: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
         assert!(big.len() > 32, "exceeds the 32-byte query-attachment cap");
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .attachment(&big)
             .build()
             .unwrap();
@@ -2749,7 +2522,7 @@ mod tests {
             time: 0x0102_0304,
             zid: vec![0x09],
         };
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .encoding(&enc)
             .timestamp(&ts)
             .attachment(b"meta")
@@ -2796,7 +2569,7 @@ mod tests {
     #[cfg(all(feature = "codec-response", feature = "pubsub-attachment"))]
     #[test]
     fn response_reply_builder_attachment_survives_the_del_arm() {
-        let response = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
+        let response = ResponseReplyBuilder::new(42, key(0, Some("demo/a")), b"v")
             .reply_del()
             .attachment(b"kept")
             .build()
@@ -2845,7 +2618,7 @@ mod tests {
     #[test]
     fn response_reply_builder_source_info_emits_push_body_ext_on_wire() {
         let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"v")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"v")
             .source_info(&si)
             .build()
             .unwrap()
@@ -2902,7 +2675,7 @@ mod tests {
     #[test]
     fn response_reply_builder_source_info_then_attachment_emit_order() {
         let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
-        let response = ResponseReplyBuilder::new(42, 7, None, b"v")
+        let response = ResponseReplyBuilder::new(42, key(7, None), b"v")
             .source_info(&si)
             .attachment(b"abc")
             .build()
@@ -2934,7 +2707,7 @@ mod tests {
         // attachment ext (header 0x43, value "abc"). The MsgPut::encode
         // iterates the ext Vec in order, so the structural order above IS
         // the wire order — this window check is the byte-level confirmation.
-        let wire = ResponseReplyBuilder::new(42, 7, None, b"v")
+        let wire = ResponseReplyBuilder::new(42, key(7, None), b"v")
             .source_info(&si)
             .attachment(b"abc")
             .build()
@@ -2965,7 +2738,7 @@ mod tests {
     #[test]
     fn response_reply_builder_source_info_applies_to_del_arm() {
         let si = crate::sample::SourceInfo::new(&[0xAA; 4], 11, 17);
-        let response = ResponseReplyBuilder::new(42, 7, None, b"v")
+        let response = ResponseReplyBuilder::new(42, key(7, None), b"v")
             .reply_del()
             .source_info(&si)
             .build()
@@ -3012,14 +2785,14 @@ mod tests {
         assert_ne!(answered.raw, asked.raw);
         let zid = [0x5Au8; 8];
 
-        let from_answerer = ResponseReplyBuilder::new(7, 0, Some("demo/q"), b"hi")
+        let from_answerer = ResponseReplyBuilder::new(7, key(0, Some("demo/q")), b"hi")
             .qos(answered)
             .responder(&zid, 3)
             .build()
             .expect("answerer's reply builds");
         let relayed =
             relay_response(&from_answerer, 99, asked, Some("demo/q")).expect("relay builds");
-        let as_the_query_asked = ResponseReplyBuilder::new(99, 0, Some("demo/q"), b"hi")
+        let as_the_query_asked = ResponseReplyBuilder::new(99, key(0, Some("demo/q")), b"hi")
             .qos(asked)
             .responder(&zid, 3)
             .build()
@@ -3034,7 +2807,7 @@ mod tests {
         // omit-on-DEFAULT gate, with the responder id still in place.
         let to_a_default_query =
             relay_response(&from_answerer, 99, QosLevel::DEFAULT, None).expect("relay builds");
-        let default_reference = ResponseReplyBuilder::new(99, 0, Some("demo/q"), b"hi")
+        let default_reference = ResponseReplyBuilder::new(99, key(0, Some("demo/q")), b"hi")
             .responder(&zid, 3)
             .build()
             .expect("reference reply builds");
@@ -3065,6 +2838,11 @@ mod tests {
 #[cfg(all(test, feature = "codec-response", feature = "transport-shm"))]
 mod shm_relay_tests {
     use super::*;
+
+    /// The key an id and a suffix name; every pair these tests pass names one.
+    fn key(id: crate::wire_id::ExprId, suffix: Option<&str>) -> WireKey<'_> {
+        WireKey::from_parts(id, suffix).expect("the pair names a key")
+    }
     use crate::extshm::ShmDescriptor;
     use crate::put_payload::{RelayFault, Relayed};
     use wz_codecs_test_support::TestWire;
@@ -3085,7 +2863,7 @@ mod shm_relay_tests {
     };
 
     fn a_reply_in_shared_memory(descriptor: ShmDescriptor) -> ResponseOwned {
-        ResponseReplyBuilder::new(5, 0, Some("demo/q"), &[])
+        ResponseReplyBuilder::new(5, key(0, Some("demo/q")), &[])
             .shm_descriptor(descriptor)
             .build()
             .expect("a reply that carries a descriptor")
@@ -3118,7 +2896,7 @@ mod shm_relay_tests {
         let chunk = alloc::vec![0x33u8; 1024];
         let mut reply = a_reply_in_shared_memory(DESCRIPTOR);
         relay_response_shm(&mut reply, |_| Some(Relayed::Bytes(chunk.clone()))).expect("relayed");
-        let expected = ResponseReplyBuilder::new(5, 0, Some("demo/q"), &chunk)
+        let expected = ResponseReplyBuilder::new(5, key(0, Some("demo/q")), &chunk)
             .build()
             .expect("a plain reply");
         assert_eq!(reply.wire(), expected.wire());
@@ -3144,10 +2922,10 @@ mod shm_relay_tests {
     fn a_response_with_no_shared_memory_in_it_is_left_alone_and_asks_nobody() {
         let ask_nobody = |_: &[u8]| -> Option<Relayed> { panic!("no slice of shared memory") };
         for mut response in [
-            ResponseReplyBuilder::new(5, 0, Some("demo/q"), b"plain")
+            ResponseReplyBuilder::new(5, key(0, Some("demo/q")), b"plain")
                 .build()
                 .expect("a plain reply"),
-            build_response_err_literal(5, "demo/q", b"refused").expect("an error reply"),
+            build_response_err(5, key(0, Some("demo/q")), b"refused").expect("an error reply"),
         ] {
             let before = response.wire();
             relay_response_shm(&mut response, ask_nobody).expect("relayed");

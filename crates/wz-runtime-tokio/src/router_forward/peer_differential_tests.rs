@@ -423,13 +423,18 @@ impl Node {
                 self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
             }
             Step::Query(id, rid, keyexpr) => {
-                let request =
-                    wz_session_core::request_build::build_request_query(*rid, 0, Some(keyexpr))
-                        .expect("request");
+                let request = wz_session_core::request_build::build_request_query(
+                    *rid,
+                    wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+                )
+                .expect("request");
                 self.deliver(*id, NetworkMessage::Request(Box::new(request)));
             }
             Step::QueryWith(id, rid, keyexpr, asked) => {
-                let mut builder = RequestQueryBuilder::new(*rid, 0, Some(keyexpr));
+                let mut builder = RequestQueryBuilder::new(
+                    *rid,
+                    wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+                );
                 if let Some(target) = asked.target {
                     builder = builder.request_target(target);
                 }
@@ -450,8 +455,11 @@ impl Node {
             }
             Step::ReplyErr(id, keyexpr, payload) => {
                 if let Some(rid) = self.last_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_err_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_err(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));
@@ -459,8 +467,11 @@ impl Node {
             }
             Step::Reply(id, keyexpr, payload) => {
                 if let Some(rid) = self.last_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_reply_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_reply(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));
@@ -478,8 +489,11 @@ impl Node {
             }
             Step::ReplyAfterFinal(id, keyexpr, payload) => {
                 if let Some(rid) = self.ended_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_reply_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_reply(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));

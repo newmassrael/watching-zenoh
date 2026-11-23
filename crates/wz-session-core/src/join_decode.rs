@@ -42,7 +42,8 @@ pub fn read_join(bytes: &[u8]) -> Option<(TransportJoinView<'_>, usize)> {
     }
     let mut cursor = SceCursor::new(bytes);
     let view = TransportJoinView::decode(&mut cursor).ok()?;
-    Some((view, bytes.len() - cursor.remaining()))
+    // The cursor reads within `bytes`, so what remains is at most them.
+    Some((view, bytes.len().saturating_sub(cursor.remaining())))
 }
 
 /// How many bytes the JOIN at the front of `bytes` occupies: its header, its base

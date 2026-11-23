@@ -931,11 +931,10 @@ impl ApplicationLayerObserver {
         #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
         {
             let subscribers = &self.subscribers;
-            dropped += self
-                .remote_subscribers
-                .flush_declarations_on_link_loss(&|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
-                });
+            dropped =
+                dropped.saturating_add(self.remote_subscribers.flush_declarations_on_link_loss(
+                    &|c| c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr),
+                ));
         }
         #[cfg(all(
             feature = "declare-queryable",
@@ -944,12 +943,13 @@ impl ApplicationLayerObserver {
         ))]
         {
             let queryables = &self.queryables;
-            dropped += self
-                .remote_queryables
-                .flush_declarations_on_link_loss(&|c| {
-                    c.locality.allows_local()
-                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
-                });
+            dropped = dropped.saturating_add(
+                self.remote_queryables
+                    .flush_declarations_on_link_loss(&|c| {
+                        c.locality.allows_local()
+                            && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                    }),
+            );
         }
         #[cfg(all(
             feature = "declare-queryable",
@@ -957,9 +957,10 @@ impl ApplicationLayerObserver {
             feature = "codec-declare"
         ))]
         {
-            dropped += self
-                .remote_queryables
-                .flush_declarations_on_link_loss(&|_| false);
+            dropped = dropped.saturating_add(
+                self.remote_queryables
+                    .flush_declarations_on_link_loss(&|_| false),
+            );
         }
         dropped
     }

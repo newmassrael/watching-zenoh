@@ -18,8 +18,8 @@
 //! extensions) in arrays of its own.
 //!
 //! What it mirrors, and where each choice is: the envelope is
-//! [`crate::response_build::build_response_reply_literal`] /
-//! `build_response_err_literal` (the literal keyexpr, the `N` flag), the extensions on
+//! [`crate::response_build::build_response_reply`] /
+//! `build_response_err` of a literal key (the keyexpr inline, the `N` flag), the extensions on
 //! it are `stamp_envelope_extensions` (the QoS entry unless it is the default, then the
 //! responder, the chain bits set on every entry but the last), the Reply body is
 //! `ResponseReplyBuilder::build` (timestamp, encoding, then the source-info and the
@@ -66,31 +66,57 @@ const VLE_U32: u32 = 4;
 /// The bytes a VLE of `value` takes, by the rule the codec runtime writes it by.
 fn vle_len(value: u64, continuation_max: u32) -> usize {
     let mut rest = value;
+    // At most `continuation_max`, so the count and the one byte after it never overflow.
     let mut taken = 0u32;
     while rest >= 0x80 && taken < continuation_max {
-        rest >>= 7;
-        taken += 1;
+        rest = rest.wrapping_shr(7);
+        taken = taken.saturating_add(1);
     }
-    taken as usize + 1
+    (taken as usize).saturating_add(1)
+}
+
+/// The sum of byte counts, saturated: a count past `usize` is a window no buffer lends, so the
+/// reserve refuses it rather than lend a window of a wrapped length.
+fn sum<const N: usize>(counts: [usize; N]) -> usize {
+    counts.into_iter().fold(0, usize::saturating_add)
 }
 
 /// A window of a transmit buffer being filled front to back. The writer measured the message
 /// first, so every store lands inside it; a store that did not would be a wrong measure, which
-/// the tests hold the length to and the index bound turns into a stop and not a stray write.
+/// the tests hold the length to and which the window records as a short measure, not a stray
+/// write: [`Window::filled`] is then false and the reply is refused.
 struct Window<'w> {
-    bytes: &'w mut [u8],
-    at: usize,
+    /// What is left of the window, front first.
+    rest: &'w mut [u8],
+    /// A store found no room left.
+    short: bool,
 }
 
 impl Window<'_> {
     fn byte(&mut self, value: u8) {
-        self.bytes[self.at] = value;
-        self.at += 1;
+        match core::mem::take(&mut self.rest).split_first_mut() {
+            Some((slot, rest)) => {
+                *slot = value;
+                self.rest = rest;
+            }
+            None => self.short = true,
+        }
     }
 
     fn bytes(&mut self, value: &[u8]) {
-        self.bytes[self.at..self.at + value.len()].copy_from_slice(value);
-        self.at += value.len();
+        match core::mem::take(&mut self.rest).split_at_mut_checked(value.len()) {
+            Some((into, rest)) => {
+                into.copy_from_slice(value);
+                self.rest = rest;
+            }
+            None => self.short = true,
+        }
+    }
+
+    /// Every store found its room and no byte of the window is left: the measure was the
+    /// writer's.
+    fn filled(&self) -> bool {
+        !self.short && self.rest.is_empty()
     }
 
     /// `value` as the codec runtime writes a VLE: seven bits at a time with the continuation
@@ -100,8 +126,8 @@ impl Window<'_> {
         let mut taken = 0u32;
         while rest >= 0x80 && taken < continuation_max {
             self.byte((rest as u8 & 0x7F) | 0x80);
-            rest >>= 7;
-            taken += 1;
+            rest = rest.wrapping_shr(7);
+            taken = taken.saturating_add(1);
         }
         self.byte(rest as u8);
     }
@@ -115,7 +141,7 @@ fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usiz
     };
     let mut len = vle_len(u64::from(encoding.packed_id), VLE_U32);
     if let Some(schema) = encoding.schema {
-        len += vle_len(schema.len() as u64, VLE_U64) + schema.len();
+        len = sum([len, vle_len(schema.len() as u64, VLE_U64), schema.len()]);
     }
     len
 }
@@ -203,16 +229,14 @@ pub enum ResponseRefusal {
 /// The body of an identity extension (`[(zid_len - 1) << 4 | zid | VLE(eid) |
 /// VLE(sn)?]`), made in an array on the writer. The bytes
 /// `encode_responder_ext_body` and `encode_source_info_ext_body` make in a `Vec`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct IdentityBody {
-    bytes: [u8; IDENTITY_EXT_BODY_BYTES],
-    len: usize,
+    bytes: sce_forge_runtime::heapless::Vec<u8, IDENTITY_EXT_BODY_BYTES>,
 }
 
 impl IdentityBody {
     const NONE: Self = Self {
-        bytes: [0; IDENTITY_EXT_BODY_BYTES],
-        len: 0,
+        bytes: sce_forge_runtime::heapless::Vec::new(),
     };
 
     /// The body for `zid`, `eid` and (for a source info) `sn`. The caller has checked
@@ -220,19 +244,21 @@ impl IdentityBody {
     fn new(zid: &[u8], eid: u32, sn: Option<u32>) -> Result<Self, CodecError> {
         let mut bytes = [0u8; IDENTITY_EXT_BODY_BYTES];
         let mut sink = SliceSink::new(&mut bytes);
-        sink.write_u8((zid.len() as u8).wrapping_sub(1) << 4)?;
+        sink.write_u8((zid.len() as u8).wrapping_sub(1).wrapping_shl(4))?;
         sink.write_bytes(zid)?;
         sink.write_vle_u64(u64::from(eid))?;
         if let Some(sn) = sn {
             sink.write_vle_u64(u64::from(sn))?;
         }
-        let len = sink.position();
-        Ok(Self { bytes, len })
+        // What the sink wrote fits the list it came from, whose capacity is the array's.
+        let bytes = sce_forge_runtime::heapless::Vec::from_slice(sink.into_written())
+            .map_err(|()| CodecError::BufferOverflow)?;
+        Ok(Self { bytes })
     }
 
     /// The body's bytes, as the extension's value.
     fn value(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes
     }
 }
 
@@ -252,6 +278,20 @@ const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a>
         header,
         body: ExtEntryPartsBody::CodecZenohExtZint(body),
     }
+}
+
+/// The entries of `wanted` that are there, in order, at the front of `chain`, and the part of
+/// `chain` they fill. The two arrays are of one length, so every wanted entry has its slot.
+fn filled<'c, 'e, const N: usize>(
+    chain: &'c mut [ExtEntryParts<'e>; N],
+    wanted: [Option<ExtEntryParts<'e>>; N],
+) -> &'c mut [ExtEntryParts<'e>] {
+    let mut count = 0usize;
+    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+        *slot = entry;
+        count = count.saturating_add(1);
+    }
+    chain.get_mut(..count).unwrap_or_default()
 }
 
 /// Set the chain-continuation `Z` bit on every entry but the last, which ends the
@@ -367,7 +407,7 @@ impl<'a> ResponseWriter<'a> {
                     return false;
                 }
                 #[cfg(feature = "reply-source-info")]
-                if self.source_info.len != 0 {
+                if !self.source_info.value().is_empty() {
                     return false;
                 }
                 true
@@ -396,10 +436,7 @@ impl<'a> ResponseWriter<'a> {
         }
         self.direct_bounds()?;
         match sink.reserve(self.direct_len())? {
-            Some(window) => {
-                self.write_direct(window);
-                Ok(())
-            }
+            Some(window) => self.write_direct(window),
             None if GENERIC_REACHABLE => self.encode_generic(sink),
             // Every buffer of a build without fragmentation hands out a window.
             None => Err(CodecError::BufferOverflow),
@@ -452,31 +489,41 @@ impl<'a> ResponseWriter<'a> {
             body,
             qos_extension,
         } = self.direct_view();
-        let mut len = 1
-            + vle_len(u64::from(parts.rid), VLE_U32)
-            + 1
-            + vle_len(parts.keyexpr.len() as u64, VLE_U64);
-        len += parts.keyexpr.len();
-        if qos_extension {
-            len += 1 + vle_len(u64::from(parts.qos.raw), VLE_U64);
-        }
-        if self.responder.len != 0 {
-            len += 1 + vle_len(self.responder.len as u64, VLE_U64) + self.responder.len;
-        }
-        len += match body {
-            BodyView::Put { payload, encoding } => {
-                1 + 1
-                    + encoding_len(encoding)
-                    + vle_len(payload.len() as u64, VLE_U64)
-                    + payload.len()
-            }
-            BodyView::Del => 1 + 1,
-            #[cfg(feature = "query-reply-err")]
-            BodyView::Err { payload, encoding } => {
-                1 + encoding_len(encoding) + vle_len(payload.len() as u64, VLE_U64) + payload.len()
-            }
+        let responder = self.responder.value();
+        let envelope = sum([
+            1,
+            vle_len(u64::from(parts.rid), VLE_U32),
+            1,
+            vle_len(parts.keyexpr.len() as u64, VLE_U64),
+            parts.keyexpr.len(),
+        ]);
+        let qos = if qos_extension {
+            sum([1, vle_len(u64::from(parts.qos.raw), VLE_U64)])
+        } else {
+            0
         };
-        len
+        let identity = if responder.is_empty() {
+            0
+        } else {
+            sum([1, vle_len(responder.len() as u64, VLE_U64), responder.len()])
+        };
+        let body = match body {
+            BodyView::Put { payload, encoding } => sum([
+                2,
+                encoding_len(encoding),
+                vle_len(payload.len() as u64, VLE_U64),
+                payload.len(),
+            ]),
+            BodyView::Del => 2,
+            #[cfg(feature = "query-reply-err")]
+            BodyView::Err { payload, encoding } => sum([
+                1,
+                encoding_len(encoding),
+                vle_len(payload.len() as u64, VLE_U64),
+                payload.len(),
+            ]),
+        };
+        sum([envelope, qos, identity, body])
     }
 
     /// The reply's bytes into a window of exactly [`Self::direct_len`] bytes, in the order the
@@ -485,16 +532,17 @@ impl<'a> ResponseWriter<'a> {
     /// id of 0 and a suffix, the QoS extension and the responder's if there are any (the chain
     /// flag on each but the last), then the body: the Reply's header and a Put's (its header,
     /// encoding and payload) or a Del's header, or an Err's (its header, encoding and payload).
-    fn write_direct(&self, window: &mut [u8]) {
+    fn write_direct(&self, window: &mut [u8]) -> Result<(), CodecError> {
         let parts = &self.parts;
         let PartsView {
             body,
             qos_extension,
         } = self.direct_view();
-        let responder = self.responder.len != 0;
+        let identity = self.responder.value();
+        let responder = !identity.is_empty();
         let mut out = Window {
-            bytes: window,
-            at: 0,
+            rest: window,
+            short: false,
         };
         let header = if qos_extension || responder {
             with_z(RESPONSE_HEADER)
@@ -513,8 +561,8 @@ impl<'a> ResponseWriter<'a> {
         }
         if responder {
             out.byte(RESPONDER_EXT_HEADER & !EXT_FLAG_Z);
-            out.vle(self.responder.len as u64, VLE_U64);
-            out.bytes(&self.responder.bytes[..self.responder.len]);
+            out.vle(identity.len() as u64, VLE_U64);
+            out.bytes(identity);
         }
         match body {
             BodyView::Put { payload, encoding } => {
@@ -544,7 +592,11 @@ impl<'a> ResponseWriter<'a> {
                 out.bytes(payload);
             }
         }
-        debug_assert_eq!(out.at, out.bytes.len());
+        if out.filled() {
+            Ok(())
+        } else {
+            Err(CodecError::BufferOverflow)
+        }
     }
 
     /// What a directly written reply writes besides its fixed parts, read once for the length and
@@ -576,7 +628,7 @@ impl<'a> ResponseWriter<'a> {
             PartsKind::Err { encoding, payload } => BodyView::Err {
                 payload,
                 encoding: encoding.map(|(id, schema)| crate::reply_stage::EncodingParts {
-                    packed_id: (id << 1) | u32::from(schema.is_some()),
+                    packed_id: id.wrapping_shl(1) | u32::from(schema.is_some()),
                     schema,
                 }),
             },
@@ -634,19 +686,16 @@ impl<'a> ResponseWriter<'a> {
             value: crate::codec_owned::sent(self.responder.value())?,
         };
         let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); ENVELOPE_ENTRIES];
-        let mut count = 0;
-        if parts.qos != QosLevel::DEFAULT {
-            chain[count] = zint_entry(QOS_EXT_HEADER, &qos);
-            count += 1;
-        }
-        if parts.responder.is_some() {
-            chain[count] = ExtEntryParts {
-                header: RESPONDER_EXT_HEADER,
-                body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
-            };
-            count += 1;
-        }
-        let chain = &mut chain[..count];
+        let chain = filled(
+            &mut chain,
+            [
+                (parts.qos != QosLevel::DEFAULT).then_some(zint_entry(QOS_EXT_HEADER, &qos)),
+                parts.responder.is_some().then_some(ExtEntryParts {
+                    header: RESPONDER_EXT_HEADER,
+                    body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
+                }),
+            ],
+        );
         link_chain(chain);
         let suffix = WireexprLocalParts {
             id: 0,
@@ -743,34 +792,27 @@ impl<'a> ResponseWriter<'a> {
                 })
             })
             .transpose()?;
-        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); BODY_ENTRIES];
-        // Written only by the entries a build carries (the source info, the attachment).
-        #[cfg_attr(
-            not(any(feature = "reply-source-info", feature = "pubsub-attachment")),
-            allow(unused_mut)
-        )]
-        let mut count = 0;
+        // The entries a build carries: the source info, then the attachment.
         #[cfg(feature = "reply-source-info")]
-        if self.source_info.len != 0 {
-            chain[count] = ExtEntryParts {
-                header: crate::ext_header::body_eid::SOURCE_INFO,
-                body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
-            };
-            count += 1;
-        }
+        let source_info_entry = (!self.source_info.value().is_empty()).then_some(ExtEntryParts {
+            header: crate::ext_header::body_eid::SOURCE_INFO,
+            body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
+        });
+        #[cfg(not(feature = "reply-source-info"))]
+        let source_info_entry = None;
         #[cfg(feature = "pubsub-attachment")]
-        if let Some(attachment) = &attachment {
-            chain[count] = ExtEntryParts {
-                header: if is_put {
-                    crate::ext_header::body_eid::PUT_ATTACHMENT
-                } else {
-                    crate::ext_header::body_eid::DEL_ATTACHMENT
-                },
-                body: ExtEntryPartsBody::CodecZenohExtZbuf(attachment),
-            };
-            count += 1;
-        }
-        let chain = &mut chain[..count];
+        let attachment_entry = attachment.as_ref().map(|attachment| ExtEntryParts {
+            header: if is_put {
+                crate::ext_header::body_eid::PUT_ATTACHMENT
+            } else {
+                crate::ext_header::body_eid::DEL_ATTACHMENT
+            },
+            body: ExtEntryPartsBody::CodecZenohExtZbuf(attachment),
+        });
+        #[cfg(not(feature = "pubsub-attachment"))]
+        let attachment_entry = None;
+        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); BODY_ENTRIES];
+        let chain = filled(&mut chain, [source_info_entry, attachment_entry]);
         link_chain(chain);
         // The codec derives the `T`, `E` and `Z` flags of a Put's and a Del's header from what
         // the value holds, and a chain of no entry is none.
@@ -828,7 +870,7 @@ impl<'a> ResponseWriter<'a> {
         let encoding = encoding
             .map(|(id, schema)| {
                 Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
-                    packed_id: (id << 1) | u32::from(schema.is_some()),
+                    packed_id: id.wrapping_shl(1) | u32::from(schema.is_some()),
                     schema: schema.map(schema_bytes).transpose()?,
                 })
             })
@@ -1312,5 +1354,54 @@ mod tests {
             Err(ResponseRefusal::ResponderIdentity)
         ));
         assert!(ResponseWriter::new(parts("demo/a", Some((&[0u8; 16], 1)))).is_ok());
+    }
+
+    /// A window filled to its last byte is the writer's measure; a store past its end, or a
+    /// byte left over, is a wrong measure, which is refused and writes nothing past the window.
+    #[test]
+    fn a_window_the_measure_got_wrong_is_refused_and_not_overrun() {
+        let mut exact = [0u8; 4];
+        let mut out = Window {
+            rest: &mut exact,
+            short: false,
+        };
+        out.byte(0x11);
+        out.bytes(&[0x22, 0x33]);
+        out.byte(0x44);
+        assert!(out.filled());
+        assert_eq!(exact, [0x11, 0x22, 0x33, 0x44]);
+
+        let mut small = [0u8; 2];
+        let mut out = Window {
+            rest: &mut small,
+            short: false,
+        };
+        out.byte(0x11);
+        out.bytes(&[0x22, 0x33]);
+        assert!(!out.filled(), "a store past the end");
+        assert_eq!(
+            small,
+            [0x11, 0x00],
+            "the store that did not fit wrote nothing"
+        );
+
+        let mut large = [0u8; 3];
+        let mut out = Window {
+            rest: &mut large,
+            short: false,
+        };
+        out.bytes(&[0x22, 0x33]);
+        assert!(!out.filled(), "a byte left over");
+    }
+
+    /// A count past `usize` saturates, so it asks for a window no buffer lends.
+    #[test]
+    fn a_sum_of_counts_past_usize_saturates() {
+        assert_eq!(sum([1, 2, 3]), 6);
+        assert_eq!(sum([usize::MAX, 1]), usize::MAX);
+        assert_eq!(vle_len(0x7f, VLE_U64), 1);
+        assert_eq!(vle_len(0x80, VLE_U64), 2);
+        assert_eq!(vle_len(u64::MAX, VLE_U64), 9);
+        assert_eq!(vle_len(u64::from(u32::MAX), VLE_U32), 5);
     }
 }

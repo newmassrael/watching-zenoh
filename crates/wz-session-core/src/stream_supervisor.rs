@@ -100,7 +100,7 @@ pub fn deadline(period: u32, factor: u16) -> Option<u32> {
 /// Whether more than `deadline` ticks have passed from `base` to `now`, both readings of a counter
 /// that wraps at 2^32. `deadline` is at most [`MAX_DEADLINE_TICKS`], which [`deadline`] holds.
 pub fn deadline_passed(now: u32, base: u32, deadline: u32) -> bool {
-    elapsed(now, base, deadline + 1)
+    elapsed(now, base, deadline.saturating_add(1))
 }
 
 /// One row of the stream table, in the caller's storage. Its layout is fixed (`repr(C)`, five
@@ -341,8 +341,10 @@ impl<'a> StreamSupervisor<'a> {
         if self.count >= self.capacity {
             return Err(AddRefused::Full);
         }
-        let absent = self.slots[..self.count]
+        let absent = self
+            .slots
             .iter()
+            .take(self.count)
             .any(|slot| slot.sender == sender && slot.flags & EXCLUDED != 0);
         let mut flags = 0;
         if awaited {
@@ -352,13 +354,17 @@ impl<'a> StreamSupervisor<'a> {
             flags |= EXCLUDED;
         }
         let index = self.count;
-        self.slots[index] = StreamSlot {
+        // Below the capacity, which is at most the rows the caller lent (`new`).
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err(AddRefused::Full);
+        };
+        *slot = StreamSlot {
             deadline,
             sender,
             flags,
             ..StreamSlot::EMPTY
         };
-        self.count += 1;
+        self.count = self.count.saturating_add(1);
         Ok(index)
     }
 
@@ -374,20 +380,26 @@ impl<'a> StreamSupervisor<'a> {
         if stream >= self.count {
             return Err(ReceiveRefused::NoSuchStream);
         }
-        let slot = &mut self.slots[stream];
+        let Some(slot) = self.slots.get_mut(stream) else {
+            return Err(ReceiveRefused::NoSuchStream);
+        };
         slot.flags |= RECEIVED;
         slot.flags &= !TIMED_OUT;
         rebase(slot, now);
         if self.notify == Notify::StatusOnly {
             return Ok(());
         }
-        let start = stream * self.cell;
-        if payload.len() > self.cell {
+        // The stream's cell lies inside the values the caller lent (`new`), so a payload no longer
+        // than a cell is found a place in it.
+        let start = stream.saturating_mul(self.cell);
+        let end = start.saturating_add(payload.len());
+        let cell = self.values.get_mut(start..end);
+        let (Some(into), true) = (cell, payload.len() <= self.cell) else {
             slot.flags &= !HAS_VALUE;
             slot.value_len = 0;
             return Err(ReceiveRefused::ValueTooLong);
-        }
-        self.values[start..start + payload.len()].copy_from_slice(payload);
+        };
+        into.copy_from_slice(payload);
         // The cell is at most a 32-bit length (`new`), so the payload's length fits.
         slot.value_len = payload.len() as u32;
         slot.flags |= HAS_VALUE;
@@ -412,8 +424,10 @@ impl<'a> StreamSupervisor<'a> {
         now: Option<u32>,
     ) -> Result<(), UnknownSender> {
         let mut found = false;
-        for slot in self.slots[..self.count]
+        for slot in self
+            .slots
             .iter_mut()
+            .take(self.count)
             .filter(|slot| slot.sender == sender)
         {
             found = true;
@@ -440,14 +454,20 @@ impl<'a> StreamSupervisor<'a> {
 
     /// The error count of stream `stream`, or `None` when there is none of that number.
     pub fn stream_errors(&self, stream: usize) -> Option<u8> {
-        self.slots[..self.count].get(stream).map(|slot| slot.errors)
+        self.slots
+            .iter()
+            .take(self.count)
+            .nth(stream)
+            .map(|slot| slot.errors)
     }
 
     /// Whether stream `stream` is in a loss that was told and has not ended, or `None` when there
     /// is none of that number.
     pub fn is_lost(&self, stream: usize) -> Option<bool> {
-        self.slots[..self.count]
-            .get(stream)
+        self.slots
+            .iter()
+            .take(self.count)
+            .nth(stream)
             .map(|slot| slot.flags & TIMED_OUT != 0)
     }
 
@@ -465,8 +485,10 @@ impl<'a> StreamSupervisor<'a> {
             self.drive(StreamActivationEvent::ConditionFails);
             return 0;
         };
-        for slot in self.slots[..self.count]
+        for slot in self
+            .slots
             .iter_mut()
+            .take(self.count)
             .filter(|slot| slot.flags & UNDATED != 0)
         {
             rebase(slot, Some(now));
@@ -498,7 +520,7 @@ impl<'a> StreamSupervisor<'a> {
     /// and every error count starts again from 0.
     fn activate(&mut self, now: u32) {
         self.node_errors = 0;
-        for slot in &mut self.slots[..self.count] {
+        for slot in self.slots.iter_mut().take(self.count) {
             slot.errors = 0;
             slot.flags &= !TIMED_OUT;
             if can_time_out(slot) {
@@ -508,9 +530,9 @@ impl<'a> StreamSupervisor<'a> {
     }
 
     fn judge(&mut self, now: u32, mut on_loss: impl FnMut(Loss<'_>)) -> usize {
-        let mut told = 0;
+        let mut told = 0usize;
         let last_value = self.notify == Notify::LastValue;
-        for (index, slot) in self.slots[..self.count].iter_mut().enumerate() {
+        for (index, slot) in self.slots.iter_mut().take(self.count).enumerate() {
             if slot.flags & (EXCLUDED | TIMED_OUT) != 0
                 || slot.flags & BASED == 0
                 || !deadline_passed(now, slot.base, slot.deadline)
@@ -520,10 +542,11 @@ impl<'a> StreamSupervisor<'a> {
             slot.flags |= TIMED_OUT;
             slot.errors = slot.errors.saturating_add(1);
             self.node_errors = self.node_errors.saturating_add(1);
-            told += 1;
+            told = told.saturating_add(1);
             let value = if last_value && slot.flags & HAS_VALUE != 0 {
-                let start = index * self.cell;
-                Some(&self.values[start..start + slot.value_len as usize])
+                let start = index.saturating_mul(self.cell);
+                self.values
+                    .get(start..start.saturating_add(slot.value_len as usize))
             } else {
                 None
             };

@@ -45,7 +45,7 @@ impl MemberTags {
         self.next = if tag >= u64::from(u32::MAX) {
             1
         } else {
-            tag + 1
+            tag.saturating_add(1)
         };
         MemberDeclarations {
             tag,

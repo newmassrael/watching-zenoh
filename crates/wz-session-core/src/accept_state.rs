@@ -76,6 +76,16 @@ use crate::extregion::{RegionName, MAX_REGION_NAME_LEN};
 use crate::qos::Priority;
 use crate::reliability::Reliability;
 
+/// The next `N` bytes of `cursor`, unconsumed, as an array: a fixed-width state is read by
+/// pattern and not by index.
+fn peek_array<const N: usize>(cursor: &SceCursor<'_>) -> Result<[u8; N], CodecError> {
+    cursor
+        .peek_slice(N)?
+        .first_chunk::<N>()
+        .copied()
+        .ok_or(CodecError::NeedMoreBytes)
+}
+
 /// One extension's accept state, in the form the acceptor's cookie carries.
 ///
 /// The shape mirrors the generated codecs rather than inventing a second
@@ -174,9 +184,7 @@ impl AcceptState for PatchAcceptState {
     }
 
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
-        let raw = cursor.peek_slice(2)?;
-        let present = raw[0];
-        let level = raw[1];
+        let [present, level] = peek_array(cursor)?;
         cursor.advance(2)?;
         // TOTAL on the presence byte: anything non-zero reads as present.
         // Not laxity -- there is no third case to report. A cookie this node
@@ -225,8 +233,8 @@ macro_rules! flag_accept_state {
             }
 
             fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
-                let raw = cursor.peek_slice(1)?;
-                let set = raw[0] != 0;
+                let [byte] = peek_array(cursor)?;
+                let set = byte != 0;
                 cursor.advance(1)?;
                 // TOTAL on the byte, for the reason `PatchAcceptState::decode`
                 // gives at length: the MAC refuses a payload this node did not
@@ -336,9 +344,7 @@ impl AcceptState for QosAcceptState {
     }
 
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
-        let raw = cursor.peek_slice(Self::WIDTH)?;
-        let (tag, band_present, start, end, class_present, class) =
-            (raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+        let [tag, band_present, start, end, class_present, class] = peek_array(cursor)?;
         cursor.advance(Self::WIDTH)?;
         // TOTAL on every byte, for the reason `PatchAcceptState::decode` gives
         // at length: the MAC refuses a payload this node did not write before
@@ -435,10 +441,9 @@ impl AuthAcceptState {
     /// The inverse, over exactly `Self::SLOT` bytes. Total, for the reason
     /// `PatchAcceptState::decode` gives: the MAC has refused anything this
     /// node did not write before a byte here is read.
-    fn decode_slot(raw: &[u8]) -> Option<u64> {
-        let mut value = [0u8; 8];
-        value.copy_from_slice(&raw[1..Self::SLOT]);
-        (raw[0] != 0).then(|| u64::from_le_bytes(value))
+    fn decode_slot(raw: [u8; Self::SLOT]) -> Option<u64> {
+        let [present, value @ ..] = raw;
+        (present != 0).then(|| u64::from_le_bytes(value))
     }
 }
 
@@ -455,13 +460,16 @@ impl AcceptState for AuthAcceptState {
     }
 
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
-        let raw = cursor.peek_slice(Self::WIDTH)?;
-        let state = Self {
-            pubkey: Self::decode_slot(&raw[..Self::SLOT]),
-            usrpwd: Self::decode_slot(&raw[Self::SLOT..]),
-        };
-        cursor.advance(Self::WIDTH)?;
-        Ok(state)
+        // Both slots are there before either is taken, so a short state consumes nothing.
+        cursor.peek_slice(Self::WIDTH)?;
+        let pubkey = peek_array(cursor)?;
+        cursor.advance(Self::SLOT)?;
+        let usrpwd = peek_array(cursor)?;
+        cursor.advance(Self::SLOT)?;
+        Ok(Self {
+            pubkey: Self::decode_slot(pubkey),
+            usrpwd: Self::decode_slot(usrpwd),
+        })
     }
 }
 
@@ -495,8 +503,11 @@ impl RegionAcceptState {
         let mut state = Self::default();
         if let Some(name) = name {
             let raw = name.as_str().as_bytes();
-            state.len = raw.len() as u8;
-            state.bytes[..raw.len()].copy_from_slice(raw);
+            // A `RegionName` is at most `MAX_REGION_NAME_LEN` bytes, so it fits.
+            if let Some(into) = state.bytes.get_mut(..raw.len()) {
+                into.copy_from_slice(raw);
+                state.len = raw.len() as u8;
+            }
         }
         state
     }
@@ -510,7 +521,7 @@ impl RegionAcceptState {
         // exactly what `RegionName::new` admits, so neither arm below is
         // reachable; `ok()` rather than a panic keeps a future constructor
         // that forgot the rule a refusal.
-        core::str::from_utf8(&self.bytes[..self.len as usize])
+        core::str::from_utf8(self.bytes.get(..usize::from(self.len))?)
             .ok()
             .and_then(|s| RegionName::new(s).ok())
     }
@@ -534,26 +545,25 @@ impl AcceptState for RegionAcceptState {
 
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
         let raw = cursor.peek_slice(Self::WIDTH)?;
-        let len = raw[0] as usize;
+        let (&len, padded) = raw.split_first().ok_or(CodecError::NeedMoreBytes)?;
         // Checked here rather than trusted, although the MAC has already
         // refused any payload this node did not write: `name` promises that
         // a present state is a name, and that promise is kept at the one
-        // place a state is built from bytes.
-        if len > MAX_REGION_NAME_LEN {
-            return Err(CodecError::TooManyElements);
-        }
-        if len > 0 {
-            let text =
-                core::str::from_utf8(&raw[1..1 + len]).map_err(|_| CodecError::InvalidUtf8)?;
+        // place a state is built from bytes. The padding is the longest name,
+        // so a length past it names no prefix of it.
+        let name = padded
+            .get(..usize::from(len))
+            .ok_or(CodecError::TooManyElements)?;
+        if !name.is_empty() {
+            let text = core::str::from_utf8(name).map_err(|_| CodecError::InvalidUtf8)?;
             RegionName::new(text).map_err(|_| CodecError::InvalidUtf8)?;
         }
         let mut bytes = [0u8; MAX_REGION_NAME_LEN];
-        bytes[..len].copy_from_slice(&raw[1..1 + len]);
+        for (slot, byte) in bytes.iter_mut().zip(name) {
+            *slot = *byte;
+        }
         cursor.advance(Self::WIDTH)?;
-        Ok(Self {
-            len: len as u8,
-            bytes,
-        })
+        Ok(Self { len, bytes })
     }
 }
 

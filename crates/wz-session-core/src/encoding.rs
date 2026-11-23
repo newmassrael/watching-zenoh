@@ -189,9 +189,9 @@ pub fn split_value_body(value: &[u8]) -> Option<(EncodingHint, &[u8])> {
     let mut cursor = sce_forge_runtime::codec::SceCursor::new(value);
     let encoding = wz_codecs::lent::Encoding::decode(&mut cursor).ok()?;
     // The bytes the encoding consumed are what the cursor no longer holds.
-    let consumed = value.len() - cursor.remaining();
+    let consumed = value.len().saturating_sub(cursor.remaining());
     let hint = EncodingHint::from_codec(&encoding.try_into_owned().ok()?);
-    Some((hint, &value[consumed..]))
+    Some((hint, value.get(consumed..)?))
 }
 
 /// Parse a MIME string into an [`EncodingHint`] (zenoh `Encoding::from_str`,

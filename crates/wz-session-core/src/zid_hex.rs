@@ -30,8 +30,9 @@ use alloc::vec::Vec;
 /// than 16 (malformed input) is truncated to 16, matching uhlc's fixed id width.
 pub fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
     let mut zid16 = [0u8; 16];
-    let n = zid.len().min(16);
-    zid16[..n].copy_from_slice(&zid[..n]);
+    for (into, byte) in zid16.iter_mut().zip(zid) {
+        *into = *byte;
+    }
     zid16
 }
 

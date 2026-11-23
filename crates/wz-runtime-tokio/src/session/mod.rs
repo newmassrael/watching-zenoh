@@ -6158,20 +6158,22 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // reliable=true / express=false match the prior
                 // `send_request_query` (dispatch_request reliable, no flush);
                 // the builder's `CodecError` maps to `SendWireError::Codec`.
-                let emit = if meta.is_empty() {
-                    wz_session_core::request_build::build_request_query(
-                        rid,
-                        selector.mapping_id,
-                        selector.suffix,
-                    )
-                } else {
-                    wz_session_core::request_build::build_request_query_with_meta(
-                        rid,
-                        selector.mapping_id,
-                        selector.suffix,
-                        &meta,
-                    )
-                }
+                // A selector of the id 0 and no text names no key: the bound the wire puts on a
+                // key's length refuses it.
+                let emit = wz_session_core::wire_key::WireKey::from_parts(
+                    selector.mapping_id,
+                    selector.suffix,
+                )
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
+                .and_then(|key| {
+                    if meta.is_empty() {
+                        wz_session_core::request_build::build_request_query(rid, key)
+                    } else {
+                        wz_session_core::request_build::build_request_query_with_meta(
+                            rid, key, &meta,
+                        )
+                    }
+                })
                 .map_err(SendWireError::Codec)
                 .and_then(|request| {
                     self.send_query_request(request, descriptor_value, opts.encoding.as_ref())

@@ -113,6 +113,27 @@ pub enum Direction {
     B,
 }
 
+/// The side of a two-direction pair that `seat` names: 0 is [`Direction::A`]'s and any other
+/// [`Direction::B`]'s, as `usize::from(direction == Direction::B)` numbers them.
+fn side<T>(pair: &[T; 2], seat: usize) -> &T {
+    let [a, b] = pair;
+    if seat == 0 {
+        a
+    } else {
+        b
+    }
+}
+
+/// [`side`], to write.
+fn side_mut<T>(pair: &mut [T; 2], seat: usize) -> &mut T {
+    let [a, b] = pair;
+    if seat == 0 {
+        a
+    } else {
+        b
+    }
+}
+
 impl Direction {
     /// The opposite half.
     pub fn peer(self) -> Self {
@@ -370,11 +391,11 @@ impl VersionEvidence {
         match decode {
             Ok(Some(version)) if version == wz_codecs::wire_const::PROTOCOL_VERSION => {
                 if whole {
-                    self.own_version += 1;
+                    self.own_version = self.own_version.saturating_add(1);
                 }
             }
             Ok(Some(_)) | Err(InboundParseError::ForeignVersion { .. }) => {
-                self.foreign_version += 1;
+                self.foreign_version = self.foreign_version.saturating_add(1);
             }
             Ok(None) | Err(_) => {}
         }
@@ -820,7 +841,7 @@ impl FlowContext {
         self.negotiated()
             && self.lowlatency
             && self.phase == SessionPhase::Established
-            && self.open_seen[usize::from(direction == Direction::B)]
+            && *side(&self.open_seen, usize::from(direction == Direction::B))
     }
 
     /// Is a message whose first byte is `header`, sent by `direction`, a BARE
@@ -906,7 +927,7 @@ impl FlowContext {
     pub fn batch_header(&self, direction: Direction) -> BatchHeader {
         let seat = usize::from(direction == Direction::B);
         if !self.negotiated() {
-            return if self.holds_no_init() && self.batch_header_inferred[seat] {
+            return if self.holds_no_init() && *side(&self.batch_header_inferred, seat) {
                 BatchHeader::Inferred
             } else {
                 BatchHeader::Absent
@@ -915,7 +936,7 @@ impl FlowContext {
         if self.compression
             && !self.lowlatency
             && self.phase == SessionPhase::Established
-            && self.open_seen[seat]
+            && *side(&self.open_seen, seat)
         {
             BatchHeader::Negotiated
         } else {
@@ -928,7 +949,10 @@ impl FlowContext {
     /// probe, [`PassiveSession::read_unit`]'s scan). Ignored once the Init
     /// pair is seen: the negotiation is the answer then.
     fn set_batch_header_inferred(&mut self, direction: Direction, headed: bool) {
-        self.batch_header_inferred[usize::from(direction == Direction::B)] = headed;
+        *side_mut(
+            &mut self.batch_header_inferred,
+            usize::from(direction == Direction::B),
+        ) = headed;
     }
 
     /// Whether the session negotiated compression, and on what grounds, given
@@ -1078,8 +1102,10 @@ impl FlowContext {
     /// The size parameters `direction`'s frames are read in: the InitAck's on
     /// a link with a handshake, the direction's own JOIN's on one without.
     pub fn caps_of(&self, direction: Direction) -> Option<PeerInitCaps> {
-        self.caps
-            .or(self.joined_caps[usize::from(direction == Direction::B)])
+        self.caps.or(*side(
+            &self.joined_caps,
+            usize::from(direction == Direction::B),
+        ))
     }
 
     /// The SN ring `direction`'s frames are judged on ([`Self::caps_of`]),
@@ -2339,9 +2365,9 @@ pub const OPENS_LZ4_BATCHES: bool = cfg!(feature = "transport-compression");
 /// ends where the unit ends. No state is read or written, so it can be asked of
 /// a unit before the walk reads it.
 fn unit_reads_whole(unit: &[u8]) -> bool {
-    let mut pos = 0;
-    while pos < unit.len() {
-        match parse_inbound_observed(&unit[pos..]) {
+    let mut rest = unit;
+    while !rest.is_empty() {
+        match parse_inbound_observed(rest) {
             Ok((frame, consumed))
                 if consumed > 0
                     && frame
@@ -2349,7 +2375,8 @@ fn unit_reads_whole(unit: &[u8]) -> bool {
                         .map_or(true, |v| v == wz_codecs::wire_const::PROTOCOL_VERSION) =>
             {
                 match frame_reach(&frame, consumed) {
-                    Some(reach) => pos += reach,
+                    // A reach past the unit ends the walk, as the end of it does.
+                    Some(reach) => rest = rest.get(reach..).unwrap_or_default(),
                     None => return false,
                 }
             }
@@ -2378,7 +2405,8 @@ fn frame_reach(frame: &InboundFrame, consumed: usize) -> Option<usize> {
         return None;
     }
     Some(match records.next_message_at {
-        Some(end) => consumed - (payload.len() - end),
+        // The records end inside the payload, which the message's bytes hold.
+        Some(end) => consumed.saturating_sub(payload.len().saturating_sub(end)),
         None => consumed,
     })
 }
@@ -2392,7 +2420,7 @@ fn headed_unit_reads_whole(unit: &[u8]) -> bool {
         Some(h) if h & BATCH_HEADER_COMPRESSION != 0 => {
             decompress_unit(unit).is_some_and(|plain| unit_reads_whole(&plain))
         }
-        Some(_) => unit_reads_whole(&unit[1..]),
+        Some(_) => unit_reads_whole(unit.get(1..).unwrap_or_default()),
         None => false,
     }
 }
@@ -2426,7 +2454,7 @@ const SN_CONDUITS: usize = crate::qos::Priority::NUM * 2;
 /// R311y609 (C12) — index of one conduit within a direction.
 #[cfg(feature = "codec-frame")]
 fn sn_conduit(priority: crate::qos::Priority, reliable: bool) -> usize {
-    priority.wire_byte() as usize * 2 + usize::from(reliable)
+    ((priority.wire_byte() as usize) << 1) | usize::from(reliable)
 }
 
 /// R311y609 — how many chained candidate frames confirm a resynchronised
@@ -2877,12 +2905,12 @@ impl PassiveSession {
         instant_of: &dyn Fn(usize) -> Option<u64>,
     ) -> Result<PassiveFrame, PassiveStall> {
         let seat = usize::from(direction == Direction::B);
-        if let Some(frame) = self.pending[seat].pop_front() {
+        if let Some(frame) = side_mut(&mut self.pending, seat).pop_front() {
             return Ok(frame);
         }
         let mut walked = self.read_unit(direction, instant_of)?.frames.into_iter();
         let first = walked.next().ok_or(PassiveStall::NeedMoreBytes)?;
-        self.pending[seat].extend(walked);
+        side_mut(&mut self.pending, seat).extend(walked);
         Ok(first)
     }
 
@@ -2906,10 +2934,10 @@ impl PassiveSession {
         instant_of: &dyn Fn(usize) -> Option<u64>,
     ) -> Result<ReadUnit, PassiveStall> {
         let seat = usize::from(direction == Direction::B);
-        if !self.pending[seat].is_empty() {
+        if !side(&self.pending, seat).is_empty() {
             return Ok(ReadUnit {
                 start: None,
-                frames: self.pending[seat].drain(..).collect(),
+                frames: side_mut(&mut self.pending, seat).drain(..).collect(),
             });
         }
         self.read_unit(direction, instant_of)
@@ -2958,8 +2986,10 @@ impl PassiveSession {
                     if may_infer {
                         self.context
                             .set_batch_header_inferred(direction, resumed_headed);
-                        let seen =
-                            &mut self.batch_header_evidence[usize::from(direction == Direction::B)];
+                        let seen = side_mut(
+                            &mut self.batch_header_evidence,
+                            usize::from(direction == Direction::B),
+                        );
                         if resumed_headed {
                             seen.headed_resyncs = seen.headed_resyncs.saturating_add(1);
                         } else {
@@ -2991,15 +3021,14 @@ impl PassiveSession {
         // A wrong 2-byte prefix routinely frames tens of kilobytes; waiting for
         // them before noticing would hand the scan a starting point that is
         // already past the boundary it is looking for.
-        if stream.buf.len() < width + 1 {
+        let Some(&header) = stream.buf.get(width) else {
             return Err(PassiveStall::NeedMoreBytes);
-        }
-        let header = stream.buf[width];
+        };
         // A front on a chain that has not broken since the direction's first
         // byte stands where its sender wrote a batch's first byte, whatever the
         // byte says: kept for the source, which knows whether that first byte
         // is the stream's and how far the bytes are vouched for.
-        let front_at = stream_offset + width;
+        let front_at = stream_offset.saturating_add(width);
         if stream.accounting.desyncs == 0 && stream.judged_front != Some(front_at) {
             stream.judged_front = Some(front_at);
             stream.chain_front = Some(StreamFront {
@@ -3025,13 +3054,14 @@ impl PassiveSession {
         if !credible {
             return Err(stream.desynchronise(DesyncReason::ImplausibleHeader { header }));
         }
-        if stream.buf.len() < width + payload_len {
+        // At most the prefix and `MAX_FRAME_PAYLOAD`, checked above.
+        let unit_end = width.saturating_add(payload_len);
+        let Some(body) = stream.buf.get(width..unit_end).map(<[u8]>::to_vec) else {
             return Err(PassiveStall::NeedMoreBytes);
-        }
-        let body: Vec<u8> = stream.buf[width..width + payload_len].to_vec();
-        stream.buf.drain(..width + payload_len);
+        };
+        stream.buf.drain(..unit_end);
         stream.give_back_capacity();
-        stream.consumed += width + payload_len;
+        stream.consumed = stream.consumed.saturating_add(unit_end);
         if stream.first_framing.is_none() {
             stream.first_framing = Some(true);
         }
@@ -3041,7 +3071,9 @@ impl PassiveSession {
         // `stream_offset`). The observer's own clock stands in only where the
         // source could not say.
         let clock = self.observed_at_ns;
-        let at = |from_unit_start: usize| instant_of(stream_offset + from_unit_start).or(clock);
+        let at = |from_unit_start: usize| {
+            instant_of(stream_offset.saturating_add(from_unit_start)).or(clock)
+        };
 
         // A byte STREAM is a unicast link by construction — zenoh has no
         // multicast stream transport — so `inadmissible_on_link` cannot arise
@@ -3171,7 +3203,8 @@ impl PassiveSession {
     /// clock never loses it and a clockless record has no earlier reading to
     /// erase.
     fn note_last_seen(&mut self, seat: usize, instant: Option<u64>) {
-        self.last_seen_ns[seat] = match (self.last_seen_ns[seat], instant) {
+        let seen = side_mut(&mut self.last_seen_ns, seat);
+        *seen = match (*seen, instant) {
             (Some(held), Some(this)) => Some(held.max(this)),
             (held, this) => this.or(held),
         };
@@ -3183,12 +3216,15 @@ impl PassiveSession {
     /// the units read before it, the one carrying the first Init included,
     /// and its reading is the handshake's (`stated`), not these counts'.
     pub fn batch_header_evidence(&self, direction: Direction) -> BatchHeaderEvidence {
-        self.batch_header_evidence[usize::from(direction == Direction::B)]
+        *side(
+            &self.batch_header_evidence,
+            usize::from(direction == Direction::B),
+        )
     }
 
     /// What `direction`'s units showed of the batch size and the SN ring.
     pub fn unit_extents(&self, direction: Direction) -> UnitExtents {
-        self.unit_extents[usize::from(direction == Direction::B)]
+        *side(&self.unit_extents, usize::from(direction == Direction::B))
     }
 
     /// The negotiated batch size, with the floor the units put under it: the
@@ -3232,19 +3268,22 @@ impl PassiveSession {
     /// the ordinary reading: every message of every batch was decoded and its
     /// length was known.
     pub fn unaccounted_batch_bytes(&self, direction: Direction) -> u64 {
-        self.unaccounted_batch_bytes[usize::from(direction == Direction::B)]
+        *side(
+            &self.unaccounted_batch_bytes,
+            usize::from(direction == Direction::B),
+        )
     }
 
     /// R311y609 (C12) — the SN accounting for one direction so far.
     #[cfg(feature = "codec-frame")]
     pub fn sn_accounting(&self, direction: Direction) -> SnAccounting {
-        self.sn_accounting[usize::from(direction == Direction::B)]
+        *side(&self.sn_accounting, usize::from(direction == Direction::B))
     }
 
     /// The SN steps for one direction so far. See [`SnSteps`].
     #[cfg(feature = "codec-frame")]
     pub fn sn_steps(&self, direction: Direction) -> SnSteps {
-        self.sn_steps[usize::from(direction == Direction::B)]
+        *side(&self.sn_steps, usize::from(direction == Direction::B))
     }
 
     /// R311y609 — the resynchronisation accounting for one direction so far.
@@ -3285,11 +3324,11 @@ impl PassiveSession {
     pub fn half(&self, direction: Direction) -> HalfFacts {
         let seat = usize::from(direction == Direction::B);
         HalfFacts {
-            lease_ms: self.lease_ms[seat],
-            last_seen_ms: self.last_seen_ns[seat].map(|ns| ns / NANOS_PER_MILLI),
-            last_seen_ns: self.last_seen_ns[seat],
-            close_seen: self.close_seen[seat],
-            initial_sn: self.initial_sn[seat],
+            lease_ms: *side(&self.lease_ms, seat),
+            last_seen_ms: side(&self.last_seen_ns, seat).map(|ns| ns / NANOS_PER_MILLI),
+            last_seen_ns: *side(&self.last_seen_ns, seat),
+            close_seen: *side(&self.close_seen, seat),
+            initial_sn: *side(&self.initial_sn, seat),
             initial_sn_derivation: self.initial_sn_derivation(seat, direction),
         }
     }
@@ -3300,13 +3339,15 @@ impl PassiveSession {
         seat: usize,
         direction: Direction,
     ) -> Option<InitialSnDerivation> {
-        let announced = self.initial_sn[seat]?;
-        let (sender, sender_len) = self.init_zid[seat]?;
-        let (receiver, receiver_len) = self.init_zid[1 - seat]?;
+        let announced = (*side(&self.initial_sn, seat))?;
+        let (sender, sender_len) = (*side(&self.init_zid, seat))?;
+        let (receiver, receiver_len) = (*side(&self.init_zid, usize::from(seat == 0)))?;
         let mask = self.context.sn_mask_of(direction)?;
         let derived = crate::initial_sn::zenoh_initial_sn(
-            &sender[..usize::from(sender_len)],
-            &receiver[..usize::from(receiver_len)],
+            sender.get(..usize::from(sender_len)).unwrap_or_default(),
+            receiver
+                .get(..usize::from(receiver_len))
+                .unwrap_or_default(),
             mask,
         );
         Some(if derived == announced {
@@ -3319,14 +3360,20 @@ impl PassiveSession {
     /// R311y611 (§1.4b) — messages this direction decoded whose header set a
     /// bit its MID does not define. See [`PassiveFrame::reserved_header_bits`].
     pub fn reserved_headers(&self, direction: Direction) -> u64 {
-        self.reserved_headers[usize::from(direction == Direction::B)]
+        *side(
+            &self.reserved_headers,
+            usize::from(direction == Direction::B),
+        )
     }
 
     /// R311y630 (§14.1) — frames this direction decoded that carry a mandatory
     /// extension their message's space does not define. See
     /// [`PassiveFrame::undefined_mandatory_ext`].
     pub fn undefined_mandatory_exts(&self, direction: Direction) -> u64 {
-        self.undefined_mandatory_exts[usize::from(direction == Direction::B)]
+        *side(
+            &self.undefined_mandatory_exts,
+            usize::from(direction == Direction::B),
+        )
     }
 
     /// R311y610 — bytes pushed into this direction and not yet consumed.
@@ -3344,7 +3391,7 @@ impl PassiveSession {
     /// what a handle that keeps this observer holds for it, which
     /// [`Self::buffered`] (the bytes waiting) does not say.
     pub fn buffer_capacity(&self) -> usize {
-        self.a.buf.capacity() + self.b.buf.capacity()
+        self.a.buf.capacity().saturating_add(self.b.buf.capacity())
     }
 
     /// R311y609 (C12) — judge one decoded frame's sequence number against the
@@ -3376,30 +3423,33 @@ impl PassiveSession {
             _ => return None,
         };
         let idx = usize::from(direction == Direction::B);
-        let acc = &mut self.sn_accounting[idx];
-        acc.frames += 1;
+        // Every count below is of frames seen, far from wrapping: they saturate.
+        let acc = side_mut(&mut self.sn_accounting, idx);
+        acc.frames = acc.frames.saturating_add(1);
+        // A priority's wire byte is below `Priority::NUM`, so every conduit is a slot.
         let conduit = sn_conduit(priority, reliable);
-        let steps = &mut self.sn_steps[idx];
+        let steps = side_mut(&mut self.sn_steps, idx);
         let Some(mask) = self.context.sn_mask_of(direction) else {
-            acc.without_resolution += 1;
+            acc.without_resolution = acc.without_resolution.saturating_add(1);
             // No ring, so no verdict; the step to the next integer is still a
             // fact (see `SnSteps`). A repeated SN leaves the slot as it is.
-            let slot = &mut self.sn_last[idx][conduit];
-            if let Some(last) = *slot {
-                if sn == last.wrapping_add(1) {
-                    steps.follows += 1;
-                } else {
-                    steps.breaks += 1;
+            if let Some(slot) = side_mut(&mut self.sn_last, idx).get_mut(conduit) {
+                if let Some(last) = *slot {
+                    if sn == last.wrapping_add(1) {
+                        steps.follows = steps.follows.saturating_add(1);
+                    } else {
+                        steps.breaks = steps.breaks.saturating_add(1);
+                    }
                 }
+                *slot = Some(sn);
             }
-            *slot = Some(sn);
-            self.sn_unringed[idx] = true;
+            *side_mut(&mut self.sn_unringed, idx) = true;
             return Some(SnVerdict::WithoutResolution);
         };
-        if core::mem::take(&mut self.sn_unringed[idx]) {
-            self.sn_last[idx] = [None; SN_CONDUITS];
+        if core::mem::take(side_mut(&mut self.sn_unringed, idx)) {
+            *side_mut(&mut self.sn_last, idx) = [None; SN_CONDUITS];
         }
-        let slot = &mut self.sn_last[idx][conduit];
+        let slot = side_mut(&mut self.sn_last, idx).get_mut(conduit)?;
         let verdict = match *slot {
             None => SnVerdict::Baseline,
             Some(last) if (sn & mask) == (last & mask) => SnVerdict::Duplicate,
@@ -3410,22 +3460,25 @@ impl PassiveSession {
                 if step == 1 {
                     SnVerdict::Continuous
                 } else {
-                    SnVerdict::Gap { missing: step - 1 }
+                    // `step` is 2 or more here.
+                    SnVerdict::Gap {
+                        missing: step.saturating_sub(1),
+                    }
                 }
             }
         };
         match verdict {
-            SnVerdict::Continuous => steps.follows += 1,
+            SnVerdict::Continuous => steps.follows = steps.follows.saturating_add(1),
             SnVerdict::Duplicate | SnVerdict::OutOfWindow | SnVerdict::Gap { .. } => {
-                steps.breaks += 1;
+                steps.breaks = steps.breaks.saturating_add(1);
             }
             SnVerdict::Baseline | SnVerdict::WithoutResolution => {}
         }
         match verdict {
-            SnVerdict::Duplicate => acc.duplicates += 1,
-            SnVerdict::OutOfWindow => acc.out_of_window += 1,
+            SnVerdict::Duplicate => acc.duplicates = acc.duplicates.saturating_add(1),
+            SnVerdict::OutOfWindow => acc.out_of_window = acc.out_of_window.saturating_add(1),
             SnVerdict::Gap { missing } => {
-                acc.gaps += 1;
+                acc.gaps = acc.gaps.saturating_add(1);
                 // A gap is a distance in the session's window, up to 2^62 - 2 at
                 // the widest, so a handful of them overflow the sum. The total
                 // is a floor ("at least this many were lost"), and a floor that
@@ -3675,7 +3728,7 @@ impl PassiveSession {
         // Read BEFORE the router is borrowed: the clock and the router are both
         // fields of `self`.
         let now_ms = self.now_ms();
-        let router = &mut self.reasm[idx];
+        let router = side_mut(&mut self.reasm, idx);
         router.set_fragmentation_markers(markers_on);
         let mut joined: Option<Vec<u8>> = None;
         // The peer key is the DIRECTION, one byte, because an observer holds
@@ -3731,8 +3784,8 @@ impl PassiveSession {
             // during parse. First wins, like `init_seen`, because a repeated
             // Open is a replay and not a new announcement.
             InboundFrame::Open { body, .. } => {
-                self.lease_ms[seat].get_or_insert(body.lease);
-                self.initial_sn[seat].get_or_insert(body.initial_sn);
+                side_mut(&mut self.lease_ms, seat).get_or_insert(body.lease);
+                side_mut(&mut self.initial_sn, seat).get_or_insert(body.initial_sn);
             }
             // The zid a direction's first Init states, first wins as the
             // lease does: the sender's half of the origin derivation.
@@ -3740,17 +3793,19 @@ impl PassiveSession {
                 let wire = body.zid.as_slice();
                 let mut zid = [0u8; 16];
                 let len = wire.len().min(zid.len());
-                zid[..len].copy_from_slice(&wire[..len]);
-                self.init_zid[seat].get_or_insert((zid, len as u8));
+                for (into, byte) in zid.iter_mut().zip(wire) {
+                    *into = *byte;
+                }
+                side_mut(&mut self.init_zid, seat).get_or_insert((zid, len as u8));
             }
-            InboundFrame::Close { .. } => self.close_seen[seat] = true,
+            InboundFrame::Close { .. } => *side_mut(&mut self.close_seen, seat) = true,
             #[cfg(feature = "codec-join")]
             InboundFrame::Join {
                 body, extensions, ..
             } => {
                 let stated = JoinStatement::of(body, extensions);
-                if self.joined[seat] != Some(stated) {
-                    self.joined[seat] = Some(stated);
+                if *side(&self.joined, seat) != Some(stated) {
+                    *side_mut(&mut self.joined, seat) = Some(stated);
                     self.start_sns_at_join(seat, body, extensions);
                 }
             }
@@ -3788,19 +3843,21 @@ impl PassiveSession {
         use crate::ext_view::ExtEntryView as _;
         use crate::qos::Priority;
         use crate::sn::MulticastRxPair;
-        let last = &mut self.sn_last[seat];
+        let last = side_mut(&mut self.sn_last, seat);
         *last = [None; SN_CONDUITS];
         // The SNs kept before this sender had a ring belong to no ring; the
         // JOIN replaces them, so the next frame must not clear what it wrote.
-        self.sn_unringed[seat] = false;
-        let Some(caps) = self.context.joined_caps[seat] else {
+        *side_mut(&mut self.sn_unringed, seat) = false;
+        let Some(caps) = *side(&self.context.joined_caps, seat) else {
             return;
         };
         let mask = crate::sn::mask_from_res(caps.seq_num_res);
         let mut start = |priority: Priority, next: MulticastRxPair| {
             for (reliable, sn) in [(true, next.reliable), (false, next.best_effort)] {
                 if sn & !mask == 0 {
-                    last[sn_conduit(priority, reliable)] = Some(crate::sn::decrement(mask, sn));
+                    if let Some(slot) = last.get_mut(sn_conduit(priority, reliable)) {
+                        *slot = Some(crate::sn::decrement(mask, sn));
+                    }
                 }
             }
         };
@@ -3860,10 +3917,10 @@ impl FlowContext {
                 ..
             } => {
                 let idx = usize::from(direction == Direction::B);
-                if self.init_seen[idx] {
+                if *side(&self.init_seen, idx) {
                     return;
                 }
-                self.init_seen[idx] = true;
+                *side_mut(&mut self.init_seen, idx) = true;
                 self.fold_init(extensions);
                 self.shm.fold_init(*is_ack, extensions);
                 self.fold_version(*is_ack, body.version);
@@ -3889,7 +3946,7 @@ impl FlowContext {
                 // phase below is the session's and still moves on the first
                 // Open; the width does not, because the peer is still narrow
                 // until it carries its own.
-                self.open_seen[usize::from(direction == Direction::B)] = true;
+                *side_mut(&mut self.open_seen, usize::from(direction == Direction::B)) = true;
                 self.shm.fold_open(*is_ack, extensions);
                 if self.phase == SessionPhase::InitComplete {
                     self.phase = SessionPhase::Established;
@@ -3903,11 +3960,13 @@ impl FlowContext {
             // ([`PassiveSession::fold`]).
             #[cfg(feature = "codec-join")]
             InboundFrame::Join { body, .. } => {
-                self.joined_caps[usize::from(direction == Direction::B)] =
-                    Some(PeerInitCaps::from_join_body(
-                        body.s.as_ref().map(|s| s.sn_res),
-                        body.s.as_ref().map(|s| s.batch_size),
-                    ));
+                *side_mut(
+                    &mut self.joined_caps,
+                    usize::from(direction == Direction::B),
+                ) = Some(PeerInitCaps::from_join_body(
+                    body.s.as_ref().map(|s| s.sn_res),
+                    body.s.as_ref().map(|s| s.batch_size),
+                ));
             }
             _ => {}
         }
@@ -3947,7 +4006,9 @@ impl JoinStatement {
         let wire_zid = body.zid.as_slice();
         let mut zid = [0u8; 16];
         let zid_len = wire_zid.len().min(zid.len());
-        zid[..zid_len].copy_from_slice(&wire_zid[..zid_len]);
+        for (into, byte) in zid.iter_mut().zip(wire_zid) {
+            *into = *byte;
+        }
         Self {
             zid,
             zid_len: zid_len as u8,
@@ -4156,7 +4217,7 @@ impl UnitJudge for LiveJudge<'_, '_> {
     }
 
     fn count_batch_header_unit(&mut self, seat: usize, headed: bool) {
-        let seen = &mut self.session.batch_header_evidence[seat];
+        let seen = side_mut(&mut self.session.batch_header_evidence, seat);
         if headed {
             seen.headed_units = seen.headed_units.saturating_add(1);
         } else {
@@ -4165,21 +4226,24 @@ impl UnitJudge for LiveJudge<'_, '_> {
     }
 
     fn note_unit_extent(&mut self, seat: usize, wire_len: usize, largest_sn: Option<u64>) {
-        let seen = &mut self.session.unit_extents[seat];
+        let seen = side_mut(&mut self.session.unit_extents, seat);
         seen.longest_unit = seen.longest_unit.max(wire_len as u64);
         seen.largest_sn = seen.largest_sn.max(largest_sn);
     }
 
     fn count_unaccounted(&mut self, seat: usize, bytes: u64) {
-        self.session.unaccounted_batch_bytes[seat] += bytes;
+        let count = side_mut(&mut self.session.unaccounted_batch_bytes, seat);
+        *count = count.saturating_add(bytes);
     }
 
     fn count_reserved_header(&mut self, seat: usize) {
-        self.session.reserved_headers[seat] += 1;
+        let count = side_mut(&mut self.session.reserved_headers, seat);
+        *count = count.saturating_add(1);
     }
 
     fn count_undefined_mandatory_ext(&mut self, seat: usize) {
-        self.session.undefined_mandatory_exts[seat] += 1;
+        let count = side_mut(&mut self.session.undefined_mandatory_exts, seat);
+        *count = count.saturating_add(1);
     }
 }
 
@@ -4208,8 +4272,11 @@ fn walk_unit(
     } = anchor;
     // The end of the bytes this unit was handed as, which is what the wire
     // carried whether or not the body turns out to be an lz4 batch.
-    let wire_end =
-        (offset_space == OffsetSpace::StreamBytes).then(|| offset + prefix_width + bytes.len());
+    let wire_end = (offset_space == OffsetSpace::StreamBytes).then(|| {
+        offset
+            .saturating_add(prefix_width)
+            .saturating_add(bytes.len())
+    });
     // Whether any byte of the unit went unaccounted for, which with every
     // message decoded is what "read whole" means.
     let mut unaccounted = false;
@@ -4257,7 +4324,9 @@ fn walk_unit(
     // that count is what the inference rests on
     // ([`PassiveSession::batch_header_evidence`]).
     if handshake == LinkHandshake::Present && judge.context().holds_no_init() && !bytes.is_empty() {
-        let header_byte = bytes[0] & !BATCH_HEADER_COMPRESSION == 0;
+        let header_byte = bytes
+            .first()
+            .is_some_and(|byte| byte & !BATCH_HEADER_COMPRESSION == 0);
         let plain_whole = unit_reads_whole(bytes);
         let headed_whole = header_byte && headed_unit_reads_whole(bytes);
         if plain_whole != headed_whole {
@@ -4280,7 +4349,10 @@ fn walk_unit(
     // lz4 arm reads out of a buffer this reader made.
     let (unit, mut pos, decompressed): (&[u8], usize, bool) = if !headed {
         (bytes, 0, false)
-    } else if bytes[0] & BATCH_HEADER_COMPRESSION == 0 {
+    } else if bytes
+        .first()
+        .is_some_and(|byte| byte & BATCH_HEADER_COMPRESSION == 0)
+    {
         (bytes, 1, false)
     } else {
         match decompress_unit(bytes) {
@@ -4323,15 +4395,16 @@ fn walk_unit(
     let front = pos;
     let mut out = Vec::new();
     let mut batch_index = 0usize;
-    while pos < unit.len() {
-        let rest = &unit[pos..];
+    while let Some(rest) = unit.get(pos..).filter(|rest| !rest.is_empty()) {
         // R311y611 (§1.4b) — counted BEFORE the admissibility branch below: a
         // reserved bit is a fact about the SENDER's wire-spec vintage, and it is
         // one whether or not this link was entitled to carry the message. Read
         // off THIS message's header, so a batch's second message is judged as
         // well as its first — the stream path's credible-header gate gets to
         // see only the first.
-        let lean_network = judge.context().reads_bare_network(direction, rest[0]);
+        let lean_network = rest
+            .first()
+            .is_some_and(|lead| judge.context().reads_bare_network(direction, *lead));
         // Transport flags have no meaning on a bare network header.
         let reserved = rest
             .first()
@@ -4393,7 +4466,7 @@ fn walk_unit(
         // one framing unit — so an undecodable datagram still reports the
         // decode error rather than vanishing.
         if consumed == 0 && pos > front {
-            judge.count_unaccounted(seat, (unit.len() - pos) as u64);
+            judge.count_unaccounted(seat, rest.len() as u64);
             unaccounted = true;
             break;
         }
@@ -4436,9 +4509,9 @@ fn walk_unit(
             let end = if consumed == 0 {
                 unit.len()
             } else {
-                pos + consumed
+                pos.saturating_add(consumed)
             };
-            Some(unit[pos..end].to_vec())
+            unit.get(pos..end).map(<[u8]>::to_vec)
         } else {
             None
         };
@@ -4450,7 +4523,7 @@ fn walk_unit(
         let instant = if decompressed {
             unit_instant
         } else {
-            judge.instant_of(prefix_width + pos)
+            judge.instant_of(prefix_width.saturating_add(pos))
         };
         judge.note_last_seen(seat, instant);
         out.push(PassiveFrame {
@@ -4481,17 +4554,17 @@ fn walk_unit(
             unit_read_whole: false,
             foreign_version,
         });
-        batch_index += 1;
+        batch_index = batch_index.saturating_add(1);
         if consumed == 0 {
             // Front of the unit, and unmeasurable: the record above is the
             // verdict on the whole unit, and the bytes behind it are still
             // unaccounted for. Counting them is what makes an undecodable
             // datagram say how much it could not explain.
-            judge.count_unaccounted(seat, (unit.len() - pos) as u64);
+            judge.count_unaccounted(seat, rest.len() as u64);
             unaccounted = true;
             break;
         }
-        pos += consumed;
+        pos = pos.saturating_add(consumed);
     }
     // Whether the unit was read whole is known only once its walk has ended.
     let whole = !unaccounted && !batch_failed && out.iter().all(|f| f.frame.is_ok());
@@ -4630,7 +4703,8 @@ fn end_frame_at_next_message(
     };
     if let Ok(InboundFrame::Frame { payload, .. }) = &mut frame {
         if let Some(kept) = payload.subslice(0..*end) {
-            consumed -= payload.len() - *end;
+            // `end` is inside the payload, which the message's bytes hold.
+            consumed = consumed.saturating_sub(payload.len().saturating_sub(*end));
             *payload = kept;
         }
     }
@@ -4774,7 +4848,7 @@ impl UnitJudge for Recorded<'_> {
         self.facts
             .messages
             .iter()
-            .find(|m| self.prefix_width + m.unit_offset == from_unit_start)
+            .find(|m| self.prefix_width.saturating_add(m.unit_offset) == from_unit_start)
             .map_or(self.facts.unit_instant, |m| m.observed_at_ns)
     }
 
@@ -4891,11 +4965,15 @@ pub struct RedecodeError {
 /// [`PassiveSession::next_frame`] does, and a second copy of the width match
 /// is a second place for the two to disagree.
 fn read_prefix(buf: &[u8], at: usize, width: usize) -> usize {
+    // A prefix the buffer does not hold reads as 0, which every caller refuses.
+    let rest = buf.get(at..).unwrap_or_default();
     match width {
-        PREFIX_WIDTH_LOWLATENCY => {
-            u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]) as usize
-        }
-        _ => u16::from_le_bytes([buf[at], buf[at + 1]]) as usize,
+        PREFIX_WIDTH_LOWLATENCY => rest
+            .first_chunk::<4>()
+            .map_or(0, |word| u32::from_le_bytes(*word) as usize),
+        _ => rest
+            .first_chunk::<2>()
+            .map_or(0, |word| usize::from(u16::from_le_bytes(*word))),
     }
 }
 
@@ -4919,21 +4997,22 @@ enum Candidate {
 
 /// R311y609 — test the bytes at `at` as one framed transport message.
 fn candidate_at(buf: &[u8], at: usize, width: usize, headed: bool) -> Candidate {
-    if buf.len() < at + width {
-        return Candidate::Short { needed: at + width };
+    // Offsets into one buffer: the sums do not saturate.
+    let head_end = at.saturating_add(width);
+    if buf.len() < head_end {
+        return Candidate::Short { needed: head_end };
     }
     let len = read_prefix(buf, at, width);
     if len == 0 || len > MAX_FRAME_PAYLOAD {
         return Candidate::Refuted;
     }
-    if buf.len() < at + width + 1 {
-        return Candidate::Short {
-            needed: at + width + 1,
-        };
-    }
     // A headed unit opens with the BatchHeader, whose one defined bit is
     // compression: the boundary `read_unit` accepts on a headed stream.
-    let header = buf[at + width];
+    let Some(&header) = buf.get(head_end) else {
+        return Candidate::Short {
+            needed: head_end.saturating_add(1),
+        };
+    };
     let credible = if headed {
         header & !BATCH_HEADER_COMPRESSION == 0
     } else {
@@ -4942,12 +5021,11 @@ fn candidate_at(buf: &[u8], at: usize, width: usize, headed: bool) -> Candidate 
     if !credible {
         return Candidate::Refuted;
     }
-    if buf.len() < at + width + len {
-        return Candidate::Short {
-            needed: at + width + len,
-        };
+    let end = head_end.saturating_add(len);
+    if buf.len() < end {
+        return Candidate::Short { needed: end };
     }
-    Candidate::Framed(at + width + len)
+    Candidate::Framed(end)
 }
 
 /// R311y609 — how far past a desynchronisation the true boundary can hide.
@@ -4966,8 +5044,9 @@ impl DirectionStream {
     /// which no row reads. As the TCP stream's kept bytes do (R3358).
     fn give_back_capacity(&mut self) {
         let held = self.buf.len();
-        if self.buf.capacity() > 2 * held + 4096 {
-            self.buf.shrink_to(held + held / 4 + 4096);
+        if self.buf.capacity() > held.saturating_mul(2).saturating_add(4096) {
+            self.buf
+                .shrink_to(held.saturating_add(held / 4).saturating_add(4096));
         }
     }
 
@@ -4987,7 +5066,7 @@ impl DirectionStream {
             self.first_framing = Some(false);
         }
         if self.desync.is_none() {
-            self.accounting.desyncs += 1;
+            self.accounting.desyncs = self.accounting.desyncs.saturating_add(1);
             self.desync = Some(DesyncState {
                 at_offset,
                 reason,
@@ -5067,7 +5146,7 @@ impl DirectionStream {
                 match candidate_at(buf, at, width, headed) {
                     Candidate::Framed(next) => {
                         at = next;
-                        confirmed += 1;
+                        confirmed = confirmed.saturating_add(1);
                     }
                     other => break other,
                 }
@@ -5097,18 +5176,17 @@ impl DirectionStream {
             }
             // The cursor follows only while the refutations, in every reading,
             // are contiguous from it.
+            // Both stay below the buffer's length, so neither step wraps.
             if refuted && candidate == cursor {
-                cursor += 1;
+                cursor = cursor.saturating_add(1);
             }
-            candidate += 1;
+            candidate = candidate.saturating_add(1);
         }
         let Some((offset, headed)) = accepted else {
-            let state = self.desync.as_mut().expect("state was Some");
-            state.scan_cursor = cursor;
             // Nothing unresolved means nothing to wait FOR: only a longer
             // buffer can change the answer.
-            state.rescan_at = if rescan_at == usize::MAX {
-                self.buf.len() + 1
+            let rescan_at = if rescan_at == usize::MAX {
+                self.buf.len().saturating_add(1)
             } else {
                 rescan_at
             };
@@ -5118,22 +5196,26 @@ impl DirectionStream {
             // one, this reader cannot recover the framing of those bytes, so
             // it drops them — bounded memory, and the skip stays visible in
             // the accounting because `skipped` is measured off `consumed`.
-            if cursor > RESYNC_SCAN_WINDOW {
-                let drop = cursor - RESYNC_SCAN_WINDOW;
+            // Nothing is dropped while the cursor is within the window.
+            let drop = cursor.saturating_sub(RESYNC_SCAN_WINDOW);
+            if drop > 0 {
                 self.buf.drain(..drop);
-                self.consumed += drop;
-                let state = self.desync.as_mut().expect("state was Some");
-                state.scan_cursor -= drop;
-                state.rescan_at = state.rescan_at.saturating_sub(drop);
+                self.consumed = self.consumed.saturating_add(drop);
+            }
+            if let Some(state) = self.desync.as_mut() {
+                state.scan_cursor = cursor.saturating_sub(drop);
+                state.rescan_at = rescan_at.saturating_sub(drop);
             }
             return None;
         };
         self.buf.drain(..offset);
-        self.consumed += offset;
+        self.consumed = self.consumed.saturating_add(offset);
         self.desync = None;
-        self.accounting.recoveries += 1;
-        let skipped = self.consumed - state.at_offset;
-        self.accounting.skipped_bytes += skipped as u64;
+        self.accounting.recoveries = self.accounting.recoveries.saturating_add(1);
+        // The desynchronisation was judged at or before what is consumed now.
+        let skipped = self.consumed.saturating_sub(state.at_offset);
+        self.accounting.skipped_bytes =
+            self.accounting.skipped_bytes.saturating_add(skipped as u64);
         Some((
             StreamResync {
                 desync_offset: state.at_offset,

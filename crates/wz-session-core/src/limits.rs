@@ -831,9 +831,11 @@ mod enforcement {
     fn queries(rids: core::ops::Range<u32>) -> crate::driver_loop::DriverLoopOutcome {
         let messages = rids
             .map(|rid| {
-                let request =
-                    crate::request_build::build_request_query(rid, 0, Some("bound/reply"))
-                        .expect("a literal key builds");
+                let request = crate::request_build::build_request_query(
+                    rid,
+                    crate::wire_key::WireKey::literal("bound/reply").expect("a literal key"),
+                )
+                .expect("a literal key builds");
                 crate::network_message::NetworkMessage::Request(std::boxed::Box::new(request))
             })
             .collect();
@@ -1635,8 +1637,10 @@ mod enforcement {
         let messages = asked
             .iter()
             .map(|&(rid, parameters, attachment)| {
-                let mut builder =
-                    crate::request_build::RequestQueryBuilder::new(rid, 0, Some("bound/reply"));
+                let mut builder = crate::request_build::RequestQueryBuilder::new(
+                    rid,
+                    crate::wire_key::WireKey::literal("bound/reply").expect("a literal key"),
+                );
                 if let Some(parameters) = parameters {
                     builder = builder.parameters(parameters);
                 }

@@ -76,7 +76,8 @@ pub struct PlainPut {
 fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
     if let Some(&byte) = buf.get(*at) {
         if byte & 0x80 == 0 {
-            *at += 1;
+            // A byte was read at `*at`, so one past it is within the buffer's length.
+            *at = at.saturating_add(1);
             return Some(u64::from(byte));
         }
     }
@@ -87,18 +88,19 @@ fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
 #[inline(never)]
 fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     let mut value: u64 = 0;
+    // Seven times the step, so at most 56: every shift is below the width of a `u64`.
     let mut shift: u32 = 0;
     for step in 0..9 {
         let byte = *buf.get(*at)?;
-        *at += 1;
+        *at = at.saturating_add(1);
         if step == 8 {
-            return Some(value | (u64::from(byte) << shift));
+            return Some(value | u64::from(byte).wrapping_shl(shift));
         }
-        value |= u64::from(byte & 0x7f) << shift;
+        value |= u64::from(byte & 0x7f).wrapping_shl(shift);
         if byte & 0x80 == 0 {
             return Some(value);
         }
-        shift += 7;
+        shift = shift.saturating_add(7);
     }
     None
 }
@@ -113,21 +115,21 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
 #[inline(always)]
 fn vle_expr_id(buf: &[u8], at: &mut usize) -> Option<crate::wire_id::ExprId> {
     let mut value: crate::wire_id::ExprId = 0;
-    for step in 0..3u32 {
+    // The first two bytes carry seven bits each, the third the two top bits of the sixteen.
+    for shift in [0u32, 7] {
         let byte = *buf.get(*at)?;
-        *at += 1;
-        if step == 2 {
-            if byte > 0x03 {
-                return None;
-            }
-            return Some(value | (crate::wire_id::ExprId::from(byte) << 14));
-        }
-        value |= crate::wire_id::ExprId::from(byte & 0x7f) << (7 * step);
+        *at = at.saturating_add(1);
+        value |= crate::wire_id::ExprId::from(byte & 0x7f).wrapping_shl(shift);
         if byte & 0x80 == 0 {
             return Some(value);
         }
     }
-    None
+    let byte = *buf.get(*at)?;
+    *at = at.saturating_add(1);
+    if byte > 0x03 {
+        return None;
+    }
+    Some(value | crate::wire_id::ExprId::from(byte).wrapping_shl(14))
 }
 
 /// Read the plain `Put` that starts at `buf[at]`, and where it ends, or `None` when what
@@ -171,7 +173,8 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     let mut same_suffix = false;
     let mut cursor = at;
     let header = *buf.get(cursor)?;
-    cursor += 1;
+    // Each step past a byte that was read stays within the buffer's length.
+    cursor = cursor.saturating_add(1);
     if header & 0x1f != PUSH_MID {
         return None;
     }
@@ -196,7 +199,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
         if *buf.get(cursor)? != QOS_EXT_HEADER {
             return None;
         }
-        cursor += 1;
+        cursor = cursor.saturating_add(1);
         let value = vle(buf, &mut cursor)?;
         // The QoS byte is the low byte of the extension's value, as `extract_qos` reads it.
         Some(value as u8)
@@ -206,7 +209,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     if *buf.get(cursor)? != PLAIN_PUT_HEADER {
         return None;
     }
-    cursor += 1;
+    cursor = cursor.saturating_add(1);
     let prefix_end = cursor;
     let (end, payload) = read_payload(buf, cursor)?;
     Some(Read {
@@ -233,20 +236,20 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
 #[inline(always)]
 fn equal_short(a: &[u8], b: &[u8]) -> bool {
     debug_assert_eq!(a.len(), b.len());
-    let len = a.len();
-    let word = |s: &[u8], at: usize| u64::from_ne_bytes(s[at..at + 8].try_into().unwrap());
-    let half = |s: &[u8], at: usize| u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
-    match len {
+    // Each arm reads only widths its lengths admit, so no read below is `None`.
+    let head4 = |s: &[u8]| s.first_chunk::<4>().map(|w| u32::from_ne_bytes(*w));
+    let tail4 = |s: &[u8]| s.last_chunk::<4>().map(|w| u32::from_ne_bytes(*w));
+    let head8 = |s: &[u8]| s.first_chunk::<8>().map(|w| u64::from_ne_bytes(*w));
+    let tail8 = |s: &[u8]| s.last_chunk::<8>().map(|w| u64::from_ne_bytes(*w));
+    let head16 = |s: &[u8]| s.first_chunk::<16>().map(|w| u128::from_ne_bytes(*w));
+    let tail16 = |s: &[u8]| s.last_chunk::<16>().map(|w| u128::from_ne_bytes(*w));
+    match a.len() {
         0 => true,
-        1..=3 => a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1],
-        4..=7 => half(a, 0) == half(b, 0) && half(a, len - 4) == half(b, len - 4),
-        8..=16 => word(a, 0) == word(b, 0) && word(a, len - 8) == word(b, len - 8),
-        17..=32 => {
-            word(a, 0) == word(b, 0)
-                && word(a, 8) == word(b, 8)
-                && word(a, len - 16) == word(b, len - 16)
-                && word(a, len - 8) == word(b, len - 8)
-        }
+        // The first, the second (none for one byte) and the last: every byte of three.
+        1..=3 => a.first() == b.first() && a.get(1) == b.get(1) && a.last() == b.last(),
+        4..=7 => head4(a) == head4(b) && tail4(a) == tail4(b),
+        8..=16 => head8(a) == head8(b) && tail8(a) == tail8(b),
+        17..=32 => head16(a) == head16(b) && tail16(a) == tail16(b),
         _ => a == b,
     }
 }
@@ -283,15 +286,24 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
         // the reading of those bytes is a function of the bytes alone. What is left to read
         // is the payload's length.
         if let Some((last, start, prefix_len)) = before {
-            let same_prefix = at
+            let prefix_end = at.checked_add(prefix_len);
+            let now = prefix_end.and_then(|to| buf.get(at..to));
+            let then = start
                 .checked_add(prefix_len)
-                .and_then(|to| buf.get(at..to))
-                .is_some_and(|now| equal_short(now, &buf[start..start + prefix_len]));
-            if same_prefix {
-                let (end, payload) = read_payload(buf, at + prefix_len)?;
+                .and_then(|to| buf.get(start..to));
+            let same_prefix = match (prefix_end, now, then) {
+                (Some(prefix_end), Some(now), Some(then)) if equal_short(now, then) => {
+                    Some(prefix_end)
+                }
+                _ => None,
+            };
+            if let Some(prefix_end) = same_prefix {
+                let (end, payload) = read_payload(buf, prefix_end)?;
                 // The suffix lies at the same distance from the start of the record.
                 let moved = |range: (u32, u32)| {
-                    let to_at = |position: u32| u32::try_from(position as usize - start + at).ok();
+                    let to_at = |position: u32| {
+                        u32::try_from((position as usize).checked_sub(start)?.checked_add(at)?).ok()
+                    };
                     Some((to_at(range.0)?, to_at(range.1)?))
                 };
                 let suffix = match last.suffix {
@@ -306,7 +318,7 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
                 };
                 previous = put
                     .suffix
-                    .map(|(from, to)| &buf[from as usize..to as usize])
+                    .and_then(|(from, to)| buf.get(from as usize..to as usize))
                     .or(previous);
                 before = Some((put, at, prefix_len));
                 puts.push(put);
@@ -327,15 +339,17 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
                     _ => false,
                 }
         });
-        before = Some((put, at, read.prefix_end - at));
+        // A record read at `at` ends, and its prefix ends, at or past `at`.
+        before = Some((put, at, read.prefix_end.saturating_sub(at)));
         previous = put
             .suffix
-            .map(|(from, to)| &buf[from as usize..to as usize])
+            .and_then(|(from, to)| buf.get(from as usize..to as usize))
             .or(previous);
         if puts.capacity() == 0 {
             // Records of the size the first one is: its bytes, and the header around them.
-            let width = (read.end - at).max(1);
-            puts.reserve_exact((buf.len() / width).clamp(1, 4096));
+            let width = read.end.saturating_sub(at).max(1);
+            let records = buf.len().checked_div(width).unwrap_or(1);
+            puts.reserve_exact(records.clamp(1, 4096));
         }
         puts.push(put);
         at = read.end;

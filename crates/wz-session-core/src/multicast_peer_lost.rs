@@ -55,7 +55,9 @@ impl MulticastPeerId {
     pub fn from_wire(zid: &[u8]) -> Self {
         let mut bytes = [0u8; OBSERVER_ZID_MAX];
         let len = core::cmp::min(zid.len(), OBSERVER_ZID_MAX);
-        bytes[..len].copy_from_slice(&zid[..len]);
+        for (into, byte) in bytes.iter_mut().zip(zid) {
+            *into = *byte;
+        }
         Self {
             bytes,
             len: len as u8,
@@ -64,7 +66,9 @@ impl MulticastPeerId {
 
     /// The zid bytes as they appeared on the wire.
     pub fn as_slice(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
+        self.bytes
+            .get(..usize::from(self.len))
+            .unwrap_or(&self.bytes)
     }
 }
 
