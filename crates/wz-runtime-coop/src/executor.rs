@@ -528,6 +528,11 @@ enum Cells {
 }
 
 /// The task pool of a runtime: a view of its table that spawns into it and polls it.
+/// Gives a cell the bytes a task needs: the cell, the bytes and their alignment, and the place it
+/// was given, or `None` when no allocation can hold them.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+type FitCell = fn(&TaskCell, usize, usize) -> Option<*mut u8>;
+
 pub struct ExecutorState {
     cells: Cells,
     /// The bytes of every cell of a fixed table (a `static` one or one reserved); `None` for a
@@ -536,7 +541,7 @@ pub struct ExecutorState {
     /// Bytes for a task in a cell with none or too few, for a table that takes memory after it is
     /// made (grown, or reserved while its open lasts); `None` for a fixed one.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fit: Option<fn(&TaskCell, usize, usize) -> Option<*mut u8>>,
+    fit: Option<FitCell>,
     /// What a grown table does that no other does; `None` for every other.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     grower: Option<Grower>,
