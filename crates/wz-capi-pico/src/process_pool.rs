@@ -177,43 +177,83 @@ impl Bounds {
     }
 }
 
+/// `?` for the planning functions, which are `const` so that the build's plan is worked out
+/// when the library is compiled ([`BUILT_PLAN`]) and `?` is not.
+macro_rules! planned {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(unplanned) => return Err(unplanned),
+        }
+    };
+}
+
+/// `each` of an entity for every one of `sessions` sessions.
+const fn per_session(each: usize, sessions: usize) -> Result<usize, Unplanned> {
+    match each.checked_mul(sessions) {
+        Some(all) => Ok(all),
+        None => Err(Unplanned::TooLarge),
+    }
+}
+
+/// How many of an entity the pools hold for `sessions` sessions: `stated` held to `bound`, the
+/// bound itself for a count left at zero. A build without the plane (`has` false) holds none,
+/// whatever its limit says.
+const fn bounded(
+    has: bool,
+    sessions: usize,
+    stated: usize,
+    bound: Option<usize>,
+) -> Result<usize, Unplanned> {
+    if !has || sessions == 0 {
+        return Ok(0);
+    }
+    let each = match (stated, bound) {
+        (0, Some(bound)) => bound,
+        (0, None) => return Err(Unplanned::Unbounded),
+        (stated, Some(bound)) => {
+            if stated < bound {
+                stated
+            } else {
+                bound
+            }
+        }
+        (stated, None) => stated,
+    };
+    per_session(each, sessions)
+}
+
 /// The objects the pools hold, for all sessions together: each count read against the bounds of
 /// the limits of a session, the entity counts times the sessions.
-pub(crate) fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplanned> {
+pub(crate) const fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplanned> {
     let sessions = stated.sessions;
-    let per_session = |each: usize| each.checked_mul(sessions).ok_or(Unplanned::TooLarge);
-    // A build without the plane holds none of its entities, whatever its limit says.
-    let bounded = |has: bool, stated: usize, bound: Option<usize>| {
-        if !has || sessions == 0 {
-            return Ok(0);
-        }
-        let each = match (stated, bound) {
-            (0, Some(bound)) => bound,
-            (0, None) => return Err(Unplanned::Unbounded),
-            (stated, Some(bound)) => stated.min(bound),
-            (stated, None) => stated,
-        };
-        per_session(each)
-    };
     Ok(Counts {
         sessions,
-        publishers: per_session(stated.publishers)?,
-        subscribers: bounded(true, stated.subscribers, bounds.subscribers)?,
-        queryables: bounded(
+        publishers: planned!(per_session(stated.publishers, sessions)),
+        subscribers: planned!(bounded(
+            true,
+            sessions,
+            stated.subscribers,
+            bounds.subscribers
+        )),
+        queryables: planned!(bounded(
             cfg!(feature = "queryable"),
+            sessions,
             stated.queryables,
             bounds.queryables,
-        )?,
-        liveliness_tokens: bounded(
+        )),
+        liveliness_tokens: planned!(bounded(
             cfg!(feature = "liveliness"),
+            sessions,
             stated.liveliness_tokens,
             bounds.liveliness_tokens,
-        )?,
-        liveliness_subscribers: bounded(
+        )),
+        liveliness_subscribers: planned!(bounded(
             cfg!(feature = "liveliness"),
+            sessions,
             stated.liveliness_subscribers,
             bounds.liveliness_subscribers,
-        )?,
+        )),
         samples: stated.samples,
         replies: stated.replies,
         queries: stated.queries,
@@ -242,66 +282,93 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// The pools `objects` make: one per kind, each slot of the size of that kind's object.
-    pub(crate) fn of(objects: &Counts) -> Result<Self, Unplanned> {
+    pub(crate) const fn of(objects: &Counts) -> Result<Self, Unplanned> {
         let mut plan = Self {
             slots: [0; KINDS],
             sizes: [0; KINDS],
-            area: Blocks::area_of(objects.payload_bytes)?,
+            area: planned!(Blocks::area_of(objects.payload_bytes)),
         };
         // A session of the cooperative engine lies in its own arena; its pool is the program's to
         // reserve where the doors are.
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
-        plan.add::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
-        plan.add::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
-        plan.add::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
+        {
+            plan = plan.with::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
+        }
+        plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
+        plan = plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
         #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+        {
+            plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
+        }
         #[cfg(feature = "liveliness")]
-        plan.add::<crate::liveliness::TokenState>(Kind::LivelinessToken, objects.liveliness_tokens);
-        #[cfg(feature = "liveliness")]
-        plan.add::<crate::pubsub::SubscriberState>(
-            Kind::LivelinessSubscriber,
-            objects.liveliness_subscribers,
-        );
-        plan.add::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
+        {
+            plan = plan.with::<crate::liveliness::TokenState>(
+                Kind::LivelinessToken,
+                objects.liveliness_tokens,
+            );
+            plan = plan.with::<crate::pubsub::SubscriberState>(
+                Kind::LivelinessSubscriber,
+                objects.liveliness_subscribers,
+            );
+        }
+        plan = plan.with::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
         #[cfg(feature = "query")]
-        plan.add::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
+        {
+            plan = plan.with::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
+        }
         #[cfg(feature = "queryable")]
-        plan.add::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
-        plan.add::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
-        plan.add::<crate::config::ConfigState>(Kind::Config, objects.configs);
+        {
+            plan = plan.with::<crate::query::QueryMarshal>(Kind::Query, objects.queries);
+        }
+        plan = plan.with::<crate::bytes::ByteBuf>(Kind::Bytes, objects.bytes);
+        plan = plan.with::<crate::config::ConfigState>(Kind::Config, objects.configs);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
-        plan.add::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
-        if plan.slots.iter().all(|&slots| slots == 0) && plan.area == 0 {
+        {
+            plan = plan.with::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
+        }
+        let mut kind = 0;
+        let mut holds = plan.area != 0;
+        while kind < KINDS {
+            holds |= plan.slots[kind] != 0;
+            kind += 1;
+        }
+        if !holds {
             return Err(Unplanned::Empty);
         }
-        plan.bytes()?;
+        planned!(plan.bytes());
         Ok(plan)
     }
 
-    /// The pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
-    fn add<T>(&mut self, kind: Kind, count: usize) {
+    /// This plan with the pool of `kind`: `count` slots, each of the bytes a slot for a `T` takes.
+    const fn with<T>(mut self, kind: Kind, count: usize) -> Self {
         self.slots[kind as usize] = count;
         self.sizes[kind as usize] = const { slot_size::<T>() };
+        self
     }
 
     /// The bytes every pool's slots take together.
-    fn slot_bytes(&self) -> Result<usize, Unplanned> {
+    const fn slot_bytes(&self) -> Result<usize, Unplanned> {
         let mut total: usize = 0;
-        for (&slots, &size) in self.slots.iter().zip(self.sizes.iter()) {
-            total = slots
-                .checked_mul(size)
-                .and_then(|bytes| total.checked_add(bytes))
-                .ok_or(Unplanned::TooLarge)?;
+        let mut kind = 0;
+        while kind < KINDS {
+            total = match self.slots[kind].checked_mul(self.sizes[kind]) {
+                Some(bytes) => match total.checked_add(bytes) {
+                    Some(total) => total,
+                    None => return Err(Unplanned::TooLarge),
+                },
+                None => return Err(Unplanned::TooLarge),
+            };
+            kind += 1;
         }
         Ok(total)
     }
 
     /// The bytes the pools take together: the slots, then the payloads' area and its marks.
-    pub(crate) fn bytes(&self) -> Result<usize, Unplanned> {
-        self.slot_bytes()?
-            .checked_add(self.area + Blocks::marks_bytes(self.area))
-            .ok_or(Unplanned::TooLarge)
+    pub(crate) const fn bytes(&self) -> Result<usize, Unplanned> {
+        match planned!(self.slot_bytes()).checked_add(self.area + Blocks::marks_bytes(self.area)) {
+            Some(bytes) => Ok(bytes),
+            None => Err(Unplanned::TooLarge),
+        }
     }
 }
 
@@ -422,7 +489,7 @@ struct Blocks {
 impl Blocks {
     /// The bytes of an area for `bytes` of payload: the multiple of `MIN_BLOCK` at or under it,
     /// refused past the largest block's offset an area can name.
-    fn area_of(bytes: usize) -> Result<usize, Unplanned> {
+    const fn area_of(bytes: usize) -> Result<usize, Unplanned> {
         let area = bytes - bytes % MIN_BLOCK;
         if area > block_bytes(ORDERS - 1) {
             return Err(Unplanned::TooLarge);
@@ -749,7 +816,7 @@ fn take_slot(kind: Kind, size: usize) -> Option<NonNull<u8>> {
 /// as the limits the library opens a session under admit within the build's value of the limit,
 /// and the held values' own limits. Refused only by a build whose counts are past the address
 /// space.
-fn built_counts() -> Result<Counts, Unplanned> {
+const fn built_counts() -> Result<Counts, Unplanned> {
     let limits = session_limits();
     let bounds = Bounds {
         subscribers: each::<{ caps::MAX_SUBSCRIPTIONS }>(limits.max_subscriptions()),
@@ -761,7 +828,10 @@ fn built_counts() -> Result<Counts, Unplanned> {
     };
     let built = Counts {
         sessions: caps::HELD_SESSIONS,
-        publishers: each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()).unwrap_or(0),
+        publishers: match each::<{ caps::MAX_PUBLISHERS }>(limits.max_publishers()) {
+            Some(publishers) => publishers,
+            None => 0,
+        },
         // Each of these at the bound of its limit, which a count left at zero takes.
         subscribers: 0,
         queryables: 0,
@@ -781,8 +851,11 @@ fn built_counts() -> Result<Counts, Unplanned> {
 /// How many of an entity one session holds: `value`, the limit the library opens a session under,
 /// within `CEILING`, the build's value of it, which sizes the pool; `None` where the limit holds no
 /// bound.
-fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
-    value.lent_under(Quota::at_most(CEILING)).ok()
+const fn each<const CEILING: usize>(value: Quota) -> Option<usize> {
+    match value.lent_under(Quota::at_most(CEILING)) {
+        Ok(each) => Some(each),
+        Err(_) => None,
+    }
 }
 
 /// The pools of `plan` from the heap in one allocation, or `None` when the heap has not the
@@ -796,11 +869,21 @@ fn reserve_from_heap(plan: &Plan) -> Option<Pools> {
     Some(unsafe { Pools::over(base, plan, Origin::Heap(layout)) })
 }
 
-/// The build's pools ([`built_counts`]): what the first object a program makes reserves when it
+/// The plan of the build's pools ([`built_counts`]), worked out when the library is compiled: the
+/// counts are the build's constants and the limits it opens sessions under, so nothing of it is
+/// left to the first object a program makes.
+const BUILT_PLAN: Result<Plan, Unplanned> = match built_counts() {
+    Ok(objects) => Plan::of(&objects),
+    Err(unplanned) => Err(unplanned),
+};
+
+/// The build's pools ([`BUILT_PLAN`]): what the first object a program makes reserves when it
 /// reserved none. `None` when the counts make no pool or the heap has not the memory.
 fn reserve_built() -> Option<Pools> {
-    let plan = built_counts().and_then(|objects| Plan::of(&objects)).ok()?;
-    reserve_from_heap(&plan)
+    match BUILT_PLAN {
+        Ok(plan) => reserve_from_heap(&plan),
+        Err(_) => None,
+    }
 }
 
 /// Whether `place` lies in the pools reserved now.
@@ -871,7 +954,7 @@ pub(crate) unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
 }
 
 /// The limits every session of this ABI opens under: the snapshot `z_open` hands its engine.
-fn session_limits() -> SessionLimits {
+const fn session_limits() -> SessionLimits {
     SessionLimits::defaults()
 }
 
@@ -1320,6 +1403,17 @@ mod tests {
         assert!(pools.give_back(first));
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
+    }
+
+    /// The plan the library was compiled with is the one the build's counts make when worked out
+    /// as a program runs: making the planning `const` changed where it is evaluated, not what.
+    #[test]
+    fn the_plan_worked_out_when_compiled_is_the_one_the_counts_make() {
+        assert_eq!(
+            BUILT_PLAN,
+            built_counts().and_then(|objects| Plan::of(&objects))
+        );
+        assert!(BUILT_PLAN.is_ok(), "the build's counts make pools");
     }
 
     /// The build's counts: its sessions, each holding as many of each entity as the session's
