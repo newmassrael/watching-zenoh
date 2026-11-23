@@ -1651,13 +1651,13 @@ pub(crate) struct RoundDelivery {
 impl RoundDelivery {
     /// Deliveries into `round`.
     #[cfg(not(feature = "queryable"))]
-    pub(crate) fn new(round: Arc<Round>) -> Self {
+    fn new(round: Arc<Round>) -> Self {
         Self { round }
     }
 
-    /// Deliveries into `round`, and queries into `plane`.
+    /// Deliveries into `round`, and queries into `plane`, which only the engine reaches.
     #[cfg(feature = "queryable")]
-    pub(crate) fn new(round: Arc<Round>, plane: Arc<QueryPlane>) -> Self {
+    fn new(round: Arc<Round>, plane: Arc<QueryPlane>) -> Self {
         Self { round, plane }
     }
 }
