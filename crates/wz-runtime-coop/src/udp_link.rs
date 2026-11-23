@@ -451,7 +451,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             let Some((len, from)) = self.socket.try_recv(buf)? else {
                 return Ok(None);
             };
-            if self.admit(from, &buf[..len]) {
+            if self.admit(from, datagram_of(buf, len)) {
                 return Ok(Some(len));
             }
         }
@@ -499,7 +499,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         let bytes: &mut [u8] = buf.as_mut();
         match self.socket.recv_waiting(bytes) {
             Ok(Some((len, from))) => {
-                if self.admit(from, &bytes[..len]) {
+                if self.admit(from, datagram_of(bytes, len)) {
                     self.stash.set(Some(len));
                 }
             }
@@ -644,7 +644,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         // when the deadline moves to another power of two: a link whose deadlines are seconds
         // away arms once, and the approach to a deadline costs one wake per halving, not one per
         // tick.
-        let armed = 1u64 << (u64::BITS - 1 - want.leading_zeros());
+        let armed = power_of_two_within(want);
         // `idle_wait_ms` is at most half of `c_int`'s range, so the power of two is inside it.
         if !self.arm(armed as c_int) {
             self.service();
@@ -658,10 +658,10 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
         if let Some(len) = self.kept.take() {
-            return Some(RxFrame::new(bytes[..len].to_vec()));
+            return Some(RxFrame::new(datagram_of(bytes, len).to_vec()));
         }
         match self.next_admitted(bytes) {
-            Ok(Some(len)) => Some(RxFrame::new(bytes[..len].to_vec())),
+            Ok(Some(len)) => Some(RxFrame::new(datagram_of(bytes, len).to_vec())),
             Ok(None) => None,
             Err(e) => {
                 self.rx_error.set(Some(e));
@@ -719,7 +719,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
             },
         };
         self.keeping.set(false);
-        f(&bytes[..len]);
+        f(datagram_of(bytes, len));
         if self.keeping.replace(false) {
             self.kept.set(Some(len));
         }
@@ -826,7 +826,7 @@ impl<S: DatagramSocket> UdpPort<S> {
             return Ok(());
         };
         while let Some((len, from)) = self.socket.try_recv(&mut buf)? {
-            self.sort(from, &buf[..len]);
+            self.sort(from, datagram_of(&buf, len));
         }
         Ok(())
     }
@@ -959,7 +959,9 @@ impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
         if let Some(datagram) = self.port.take_for(self.peer) {
             // Cut to the buffer, as the stack cuts a datagram longer than the read.
             let len = datagram.len().min(buf.len());
-            buf[..len].copy_from_slice(&datagram[..len]);
+            if let (Some(to), Some(from)) = (buf.get_mut(..len), datagram.get(..len)) {
+                to.copy_from_slice(from);
+            }
             return Ok(Some((len, self.peer)));
         }
         pumped.map(|()| None).map_err(PortPeerError::Socket)
@@ -1079,6 +1081,18 @@ impl<S: DatagramSocket + 'static> SlotStack for UdpStack<S> {
     }
 }
 
+/// The first `len` bytes of `buf`, as a socket reports a datagram it read into it: a length past
+/// the buffer reads as the whole buffer, as the stack cuts a datagram longer than the read.
+fn datagram_of(buf: &[u8], len: usize) -> &[u8] {
+    buf.get(..len).unwrap_or(buf)
+}
+
+/// The largest power of two not above `want`, and `1` for `0`: a wait armed at it never ends
+/// after the deadline it was computed from.
+fn power_of_two_within(want: u64) -> u64 {
+    want.checked_ilog2().map_or(1, |exp| 1 << exp)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -1086,6 +1100,24 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::vec::Vec;
+
+    /// A datagram is the bytes the socket reported, cut to the buffer it was read into.
+    #[test]
+    fn a_datagram_is_cut_to_the_buffer_it_was_read_into() {
+        assert_eq!(datagram_of(&[1, 2, 3], 2), &[1, 2][..]);
+        assert_eq!(datagram_of(&[1, 2, 3], 3), &[1, 2, 3][..]);
+        assert_eq!(datagram_of(&[1, 2, 3], 5), &[1, 2, 3][..]);
+    }
+
+    /// A wait is armed at the largest power of two not above it, and at `1` for none.
+    #[test]
+    fn a_wait_is_armed_at_the_largest_power_of_two_within_it() {
+        assert_eq!(power_of_two_within(0), 1);
+        assert_eq!(power_of_two_within(1), 1);
+        assert_eq!(power_of_two_within(5), 4);
+        assert_eq!(power_of_two_within(1024), 1024);
+        assert_eq!(power_of_two_within(u64::MAX), 1 << 63);
+    }
 
     /// The text a link names its ends by is zenoh's locator, the `Display` of the address behind
     /// the scheme, on either family; the longest IPv6 one still fits the default bound.

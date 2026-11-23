@@ -183,11 +183,15 @@ def table_findings(table: dict | None, case_ids: list[str]) -> list[str]:
     return out
 
 
-def grade_ceiling(case_id: str, row: dict, reading: dict,
-                  remeasure: str = "") -> tuple[list[str], list[str]]:
+def grade_ceiling(case_id: str, row: dict, reading: dict, remeasure: str = "",
+                  table: pathlib.Path = HOST_CEILING,
+                  win_closes_debt: bool = True) -> tuple[list[str], list[str]]:
     """The findings and the notes for one case's reading against its well-formed row. Pure, so
     the selftest can drive it. `remeasure` is the command of the lane that measures the case,
-    which an unfilled row names as the one that prints the row again."""
+    which an unfilled row names as the one that prints the row again. `table` is the file the
+    row is in, which an unfilled row's finding names. `win_closes_debt` says whether a reading
+    that reaches WIN closes the row's debt: a case's does, while an area of the size ledger
+    (`size_ledger_gate.py`) is one part of its case's debt and closes nothing alone."""
     wz_text, pico_text = reading["wz_text"], reading["pico_text"]
     ratio = wz_text / pico_text
     verdict = verdict_size(wz_text, pico_text)
@@ -201,7 +205,7 @@ def grade_ceiling(case_id: str, row: dict, reading: dict,
     debt = row.get("debt")
     at_most = row["ratio_at_most"]
     if at_most is None:
-        return [f"{said}. Its row in {HOST_CEILING.relative_to(ROOT)} states no ratio_at_most, so "
+        return [f"{said}. Its row in {table.relative_to(ROOT)} states no ratio_at_most, so "
                 f"the case is held to nothing. Fill it from the host that grades it: paste "
                 f"{format_row(case_id, ceiling_row(reading, debt))} over the row, with `debt` the "
                 f"store inventory entry (`debt-<id>`) the case is registered under (D5)"
@@ -213,9 +217,9 @@ def grade_ceiling(case_id: str, row: dict, reading: dict,
                         f"WIN is an open-debt item, paid largest ratio first (D5), and its row "
                         f"says which (`debt-<id>`, an entry of the store's inventory)")
     if verdict == "WIN":
+        closing = f" and close {debt}" if win_closes_debt else ""
         findings.append(f"{said}. A case that reached WIN is locked at WIN from now on: replace its "
-                        f"row with {format_row(case_id, ceiling_row(reading, debt))} and close "
-                        f"{debt}")
+                        f"row with {format_row(case_id, ceiling_row(reading, debt))}{closing}")
         return findings, notes
     limit = at_most * (1 + RATIO_TOLERANCE)
     if ratio > limit:

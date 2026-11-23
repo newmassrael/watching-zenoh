@@ -97,7 +97,7 @@ mod host_std {
                 let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
                 HELD.with(|held| *held.borrow_mut() = Some(guard));
             }
-            DEPTH.with(|depth| depth.set(depth.get() + 1));
+            DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
             Self
         }
     }
@@ -105,8 +105,9 @@ mod host_std {
     impl Drop for Section {
         #[inline(never)]
         fn drop(&mut self) {
+            // A section is made only by `enter`, so the count is at least one here.
             let depth = DEPTH.with(|depth| {
-                depth.set(depth.get() - 1);
+                depth.set(depth.get().saturating_sub(1));
                 depth.get()
             });
             if depth == 0 {
@@ -255,7 +256,10 @@ mod host_sys {
                 LOCK.lock();
                 OWNER.store(me, Ordering::Relaxed);
             }
-            DEPTH.store(DEPTH.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            DEPTH.store(
+                DEPTH.load(Ordering::Relaxed).saturating_add(1),
+                Ordering::Relaxed,
+            );
             Self
         }
     }
@@ -263,7 +267,8 @@ mod host_sys {
     impl Drop for Section {
         #[inline(never)]
         fn drop(&mut self) {
-            let depth = DEPTH.load(Ordering::Relaxed) - 1;
+            // A section is made only by `enter`, so the count is at least one here.
+            let depth = DEPTH.load(Ordering::Relaxed).saturating_sub(1);
             DEPTH.store(depth, Ordering::Relaxed);
             if depth == 0 {
                 // The outermost section ends: the lock goes, its owner cleared first.

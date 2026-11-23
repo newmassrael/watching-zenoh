@@ -241,7 +241,7 @@ pub fn canonize_keyexpr_as<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
 ) -> Result<BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>, KeyexprCanonError> {
-    if exceeds_byte_bound::<P>(input) {
+    if exceeds_byte_bound::<P, { caps::MAX_KEYEXPR_BYTES }>(input) {
         return Err(KeyexprCanonError::ExceedsCapacity);
     }
     let mut out = BoundedString::default();
@@ -262,7 +262,7 @@ pub fn canonize_keyexpr_as<P: Storage>(
 /// written, so a caller that needs only the verdict (an outbound declaration's check) holds no
 /// buffer and allocates nothing on any profile.
 pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), KeyexprCanonError> {
-    if exceeds_byte_bound::<Profile>(input) {
+    if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
         return Err(KeyexprCanonError::ExceedsCapacity);
     }
     walk_canonical(
@@ -275,12 +275,11 @@ pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), Keyexpr
 
 /// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
 /// text with every run of `$*` written once, which is the longest the canonical form can be,
-/// past [`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES) on a policy that enforces it. Judged
-/// first, as a text too long for the output is refused whatever its chunks say.
-fn exceeds_byte_bound<P: Storage>(input: &str) -> bool {
-    P::ENFORCES_CAPACITY
-        && input.len() > caps::MAX_KEYEXPR_BYTES
-        && collapsed_len(input) > caps::MAX_KEYEXPR_BYTES
+/// past `CAPACITY`, the bytes the output's type holds
+/// ([`MAX_KEYEXPR_BYTES`](caps::MAX_KEYEXPR_BYTES)), on a policy that enforces it. Judged first,
+/// as a text too long for the output is refused whatever its chunks say.
+fn exceeds_byte_bound<P: Storage, const CAPACITY: usize>(input: &str) -> bool {
+    P::ENFORCES_CAPACITY && input.len() > CAPACITY && collapsed_len(input) > CAPACITY
 }
 
 /// The length of `input` with every run of consecutive `$*` tokens written as one, as

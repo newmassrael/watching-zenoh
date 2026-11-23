@@ -662,10 +662,13 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     /// Refused past the build's value. A build that states no value of it lends its lists no row,
     /// as their type holds none.
     pub fn decl_watcher_rows(limits: &crate::limits::SessionLimits) -> Result<usize, LendRefused> {
-        match limits
-            .max_decl_observers()
-            .lent_under(Quota::at_most(caps::MAX_DECL_OBSERVERS))
-        {
+        Self::watcher_rows_under::<{ caps::MAX_DECL_OBSERVERS }>(limits.max_decl_observers())
+    }
+
+    /// The rows `value` lends a declaration watcher list whose type holds `CEILING`, the build's
+    /// value of the limit: refused past it, none where the build states no value.
+    fn watcher_rows_under<const CEILING: usize>(value: Quota) -> Result<usize, LendRefused> {
+        match value.lent_under(Quota::at_most(CEILING)) {
             Ok(rows) => Ok(rows),
             Err(UnlentRows::OverCeiling { value, ceiling }) => Err(LendRefused::OverCeiling {
                 rows: value,

@@ -67,6 +67,7 @@ use wz_codecs::wire_const;
 use wz_runtime_core::Runtime;
 
 use crate::caps;
+use crate::limits::{MaxLocatorLenHeld, RuntimeLimits};
 use crate::link::LostCause;
 pub use crate::scout_initiator::{
     classify_ignored_scout_rx, hello_advances_window, ScoutRxIgnored,
@@ -329,13 +330,17 @@ impl HelloFacts for ScoutedHello {
     }
 }
 
-/// The bytes of locator text one row holds: each locator at most `MAX_LOCATOR_LEN`.
-const HELLO_LOCATOR_TEXT: usize = caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN;
+/// The locator text one row holds: `SCOUT_HELLO_LOCATORS` locators of the build's
+/// `MAX_LOCATOR_LEN` bytes each, the most any window's limits admit.
+type HelloLocatorText = [u8; caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN];
+
+/// The bytes of [`HelloLocatorText`].
+const HELLO_LOCATOR_TEXT: usize = core::mem::size_of::<HelloLocatorText>();
 
 /// One Hello as a window keeps it: what [`ScoutedHello`] carries, its locators in a text of the
 /// row's own, so a window records its Hellos in a table of a size the build fixes and decodes none
-/// onto the heap. A locator longer than `MAX_LOCATOR_LEN` bytes, or one past
-/// `SCOUT_HELLO_LOCATORS`, is skipped, never cut short, and counted.
+/// onto the heap. A locator longer than the `MAX_LOCATOR_LEN` the window's runtime limits state,
+/// or one past `SCOUT_HELLO_LOCATORS`, is skipped, never cut short, and counted.
 #[derive(Debug, Clone)]
 pub struct HelloRow {
     /// Protocol version byte, verbatim from the wire.
@@ -348,7 +353,7 @@ pub struct HelloRow {
     ends: [usize; caps::SCOUT_HELLO_LOCATORS],
     kept: usize,
     skipped: usize,
-    text: [u8; HELLO_LOCATOR_TEXT],
+    text: HelloLocatorText,
 }
 
 impl PartialEq for HelloRow {
@@ -389,9 +394,10 @@ impl HelloRow {
     }
 
     /// Decode one inbound scouting datagram into this row, in place, as [`decode_scouted_hello`]
-    /// decodes it, writing the locators into the row's text and nothing onto the heap: `false`
-    /// when it is no well-formed Hello naming a zid, the row then holding no Hello to read.
-    pub fn decode_into(&mut self, bytes: &[u8]) -> bool {
+    /// decodes it, writing the locators into the row's text and nothing onto the heap, each held
+    /// to `locator_len`, the `MAX_LOCATOR_LEN` of the window's runtime limits: `false` when it is
+    /// no well-formed Hello naming a zid, the row then holding no Hello to read.
+    pub fn decode_into(&mut self, bytes: &[u8], locator_len: MaxLocatorLenHeld) -> bool {
         let Ok(view) = ScoutingHelloView::decode(&mut SceCursor::new(bytes)) else {
             return false;
         };
@@ -402,7 +408,7 @@ impl HelloRow {
         self.reset(hello.version, WhatAmI::from_wire(hello.cbyte), zid);
         if let Some(locators) = hello.locators.as_ref() {
             for entry in locators.inner().iter() {
-                self.keep(entry.locator.inner());
+                self.keep(entry.locator.inner(), locator_len);
             }
         }
         true
@@ -418,14 +424,19 @@ impl HelloRow {
         self.skipped = source.skipped;
     }
 
-    /// `locator` kept after the others, or skipped and counted when the row has no row for it
-    /// or it is longer than `MAX_LOCATOR_LEN` bytes.
-    fn keep(&mut self, locator: &str) {
-        if self.kept == caps::SCOUT_HELLO_LOCATORS || locator.len() > caps::MAX_LOCATOR_LEN {
+    /// `locator` kept after the others, or skipped and counted when the row has no row for it,
+    /// it is longer than `locator_len` admits, or the row's text has no room for it (a build that
+    /// fixes `MAX_LOCATOR_LEN` leaves its bound to that room).
+    fn keep(&mut self, locator: &str, locator_len: MaxLocatorLenHeld) {
+        if self.kept == caps::SCOUT_HELLO_LOCATORS || !locator_len.admits(locator.len()) {
             self.skipped += 1;
             return;
         }
         let start = self.start_of(self.kept);
+        if locator.len() > HELLO_LOCATOR_TEXT - start {
+            self.skipped += 1;
+            return;
+        }
         let end = start + locator.len();
         self.text[start..end].copy_from_slice(locator.as_bytes());
         self.ends[self.kept] = end;
@@ -440,12 +451,14 @@ impl HelloRow {
         }
     }
 
-    /// The row of `hello`, its locators kept as a window keeps them.
+    /// The row of `hello`, its locators kept as a window whose runtime limits state no
+    /// `MAX_LOCATOR_LEN` keeps them.
     pub fn of(hello: &ScoutedHello) -> Self {
+        let locator_len = RuntimeLimits::BUILD.max_locator_len_held();
         let mut row = Self::EMPTY;
         row.reset(hello.version, hello.whatami, hello.zid);
         for locator in &hello.locators {
-            row.keep(locator);
+            row.keep(locator, locator_len);
         }
         row
     }
@@ -506,6 +519,9 @@ pub struct HelloTable {
     rows: [HelloRow; caps::MAX_SCOUT_HELLOS + 1],
     held: usize,
     refused: usize,
+    /// The longest locator a row keeps, `MAX_LOCATOR_LEN` as the creator's runtime limits state it
+    /// ([`Self::limit_to`]).
+    locator_len: MaxLocatorLenHeld,
 }
 
 impl Default for HelloTable {
@@ -515,13 +531,22 @@ impl Default for HelloTable {
 }
 
 impl HelloTable {
-    /// A table of no Hello, which a `static` can hold.
+    /// A table of no Hello, which a `static` can hold, keeping locators to the build's
+    /// `MAX_LOCATOR_LEN` until its creator states the runtime's ([`Self::limit_to`]).
     pub const fn new() -> Self {
         Self {
             rows: [HelloRow::EMPTY; caps::MAX_SCOUT_HELLOS + 1],
             held: 0,
             refused: 0,
+            locator_len: RuntimeLimits::BUILD.max_locator_len_held(),
         }
+    }
+
+    /// Holds the locators the rows keep from the next Hello on to `quota`, `MAX_LOCATOR_LEN` as
+    /// the creator's runtime limits state it: a longer one is skipped and counted with its Hello.
+    /// A window clears the table and keeps this.
+    pub fn limit_to(&mut self, quota: MaxLocatorLenHeld) {
+        self.locator_len = quota;
     }
 
     /// No Hello recorded and none refused, for the next window.
@@ -537,8 +562,10 @@ impl HelloTable {
 
     /// `bytes` decoded into the staged row: whether it is a Hello the window advances on.
     fn stage(&mut self, bytes: &[u8], exit_on_first: bool) -> bool {
+        let locator_len = self.locator_len;
         let row = self.staged();
-        row.decode_into(bytes) && hello_advances_window(exit_on_first, row.advertised_locators())
+        row.decode_into(bytes, locator_len)
+            && hello_advances_window(exit_on_first, row.advertised_locators())
     }
 
     /// The staged row recorded after the others, or counted when the rows are full.

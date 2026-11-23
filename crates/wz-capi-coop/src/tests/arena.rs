@@ -459,7 +459,7 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         row(&plan, "subscribers").entry_bytes,
-        SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+        SubscriberTable::<crate::engine::SubscriberRow, Lent>::ROW_BYTES
     );
     assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
     // A key of the static policy is its text and its length; a place is a few words.
@@ -1217,6 +1217,45 @@ fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
     let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
     let tokens = preset_of(&presets, "MAX_LOCAL_TOKENS").expect("the preset states it");
     assert!(declares > subscribers && declares > tokens);
+}
+
+/// The pico preset admits the liveliness subscribers zenoh-pico's own advanced subscriber example
+/// holds on one session: the one its history detects late publishers with and the one the program
+/// detects publishers with. Under the preset's value two are declared and asked for; the CONTROL
+/// is the third, which the table refuses, so the preset is the bound the session is held to.
+#[cfg(feature = "liveliness")]
+#[test]
+fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
+    use wz_capi_port::LivelinessSink;
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let presets = pico_preset();
+    let preset = preset_of(&presets, "MAX_LIVELINESS_SUBSCRIPTIONS").expect("the preset states it");
+    assert_eq!(preset, 2, "z_advanced_sub holds two at once");
+    let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(preset)));
+    let router = Router::start(CatchAll::None);
+    let engine = super::entity_tables::open_under(&router, limits);
+    let sink = || -> LivelinessSink {
+        Arc::new(|| {
+            Box::new(|_sample: LivelinessSample<'_>| {})
+                as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
+        })
+    };
+    let declare = |key: &str| {
+        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink())
+    };
+    assert!(
+        declare("demo/@adv/pub/**").is_some(),
+        "the history's late-publisher detection"
+    );
+    assert!(
+        declare("demo/**/@adv/pub/**").is_some(),
+        "the program's own publisher detection"
+    );
+    until(&engine, "the router to see both Interests", || {
+        router.seen(|s| s.interests) >= 2
+    });
+    assert_eq!(declare("demo/third"), None, "CONTROL: the third is refused");
 }
 
 /// The pico preset's delivery lane is the least lane the build accepts at the preset's other

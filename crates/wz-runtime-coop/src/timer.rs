@@ -215,7 +215,7 @@ impl TimerQueue {
             let mut due: [Option<Waker>; WAKE_BATCH] = [const { None }; WAKE_BATCH];
             let taken = crate::cs::with(|cs| {
                 self.with_slots(cs, |slots| {
-                    let mut taken = 0;
+                    let mut taken: usize = 0;
                     for place in due.iter_mut() {
                         let Some((index, _)) = earliest(slots, now_us) else {
                             break;
@@ -224,7 +224,7 @@ impl TimerQueue {
                             .get_mut(index)
                             .and_then(|slot| slot.0.take())
                             .map(|entry| entry.waker);
-                        taken += 1;
+                        taken = taken.saturating_add(1);
                     }
                     taken
                 })

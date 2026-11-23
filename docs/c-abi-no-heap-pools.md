@@ -834,7 +834,7 @@ its own either way, and the build still refuses a document that raises a value (
 | `MAX_SUBSCRIPTIONS` | 16 | 3 | the most subscribers pico's API tests hold on one session |
 | `MAX_QUERYABLES` | 16 | 4 | the most queryables pico's API tests hold on one session |
 | `MAX_LOCAL_TOKENS` | 8 | 2 | the most tokens pico's API tests hold on one session |
-| `MAX_LIVELINESS_SUBSCRIPTIONS` | 8 | 1 | one at a time, in pico's examples and API tests |
+| `MAX_LIVELINESS_SUBSCRIPTIONS` | 8 | 2 | `z_advanced_sub`: its history's late-publisher detection and its own publisher detection |
 | `MAX_PUBLISHERS` | 16 | 2 | the speed matrix's program, which holds two |
 | `MAX_QUERIERS` | 16 | 2 | pico's queryable API test, which holds two |
 | `MAX_MATCHING_LISTENERS` | 16 | 1 | one at a time, on the entity under test |

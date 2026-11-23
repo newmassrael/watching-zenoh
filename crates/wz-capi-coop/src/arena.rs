@@ -9,7 +9,8 @@
 //! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
 //! from the limits and the config the open was handed:
 //!
-//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), each
+//!   row the engine's whole record of a subscriber (`crate::engine::SubscriberRow`), with
 //!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
@@ -50,7 +51,7 @@
 //!   ends one), with the flags that say which are lent (`SessionArena::lend_reassembly`), lent
 //!   after the lane;
 //! - the engine's own record of each declaration it announces and announces again over a new
-//!   link ([`EntityRows`]): its subscribers, queryables, tokens and liveliness subscribers under
+//!   link ([`EntityRows`]): its queryables, tokens and liveliness subscribers under
 //!   the limits of the application's tables, the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
@@ -109,10 +110,9 @@ use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_RO
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::row_pool::MAX_POOL_ROWS;
-use wz_session_core::sink::BoxedSink;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::EntryBytes;
+use crate::engine::{EntryBytes, SubscriberRow};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -342,33 +342,33 @@ impl ArenaPlan {
             "PICO_UNICAST_BATCH_BYTES",
             links,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "link receive buffers",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             link_bytes,
-        );
+        )?;
         plan.put(
             "link transmit flags",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "link transmit slots",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             times(LINK_TX_SLOTS, link_bytes)?,
-        );
+        )?;
         // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
         plan.put(
             "delivery lane flag",
             "DELIVERY_LANE_BYTES",
             1,
             LentByteCells::FLAG_BYTES,
-        );
-        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes);
+        )?;
+        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes)?;
         // The session's reassembly buffers, which its links share, lent next
         // (`SessionArena::lend_reassembly`).
         plan.put(
@@ -376,19 +376,19 @@ impl ArenaPlan {
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "reassembly buffers",
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             plan.reassembly_bytes,
-        );
+        )?;
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
             lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
-            SubscriberTable::<BoxedSink, Lent>::ROW_BYTES,
-        );
+            SubscriberTable::<SubscriberRow, Lent>::ROW_BYTES,
+        )?;
         #[cfg(feature = "queryable")]
         plan.put(
             "queryables",
@@ -398,7 +398,7 @@ impl ArenaPlan {
                 wz_session_core::query_sink::BoxedQuerySink,
                 Lent,
             >::ROW_BYTES,
-        );
+        )?;
         #[cfg(feature = "liveliness")]
         {
             plan.put(
@@ -406,7 +406,7 @@ impl ArenaPlan {
                 "MAX_LOCAL_TOKENS",
                 lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?,
                 wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-            );
+            )?;
             plan.put(
                 "liveliness subscribers",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
@@ -418,7 +418,7 @@ impl ArenaPlan {
                     wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
                     Lent,
                 >::ROW_BYTES,
-            );
+            )?;
         }
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
@@ -432,7 +432,7 @@ impl ArenaPlan {
             1,
             SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(watchers)
                 .ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         plan.gets = GetTables {
             rows: RequesterRows {
                 queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
@@ -458,7 +458,7 @@ impl ArenaPlan {
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.tables,
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         plan.put(
@@ -466,7 +466,7 @@ impl ArenaPlan {
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
             core::mem::size_of::<u64>(),
-        );
+        )?;
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
         plan.peers = FacePeers {
@@ -479,25 +479,21 @@ impl ArenaPlan {
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
         if SHARES_ROWS {
             let pools = plan.peers.pools;
             for (part, kind, bytes) in [
-                ("peer alias pool", &POOL_LIMITS[0], pools.alias_bytes()),
-                (
-                    "peer declaration pools",
-                    &POOL_LIMITS[1],
-                    pools.decl_bytes(),
-                ),
+                ("peer alias pool", &ALIAS_LIMITS, pools.alias_bytes()),
+                ("peer declaration pools", &DECL_LIMITS, pools.decl_bytes()),
                 (
                     "peer interest pool",
-                    &POOL_LIMITS[2],
+                    &INTEREST_LIMITS,
                     pools.interest_bytes(),
                 ),
             ] {
-                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?)?;
             }
         }
         plan.held_queries = if cfg!(feature = "queryable") {
@@ -514,19 +510,13 @@ impl ArenaPlan {
     /// The rows of the engine's own record of the session's declarations ([`EntityRows`]).
     fn put_entities(&mut self) -> Result<(), ArenaRefused> {
         let rows = self.entities;
-        self.put(
-            "subscriber declarations",
-            "MAX_SUBSCRIPTIONS",
-            rows.subscribers,
-            EntryBytes::SUBSCRIBER,
-        );
         #[cfg(feature = "queryable")]
         self.put(
             "queryable declarations",
             "MAX_QUERYABLES",
             rows.queryables,
             EntryBytes::QUERYABLE,
-        );
+        )?;
         #[cfg(feature = "liveliness")]
         {
             self.put(
@@ -534,38 +524,38 @@ impl ArenaPlan {
                 "MAX_LOCAL_TOKENS",
                 rows.tokens,
                 EntryBytes::TOKEN,
-            );
+            )?;
             self.put(
                 "liveliness subscriber declarations",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
                 rows.liveliness_subscribers,
                 EntryBytes::LIVELINESS_SUBSCRIBER,
-            );
+            )?;
         }
         self.put(
             "key expressions",
             "MAX_DECLARED_KEYEXPRS",
             rows.keyexprs,
             EntryBytes::KEYEXPR,
-        );
+        )?;
         self.put(
             "write filters",
             "MAX_PUBLISHERS + MAX_QUERIERS",
             rows.filters().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::FILTER,
-        );
+        )?;
         self.put(
             "matching listeners",
             "MAX_MATCHING_LISTENERS",
             rows.matching_listeners,
             EntryBytes::MATCH,
-        );
+        )?;
         self.put(
             "interests",
             "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
             rows.interests().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::INTEREST,
-        );
+        )?;
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
         // each.
@@ -574,7 +564,7 @@ impl ArenaPlan {
             "KEY_ARENA_BYTES",
             1,
             KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         Ok(())
     }
 
@@ -614,15 +604,24 @@ impl ArenaPlan {
         self.held_queries
     }
 
-    /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
-    fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
-        self.rows[self.len] = ArenaRow {
+    /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`);
+    /// a row past them is refused as an arena past what the plan can lay out.
+    fn put(
+        &mut self,
+        part: &'static str,
+        basis: &'static str,
+        count: usize,
+        entry_bytes: usize,
+    ) -> Result<(), ArenaRefused> {
+        let row = self.rows.get_mut(self.len).ok_or(ArenaRefused::TooLarge)?;
+        *row = ArenaRow {
             part,
             basis,
             count,
             entry_bytes,
         };
-        self.len += 1;
+        self.len = self.len.saturating_add(1);
+        Ok(())
     }
 
     /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
@@ -638,8 +637,8 @@ impl ArenaPlan {
             return Ok(self);
         }
         self.handle_bytes = handle.size();
-        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES);
-        self.put("session handle", "", 1, handle.size());
+        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
+        self.put("session handle", "", 1, handle.size())?;
         self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(self)
     }
@@ -651,7 +650,7 @@ impl ArenaPlan {
 
     /// The rows, in the order they are lent.
     pub fn rows(&self) -> &[ArenaRow] {
-        &self.rows[..self.len]
+        self.rows.get(..self.len).unwrap_or(&[])
     }
 
     /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
@@ -756,64 +755,75 @@ fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, Arena
         // A build whose faces keep what their peers write inline lends no pool and no span.
         return Ok(PeerPoolRows::default());
     }
-    let mut rows = [0; POOL_LIMITS.len()];
-    for (kind, held) in POOL_LIMITS.iter().zip(&mut rows) {
-        let face = lent_under(kind.face, (kind.face_of)(limits), kind.face_ceiling)?;
-        let session = lent_under(
-            kind.session,
-            (kind.session_of)(limits),
-            kind.session_ceiling,
-        )?;
-        *held = kind_rows(faces, (kind.face, face), (kind.session, session))?;
-    }
-    let [aliases, remote_decls, interests] = rows;
     Ok(PeerPoolRows {
-        aliases,
-        remote_decls,
-        interests,
+        aliases: kind_rows(
+            faces,
+            limit_rows::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
+                ALIAS_LIMITS.face,
+                limits.max_peer_keyexpr_aliases(),
+            )?,
+            limit_rows::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
+                ALIAS_LIMITS.session,
+                limits.session_max_peer_keyexpr_aliases(),
+            )?,
+        )?,
+        remote_decls: kind_rows(
+            faces,
+            limit_rows::<{ caps::MAX_REMOTE_DECLS }>(DECL_LIMITS.face, limits.max_remote_decls())?,
+            limit_rows::<{ caps::SESSION_MAX_REMOTE_DECLS }>(
+                DECL_LIMITS.session,
+                limits.session_max_remote_decls(),
+            )?,
+        )?,
+        interests: kind_rows(
+            faces,
+            limit_rows::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
+                INTEREST_LIMITS.face,
+                limits.max_inbound_sub_interests(),
+            )?,
+            limit_rows::<{ caps::SESSION_MAX_INBOUND_SUB_INTERESTS }>(
+                INTEREST_LIMITS.session,
+                limits.session_max_inbound_sub_interests(),
+            )?,
+        )?,
         shared: faces > 1,
     })
 }
 
-/// The two limits that bound one kind of what the peers of a session write: one face's, and all
-/// the faces' together, each by its id, the build's value of it and how a snapshot reads it.
-struct PoolLimit {
-    face: &'static str,
-    face_ceiling: usize,
-    face_of: fn(&SessionLimits) -> Quota,
-    session: &'static str,
-    session_ceiling: usize,
-    session_of: fn(&SessionLimits) -> Quota,
+/// The limit `limit` and the rows [`lent`] gives its value under `CEILING`, as [`kind_rows`]
+/// takes each of its two.
+#[inline]
+fn limit_rows<const CEILING: usize>(
+    limit: &'static str,
+    value: Quota,
+) -> Result<(&'static str, usize), ArenaRefused> {
+    Ok((limit, lent::<CEILING>(limit, value)?))
 }
 
-/// The kinds [`pool_rows`] resolves, in the order of [`PeerPoolRows`]'s fields: the aliases, the
-/// declarations of one kind and the interests. One table, so the three are resolved by one body.
-const POOL_LIMITS: [PoolLimit; 3] = [
-    PoolLimit {
-        face: "MAX_PEER_KEYEXPR_ALIASES",
-        face_ceiling: caps::MAX_PEER_KEYEXPR_ALIASES,
-        face_of: SessionLimits::max_peer_keyexpr_aliases,
-        session: "SESSION_MAX_PEER_KEYEXPR_ALIASES",
-        session_ceiling: caps::SESSION_MAX_PEER_KEYEXPR_ALIASES,
-        session_of: SessionLimits::session_max_peer_keyexpr_aliases,
-    },
-    PoolLimit {
-        face: "MAX_REMOTE_DECLS",
-        face_ceiling: caps::MAX_REMOTE_DECLS,
-        face_of: SessionLimits::max_remote_decls,
-        session: "SESSION_MAX_REMOTE_DECLS",
-        session_ceiling: caps::SESSION_MAX_REMOTE_DECLS,
-        session_of: SessionLimits::session_max_remote_decls,
-    },
-    PoolLimit {
-        face: "MAX_INBOUND_SUB_INTERESTS",
-        face_ceiling: caps::MAX_INBOUND_SUB_INTERESTS,
-        face_of: SessionLimits::max_inbound_sub_interests,
-        session: "SESSION_MAX_INBOUND_SUB_INTERESTS",
-        session_ceiling: caps::SESSION_MAX_INBOUND_SUB_INTERESTS,
-        session_of: SessionLimits::session_max_inbound_sub_interests,
-    },
-];
+/// The two limits that bound one kind of what the peers of a session write, by id: one face's, and
+/// all the faces' together.
+struct PoolLimit {
+    face: &'static str,
+    session: &'static str,
+}
+
+/// The limits of the peers' keyexpr aliases.
+const ALIAS_LIMITS: PoolLimit = PoolLimit {
+    face: "MAX_PEER_KEYEXPR_ALIASES",
+    session: "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+};
+
+/// The limits of the peers' declarations of one kind.
+const DECL_LIMITS: PoolLimit = PoolLimit {
+    face: "MAX_REMOTE_DECLS",
+    session: "SESSION_MAX_REMOTE_DECLS",
+};
+
+/// The limits of the peers' subscriber interests.
+const INTEREST_LIMITS: PoolLimit = PoolLimit {
+    face: "MAX_INBOUND_SUB_INTERESTS",
+    session: "SESSION_MAX_INBOUND_SUB_INTERESTS",
+};
 
 /// The rows of one kind of what the peers of a session of `faces` faces write: the fewer of the
 /// session's limit and the faces' bounds together, `face` and `session` each a limit's id and the
@@ -1168,5 +1178,42 @@ impl Drop for SessionArena {
         // SAFETY: `base` is what the memory gave for `layout`, given back here once, and the
         // session that held the arena dropped every table lent from it first.
         unsafe { self.memory.release(self.base, self.layout) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_plan() -> ArenaPlan {
+        ArenaPlan {
+            rows: [NO_ROW; ARENA_ROWS],
+            len: 0,
+            links: 0,
+            link_bytes: 0,
+            lane_bytes: 0,
+            reassembly_bytes: 0,
+            reassembly_chains: 0,
+            entities: EntityRows::default(),
+            gets: GetTables::default(),
+            peers: FacePeers::default(),
+            held_queries: 0,
+            key_bytes: 0,
+            handle_bytes: 0,
+        }
+    }
+
+    /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
+    #[test]
+    fn a_row_past_the_plan_is_refused_and_the_rows_it_holds_stay() {
+        let mut plan = empty_plan();
+        for _ in 0..ARENA_ROWS {
+            assert_eq!(plan.put("part", "BASIS", 1, 8), Ok(()));
+        }
+        assert_eq!(
+            plan.put("one more", "BASIS", 1, 8),
+            Err(ArenaRefused::TooLarge)
+        );
+        assert_eq!(plan.rows().len(), ARENA_ROWS);
     }
 }

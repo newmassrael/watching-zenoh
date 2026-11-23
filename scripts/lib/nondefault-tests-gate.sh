@@ -1495,6 +1495,26 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # runs in the default build on the declared range; this row runs it on the lent one.
     "wz-session-core|hook|limits-lent-at-open|\
 limits::tests::a_parameter_lent_at_the_open_stops_at_the_builds_value_where_it_is_lent"
+    # Three switches of the session core that no row above turned on, which the feature-legs gate
+    # (`nondefault_feature_legs_gate.py`) refuses; each row runs tests that read its switch.
+    #
+    # `action-trace`, the session machine's action counters: the action bundle over a runtime of
+    # the crate's own runs actions through the machine's binding and reads each count back through
+    # `trace_snapshot`. The crate's test build already turns the feature on through its
+    # dev-dependency on itself, so this row is the one that names it; `session-unicast` is the
+    # bundle's. The filter is the module path.
+    "wz-session-core|hook|session-unicast,action-trace|session_actions::bundle_tests::action_trace::"
+    # `peer-row-pools`, the rows of the lent tables kept in pools the faces of a session share: its
+    # own tests are in `peer_tables` and `id_map`, and it changes the backing of every lent table the
+    # other tests build, so the filter is EMPTY. `declare-subscriber` is what the pooled interest and
+    # declaration tests of `peer_tables` name beside it.
+    "wz-session-core|hook|peer-row-pools,declare-subscriber|"
+    # `reply-egress-gate`, the egress admission of the replies a session sends: a Response the
+    # installed gate denies never reaches the link, one it admits is written, and with the gate
+    # taken away it is written unasked. `codec-response` is the reply's codec, `session-unicast`
+    # the bundle's. The filter is the module path.
+    "wz-session-core|hook|session-unicast,codec-response,reply-egress-gate|\
+session_actions::bundle_tests::reply_egress_gate::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),
