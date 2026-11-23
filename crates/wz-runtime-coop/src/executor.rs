@@ -282,7 +282,9 @@ impl<const TASKS: usize, const BYTES: usize> Default for TaskTable<TASKS, BYTES>
 /// cell is good for as long as a count is held.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) struct TaskStore {
-    chunks: Mutex<RefCell<Vec<Box<[TaskCell]>>>>,
+    /// Each chunk a box given up to a raw pointer: the list moves when it grows, and a box moved
+    /// with it would be asserted unique again over the cells other holders point at.
+    chunks: Mutex<RefCell<Vec<*const [TaskCell]>>>,
     /// The block a reserved table's cells lie in, and its layout; null for a grown table, whose
     /// cells each keep bytes of their own.
     region: *mut u8,
@@ -304,7 +306,9 @@ impl TaskStore {
         let at = crate::cs::with(|cs| {
             let chunks = self.chunks.borrow(cs).borrow();
             let mut left = index;
-            for chunk in chunks.iter() {
+            for &chunk in chunks.iter() {
+                // SAFETY: a chunk the list holds is alive until the store is dropped.
+                let chunk: &[TaskCell] = unsafe { &*chunk };
                 if let Some(cell) = chunk.get(left) {
                     return Some(ptr::from_ref(cell));
                 }
@@ -339,12 +343,15 @@ impl TaskStore {
         let chunk: Box<[TaskCell]> = (0..count)
             .map(|_| TaskCell::owned(owner, ptr::null_mut(), 0))
             .collect();
-        chunk[0].with_meta(|meta| {
+        let raw: *const [TaskCell] = Box::into_raw(chunk).cast_const();
+        // SAFETY: just made from a box, and the store's until it is dropped.
+        let cells: &[TaskCell] = unsafe { &*raw };
+        cells[0].with_meta(|meta| {
             meta.state = State::Spawning;
             meta.local = local;
         });
-        let first: *const TaskCell = &chunk[0];
-        crate::cs::with(|cs| self.chunks.borrow(cs).borrow_mut().push(chunk));
+        let first: *const TaskCell = &cells[0];
+        crate::cs::with(|cs| self.chunks.borrow(cs).borrow_mut().push(raw));
         // SAFETY: as for `cell_at`: the chunk is the store's now and never moves.
         unsafe { &*first }
     }
@@ -355,8 +362,13 @@ impl Drop for TaskStore {
     fn drop(&mut self) {
         let chunks =
             crate::cs::with(|cs| core::mem::take(&mut *self.chunks.borrow(cs).borrow_mut()));
-        if self.region.is_null() {
-            for cell in chunks.iter().flat_map(|chunk| chunk.iter()) {
+        for raw in chunks {
+            // SAFETY: each chunk is a box the store gave up to the list, taken back here once.
+            let chunk = unsafe { Box::from_raw(raw.cast_mut()) };
+            if !self.region.is_null() {
+                continue;
+            }
+            for cell in chunk.iter() {
                 let (buf, cap, align) = cell.with_meta(|meta| (meta.buf, meta.cap, meta.buf_align));
                 if !buf.is_null() {
                     // SAFETY: a grown table's cell holds bytes `fit_cell` allocated with this
@@ -367,7 +379,8 @@ impl Drop for TaskStore {
                     }
                 }
             }
-        } else {
+        }
+        if !self.region.is_null() {
             // SAFETY: the region was allocated with this layout by `ExecutorState::reserved`.
             unsafe { alloc::alloc::dealloc(self.region, self.region_layout) }
         }
@@ -568,6 +581,7 @@ impl ExecutorState {
             // and each offset is inside the region.
             .map(|at| TaskCell::owned(owner, region.wrapping_add(at * stride), task_bytes))
             .collect();
+        let cells: *const [TaskCell] = Box::into_raw(cells).cast_const();
         crate::cs::with(|cs| store.chunks.borrow(cs).borrow_mut().push(cells));
         Self::over(Cells::Store(store), Some(task_bytes))
     }
