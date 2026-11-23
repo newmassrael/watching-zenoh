@@ -424,7 +424,7 @@ impl DeclaredKeyexpr {
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        Self::declare_up_to(shared, literal, existing, literal.len())
+        Self::declare_up_to(shared, literal, existing, literal)
     }
 
     /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
@@ -434,15 +434,18 @@ impl DeclaredKeyexpr {
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        Self::declare_up_to(shared, literal, existing, non_wild_prefix_len(literal))
+        Self::declare_up_to(shared, literal, existing, non_wild_prefix(literal))
     }
 
+    /// `literal` declared on `shared` up to `prefix`, a prefix of it (the whole key or its
+    /// non-wild prefix), named as text so that no length is cut out of the key by index.
     fn declare_up_to(
         shared: &Arc<Engine>,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
-        prefix_len: usize,
+        prefix: &str,
     ) -> Result<Self, ZResult> {
+        let prefix_len = prefix.len();
         // A key the session's tables cannot hold is refused before anything is declared.
         if !fits(literal) {
             return Err(Z_EINVAL);
@@ -474,7 +477,7 @@ impl DeclaredKeyexpr {
         // A session that holds no more declarations, its table at the limit it opened under or
         // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing; the key
         // goes back with `text`.
-        let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
+        let Some(id) = shared.acquire_keyexpr(prefix) else {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {
@@ -488,14 +491,22 @@ impl DeclaredKeyexpr {
     }
 }
 
-/// pico `_z_keyexpr_non_wild_prefix_len`: the length up to the `/` before the
-/// first `*`, the whole key when there is none, 0 when the key opens wild.
-fn non_wild_prefix_len(literal: &str) -> usize {
+/// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
+/// the first `*`, the whole key when there is none, empty when the key opens wild.
+///
+/// The prefix ends at an ASCII byte or at the key's end, both boundaries of the text, so `get`
+/// always answers it; taking it by `get` rather than by index leaves the declaration no path
+/// to the formatter of a failed slice.
+fn non_wild_prefix(literal: &str) -> &str {
     let bytes = literal.as_bytes();
-    let Some(star) = bytes.iter().position(|&b| b == b'*') else {
-        return bytes.len();
+    let len = match bytes.iter().position(|&b| b == b'*') {
+        Some(star) => bytes
+            .get(..star)
+            .and_then(|head| head.iter().rposition(|&b| b == b'/'))
+            .unwrap_or(0),
+        None => bytes.len(),
     };
-    bytes[..star].iter().rposition(|&b| b == b'/').unwrap_or(0)
+    literal.get(..len).unwrap_or_default()
 }
 
 /// Whether `text` is a key expression in canon form, as pico's
@@ -1542,11 +1553,11 @@ mod tests {
     /// key opens wild.
     #[test]
     fn the_non_wild_prefix_stops_at_the_chunk_before_the_first_star() {
-        assert_eq!(non_wild_prefix_len("demo/kd/sub/**"), "demo/kd/sub".len());
-        assert_eq!(non_wild_prefix_len("demo/kd/qbl/*/x"), "demo/kd/qbl".len());
-        assert_eq!(non_wild_prefix_len("demo/kd/pub"), "demo/kd/pub".len());
-        assert_eq!(non_wild_prefix_len("**"), 0);
-        assert_eq!(non_wild_prefix_len("a/b$*/c"), "a".len());
+        assert_eq!(non_wild_prefix("demo/kd/sub/**"), "demo/kd/sub");
+        assert_eq!(non_wild_prefix("demo/kd/qbl/*/x"), "demo/kd/qbl");
+        assert_eq!(non_wild_prefix("demo/kd/pub"), "demo/kd/pub");
+        assert_eq!(non_wild_prefix("**"), "");
+        assert_eq!(non_wild_prefix("a/b$*/c"), "a");
     }
 
     /// R2959 — a declaration is retracted when its LAST holder lets go, and not
@@ -1598,6 +1609,26 @@ mod tests {
             0,
             "another session's id is not ours"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::non_wild_prefix;
+
+    /// The non-wild prefix is cut at the `/` before the first `*` whatever the chunks before
+    /// it hold, multi-byte characters included, and is the whole key or nothing at the two ends.
+    #[test]
+    fn the_non_wild_prefix_is_cut_at_a_boundary_of_the_text() {
+        assert_eq!(
+            non_wild_prefix("d\u{e9}mo/\u{d55c}/sub/**"),
+            "d\u{e9}mo/\u{d55c}/sub"
+        );
+        assert_eq!(non_wild_prefix("\u{d55c}/*"), "\u{d55c}");
+        assert_eq!(non_wild_prefix("\u{d55c}\u{ae00}"), "\u{d55c}\u{ae00}");
+        assert_eq!(non_wild_prefix("*/a"), "");
+        assert_eq!(non_wild_prefix("a*/b"), "");
+        assert_eq!(non_wild_prefix(""), "");
     }
 }
 
