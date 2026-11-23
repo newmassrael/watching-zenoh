@@ -496,6 +496,19 @@ pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 /// by its zid declares none of it, and refuses the open.
 pub const MAX_PEER_NODES: usize = generated::MAX_PEER_NODES;
 
+/// Maximum number of faces a session that listens holds besides the one it dials (zenoh's
+/// `transport/unicast/max_sessions`): the links it accepts, those still in their handshake
+/// among them, and those it attaches. An engine that lends each face its tables from the
+/// session's arena lends this many sets and the dial role's, so the build's value is the ceiling
+/// a session's own value is held under, and a link past the session's value is closed unread.
+pub const MAX_FACES: usize = generated::MAX_FACES;
+
+/// Maximum number of inbound links a session that listens holds in their handshake at once
+/// (zenoh's `transport/unicast/accept_pending`), each one of [`MAX_FACES`]. An engine that lends
+/// each link its buffers from the session's arena lends this many beyond the faces' own, so that
+/// a link past either bound is taken off its port and closed rather than left waiting there.
+pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
+
 /// Maximum number of queries ONE declared querier has in flight at once, as a
 /// [`crate::quota::Quota`] states it: a query past it is refused, and a place comes back
 /// when the pending query ends (its final arrives, its deadline passes, or it is
