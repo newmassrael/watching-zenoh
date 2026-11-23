@@ -420,20 +420,9 @@ fn connected(engine: &Engine) -> Vec<FaceSnapshot> {
     engine.face_snapshots()
 }
 
-/// The config keys pico's link for a group endpoint's scheme knows, in the order its mapping
-/// lists them: the UDP group's (`vendor/zenoh-pico/include/zenoh-pico/link/config/udp.h` @
-/// `#define UDP_CONFIG_MAPPING_BUILD`) and the raweth link's
-/// (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `#define RAWETH_CONFIG_MAPPING_BUILD`).
-fn pico_group_config_keys(scheme: &str) -> &'static [&'static str] {
-    match scheme {
-        "reth" => &["iface", "ethtype", "mapping", "whitelist"],
-        _ => &["iface", "tout", "join"],
-    }
-}
-
 /// The text pico's `_z_endpoint_to_string` makes of a group endpoint: the locator without
 /// its metadata, then the config keys pico's link for the scheme knows
-/// ([`pico_group_config_keys`]), in its own order and joined by `;`, with NO separator
+/// (`crate::endpoint::config_keys`), in its own order and joined by `;`, with NO separator
 /// between the two (`vendor/zenoh-pico/src/link/endpoint.c` @
 /// `memcpy(curr_dst, config, config_len);`), so `udp/224.0.0.224:7447#iface=lo` reads back as
 /// `udp/224.0.0.224:7447iface=lo`.
@@ -442,27 +431,17 @@ fn pico_group_config_keys(scheme: &str) -> &'static [&'static str] {
 /// a key given twice (`vendor/zenoh-pico/src/protocol/config.c` @
 /// `z_result_t _z_str_intmap_from_strn(`), and declares no locator metadata key, so the
 /// text keeps what pico kept.
+///
+/// A group is a UDP or a raweth one, so a scheme pico reads no config of is read with no key, and
+/// a config pico would have refused (a pair with no `=`) is written as none.
 fn pico_group_endpoint_text(endpoint: &str) -> String {
-    let (locator, config) = endpoint.split_once('#').unwrap_or((endpoint, ""));
-    let locator = locator.split_once('?').map_or(locator, |(bare, _)| bare);
-    let scheme = locator.split_once('/').map_or("", |(scheme, _)| scheme);
-    let keys = pico_group_config_keys(scheme);
-    let mut values: Vec<Option<&str>> = vec![None; keys.len()];
-    for pair in config.split(';').filter(|pair| !pair.is_empty()) {
-        let Some((key, value)) = pair.split_once('=') else {
-            break;
-        };
-        let Some(slot) = keys.iter().position(|known| *known == key) else {
-            break;
-        };
-        values[slot] = Some(value);
+    use crate::endpoint::{config_keys, scheme_of, PicoEndpoint};
+    let read = PicoEndpoint::read(endpoint, config_keys(scheme_of(endpoint)).unwrap_or(&[]));
+    if read.is_malformed() {
+        return read.locator.to_owned();
     }
-    let config: Vec<String> = keys
-        .iter()
-        .zip(values)
-        .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
-        .collect();
-    format!("{locator}{}", config.join(";"))
+    let config: Vec<String> = read.pairs().collect();
+    format!("{}{}", read.locator, config.join(";"))
 }
 
 /// The link pico reports for one link of an established face.
