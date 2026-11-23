@@ -1,7 +1,8 @@
 # Fuzz reproducers
 
 One directory per target (`pcap/`, `live/`, `transport/`, `text/`, `proto/`,
-`e2e/`, `replay/`). A file here is an input that once made its target fail;
+`e2e/`, `replay/`, `ingress_frames/`, `session_unicast/`, ...; the targets are
+those `scripts/fuzz.sh targets` prints). A file here is an input that once made its target fail;
 `scripts/fuzz.sh regress` (Layer Fz of `scripts/run-ci.sh`) runs every one of
 them through its target on every run, beside the seeds.
 

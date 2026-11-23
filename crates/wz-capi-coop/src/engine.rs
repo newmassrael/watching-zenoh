@@ -32,6 +32,7 @@ use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
+use core::alloc::Layout;
 use core::any::Any;
 use core::cell::{Cell, RefCell};
 use core::ops::{Deref, DerefMut};
@@ -44,7 +45,7 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, SessionArena,
 };
 use crate::lane::{LaneCounts, LaneGate, LaneItem, MatchFlips, SharedLane};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -60,8 +61,8 @@ use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, StatementNotHonoured, SubId,
-    SubscriberSink, WireKey,
+    PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
+    StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -725,6 +726,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     deliveries: Deliveries,
     /// The bytes the open reserved for the session's arena ([`Self::arena_bytes`]).
     arena_bytes: usize,
+    /// The place the arena lent the ABI's handle of the session, when the open was asked for one
+    /// ([`CoopDrive::handle_place`]).
+    handle_place: Option<HandlePlace>,
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
@@ -1797,11 +1801,11 @@ fn dispatch_all<C: ClockSource + 'static>(
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
-    /// `MAX_KEYEXPR_BYTES`, or when the key arena has no room for it: a key the session cannot
-    /// hold is refused, never cut short, and the declaration with it, before an id is taken or
-    /// anything is sent.
+    /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
+    /// key the session cannot hold is refused, never cut short, and the declaration with it,
+    /// before an id is taken or anything is sent.
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
-        if !self.config.limits.max_keyexpr_bytes().admits(keyexpr.len()) {
+        if !self.keys.holds_key(keyexpr.len()) {
             return None;
         }
         self.keys.key(keyexpr).ok()
@@ -3243,7 +3247,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Arc<Self>, OpenError> {
-        Self::open_made_in(links, clock, entropy, || config, policy, key_ids, memory)
+        Self::open_made_in(
+            links,
+            clock,
+            entropy,
+            || config,
+            policy,
+            key_ids,
+            memory,
+            None,
+        )
     }
 
     /// [`Self::open_in`], its config made by `make_config` inside the open, once, before anything
@@ -3257,6 +3270,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// config, is under the session's first steps. An open that fails once the engine is built
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
+    ///
+    /// With `handle`, the arena also holds a place of that layout for the ABI's own handle of the
+    /// session, lent after every table ([`ArenaPlan::holding`], [`CoopDrive::handle_place`]): the
+    /// handle is then reserved with the session, and an open whose arena cannot hold it opens
+    /// nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
         links: L,
         clock: C,
@@ -3265,8 +3284,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
+        handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, make_config, policy, key_ids, memory)?;
+        let engine = Self::assemble(
+            links,
+            clock,
+            entropy,
+            make_config,
+            policy,
+            key_ids,
+            memory,
+            handle,
+        )?;
         engine.open_links()?;
         Ok(engine)
     }
@@ -3277,6 +3306,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// this frame and moved into the engine's allocation, and the frame has returned before the
     /// first link is opened.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn assemble(
         mut links: L,
         clock: C,
@@ -3285,6 +3315,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
+        handle: Option<Layout>,
     ) -> Result<Arc<Self>, OpenError> {
         let config = make_config();
         #[cfg(feature = "shared-key-ids")]
@@ -3292,6 +3323,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
         let plan = ArenaPlan::of(&config, &resolve_limits(&config)).map_err(OpenError::Arena)?;
+        let plan = match handle {
+            Some(handle) => plan.holding(handle).map_err(OpenError::Arena)?,
+            None => plan,
+        };
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
@@ -3338,7 +3373,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let live_subs = arena
             .lend(entities.liveliness_subscribers)
             .map_err(OpenError::Arena)?;
-        let keys = arena.lend_keys(&plan).map_err(OpenError::Arena)?;
+        let keys = arena
+            .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
+            .map_err(OpenError::Arena)?;
         // The application's tables, lent from the rows the plan counts for them.
         let registry = Registry::new(
             &resolve_limits(&config),
@@ -3365,6 +3402,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 )
                 .map_err(OpenError::Arena)?,
         );
+        // The ABI's handle's place, the plan's last row.
+        let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
@@ -3495,6 +3534,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             reader: Mutex::new(None),
             deliveries: Deliveries::new(),
             arena_bytes,
+            handle_place,
             #[cfg(test)]
             takes: Takes::default(),
             this: this.clone(),
@@ -5036,34 +5076,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
-        let Some(core) = self.live() else {
-            return Vec::new();
-        };
-        // A group's members are not listed here, as the tokio engine lists none:
-        // `group_member_zids` answers them, whatever role they announced.
+    fn next_peer(&self, from: u64) -> Option<(u64, PeerIdentity)> {
+        let core = self.live()?;
+        // A face's id is its key: faces are numbered as they come and keep their id while they
+        // stand. A group's members are not listed here, as the tokio engine lists none:
+        // `next_group_member` answers them, whatever role they announced.
         core.0
-            .ups()
-            .filter(|actions| actions.is_established())
-            .filter_map(
-                |actions| match (actions.peer_zid(), actions.peer_whatami_wire()) {
-                    (Some(zid), Some(role)) => Some((zid, role)),
-                    _ => None,
-                },
-            )
-            .collect()
+            .ups_by_id()
+            .filter(|(id, actions)| *id >= from && actions.is_established())
+            .filter_map(|(id, actions)| {
+                Some((
+                    id,
+                    PeerIdentity {
+                        zid: actions.peer_session_zid()?,
+                        whatami: actions.peer_whatami_wire()?,
+                    },
+                ))
+            })
+            .min_by_key(|(id, _)| *id)
     }
 
+    /// A member's key is its group's place in the session's groups above its own place in the
+    /// group's member table.
     #[cfg(feature = "group")]
-    fn group_member_zids(&self) -> Vec<Vec<u8>> {
-        let Some(core) = self.live() else {
-            return Vec::new();
-        };
+    fn next_group_member(&self, from: u64) -> Option<(u64, SessionZid)> {
+        let core = self.live()?;
+        let (first_group, first_member) = (from >> 32, from & u64::from(u32::MAX));
         core.0
             .groups
             .iter()
-            .flat_map(GroupFace::member_zids)
-            .collect()
+            .enumerate()
+            .skip(usize::try_from(first_group).ok()?)
+            .find_map(|(at, group)| {
+                let from_member = if at as u64 == first_group {
+                    first_member
+                } else {
+                    0
+                };
+                let (member, zid) = group.member_zid_from(usize::try_from(from_member).ok()?)?;
+                Some((((at as u64) << 32) | member as u64, zid))
+            })
     }
 
     /// Each group's session sends its JOIN at its next step, which this call takes, as the tokio
@@ -5200,7 +5252,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
@@ -5216,11 +5268,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         let lane = self.samples.clone();
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
-            &keyexpr,
+            keyexpr,
             allowed_origin,
             // SAFETY: the registry hands its sinks a sample under the session's lock.
             BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
@@ -5329,14 +5381,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.deliver();
     }
 
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         let mut core = self.live()?;
         let core = &mut core.0;
-        if let Some(entry) = core
-            .keyexprs
-            .iter_mut()
-            .find(|e| e.keyexpr == keyexpr.as_str())
-        {
+        if let Some(entry) = core.keyexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
             entry.holds += 1;
             return Some(entry.id);
         }
@@ -5345,7 +5393,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if core.keyexprs.free_slots() == 0 {
             return None;
         }
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
@@ -5364,7 +5412,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // made while a link is down, or that a replay has not reached, is sent in its turn.
         let taken = core.announce_or_undo(
             Kind::Keyexpr,
-            |actions| actions.send_declare_keyexpr(id, &keyexpr).is_ok(),
+            |actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             |actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
@@ -5373,7 +5421,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // And each group told the session's keyexprs, as a link is.
         #[cfg(feature = "group")]
         for group in &core.groups {
-            group.announce_keyexpr(id, &keyexpr);
+            group.announce_keyexpr(id, keyexpr);
         }
         core.next_mapping = id.wrapping_add(1);
         keep(
@@ -5424,7 +5472,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         // The session's own subscribers count with `local-subscriber` and its own queryables with
         // `local-queryable`, and nothing of its own does otherwise: zenoh-pico's default build
@@ -5445,7 +5493,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return 0;
         }
         // So does a key longer than its row holds.
-        let Some(key) = core.row_key(&keyexpr) else {
+        let Some(key) = core.row_key(keyexpr) else {
             return 0;
         };
         // A listener whose Interest the session has no id left for is not declared, as a closed
@@ -5453,10 +5501,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !self.acquire_interest(
             core,
             plane,
-            &keyexpr,
+            keyexpr,
             &InterestForm {
                 mapping_id: 0,
-                suffix: Some(keyexpr.clone()),
+                suffix: Some(keyexpr.to_owned()),
                 aggregate: false,
             },
         ) {
@@ -5464,8 +5512,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         let id = core.next_match;
         core.next_match += 1;
-        let local = count_local && Self::local_matches(core, plane, &keyexpr);
-        let now = Self::peer_matches(core, plane, &keyexpr) || local;
+        let local = count_local && Self::local_matches(core, plane, keyexpr);
+        let now = Self::peer_matches(core, plane, keyexpr) || local;
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
@@ -5474,13 +5522,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let mut registry = core.registry.borrow_mut();
             match plane {
                 FilterPlane::Subscribers => registry.watch_publishers(
-                    PublisherCriterion::new(&keyexpr, counted(plane, count_local)),
+                    PublisherCriterion::new(keyexpr, counted(plane, count_local)),
                     local,
                     report,
                 ),
                 #[cfg(any(feature = "query", feature = "queryable"))]
                 FilterPlane::Queryables { complete_required } => registry.watch_queriers(
-                    QuerierCriterion::new(&keyexpr, counted(plane, count_local), complete_required),
+                    QuerierCriterion::new(keyexpr, counted(plane, count_local), complete_required),
                     local,
                     report,
                 ),
@@ -5541,7 +5589,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         wire: &WireKey,
         ask: Option<InterestForm>,
         // See `declare_matching_listener`: the session's own subscribers count with
@@ -5571,14 +5619,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So is a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let mut spent = None;
         let held = match &ask {
             Some(form) => {
                 let before = core.interests.len();
-                let held = self.acquire_interest(core, plane, &keyexpr, form);
+                let held = self.acquire_interest(core, plane, keyexpr, form);
                 if held && core.interests.len() > before {
                     spent = core.interests.last().map(|hold| hold.interest_id);
                 }
@@ -5611,7 +5659,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         {
             if let Some(interest_id) = spent.or_else(|| self.next_entity_id().map(u64::from)) {
                 for group in &core.groups {
-                    group.ask_filter(id, interest_id, plane, &keyexpr, wire);
+                    group.ask_filter(id, interest_id, plane, keyexpr, wire);
                 }
             }
         }
@@ -5799,7 +5847,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "queryable")]
     fn declare_queryable_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -5814,7 +5862,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
@@ -5825,7 +5873,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .app
             .queryables
             .register_sink(
-                &keyexpr,
+                keyexpr,
                 allowed_origin,
                 complete,
                 BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
@@ -6268,7 +6316,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
@@ -6281,13 +6329,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         core.registry
             .borrow_mut()
             .app
             .local_tokens
-            .register(u64::from(id), &keyexpr)
+            .register(u64::from(id), keyexpr)
             .ok()?;
         let entry = TokenEntry {
             id,
@@ -6339,7 +6387,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
@@ -6354,7 +6402,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
@@ -6370,7 +6418,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         unsafe { self.samples.held() }.rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
-            &keyexpr,
+            keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );
@@ -6616,72 +6664,113 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
-    /// This session as the C handle's drive. Made HERE (out of line), so the session's drop glue
-    /// is this crate's and not a second copy in the ABI crate that holds the handle, as the tokio
-    /// engine's `SessionState::into_drive` is.
-    #[inline(never)]
-    pub fn into_drive(self: Arc<Self>) -> Box<dyn SessionDrive> {
-        Box::new(Drive(self))
+    /// This session as the C handle's drive: the engine's own allocation, which the handle holds
+    /// as one of its `Arc`s, so the open makes nothing more for it.
+    pub fn into_drive(self: Arc<Self>) -> CoopDrive<L, C> {
+        let handle_place = self.handle_place;
+        CoopDrive {
+            engine: self,
+            handle_place,
+        }
     }
 }
 
-/// The C handle's hold on an engine: the engine is shared with the entities declared on it and
-/// with its read task, so the handle holds it as one of its `Arc`s.
-struct Drive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>(Arc<CoopEngine<L, C>>);
+/// The C handle's hold on a session of this engine, kept by value in the handle: the engine is
+/// shared with the entities declared on it and with its read task, so the handle holds one of its
+/// `Arc`s. Its operations are the port's [`SessionDrive`] of this engine, called by name, so an
+/// ABI built over one kind of links reaches its session through no table of functions, and the
+/// engine it hands out is the engine's own type.
+pub struct CoopDrive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: Arc<CoopEngine<L, C>>,
+    handle_place: Option<HandlePlace>,
+}
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for Drive<L, C> {
-    fn engine(&self) -> Arc<dyn SessionEngine> {
-        self.0.clone()
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
+    /// The engine the session's entities keep.
+    pub fn engine(&self) -> Arc<CoopEngine<L, C>> {
+        self.engine.clone()
     }
 
-    fn engine_ref(&self) -> &dyn SessionEngine {
-        &*self.0
+    /// The engine, borrowed for the length of one call.
+    pub fn engine_ref(&self) -> &CoopEngine<L, C> {
+        &self.engine
     }
 
-    fn close(&self) {
-        SessionDrive::close(&*self.0)
+    /// The place the session's arena lent the ABI's handle (`open_made_in`'s `handle`), `None`
+    /// for a session opened without one. It stands while the engine does.
+    pub fn handle_place(&self) -> Option<HandlePlace> {
+        self.handle_place
     }
 
-    fn is_closed(&self) -> bool {
-        SessionDrive::is_closed(&*self.0)
+    /// The session's own zid, zero-padded to 16 bytes ([`SessionEngine::zid`]).
+    pub fn zid(&self) -> [u8; 16] {
+        SessionEngine::zid(self.engine_ref())
     }
 
-    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
-        self.0.start_read_task()
+    /// [`SessionDrive::close`].
+    pub fn close(&self) {
+        SessionDrive::close(self.engine_ref())
     }
 
-    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
-        self.0.stop_read_task()
+    /// [`SessionDrive::is_closed`].
+    pub fn is_closed(&self) -> bool {
+        SessionDrive::is_closed(self.engine_ref())
     }
 
-    fn read_task_is_running(&self) -> bool {
-        self.0.read_task_is_running()
+    /// [`SessionDrive::start_read_task`].
+    pub fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        SessionDrive::start_read_task(self.engine_ref())
     }
 
-    fn read(&self, single: bool) -> Result<(), SessionClosed> {
-        self.0.read(single)
+    /// [`SessionDrive::stop_read_task`].
+    pub fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        SessionDrive::stop_read_task(self.engine_ref())
     }
 
-    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        self.0.send_keep_alive()
+    /// [`SessionDrive::read_task_is_running`].
+    pub fn read_task_is_running(&self) -> bool {
+        SessionDrive::read_task_is_running(self.engine_ref())
     }
 
-    fn spin_once(&self) -> bool {
-        self.0.spin_once()
+    /// [`SessionDrive::read`].
+    pub fn read(&self, single: bool) -> Result<(), SessionClosed> {
+        SessionDrive::read(self.engine_ref(), single)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        &*self.0
+    /// [`SessionDrive::send_keep_alive`].
+    pub fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        SessionDrive::send_keep_alive(self.engine_ref())
+    }
+
+    /// [`SessionDrive::spin_once`].
+    pub fn spin_once(&self) -> bool {
+        SessionDrive::spin_once(self.engine_ref())
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for Drive<L, C> {
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopDrive<L, C> {
     /// The C program let go of its session (zenoh-pico's `z_session_drop`), which closes it: the
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
     fn drop(&mut self) {
-        SessionDrive::close(&*self.0);
+        SessionDrive::close(self.engine_ref());
     }
+}
+
+/// What the builders of [`IpLinks`](wz_runtime_coop::ip_stack::IpLinks) turn links into: the links
+/// `with_tls` makes over a secure channel `S`, and those `with_groups` makes joining groups by
+/// `J`. An ABI names with it the links it opens its sessions over, and so the engine's type,
+/// whatever its build adds to the host's.
+pub trait ComposedLinks {
+    /// The links `with_tls` makes.
+    type WithTls<S>;
+    /// The links `with_groups` makes.
+    type WithGroups<J>;
+}
+
+impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G> {
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {

@@ -45,7 +45,7 @@ fn declare(
     let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             WireKey::literal(),
             false,
             origin,
@@ -295,7 +295,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
         let into = log.clone();
         engine.declare_matching_listener(
             plane,
-            "demo/lq/x".to_owned(),
+            "demo/lq/x",
             Arc::new(move |matching| into.lock().unwrap().push(matching)),
             count_local,
         );
@@ -307,7 +307,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
         engine
             .declare_write_filter(
                 plane,
-                "demo/lq/x".to_owned(),
+                "demo/lq/x",
                 &WireKey::literal(),
                 Some(InterestForm {
                     mapping_id: 0,

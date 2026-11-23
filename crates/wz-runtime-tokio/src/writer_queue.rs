@@ -189,6 +189,8 @@ pub fn outbound_channel_with_capacity(
         last_flush_ns: AtomicU64::new(NEVER_FLUSHED),
         last_write_ns: AtomicU64::new(NEVER_FLUSHED),
         inline: std::sync::OnceLock::new(),
+        hearing: std::sync::OnceLock::new(),
+        heard_at_flush: AtomicU64::new(0),
         writer_only: AtomicBool::new(false),
         role: AtomicBool::new(false),
     });
@@ -344,6 +346,12 @@ struct Lanes {
     /// How a thread other than the writer puts bytes on the link, when the link has a way
     /// ([`OutboundTx::set_inline_write`]). Set once, before the first frame.
     inline: std::sync::OnceLock<Arc<dyn InlineWrite>>,
+    /// What the link's reader has taken off the wire, when the link counts it
+    /// ([`OutboundTx::set_hearing`]). Set once, before the first frame.
+    hearing: std::sync::OnceLock<LinkHearing>,
+    /// What [`Self::hearing`] stood at when the last flush ended, the writer's or a sender's
+    /// ([`Self::mark_flushed`]).
+    heard_at_flush: AtomicU64,
     /// Whether every data frame of this queue is the writer's to write, whatever `inline`
     /// allows ([`OutboundTx::set_writer_only`]).
     writer_only: AtomicBool,
@@ -515,6 +523,48 @@ impl Lanes {
         }
     }
 
+    /// Whether a sender may write its own message on its own thread now, as far as the link's
+    /// timing says: the rule both of a sender's own writes keep (`OutboundTx::flush_inline`,
+    /// [`Self::write_landed_datagram`]).
+    ///
+    /// A flush that ran a moment ago (inside [`INLINE_MIN_QUIET_NS`]) says the messages come
+    /// faster than a flush is written, which is a stream, and the writer coalesces them. Past
+    /// that floor, a queue that knows what its link hears ([`OutboundTx::set_hearing`]) also
+    /// asks for one of two things: the link heard something since the last flush, which is a
+    /// turn of a conversation (a reply to a request, the next request after a reply), or the
+    /// link has been quiet for the batching time limit, the longest a batch would wait anyway.
+    /// A sender of a one-way stream has neither, however slowly it makes each message, so its
+    /// messages are the writer's and leave in batches; measured on wz's C ABI, an unoptimised
+    /// build wrote a burst of 4,000 puts one put a batch under the floor alone.
+    fn a_sender_may_write(&self) -> bool {
+        let last = self.last_flush_ns.load(Ordering::Relaxed);
+        if last == NEVER_FLUSHED {
+            return true;
+        }
+        let quiet_ns = self.now_ns().saturating_sub(last);
+        if quiet_ns < INLINE_MIN_QUIET_NS {
+            return false;
+        }
+        let Some(hearing) = self.hearing.get() else {
+            return true;
+        };
+        let limit_ns = self
+            .batching_time_limit_us
+            .load(Ordering::Relaxed)
+            .saturating_mul(1_000);
+        quiet_ns >= limit_ns || hearing.count() != self.heard_at_flush.load(Ordering::Relaxed)
+    }
+
+    /// The bookkeeping every flush ends with, the writer's or a sender's: when it ran, and what
+    /// the link had heard by then.
+    fn mark_flushed(&self) {
+        self.last_flush_ns.store(self.now_ns(), Ordering::Relaxed);
+        if let Some(hearing) = self.hearing.get() {
+            self.heard_at_flush
+                .store(hearing.count(), Ordering::Relaxed);
+        }
+    }
+
     /// A frame landed on a DATAGRAM link that has an inline write ([`InlineWrite::datagrams`]):
     /// write it from this thread, as zenoh-pico writes each batch on the thread that sends it
     /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`),
@@ -535,8 +585,7 @@ impl Lanes {
         if !sink.datagrams() || self.writer_only.load(Ordering::Relaxed) {
             return false;
         }
-        let last = self.last_flush_ns.load(Ordering::Relaxed);
-        if last != NEVER_FLUSHED && self.now_ns().saturating_sub(last) < INLINE_MIN_QUIET_NS {
+        if !self.a_sender_may_write() {
             return false;
         }
         let Some(role) = self.try_acquire_role() else {
@@ -549,7 +598,7 @@ impl Lanes {
         let left = self.write_inline(sink.as_ref());
         drop(step);
         drop(role);
-        self.last_flush_ns.store(self.now_ns(), Ordering::Relaxed);
+        self.mark_flushed();
         // Work the writer must see: a datagram the link would not take now, or a frame that
         // landed behind this take.
         if left || self.has_queued() {
@@ -730,8 +779,28 @@ const LONE_STAGED_MAX: u64 = 2;
 
 /// How long no flush may have run for a sender to flush its own message (`flush_inline`): a
 /// request and its reply are a round trip apart, tens of microseconds, and a stream's messages
-/// are well inside this.
+/// are well inside this on a fast build. It is a floor and not the whole rule: a sender whose
+/// messages take longer than this to make (an unoptimised build, a slow core, a contended host)
+/// finds every gap of its own stream past it, so a queue that knows what its link hears also
+/// asks for a turn of the conversation (`Lanes::a_sender_may_write`).
 const INLINE_MIN_QUIET_NS: u64 = 8_000;
+
+/// What a link's reader has taken off the wire, counted one per frame: shared by the reader,
+/// which counts, and the link's outbound queue ([`OutboundTx::set_hearing`]), which reads it to
+/// tell a sender that answers what it heard from a sender of a stream.
+#[derive(Clone, Default)]
+pub(crate) struct LinkHearing(Arc<AtomicU64>);
+
+impl LinkHearing {
+    /// The reader took a frame off the wire.
+    pub(crate) fn heard(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 /// How many frames of the head's size one write may carry, whatever the batch of the link: the
 /// frames queued behind a write under way are joined into the next one
@@ -2090,6 +2159,13 @@ impl OutboundTx {
         let _ = self.shared.inline.set(sink);
     }
 
+    /// Give the queue its link's count of what the link's reader took off the wire
+    /// ([`LinkHearing`]), by which a sender's own write tells a turn of a conversation from a
+    /// stream. Once, before the first frame; a second call is ignored.
+    pub(crate) fn set_hearing(&self, hearing: LinkHearing) {
+        let _ = self.shared.hearing.set(hearing);
+    }
+
     /// Leave every data frame of this queue to its writer from now on: a sender stages and wakes
     /// the writer, and writes neither its own lone message (`flush_inline`) nor a datagram it
     /// lands on its own thread. What a router asks of the link of each face it routes to
@@ -2126,11 +2202,9 @@ impl OutboundTx {
         if since > LONE_STAGED_MAX {
             return false;
         }
-        // A flush ran a moment ago: messages come faster than a flush is written, which is a
-        // stream, and the writer coalesces them. Counting what was staged is not enough to tell:
-        // one sender of a stream always finds just its own message staged since the last flush.
-        let last = shared.last_flush_ns.load(Ordering::Relaxed);
-        if last != NEVER_FLUSHED && shared.now_ns().saturating_sub(last) < INLINE_MIN_QUIET_NS {
+        // Counting what was staged is not enough to tell a lone message from a stream: one
+        // sender of a stream always finds just its own message staged since the last flush.
+        if !shared.a_sender_may_write() {
             return false;
         }
         let Some(role) = shared.try_acquire_role() else {
@@ -2151,9 +2225,7 @@ impl OutboundTx {
         let left = shared.write_inline(sink.as_ref());
         drop(step);
         drop(role);
-        shared
-            .last_flush_ns
-            .store(shared.now_ns(), Ordering::Relaxed);
+        shared.mark_flushed();
         // Work the writer must see: the rest of a frame, a frame a lend completed behind our
         // take, a request raised while we held the role.
         if left || shared.has_queued() || shared.flush_wanted.load(Ordering::SeqCst) {
@@ -3220,9 +3292,7 @@ impl OutboundRx {
         }
         let staged = self.shared.staged.load(Ordering::Relaxed);
         self.shared.staged_at_flush.store(staged, Ordering::Relaxed);
-        self.shared
-            .last_flush_ns
-            .store(self.shared.now_ns(), Ordering::Relaxed);
+        self.shared.mark_flushed();
         staged
     }
 
@@ -4739,6 +4809,59 @@ mod tests {
             link.bytes(),
             b"frame",
             "a quiet link's message is flushed inline"
+        );
+    }
+
+    /// On a queue that knows what its link hears, a sender past the quiet floor writes its own
+    /// message only as a turn of a conversation (the link heard something since the last flush)
+    /// or after the batching time limit; a sender of a one-way stream, however slowly it makes
+    /// each message, leaves it to the writer. Measured before this rule on wz's C ABI: an
+    /// unoptimised build wrote a burst of 4,000 puts one put a batch.
+    #[tokio::test]
+    async fn a_one_way_stream_slower_than_the_floor_is_left_to_the_writer() {
+        let (tx, rx) = outbound_channel();
+        let link = FakeLink::new(usize::MAX, 0);
+        let hearing = LinkHearing::default();
+        tx.set_hearing(hearing.clone());
+        tx.set_inline_write(link.clone());
+        let hook_tx = tx.clone();
+        tx.set_idle_hook(Arc::new(move || {
+            let _ = hook_tx.send(Priority::DEFAULT, b"frame".to_vec());
+            IdleFlush::Drained
+        }));
+        // Room on the queue's clock to place a flush in the past.
+        std::thread::sleep(Duration::from_millis(5));
+        let limit_ns = wz_session_core::link::BATCHING_TIME_LIMIT_US * 1_000;
+        let past_the_floor = || tx.shared.now_ns() - (INLINE_MIN_QUIET_NS + limit_ns) / 2;
+        tx.shared
+            .last_flush_ns
+            .store(past_the_floor(), Ordering::Relaxed);
+
+        tx.wake_for_flush();
+
+        assert!(
+            link.bytes().is_empty(),
+            "a message past the floor but inside the time limit, with nothing heard, is not \
+             written by its sender"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), rx.shared.ready.notified())
+                .await
+                .is_ok(),
+            "the writer is woken to flush it"
+        );
+
+        // The link hears a frame: the next message is a turn of a conversation.
+        hearing.heard();
+        tx.shared
+            .last_flush_ns
+            .store(past_the_floor(), Ordering::Relaxed);
+        tx.shared.flush_wanted.store(false, Ordering::SeqCst);
+        tx.wake_for_flush();
+        assert_eq!(
+            link.bytes(),
+            b"frame",
+            "a message after the link heard something is written by its sender"
         );
     }
 

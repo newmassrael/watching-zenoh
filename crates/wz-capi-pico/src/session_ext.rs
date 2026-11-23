@@ -36,6 +36,8 @@ use wz_session_core::WhatAmI;
 
 #[cfg(feature = "connectivity")]
 use crate::connectivity::Connectivity;
+#[cfg(feature = "connectivity")]
+use crate::session::Engine;
 
 /// This session's pico-side state; see the module doc.
 pub(crate) struct PicoSessionExt {
@@ -54,7 +56,7 @@ pub(crate) struct PicoSessionExt {
     /// The engine whose faces this session's connectivity hub watches, and the id it
     /// watches under, so the watch can be dropped with the session.
     #[cfg(feature = "connectivity")]
-    watch: (Arc<dyn SessionEngine>, u64),
+    watch: (Arc<Engine>, u64),
     /// Whether the admin space runs, and what it reports as the transport's link.
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
@@ -105,7 +107,7 @@ impl PicoSessionExt {
         zid: &[u8],
         policy: SessionPolicy,
         limits: SessionLimits,
-        #[cfg(feature = "connectivity")] engine: &Arc<dyn SessionEngine>,
+        #[cfg(feature = "connectivity")] engine: &Arc<Engine>,
     ) -> Self {
         // The snapshot is read by the clock and by a door a policy governs: a build with neither
         // a clock nor `query` reads none of it.
@@ -129,9 +131,12 @@ impl PicoSessionExt {
         #[cfg(feature = "connectivity")]
         let watch_id = {
             let sink = Arc::clone(&connectivity);
-            engine.watch_faces(Arc::new(move |kind, snapshot| {
-                sink.on_face_event(kind, snapshot);
-            }))
+            SessionEngine::watch_faces(
+                Arc::as_ref(engine),
+                Arc::new(move |kind, snapshot| {
+                    sink.on_face_event(kind, snapshot);
+                }),
+            )
         };
         // Without the advanced plane or a registrable clock nothing stamps, so there is no clock to
         // build.
@@ -211,7 +216,7 @@ impl Drop for PicoSessionExt {
     /// session's listener maps.
     fn drop(&mut self) {
         let (engine, id) = &self.watch;
-        engine.unwatch_faces(*id);
+        SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
         self.connectivity.shutdown();
     }
 }

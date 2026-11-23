@@ -97,6 +97,9 @@ struct KeyStore {
     peak: Cell<u32>,
     /// The keys refused for want of room.
     refused: Cell<u32>,
+    /// The longest key the arena keeps: the session's `MAX_KEYEXPR_BYTES` its creator lent the
+    /// arena with ([`Arena::lend_keys`]), held in no byte where the build fixes the bound.
+    longest: crate::limits::MaxKeyexprBytesHeld,
 }
 
 impl KeyStore {
@@ -261,14 +264,19 @@ impl KeySpace {
         }
     }
 
-    /// A key arena of `bytes` bytes of blocks over the span at `span`, none of them taken.
+    /// A key arena of `bytes` bytes of blocks over the span at `span`, none of them taken, that
+    /// keeps keys of at most `longest` bytes ([`Self::holds_key`]).
     ///
     /// # Safety
     /// `span` is aligned to [`ARENA_ALIGN`](crate::bounded::ARENA_ALIGN), the
     /// [`Self::span_bytes`] of `bytes` bytes from it are valid for reads and writes and used by
     /// nothing else for as long as any copy of the space or any key made from it lives, and
     /// `bytes` is at most [`MAX_KEY_ARENA_BYTES`].
-    pub(crate) unsafe fn over(span: NonNull<u8>, bytes: usize) -> Self {
+    pub(crate) unsafe fn over(
+        span: NonNull<u8>,
+        bytes: usize,
+        longest: crate::limits::MaxKeyexprBytesHeld,
+    ) -> Self {
         const {
             assert!(
                 core::mem::align_of::<KeyStore>() <= crate::bounded::ARENA_ALIGN,
@@ -287,9 +295,17 @@ impl KeySpace {
                 used: Cell::new(0),
                 peak: Cell::new(0),
                 refused: Cell::new(0),
+                longest,
             });
         }
         Self { store }
+    }
+
+    /// Whether the arena keeps a key of `len` bytes: at most the session's `MAX_KEYEXPR_BYTES` it
+    /// was lent with. The value is compared even where the build fixes it, because on the lent
+    /// policy no row is a buffer that would refuse a longer key by itself: the arena is the bound.
+    pub fn holds_key(&self, len: usize) -> bool {
+        self.store().longest.get().admits(len)
     }
 
     /// The arena's state.
@@ -378,16 +394,17 @@ impl From<KeySpace> for LentKeys {
 }
 
 impl KeyMaker<KeyRef> for LentKeys {
-    /// A key past `MAX_KEYEXPR_BYTES` is refused as a row of the static policy refuses it, so the
-    /// bound a key is held to is the build's whichever policy keeps it; a key the arena has no room
-    /// for is refused and counted by the arena ([`KeyCounts::refused`]).
+    /// A key past the session's `MAX_KEYEXPR_BYTES` the arena was lent with is refused before any
+    /// room is asked ([`KeySpace::holds_key`]), as a row of the static policy refuses one past its
+    /// buffer; a key the arena has no room for is refused and counted by the arena
+    /// ([`KeyCounts::refused`]). A table handed no arena keeps no key.
     fn key(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
-        if text.len() > crate::caps::MAX_KEYEXPR_BYTES {
-            return Err(KeyUnkept::TooLong);
-        }
         let Some(keys) = &self.0 else {
             return Err(KeyUnkept::NoRoom);
         };
+        if !keys.holds_key(text.len()) {
+            return Err(KeyUnkept::TooLong);
+        }
         keys.key(text).map_err(|_| KeyUnkept::NoRoom)
     }
 }
@@ -519,6 +536,8 @@ impl PartialEq<&str> for KeyRef {
 mod tests {
     use super::*;
     use crate::bounded::{LendRefused, ARENA_ALIGN};
+    use crate::limit_binding::{LimitSpec, Quota};
+    use crate::limits::SessionLimits;
 
     /// One block of an arena's memory in a test, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -537,12 +556,18 @@ mod tests {
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
     }
 
-    /// A key arena of `bytes` bytes of blocks, lent from an arena of exactly its span.
+    /// A key arena of `bytes` bytes of blocks, lent from an arena of exactly its span, that keeps
+    /// keys as long as a session that states nothing does.
     fn keys_of(bytes: usize) -> KeySpace {
+        keys_held_to(bytes, SessionLimits::defaults().max_keyexpr_bytes_held())
+    }
+
+    /// [`keys_of`], keeping keys of at most `longest` bytes.
+    fn keys_held_to(bytes: usize, longest: crate::limits::MaxKeyexprBytesHeld) -> KeySpace {
         let span = KeySpace::span_bytes(bytes).expect("a test arena fits");
         let mut arena = arena_of(span);
         let keys = arena
-            .lend_keys(bytes)
+            .lend_keys(bytes, longest)
             .expect("the arena is the key arena's span");
         assert_eq!(
             arena.high_water(),
@@ -710,9 +735,10 @@ mod tests {
         assert_eq!(keys.counts().used, 0);
     }
 
-    /// A table's key arena keeps a key as the arena does, refuses one past `MAX_KEYEXPR_BYTES`
-    /// as a row of the static policy refuses it, before any room is asked, and one the arena has
-    /// no room for as no room; a table handed no key arena keeps no key.
+    /// A table's key arena keeps a key as the arena does, refuses one past the `MAX_KEYEXPR_BYTES`
+    /// of a session that states nothing, the build's, as a row of the static policy refuses it,
+    /// before any room is asked, and one the arena has no room for as no room; a table handed no
+    /// key arena keeps no key.
     #[test]
     fn a_tables_key_arena_keeps_a_key_or_says_why_not() {
         let block = block_bytes(crate::caps::MAX_KEYEXPR_BYTES).expect("the longest key");
@@ -736,14 +762,49 @@ mod tests {
         assert!(LentKeys::default().space().is_none());
     }
 
+    /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered
+    /// under the build's, and refuses one byte more as too long, asking no room and counting
+    /// nothing; a build whose domain is its own value alone has no lower bound to state.
+    #[test]
+    fn a_key_arena_holds_keys_to_the_bound_it_was_lent_with() {
+        let mut limits = SessionLimits::defaults();
+        if limits.select_max_keyexpr_bytes(Quota::at_most(8)).is_err() {
+            assert!(
+                <crate::limits::MaxKeyexprBytes as LimitSpec>::DOMAIN.is_singleton(),
+                "only a domain of one value refuses a lower bound"
+            );
+            return;
+        }
+        let keys = keys_held_to(256, limits.max_keyexpr_bytes_held());
+        assert!(keys.holds_key(8));
+        assert!(!keys.holds_key(9));
+        let lent = LentKeys::from(keys);
+        let past = "k".repeat(9);
+        assert_eq!(lent.key(&past).err(), Some(KeyUnkept::TooLong));
+        assert_eq!(
+            (keys.counts().used, keys.counts().refused),
+            (0, 0),
+            "a key past the bound takes and counts nothing"
+        );
+        let at = "k".repeat(8);
+        let held = lent.key(&at).expect("a key of the bound itself is kept");
+        assert_eq!(held.as_str(), at);
+        let wide = keys_of(256);
+        assert!(
+            wide.holds_key(9),
+            "an arena lent with the build's bound keeps the longer key"
+        );
+    }
+
     /// An arena refuses a key arena whose span is past what it has left, taking nothing, and one
     /// past the key arena's own address space.
     #[test]
     fn an_arena_refuses_a_key_arena_past_what_is_left() {
         let span = KeySpace::span_bytes(64).expect("fits");
         let mut arena = arena_of(span);
+        let longest = SessionLimits::defaults().max_keyexpr_bytes_held();
         assert_eq!(
-            arena.lend_keys(65).err(),
+            arena.lend_keys(65, longest).err(),
             Some(LendRefused::Exhausted {
                 asked: KeySpace::span_bytes(65),
                 left: span,
@@ -751,6 +812,6 @@ mod tests {
         );
         assert_eq!(arena.high_water(), 0, "a refused key arena takes nothing");
         assert_eq!(KeySpace::span_bytes(MAX_KEY_ARENA_BYTES + 1), None);
-        assert!(arena.lend_keys(64).is_ok());
+        assert!(arena.lend_keys(64, longest).is_ok());
     }
 }

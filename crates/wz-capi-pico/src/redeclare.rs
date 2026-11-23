@@ -40,7 +40,9 @@ pub unsafe extern "C" fn wz_ext_redeclare(session: *const z_loaned_session_t) ->
         let Some(handle) = session_handle(session) else {
             return Z_ERR_NULL;
         };
-        result_of(crate::session::engine_ref(handle).redeclare())
+        result_of(wz_capi_port::SessionEngine::redeclare(
+            crate::session::engine_ref(handle),
+        ))
     })
 }
 

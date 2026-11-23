@@ -66,13 +66,7 @@ impl Counts {
 }
 
 fn declare(engine: &super::Engine, key: &str, sink: SubscriberSink) -> Option<wz_capi_port::SubId> {
-    engine.declare_subscriber_on_wire(
-        key.to_owned(),
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        sink,
-    )
+    engine.declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
 }
 
 /// Undeclared, a subscriber's callback is let go of once, and its factory once; a second
@@ -150,12 +144,7 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let listen = |sink: MatchingSink| {
-        engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/drop/m".to_owned(),
-            sink,
-            false,
-        )
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
     };
 
     let undeclared: MatchingSink = Arc::new(|_matching: bool| {});
@@ -210,12 +199,7 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
         })
     };
     let declare = |key: &str, counts: &Counts| {
-        engine.declare_liveliness_subscriber_on_wire(
-            key.to_owned(),
-            WireKey::literal(),
-            false,
-            sink(counts),
-        )
+        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(counts))
     };
 
     let undeclared = Counts::default();
@@ -263,7 +247,7 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
     };
     let declare = |key: &str, counts: &Counts| {
         engine.declare_queryable_on_wire(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             false,
             Locality::Remote,

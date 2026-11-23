@@ -44,6 +44,13 @@ pub(super) const HELD_SAMPLES: usize = limit(option_env!("WZ_LIMIT_HELD_SAMPLES"
 pub(super) const HELD_REPLIES: usize = limit(option_env!("WZ_LIMIT_HELD_REPLIES"), 16);
 pub(super) const HELD_QUERIES: usize = limit(option_env!("WZ_LIMIT_HELD_QUERIES"), 8);
 pub(super) const HELD_PAYLOADS: usize = limit(option_env!("WZ_LIMIT_HELD_PAYLOADS"), 32);
+pub(super) const CONFIG_ENTRIES: usize = limit(option_env!("WZ_LIMIT_CONFIG_ENTRIES"), 32);
+pub(super) const MAX_SCOUT_HELLOS: usize = limit(option_env!("WZ_LIMIT_MAX_SCOUT_HELLOS"), 16);
+pub(super) const SCOUT_HELLO_LOCATORS: usize =
+    limit(option_env!("WZ_LIMIT_SCOUT_HELLO_LOCATORS"), 8);
+pub(super) const CONFIG_DOCUMENT_DEPTH: usize =
+    limit(option_env!("WZ_LIMIT_CONFIG_DOCUMENT_DEPTH"), 16);
+pub(super) const CONFIG_TEXT_BYTES: usize = limit(option_env!("WZ_LIMIT_CONFIG_TEXT_BYTES"), 16384);
 pub(super) const MAX_PENDING_LIVELINESS_GETS: usize =
     limit(option_env!("WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"), 8);
 pub(super) const MAX_PENDING_DECLARES: usize =

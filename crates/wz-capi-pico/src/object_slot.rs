@@ -4,7 +4,8 @@
 //! The place of the object behind an owned handle of this ABI: a session, a publisher, a
 //! subscriber, a queryable, a liveliness token, an owned sample, reply or query, and a payload.
 //!
-//! Each such object is placed with [`Slot::take`] and [`Slot::fill`], and let go with [`release`].
+//! Each such object is placed with [`Slot::take`] and [`Slot::fill`], and let go with [`release`];
+//! a session of the cooperative engine is placed in its own arena instead (`crate::session_place`).
 //! Without the `object-pool` capability a slot is the heap's: the same allocation the `Box` it
 //! replaces made, so a build without the capability is the build it was. With it, a slot comes from
 //! the fixed pool of the object's kind (`crate::object_pool`), the program's or, when it reserved
@@ -25,6 +26,9 @@ use crate::prelude::*;
 /// build places nowhere is not a variant of it, and each keeps its number in every build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
+    // The cooperative engine's session lies in its own arena (`crate::session_place`); its pool
+    // is the program's to reserve where the doors are.
+    #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
     Session = 0,
     Publisher = 1,
     Subscriber = 2,

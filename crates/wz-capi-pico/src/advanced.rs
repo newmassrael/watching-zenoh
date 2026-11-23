@@ -1081,7 +1081,7 @@ unsafe fn declare_subscriber_state(
         let miss = miss.clone();
         let mut inner = crate::pubsub::make_subscriber_callback(cclosure);
         EngineSubscriber::declare_with_miss_listener(
-            &engine,
+            &crate::session::port_engine(&engine),
             ke.clone(),
             opts,
             // The advanced subscriber hands an OWNED `Sample`; the existing marshal
@@ -1476,10 +1476,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(&*engine);
+        let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
         let Some(id) = engine.declare_liveliness_subscriber_on_wire(
-            ke,
+            &ke,
             wire,
             history,
             crate::liveliness::sample_sink(cclosure),

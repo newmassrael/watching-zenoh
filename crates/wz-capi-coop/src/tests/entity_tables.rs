@@ -63,7 +63,7 @@ fn subscriber_sink(minted: &Arc<AtomicUsize>) -> SubscriberSink {
 
 fn declare_subscriber(engine: &Engine, key: &str, minted: &Arc<AtomicUsize>) -> Option<SubId> {
     engine.declare_subscriber_on_wire(
-        key.to_owned(),
+        key,
         WireKey::literal(),
         Locality::Any,
         None,
@@ -75,7 +75,7 @@ fn declare_subscriber(engine: &Engine, key: &str, minted: &Arc<AtomicUsize>) -> 
 fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Option<FilterId> {
     engine.declare_write_filter(
         plane,
-        key.to_owned(),
+        key,
         &WireKey::literal(),
         Some(InterestForm {
             mapping_id: 0,
@@ -162,11 +162,9 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let before = router.seen(|s| s.declares);
-    let id = engine
-        .acquire_keyexpr("demo/k/a".to_owned())
-        .expect("a row is free");
+    let id = engine.acquire_keyexpr("demo/k/a").expect("a row is free");
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/a".to_owned()),
+        engine.acquire_keyexpr("demo/k/a"),
         Some(id),
         "a held key is held again, in its row"
     );
@@ -175,21 +173,43 @@ fn a_key_expression_past_its_table_is_refused_and_sends_nothing() {
     });
     let seen = router.seen(|s| s.declares);
 
-    assert_eq!(engine.acquire_keyexpr("demo/k/b".to_owned()), None);
+    assert_eq!(engine.acquire_keyexpr("demo/k/b"), None);
     settle(&engine);
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
     assert_eq!(engine.keyexpr_declarations().len(), 1);
 
     engine.release_keyexpr(id);
     assert_eq!(
-        engine.acquire_keyexpr("demo/k/b".to_owned()),
+        engine.acquire_keyexpr("demo/k/b"),
         None,
         "one hold is left on the first key"
     );
     engine.release_keyexpr(id);
     assert!(
-        engine.acquire_keyexpr("demo/k/b".to_owned()).is_some(),
+        engine.acquire_keyexpr("demo/k/b").is_some(),
         "the last hold gone, its row takes the next key"
+    );
+}
+
+/// The engine is handed a key as the caller's borrow and keeps its own copy in its row: a key read
+/// out of a buffer the caller then writes over is declared, listed and held again as it was.
+#[test]
+fn a_key_handed_as_a_borrow_is_kept_in_the_sessions_own_row() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let mut buffer = *b"demo/k/borrowed";
+    let key = core::str::from_utf8(&buffer).expect("the key is text");
+    let id = engine.acquire_keyexpr(key).expect("a row is free");
+    buffer.copy_from_slice(b"xxxx/x/xxxxxxxx");
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/k/borrowed".to_owned())],
+        "the row holds its own copy of the key"
+    );
+    assert_eq!(
+        engine.acquire_keyexpr("demo/k/borrowed"),
+        Some(id),
+        "the held key is held again by its text"
     );
 }
 
@@ -247,12 +267,8 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let first_sink: MatchingSink = Arc::new(|_matching: bool| {});
-    let first = engine.declare_matching_listener(
-        FilterPlane::Subscribers,
-        "demo/m/1".to_owned(),
-        first_sink,
-        false,
-    );
+    let first =
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/1", first_sink, false);
     assert_ne!(first, 0, "a row is free");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
@@ -261,12 +277,8 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
 
     let refused_sink: MatchingSink = Arc::new(|_matching: bool| {});
     let held = Arc::downgrade(&refused_sink);
-    let refused = engine.declare_matching_listener(
-        FilterPlane::Subscribers,
-        "demo/m/2".to_owned(),
-        refused_sink,
-        false,
-    );
+    let refused =
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", refused_sink, false);
     assert_eq!(refused, 0);
     assert!(
         held.upgrade().is_none(),
@@ -278,12 +290,7 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
     engine.undeclare_matching_listener(first);
     let again: MatchingSink = Arc::new(|_matching: bool| {});
     assert_ne!(
-        engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/m/2".to_owned(),
-            again,
-            false,
-        ),
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/m/2", again, false,),
         0,
         "the row the undeclaration gave back takes the next listener"
     );
@@ -309,7 +316,7 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     };
     let declare = |key: &str| {
         engine.declare_queryable_on_wire(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             false,
             Locality::Remote,
@@ -348,7 +355,7 @@ fn a_token_past_its_table_is_refused_and_sends_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let first = engine
-        .declare_liveliness_token_on_wire("demo/t/1".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("demo/t/1", WireKey::literal(), None)
         .expect("a row is free");
     until(&engine, "the router to see the token", || {
         router.seen(|s| s.tokens.len()) == 1
@@ -356,7 +363,7 @@ fn a_token_past_its_table_is_refused_and_sends_nothing() {
     let seen = router.seen(|s| s.declares);
 
     assert_eq!(
-        engine.declare_liveliness_token_on_wire("demo/t/2".to_owned(), WireKey::literal(), None),
+        engine.declare_liveliness_token_on_wire("demo/t/2", WireKey::literal(), None),
         None
     );
     settle(&engine);
@@ -366,7 +373,7 @@ fn a_token_past_its_table_is_refused_and_sends_nothing() {
     engine.undeclare_liveliness_token(first);
     assert!(
         engine
-            .declare_liveliness_token_on_wire("demo/t/2".to_owned(), WireKey::literal(), None)
+            .declare_liveliness_token_on_wire("demo/t/2", WireKey::literal(), None)
             .is_some(),
         "the row given back takes it"
     );
@@ -393,12 +400,7 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
         })
     };
     let declare = |key: &str| {
-        engine.declare_liveliness_subscriber_on_wire(
-            key.to_owned(),
-            WireKey::literal(),
-            false,
-            sink(&minted),
-        )
+        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&minted))
     };
     let first = declare("demo/ls/1").expect("a row is free");
     until(&engine, "the router to see the Interest", || {
@@ -434,7 +436,7 @@ fn a_key_past_its_row_is_refused_and_sends_nothing() {
     let past = "k".repeat(MAX_KEYEXPR_BYTES + 1);
     let before = router.seen(|s| s.declares);
     assert_eq!(declare_subscriber(&engine, &past, &minted), None);
-    assert_eq!(engine.acquire_keyexpr(past.clone()), None);
+    assert_eq!(engine.acquire_keyexpr(&past), None);
     assert_eq!(filter(&engine, FilterPlane::Subscribers, &past), None);
     settle(&engine);
     assert_eq!(
@@ -463,7 +465,7 @@ fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
     let past = "demo/k/10";
     let before = router.seen(|s| s.declares);
     assert_eq!(declare_subscriber(&engine, past, &minted), None);
-    assert_eq!(engine.acquire_keyexpr(past.to_owned()), None);
+    assert_eq!(engine.acquire_keyexpr(past), None);
     assert_eq!(filter(&engine, FilterPlane::Subscribers, past), None);
     settle(&engine);
     assert_eq!(

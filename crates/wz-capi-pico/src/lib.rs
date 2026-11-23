@@ -95,6 +95,9 @@ mod prelude {
     pub(crate) use alloc::string::{String, ToString};
     pub(crate) use alloc::vec;
     pub(crate) use alloc::vec::Vec;
+    // The operations of the session's engine, which a build of one engine reaches as its own
+    // type rather than as a trait object.
+    pub(crate) use wz_capi_port::SessionEngine as _;
 }
 
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
@@ -620,6 +623,9 @@ pub mod segment_sender;
 pub mod serde;
 pub mod session;
 mod session_ext;
+// The cooperative engine's session handle lies in a place of the session's arena.
+#[cfg(not(feature = "engine-tokio"))]
+mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]

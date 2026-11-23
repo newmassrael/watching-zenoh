@@ -230,7 +230,7 @@ the declarations owed it (`id_map.rs`, `declaration_sync.rs`, `peer_table.rs`,
 
 The engine's `Core` (faces, listeners, groups, admission), `McuActions` behind `Rc`, the link
 admission registry, reconnect state, the handshake's cookie and signing key, the zid, the
-`Arc<CoopEngine>` the ABI holds, the `Box<dyn SessionDrive>`.
+`Arc<CoopEngine>` the ABI holds (its drive, a `Box<dyn SessionDrive>` until U10, is that `Arc`).
 
 - Bound: one dial face; `MAX_FACES` for a listening session (default 1,000, zenoh's
   `max_sessions`; 10 at the pico preset) and `MAX_ACCEPT_PENDING` (default 100; 1 at the pico
@@ -339,14 +339,33 @@ inside a callback (`IN_CALLBACK`, `delivering`).
 policy document's statements (`Vec<LimitStatement>`), locator parsing into owned forms, the
 device-requirements door's facilities, TLS material.
 
-- Bound: pico's numbered keys are a fixed set; NEW CONFIG_VALUE_BYTES per value; NEW
-  CONFIG_DOCUMENT_DEPTH for the document; `MAX_LOCATOR_LEN`.
-- Form: a config is a process-pool object with a fixed table of its keys; the document is read
-  by a pull reader that keeps a stack of at most CONFIG_DOCUMENT_DEPTH frames and builds no tree,
-  reporting each `wz/*` member it meets; a locator is parsed into borrowed fields.
+- Bound: `CONFIG_ENTRIES` numbered keys and `CONFIG_TEXT_BYTES` of value text per config
+  (pico preset 8 and 256; the defaults, 32 and 16,384, hold every key zenoh-pico defines and the
+  five inline certificates and keys of its TLS example); NEW CONFIG_DOCUMENT_DEPTH for the
+  document; `MAX_LOCATOR_LEN`.
+- Form: a config is one object of the build's size: a table of its keys and one text their values
+  lie in, NUL-terminated, written in place by `z_config_default` and `z_config_clone`
+  (`crates/wz-capi-pico/src/config.rs`, `ConfigEntries`). A key's new value is written over its
+  old place when it fits there (zenoh-pico frees the value it replaces), the last place grows into
+  the free text, and otherwise the value goes after the last place; a value's place never moves, so
+  the pointer `zp_config_get` lends stays valid while the config lives and the key is not inserted
+  again. The policy statements of `wz_ext_config_policy` and `wz_ext_config_profile` are the
+  build's own ids (`PolicyStatements`, a row per policy), found by the door, so they hold no text
+  of their own. The document is walked once by the no-heap lexer (`json5_lex::Lexer`), at most
+  `CONFIG_DOCUMENT_DEPTH` deep (default 16; zenoh's reference document nests 7), and its `wz`
+  member is written straight into rows of the build's ids (`DocumentRows`: the profile, a row per
+  policy, a row per limit of a session), which `policy_document::resolve_layers_under` composes as
+  `resolve_document_under` composes a tree; `wz/key-ids`, a shape of its own, is still read
+  through the tree reader. A locator is parsed into borrowed fields. The object itself is still one
+  allocation of the global allocator, made before the open; its slot in the process pools (a kind
+  of `object_slot.rs` counted by NEW HELD_OBJECTS) is U9's.
 - Lifetime: a config from `z_config_default` to its move into `z_open` or its drop.
-- Exhausted: `zp_config_insert` with a value past CONFIG_VALUE_BYTES answers
-  `Z_ERR_CONFIG_INVALID_VALUE`; a document deeper than its bound is refused at open with the same.
+- Exhausted: `zp_config_insert` of a new key past the rows or a value past the text answers
+  `_Z_ERR_CONFIG_FAILED_INSERT` (-95), zenoh-pico's code for an insert it could not make
+  (`vendor/zenoh-pico/src/protocol/config.c` @ `ret = _Z_ERR_CONFIG_FAILED_INSERT;`), and the
+  config keeps what it held; a policy, value or profile the build does not have is refused at its
+  door with `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it; a document
+  deeper than its bound is refused at its door with the same.
 
 ### 4.14 Multicast group
 
@@ -378,6 +397,30 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   the door.
 - **Scouting**: NEW MAX_SCOUT_HELLOS per window and each Hello's locators at most
   `MAX_ADMIN_LOCATORS`; a Hello is handed to the callback from a buffer of the window and not kept.
+  The ABI's half is done: the hello the callback reads lends the scouted Hello's own strings
+  through a table of `MAX_ADMIN_LOCATORS` views on the delivering frame (`lend_hello`,
+  `StringArrayState::lent`), so a delivery copies nothing, and the scout reads its config's keys
+  in place; a Hello with more locators than the table is handed through copies, and
+  `z_hello_clone` owns copies. The window's half: a cooperative window records its Hellos in a
+  table of `MAX_SCOUT_HELLOS` rows (`HelloTable`, pico preset 1), each row its locators, at most
+  `SCOUT_HELLO_LOCATORS` of `MAX_LOCATOR_LEN` bytes, in a text of its own (`HelloRow`), decoded
+  into the row in place (`HelloRow::decode_into`); a Hello past the table is counted
+  (`hellos_refused`), and the rows are lent to the callback (`deliver_rows_in_upstream_order`).
+  The table is never on a stack: the window holds a pointer to it
+  (`ScoutingActions::over_table`), and the pico C ABI keeps the one table in the library's static
+  memory, held by one window at a time. A window that finds it held by another thread's window
+  waits on a condition variable the holder signals when it lets go, at most its own budget
+  (`Condvar::wait_timeout_ms` of `wz-capi-port`), and runs on what is left; a budget spent
+  waiting is a window nobody answered (`Z_OK` with no Hello, or the open's
+  `_Z_ERR_SCOUT_NO_RESULTS`), so no scout fails because another thread scouts. A scout asked on
+  the holding thread, from inside a scout's callback, is refused at once with
+  `WZ_EXT_ERR_SCOUT_REENTERED`. The holder's mutex and condition variable are the kernel's, made
+  by the first scout of the process (U11's kernel objects). The Rust
+  preset's window (`ScoutingActions::new`, the tokio engine) keeps zenoh's collection on the
+  heap, with no bound. What a window still allocates: its actions (`Arc`), the
+  Scout it stages (`Vec<u8>`), the first locator it captured (`String`), the record of ignored
+  datagrams, the read buffer (`vec![0; rx]`), and `scouted_hellos`/`scout_first` for a host or
+  an open that takes owned Hellos.
 - **Admin space**: `MAX_ADMIN_REPLY_BYTES`, `MAX_ADMIN_LOCATORS`, `MAX_ADMIN_SESSION_LINKS`; the
   fixed profile's admin rows (`adminspace-fixed`, `wz-session-mcu`'s `admin_fixed`) replace the
   growable node; a reply past its buffer is an error reply, as there.
@@ -492,10 +535,44 @@ suites (C1co, Layer Z) unchanged.
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
     `z_bytes_copy_from_buf` past HELD_PAYLOAD_BYTES answers the code and leaves the source; every
     pool's count after a drop.
+    Taken for the session: on the cooperative engine its handle lies in its own arena, not in a
+    process pool (a table of HELD_SESSIONS places would be a count the program states nowhere for
+    a library without the pool doors). `ArenaPlan::holding` adds the handle's place as the plan's
+    last two rows, `CoopEngine::open_made_in` is handed its layout and lends it
+    (`CoopDrive::handle_place`), `z_open` writes the handle there (`crate::session_place`) and
+    `z_session_drop` moves it out before letting it go, the memory going back with the arena. A
+    word beside the handle says whether the place holds it, so a copy of the owned session kept
+    past its drop is refused, not read, for as long as the session's memory stands (a declared
+    entity keeps it standing; past the last holder the copy names freed memory, as a copy of
+    zenoh-pico's does). The tokio engine keeps `Slot::take`, and a build with the pool doors
+    still reserves its session pool, which the cooperative engine does not use.
 11. **U10. The port without heap types.** `wz-capi-port` `engine.rs`, `drive.rs`, `lib.rs`:
     methods returning `Vec` write into a caller's buffer, `Arc<dyn SessionEngine>` becomes the
     session's slot and generation, `Box<dyn SessionDrive>` the session object itself. Families:
     `z_open`, close. Tests: a handle kept past `z_close` is refused, not read.
+    Taken: the cooperative engine hands its own `Arc` as the handle's drive (`CoopDrive`, kept by
+    value in `PicoSessionHandle`, its drop the close), so the open makes no box for it; and every
+    key a `SessionEngine` method takes is `&str`, so a declaration hands the engine its own text
+    and the engine copies it into its key arena, where it was copied already. The tokio engine
+    keeps its boxed drive, which holds its session's drop glue in its own crate. The peers are
+    read one at a time (`next_peer`, `next_group_member`, walked by `each_peer` and
+    `each_group_member`): each read takes the session and lets it go, and the identity is copied
+    out before the C callback of `z_info_peers_zid` runs, so no callback runs under the lock and
+    no list is made (a buffer of every face would be MAX_FACES rows on the stack); a Rust caller
+    collects them through `PeerLists`. Left: the methods returning `Vec` that only the
+    connectivity and admin planes and the Rust API read (`face_snapshots`, whose rows own their
+    links' text, `listen_locators`, `linkstate_regions`, `keyexpr_declarations`).
+    The dispatch is static where the build has one engine: the ABI's `Engine` is
+    `CoopEngine<HostLinks, SessionClockOf>`, the links named as the open composes them
+    (`ComposedLinks` over the host's, a secure channel and groups), and the handle's drive is
+    `CoopDrive<L, C>`, whose operations call the engine's by name, so no table of the engine's
+    functions is made and what the build never calls is not linked. A build with `app-transport`
+    opens over the host's links or the program's: its drive is an enum of the two (`PicoDrive`),
+    and its entities still keep the engine as the port's trait object, because the engine is made
+    in its own `Arc` and an enum of two engines would be a second allocation; one engine type
+    there needs the links to be one type (an enum of the two at `SessionLinks` and its pump, in
+    `wz-runtime-coop`'s traits). What serves any engine keeps the trait object, an open set: the
+    advanced plane's host and its periodic job (`port_engine`), and the admin space's weak hold.
 12. **U11. The static runtime under the engine.** `wz-runtime-coop` `local.rs`, `executor.rs`,
     `runtime_impl.rs`, `session_runtime.rs`, `wz-capi-coop` `engine/ticker.rs`. Family: idle
     step. Tests: the session's tasks placed at open; a timer table at its limit.
@@ -506,14 +583,52 @@ suites (C1co, Layer Z) unchanged.
     `wz-session-core` `locator.rs`. Family: `z_open` on its failure paths. Tests: each failure
     answers its code with no allocation.
 15. **U14. Configuration and the document.** `wz-capi-pico` `config.rs`, `config_policy.rs`,
-    `wz-session-core` `policy_document.rs`, `json5.rs`. Family: owned values (the config).
-    Tests: a value past CONFIG_VALUE_BYTES and a document past CONFIG_DOCUMENT_DEPTH refused with
-    `Z_ERR_CONFIG_INVALID_VALUE`; every policy and limit read as before.
+    `wz-session-core` `policy_document.rs`, `json5.rs`. Family: owned values (the config),
+    `config-document`. Done: the config's keys and values in a table and a text of the build's
+    size (`CONFIG_ENTRIES`, `CONFIG_TEXT_BYTES`), written in place, an insert allocating nothing
+    and a full one refused with zenoh-pico's `_Z_ERR_CONFIG_FAILED_INSERT`; the policy statements
+    and the profile kept as the build's ids, so the open's composition borrows them and makes no
+    list. Tests: an insert written over its old place, the last place grown in place, a value past
+    the text and a key past the rows refused with the config kept, a clone apart from its source,
+    the doors keeping the build's own ids. Done since: the document read with no tree into rows, at most
+    `CONFIG_DOCUMENT_DEPTH` deep (the `config-document` row expected from 4 to 1, the config
+    object; an estimate). Left: `wz/key-ids` read through the tree, and the config's slot in the
+    process pools (U9).
 16. **U15. The remaining planes, one commit set each.** Liveliness (`wz-capi-pico`
     `liveliness.rs`, `wz-capi-coop` `engine/liveliness.rs`), scouting (`scout.rs` of both,
     `scouting_host.rs`), connectivity, the admin space (`admin_space.rs` over `adminspace-fixed`),
     history and replay (`advanced*.rs`, `replay_*.rs`, `engine/replay.rs`), end-to-end, catalogs,
-    observation. Family: each plane's own.
+    observation. Family: each plane's own. Where each stands:
+    - Scouting: both halves done (section 4.15): the window's table of rows and the lent hello.
+      Left: the window's own allocations listed there, and the locators `z_open` takes from a
+      scout (`locators_by_scout`, a `Vec<String>` handed to the open).
+    - Liveliness: nothing of the `liveliness-token` and `liveliness-get` rows lies in
+      `liveliness.rs` alone. A token's declaration takes the key's declaration
+      (`DeclaredKeyexpr`, U6), the port's `String` key (`declare_liveliness_token_on_wire`, U10),
+      the engine's row (U5) and the slot (U9); a liveliness subscriber adds the sink factory and its
+      closures (`sample_sink`, `make_liveliness_callback`, `engine/liveliness.rs`, U7); a
+      liveliness get adds the reply gate's key and the fan's legs (`crate::get`, U8). The plane
+      follows those units; a liveliness get copies its key twice (`ke.to_owned()` and the gate's
+      `clone`), once of which goes with U8's gate.
+    - History and replay: done for the answer. The program's storage, sized by
+      `wz_ext_replay_publisher_storage_size`, holds past the rings an answer area (`AnswerArea`:
+      the order of the cells, each frame's length, a copy of every frame and one frame's room for
+      the release), aligned wherever the storage starts; one answer at a time copies into it under
+      the cache's lock and replies after it, so an answer allocates nothing. zenoh-pico answers
+      its cache the same way (one outbox held for the whole answer, the cache's lock only for the
+      copy); zenoh-ext replies under a read lock of its cache, so its answers run side by side and
+      a send waits for them. A query asked of the cache from inside a callback of its own answer,
+      on the answering thread, would wait on that answer. The `replay` row's rounds put and do not answer, so the row does not move with it.
+    - End-to-end and catalogs: the supervision's streams and the catalogs' entries are lent under
+      the process's rows already (`ProcessRows`). In this crate their doors allocate the state's
+      `Box<Mutex<..>>` when it is made (U9) and a refusal's text (`format!` and `to_string`
+      before the copy into a `z_owned_string_t`, section 4.16, U13); the 24 allocations a round of
+      the `e2e` row reads are not traced by this note.
+    - Observation: the doors copy to the caller's buffer; what allocates after the open is the
+      program time base's wait (`time_base.rs` `TimeBaseMoves::moved`, an `Arc` for each call,
+      the shape of `wz_capi_coop::ClockMoves`), which a wait that borrows the time base removes,
+      and the snapshot's JSON for the admin space (`latest_json`, a `String`, the admin space's
+      row).
 17. **U16. The flip.** `allocation_faults.rs`: `MEMORY_TAKEN_AT_OPEN` set from the build, so a
     failed allocation must be a named error and traffic must allocate nothing; every ratchet row
     locked at 0. The phase P2 ends here.
@@ -525,8 +640,8 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 ## 7. The heap the C ABI build still links
 
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
-units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, the peer-written tables of
-section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
+units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, U14 in part, U15's scouting delivery,
+the peer-written tables of section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
 unit that takes each away:
 
 | what | where | taken away by |
@@ -537,10 +652,14 @@ unit that takes each away:
 | the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
 | the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
 | a payload's place (`box_bytes`: a `Box<ByteBuf>` for each `z_bytes_clone` and each copy, as a build with no thread-local cache keeps none) and its bytes (`Backing::Owned`, an `Arc` over a `Vec`) | `wz-capi-pico` `bytes.rs` | U9: the pools and a block pool of HELD_PAYLOAD_BYTES. `object-pool` implies `unstable-api`, whose layouts a program built without `Z_FEATURE_UNSTABLE_API` (the speed matrix's) does not compile against, so such a build needs the pools apart from their doors |
-| the place of each handle object of a build without the pools (`Slot::take`, a `Box`) | `wz-capi-pico` `object_slot.rs` | U9, as above |
-| an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, the `String` each port call takes and drops, an Interest form's suffix, a subscriber's wire anchor | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs`; `wz-capi-port` `engine.rs` | U6, and U10 for the port's arguments (`&str`) |
+| the place of each handle object of a build without the pools (`Slot::take`, a `Box`) but the session's, which lies in its arena (U9) and whose drive is not boxed (U10) | `wz-capi-pico` `object_slot.rs` | U9, as above |
+| an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, an Interest form's suffix, a subscriber's wire anchor (the port's arguments are `&str` since U10, so no call makes a copy for the engine) | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs` | U6 |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
+| a document's `wz/key-ids` (read through `Json5Value`) | `wz-capi-pico` `config_policy.rs` (`key_ids_of`) | U14's remainder: the key ids read by the lexer into rows |
+| a config object (one block of the build's size) and a hello a program clones | `wz-capi-pico` `config.rs`, `scout.rs` | U9: their slots in the process pools |
+| a scouting window's actions, its Scout, the first locator and the ignored record, and its read buffer | `wz-session-core` `scouting_host.rs`; `wz-capi-coop` `scout.rs`, `scout_datagram.rs` | U15's remainder: the window's state in a place of its holder, its buffers lent |
+| the wait of a session on the program's time base (an `Arc` for each `ClockMoves::moved`) | `wz-capi-pico` `time_base.rs`; `wz-capi-coop` `ClockMoves` | U15's remainder: a wait that borrows the time base |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
 
 ## 8. The decisions this design rests on
@@ -570,12 +689,12 @@ heap's own header of each block, not a measurement.
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
-| the session's handle (`Slot::take`, a `Box` without the pools) and its drive (`Box<dyn SessionDrive>`) | open | some hundreds | U9, U10 |
-| the config (`ConfigState`, a `BTreeMap<u8, String>` of the mode and the locator) | before the open, dropped by it | about 200, alive while the arena is reserved | U14 |
-| a link's setup: the entropy source's box, the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
+| the session's handle, in a place of the session's arena, and its drive, the engine's own `Arc` kept in the handle | open | none beyond the arena | done (U9, U10) |
+| the config (`ConfigState`: `CONFIG_ENTRIES` rows of 16 bytes and `CONFIG_TEXT_BYTES` of text, one block written in place; `arm_w.conf` states 2 and 72) | before the open, dropped by it | about 110, alive while the arena is reserved (about 200 while it was a `BTreeMap<u8, String>` of the mode and the locator, and about 400 at the pico preset's 8 and 256) | U14 done; its pool slot U9 |
+| a link's setup: the entropy source's `Arc` (`SharedEntropy`; the box inside holds a source of no size, which allocates nothing), the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
 | the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
-| a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; and, dropped within the call, the key handed to `acquire_keyexpr` and to `declare_write_filter` | each declaration | about 250 kept, two keys dropped | U9, U6, U10, U11 |
-| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key as `String` | each declaration | about 350 kept | U7, U6, U10, U5 |
+| a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; `acquire_keyexpr` and `declare_write_filter` take the key as a borrow (U10) | each declaration | about 250 kept | U9, U6, U11 |
+| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key canonized as a `String`, which the port takes as a borrow (U10) | each declaration | about 350 kept | U7, U6, U5 |
 | `z_bytes_clone`: the payload's place (`box_bytes`) | each put of the put cell | 24, freed by the put | U9 |
 | `z_bytes_copy_from_buf`: the place, the `Arc<Backing>` and the copied bytes | each round trip of the rtt cell | 56 and the payload, freed by the put | U9 |
 | `z_publisher_put` on a publisher declared with no options of its own beyond the congestion control: `publish_plain`, `put_plain_filtered`, `send_plain_put_qos` into a slot the arena lent | each put | none, read from the source | done (U2) |

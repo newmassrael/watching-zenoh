@@ -1353,12 +1353,17 @@ impl Arena {
 
     /// Lend a key arena of `bytes` bytes of blocks: the next span of the arena, its state first,
     /// which the rows of the session's tables keep their keys in
-    /// ([`KeySpace`](crate::key_arena::KeySpace)). Refused, taking nothing, past what is left or past
-    /// the most a key arena addresses.
+    /// ([`KeySpace`](crate::key_arena::KeySpace)), each at most `longest` bytes, the session's
+    /// `MAX_KEYEXPR_BYTES`. Refused, taking nothing, past what is left or past the most a key arena
+    /// addresses.
     ///
     /// The key arena's memory is this arena's: whoever owns the arena gives it back only once every
     /// key made from it is gone, as it does for a lent table.
-    pub fn lend_keys(&mut self, bytes: usize) -> Result<crate::key_arena::KeySpace, LendRefused> {
+    pub fn lend_keys(
+        &mut self,
+        bytes: usize,
+        longest: crate::limits::MaxKeyexprBytesHeld,
+    ) -> Result<crate::key_arena::KeySpace, LendRefused> {
         let left = self.bytes - self.lent;
         let span = match crate::key_arena::KeySpace::span_bytes(bytes) {
             Some(span) if span <= left => span,
@@ -1371,6 +1376,7 @@ impl Arena {
             crate::key_arena::KeySpace::over(
                 NonNull::new_unchecked(self.base.as_ptr().add(self.lent)),
                 bytes,
+                longest,
             )
         };
         self.lent += span;

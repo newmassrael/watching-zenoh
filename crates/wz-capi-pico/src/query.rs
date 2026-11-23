@@ -1225,8 +1225,8 @@ pub(crate) fn declare_queryable_on(
     let id = session
         .engine
         .declare_queryable_on_wire(
-            keyexpr,
-            key.wire(&*session.engine),
+            &keyexpr,
+            key.wire(Arc::as_ref(&session.engine)),
             complete,
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key

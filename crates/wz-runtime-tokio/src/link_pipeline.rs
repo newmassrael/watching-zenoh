@@ -836,12 +836,17 @@ pub fn wire_tcp_stream_with_lowlatency(
     #[cfg(unix)]
     let inline_write = crate::stream_link::inline_write_of(&stream);
     let (reader, writer) = stream.into_split();
+    // What the reader takes off the wire, which tells a sender's own write a turn of a
+    // conversation from a stream (`crate::writer_queue::LinkHearing`).
+    let hearing = crate::writer_queue::LinkHearing::default();
     let inbound = StreamReadDriver::new(
         TcpRead::new(reader),
         lowlatency.clone(),
         link_rx.buffer_size,
-    );
+    )
+    .hearing(hearing.clone());
     let (tx, rx) = crate::stream_link::stream_outbound_channel();
+    tx.set_hearing(hearing);
     #[cfg(unix)]
     if let Some(sink) = inline_write {
         tx.set_inline_write(sink);

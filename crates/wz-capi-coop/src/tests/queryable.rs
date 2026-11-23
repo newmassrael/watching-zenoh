@@ -24,7 +24,7 @@ fn declare(
     let answer = Arc::new(answer);
     engine
         .declare_queryable_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             WireKey::literal(),
             false,
             Locality::Remote,

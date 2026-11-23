@@ -37,6 +37,8 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
 use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_tokio::multilink::{join_link, JoinOutcome};
@@ -751,6 +753,159 @@ async fn declared_reliability_segregates_two_tcp_links() {
     b2_task.abort();
     a1_task.abort();
     a2_task.abort();
+}
+
+/// Open ONE loopback-UDP link both-sides-established with the multilink 0x4
+/// handshake: the datagram twin of [`open_multilink_link`]. The acceptor learns
+/// the initiator from its first datagram, peeked so it stays queued for the wired
+/// read driver, as `udp_frag_e2e` does; the initiator binds an ephemeral port and
+/// connects it to the acceptor, as `dial_udp` does. Neither end declares a
+/// class, so the link is in its protocol's (UDP: best-effort).
+#[cfg(feature = "transport-link-udp")]
+async fn open_multilink_udp_link(acc_zid: u8, init_zid: u8) -> (OpenedSession, OpenedSession) {
+    let acc_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind udp acceptor");
+    let addr = acc_socket.local_addr().expect("udp acceptor addr");
+    let acc = async {
+        let mut probe = [0u8; 64];
+        let (_n, peer) = acc_socket
+            .peek_from(&mut probe)
+            .await
+            .expect("peek the initiator's InitSyn datagram");
+        accept_and_open_session_with_multilink(
+            DialedLink::Udp {
+                socket: acc_socket,
+                peer,
+            },
+            fixture_params_with_zid(acc_zid),
+            multilink_offer(false),
+            (Priority::Control, Priority::Background),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("udp acceptor reaches Established (multilink)")
+    };
+    let init = async {
+        let socket = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind udp initiator");
+        socket.connect(addr).await.expect("connect udp initiator");
+        initiate_and_open_session_with_multilink(
+            DialedLink::Udp { socket, peer: addr },
+            fixture_params_with_zid(init_zid),
+            multilink_offer(false),
+            (Priority::Control, Priority::Background),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("udp initiator reaches Established (multilink)")
+    };
+    tokio::join!(acc, init)
+}
+
+/// A TCP link and a UDP link to one peer, aggregated into one session with no
+/// class declared on either end, split the reliable and the best-effort channel
+/// between them over REAL sockets: an undeclared link is in its protocol's class,
+/// as upstream's is
+/// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`).
+/// `an_undeclared_link_is_in_its_protocols_class` holds the same over recording
+/// drivers; this is the composition through the real establishment, join and drive
+/// path, and the link each Put rode is read off the receiving end's drive loop.
+///
+/// `udp_first` orders the links, and each order discriminates one channel: with
+/// the UDP link first, a reliable Put that fell to the any tier would ride it; with
+/// the TCP link first, a best-effort Put that fell to the any tier would ride that.
+#[cfg(feature = "transport-link-udp")]
+async fn a_tcp_and_a_udp_link_split_the_channels(udp_first: bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let ((b1, a1), (b2, a2)) = if udp_first {
+        let udp = open_multilink_udp_link(0x02, 0x01).await;
+        let tcp = open_multilink_link(&listener, 0x02, 0x01, false).await;
+        (udp, tcp)
+    } else {
+        let tcp = open_multilink_link(&listener, 0x02, 0x01, false).await;
+        let udp = open_multilink_udp_link(0x02, 0x01).await;
+        (tcp, udp)
+    };
+    // B's link ids: 1 = the first link opened, 2 = the second.
+    let (udp_link, tcp_link) = if udp_first { (1, 2) } else { (2, 1) };
+
+    let a_send = a1.actions.clone();
+    let a_primary = a1.actions.clone();
+    let b_primary = b1.actions.clone();
+    let a_joined = match join_link(&a_primary, &a2.actions.clone(), 2) {
+        JoinOutcome::Joined(h) => h,
+        other => panic!("A join must aggregate, got {}", outcome_name(&other)),
+    };
+    let b_joined = match join_link(&b_primary, &b2.actions.clone(), 2) {
+        JoinOutcome::Joined(h) => h,
+        other => panic!("B join must aggregate, got {}", outcome_name(&other)),
+    };
+    assert_eq!(
+        b_primary.live_link_count(),
+        2,
+        "B aggregates the TCP and the UDP link into ONE session"
+    );
+    assert_eq!(
+        a_primary.live_link_count(),
+        2,
+        "A aggregates both links too"
+    );
+
+    let b_log: RxLog = Arc::new(StdMutex::new(Vec::new()));
+    let b1_task = spawn_drive(b1, b_primary.clone(), 1, b_log.clone());
+    let b2_task = spawn_drive(b2, b_joined, 2, b_log.clone());
+    let a1_task = spawn_drive(a1, a_primary, 11, Arc::new(StdMutex::new(Vec::new())));
+    let a2_task = spawn_drive(a2, a_joined, 12, Arc::new(StdMutex::new(Vec::new())));
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    a_send
+        .send_push_literal("mixed/besteffort", b"B", /*reliable=*/ false)
+        .expect("best-effort Put");
+    a_send
+        .send_push_literal("mixed/reliable", b"R", /*reliable=*/ true)
+        .expect("reliable Put");
+    let both = poll_until(&b_log, Duration::from_secs(8), |log| {
+        log.iter().any(|d| d.reliable) && log.iter().any(|d| !d.reliable)
+    })
+    .await;
+    assert!(both, "both Puts reached B: {:?}", b_log.lock().unwrap());
+    let (reliable_link, best_effort_link) = {
+        let log = b_log.lock().unwrap();
+        let r = log.iter().find(|d| d.reliable).unwrap().link_id;
+        let b = log.iter().find(|d| !d.reliable).unwrap().link_id;
+        (r, b)
+    };
+    assert_eq!(
+        best_effort_link, udp_link,
+        "the best-effort Put rode the UDP link (udp_first={udp_first})"
+    );
+    assert_eq!(
+        reliable_link, tcp_link,
+        "the reliable Put rode the TCP link (udp_first={udp_first})"
+    );
+
+    b1_task.abort();
+    b2_task.abort();
+    a1_task.abort();
+    a2_task.abort();
+}
+
+#[cfg(feature = "transport-link-udp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_and_a_udp_link_split_the_channels_udp_first() {
+    a_tcp_and_a_udp_link_split_the_channels(true).await;
+}
+
+#[cfg(feature = "transport-link-udp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_and_a_udp_link_split_the_channels_tcp_first() {
+    a_tcp_and_a_udp_link_split_the_channels(false).await;
 }
 
 /// R2783 — the multilink accept state rides the cookie: the challenge the

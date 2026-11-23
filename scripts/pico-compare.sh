@@ -28,6 +28,17 @@
 #                                             is what deploy/upstream_parity.json holds. The run is left under
 #                                             target/pico-compare/parity-runs/host-<family>-<time>/ (its verdict.txt,
 #                                             rows.json and record.txt beside the boots)
+#   scripts/pico-compare.sh fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]
+#                                             several publishers of large samples to one subscriber (defaults 4
+#                                             rounds of each arm, 3 publishers of 4,000,000 bytes at 20 Hz for 10 s,
+#                                             congestion control block): one program (conformance/host-bench/
+#                                             wz_fanin.rs) built over upstream's zenoh and with the family patched in,
+#                                             as `parity rust` builds upstream's examples, run by
+#                                             scripts/host-bench/fanin.py in rounds that alternate the arms over TCP
+#                                             loopback; a round is a DEFECT of its arm when a sample arrives corrupt,
+#                                             duplicated, reordered or foreign, or, under block, does not arrive.
+#                                             Left under target/pico-compare/fanin-runs/host-<time>/ (report.txt,
+#                                             rounds.jsonl, record.txt); exit 0 clean, 1 a defect, 2 not run
 #   scripts/pico-compare.sh perf [reps] [sizes]
 #                                             the performance matrix of the pico ABI (docs/pico-perf-matrix.md):
 #                                             round trip p50/p90/p99, throughput in messages and bytes a second,
@@ -133,7 +144,7 @@ stamped_engine() {
 }
 
 if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" != parity ] && [ "${1:-}" != perf ] \
-    && [ "${1:-}" != batch ]; then
+    && [ "${1:-}" != batch ] && [ "${1:-}" != fanin ]; then
     resolve_wz_engine
     bash scripts/build-zenoh-pico-cli.sh >"$out/build-pico.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the pico library did not build (see $out/build-pico.log)"; exit 2; }
@@ -226,8 +237,8 @@ build_zenoh_c_family() {
 }
 
 case "${1:-}" in
-    parity | perf | batch)
-        # each builds its own arms (parity, perf and batch below)
+    parity | perf | batch | fanin)
+        # each builds its own arms (parity, perf, batch and fanin below)
         ;;
     nodrop-c)
         build_zenoh_c_family
@@ -429,6 +440,15 @@ parity_fail() {
     exit 2
 }
 
+# parity_fail_log <log> <message>: parity_fail, with the first errors of <log> printed before it. A run through bx
+# leaves its logs in the build host's account, where the person reading bx's own log may not reach them.
+parity_fail_log() {
+    local log="$1"
+    shift
+    grep -m 5 -A 12 -E '^error' "$log"
+    parity_fail "$@"
+}
+
 # The cargo arguments of the wz build of an original's preset: configs/<original>_defconfig alone, resolved.
 # It runs in a command substitution, so its refusal goes to stderr and the caller exits.
 parity_preset_args() {
@@ -515,11 +535,16 @@ wz_drop_in_args_for_the_original_header=$drop_in"
 # zenoh: upstream's examples package of the pinned tree, generated twice (z8_upstream_suite.py examples): `stock`
 # over upstream's zenoh from the registry, `wz` with the family patched in and wz-capi-core given the preset's
 # features. One manifest but for that, upstream's release profile and Cargo.lock, the repository's compiler.
+# parity_build_rust <dir> [program...]: the programs built, PARITY_PROGRAMS when none is named (`fanin` names
+# its own, which the package holds beside upstream's).
 parity_build_rust() {
-    local dir="$1" args feats arm variant pkg example programs=()
+    local dir="$1" args feats arm variant pkg example programs=() wanted=()
+    shift
+    wanted=("$@")
+    [ "${#wanted[@]}" -gt 0 ] || wanted=("${PARITY_PROGRAMS[@]}")
     args="$(parity_preset_args zenoh)" || exit 2
     feats="$(sed -n 's/.*--features \([^ ]*\).*/\1/p' <<<"$args")"
-    for example in "${PARITY_PROGRAMS[@]}"; do
+    for example in "${wanted[@]}"; do
         programs+=(--example "$example")
     done
     for arm in stock wz; do
@@ -531,8 +556,8 @@ parity_build_rust() {
         pkg="${pkg##*$'\n'}"
         [ -f "$pkg/Cargo.toml" ] || parity_fail "the $arm examples package is not at '$pkg'"
         (cd "$pkg" && cargo build --release --target-dir "$pkg/target" "${programs[@]}") >"$dir/build-rust-$arm.log" 2>&1 \
-            || parity_fail "the $arm examples did not build (see $dir/build-rust-$arm.log)"
-        for example in "${PARITY_PROGRAMS[@]}"; do
+            || parity_fail_log "$dir/build-rust-$arm.log" "the $arm examples did not build (see $dir/build-rust-$arm.log)"
+        for example in "${wanted[@]}"; do
             cp "$pkg/target/release/examples/$example" "$dir/bin/${example}_$variant" \
                 || parity_fail "$example of the $arm arm did not copy"
         done
@@ -787,6 +812,47 @@ batch_control() {
         --sizes "$sizes" --count "$count"
 }
 
+# ── fanin: several publishers of large samples to one subscriber ──────────────────────────────────────────────
+#
+# fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]: wz_fanin built for both arms of the Rust
+# family (parity_build_rust), then scripts/host-bench/fanin.py over TCP loopback on this host. With
+# PICO_CMP_NO_BUILD=1 the programs a previous fanin built are run again.
+fanin() {
+    local rounds="${1:-4}" pubs="${2:-3}" size="${3:-4000000}" hz="${4:-20}" seconds="${5:-10}" cc="${6:-block}"
+    local pairs="${7:-PP,WW}"
+    local dir="$out/fanin" run rc
+    if [ "${PICO_CMP_NO_BUILD:-0}" = 1 ]; then
+        [ -x "$dir/bin/wz_fanin_P" ] && [ -x "$dir/bin/wz_fanin_W" ] \
+            || parity_fail "PICO_CMP_NO_BUILD=1 and no wz_fanin of an earlier fanin under $dir/bin"
+        PARITY_REFERENCE="(not rebuilt)" PARITY_IMAGE="(not rebuilt)" PARITY_NOTES="programs of an earlier fanin build"
+    else
+        rm -rf "$dir"
+        mkdir -p "$dir/bin"
+        bash scripts/provision-kconfiglib.sh >"$dir/build-kconfiglib.log" 2>&1 \
+            || parity_fail "kconfiglib did not install (see $dir/build-kconfiglib.log)"
+        parity_build_rust "$dir" wz_fanin
+    fi
+    run="$out/fanin-runs/host-$(date -u +%Y%m%dT%H%M%S)"
+    python3 -I "$root/scripts/host-bench/fanin.py" --bin-dir "$dir/bin" --run "$run" --rounds "$rounds" \
+        --publishers "$pubs" --size "$size" --hz "$hz" --seconds "$seconds" --cc "$cc" --pairs "$pairs"
+    rc=$?
+    [ -d "$run" ] || parity_fail "the rounds did not start (fanin.py exit $rc)"
+    {
+        echo "tree=$(git rev-parse HEAD)"
+        echo "host=$(hostname)"
+        echo "kernel=$(uname -r)"
+        echo "cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+        echo "threads=$(nproc)"
+        echo "rustc=$(cd crates && rustc -V)"
+        echo "rounds=$rounds of each pair, alternating; pairs=$pairs publishers=$pubs size=$size hz=$hz seconds=$seconds cc=$cc"
+        echo "reference=$PARITY_REFERENCE image=$PARITY_IMAGE"
+        echo "$PARITY_NOTES"
+        echo "fanin_exit=$rc"
+    } >"$run/record.txt"
+    echo "pico-compare: fanin run $run (report.txt, rounds.jsonl, record.txt)"
+    return "$rc"
+}
+
 mode="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$mode" in
@@ -799,8 +865,9 @@ case "$mode" in
     parity) parity "$@" ;;
     perf) perf_matrix "$@" ;;
     batch) batch_control "$@" ;;
+    fanin) fanin "$@" ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count]" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs]" >&2
         exit 2
         ;;
 esac

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R4576 (no register item) -- which census members a hosted Layer C1cn shard examines.
+"""R4576 (no register item) -- which census members a hosted Layer C1cn shard examines,
+which test legs a hosted Layer C1bnl shard runs, and which cases a hosted Layer C1cs shard builds.
 
 ## Why this exists
 
@@ -28,6 +29,21 @@ and named on stderr; a row for a crate that is no member is named on stderr and 
 leave every member examined, so neither refuses. A table that drifts shows up as an unbalanced
 pair of census jobs, which `job-budget-margin.sh` already reports; refresh the table from the
 `(Ns)` the census prints after every member.
+
+## The test legs of Layer C1bnl
+
+The legs of `nondefault-tests-gate.sh --all-legs` were split the same way, by position, and run
+45051019628 read its four shards at 869, 1,647, 810 and 995 s of legs, the second at 99 percent
+of its 1800 s budget with every leg green: it held the 543 s `wz-capture` leg and the 227 s
+`wz-runtime-tokio` one. They are planned here too, as items named by each leg's key (its
+package, filter and feature CRC, `--list-legs`), over `c1bnl_leg_weights.tsv`
+(`--weights`), under the same rule: the weights decide the balance, never which legs run.
+
+## The cases of Layer C1cs
+
+`capability_cost_gate.py --shards N --shard K` calls [`plan`] itself over its size and statement
+cases and `c1cs_case_weights.tsv` (`CASE_WEIGHTS`): one job read 1,114 s of its 1200 s budget
+at run 45051019628.
 """
 
 from __future__ import annotations
@@ -39,6 +55,8 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 WEIGHTS = HERE / "c1cn_census_weights.tsv"
+LEG_WEIGHTS = HERE / "c1bnl_leg_weights.tsv"
+CASE_WEIGHTS = HERE / "c1cs_case_weights.tsv"
 
 
 def read_weights(text: str) -> dict[str, int]:
@@ -119,8 +137,10 @@ def selftest() -> int:
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad!r}")
-    # The committed table reads.
+    # The committed tables read.
     read_weights(WEIGHTS.read_text(encoding="utf-8"))
+    read_weights(LEG_WEIGHTS.read_text(encoding="utf-8"))
+    read_weights(CASE_WEIGHTS.read_text(encoding="utf-8"))
     print("census-shard-plan selftest: OK")
     return 0
 

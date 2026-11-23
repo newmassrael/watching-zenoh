@@ -1,0 +1,175 @@
+# The cost of each leg of Layer C1bnl in seconds, by the leg's key (`nondefault-tests-gate.sh
+# --list-legs`): what `census_shard_plan.py` deals the legs to the hosted C1bnl shards by,
+# heaviest first to the least loaded shard. The weights decide balance only, never which legs run:
+# a leg with no row is planned at the median and named on stderr, and a row whose key no leg has is
+# named and ignored.
+#
+# Measured on hosted run 45051019628 (f4d3943298), its four shards read in full: each leg's cost is
+# the time between its line and the one before it, its build included. Refresh from a run log: the
+# gate prints `[<key>, <N>s]` after every leg. The comment after a row is the leg's label.
+wz-runtime-tokio:zenoh_config:::f1f88273 34  # wz-runtime-tokio --features <1> zenoh_config::
+wz-runtime-tokio:zenoh_config::wz_member_tests:::19dc3af3 45  # wz-runtime-tokio --features <2> zenoh_config::wz_member_tests::
+zenoh-protocol:core::endpoint::empty_:a4c83025 11  # zenoh-protocol --features <1> core::endpoint::empty_
+zenoh:*:bd4b4d4f 69  # zenoh --features <5> <whole crate>
+wz-runtime-tokio:--test=session_close_ingress:5a42cb5b 21  # wz-runtime-tokio --features <3> --test=session_close_ingress
+wz-runtime-tokio:--test=storage_manager_hosts_a_storage_e2e:417cffb1 23  # wz-runtime-tokio --features <1> --test=storage_manager_hosts_a_storage_e2e
+wz-runtime-tokio:session_lifecycle_open:::e7991daf 49  # wz-runtime-tokio --features <7> session_lifecycle_open::
+wz-runtime-tokio:loop_peers:::7c3b1362 60  # wz-runtime-tokio --features <4> loop_peers::
+wz-runtime-tokio:accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node:e7991daf 41  # wz-runtime-tokio --features <7> accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node
+wz-runtime-tokio:--test=node_peer_open_e2e:e7991daf 34  # wz-runtime-tokio --features <7> --test=node_peer_open_e2e
+wz-runtime-tokio:--test=passive_hold_over_mtls_e2e:0ae970fd 10  # wz-runtime-tokio --features <3> --test=passive_hold_over_mtls_e2e
+wz-runtime-tokio:--test=session_close_query:433b7d03 18  # wz-runtime-tokio --features <4> --test=session_close_query
+wz-runtime-tokio:router_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other:433b7d03 32  # wz-runtime-tokio --features <4> router_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other
+wz-runtime-tokio:storage_manager_service:::f352181b 18  # wz-runtime-tokio --features <2> storage_manager_service::
+wz-runtime-tokio:session::tests::each_listener_is_told_once_when_the_peers_initial_declarations_are_final:bf7e82aa 27  # wz-runtime-tokio --features <8> session::tests::each_listener_is_told_once_when_the_peers_initial_declarations_are_final
+wz-runtime-tokio:session::tests::a_listener_declared_after_the_peer_finished_reads_the_fact_and_is_not_told:bf7e82aa 35  # wz-runtime-tokio --features <8> session::tests::a_listener_declared_after_the_peer_finished_reads_the_fact_and_is_not_told
+wz-runtime-tokio:session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_arrived:bf7e82aa 25  # wz-runtime-tokio --features <8> session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_arrived
+wz-ap-demo:args::stock_config_tests:::f1f88273 26  # wz-ap-demo --features <1> args::stock_config_tests::
+wz-capi-pico:*:c9604fed 54  # wz-capi-pico --features <6> <whole crate>
+wz-capi-pico:--test=local_delivery:cf859d3d 25  # wz-capi-pico --features <2> --test=local_delivery
+wz-capi-pico:--test=raweth_door:237d74d7 23  # wz-capi-pico --features <1> --test=raweth_door
+wz-capi-pico:*:e2a7301c 51  # wz-capi-pico --features <1> <whole crate>
+wz-capi-pico:*:13415961 49  # wz-capi-pico --features <1> <whole crate>
+wz-capi-pico:*:eaea6203 50  # wz-capi-pico --features <1> <whole crate>
+wz-capi-pico:*:a05ceba3 47  # wz-capi-pico --features <4> <whole crate>
+wz-capi-pico:--test=observation_links:e5058425 23  # wz-capi-pico --features <5> --test=observation_links
+wz-capi-pico:--test=segment_sender_doors:e0d7b7d8 12  # wz-capi-pico --features <2> --test=segment_sender_doors
+wz-capi-pico:*:922450bd 51  # wz-capi-pico --features <1> <whole crate>
+wz-capi-pico:--test=e2e_doors:fb52e1e5 18  # wz-capi-pico --features <2> --test=e2e_doors
+wz-capi-pico:--test=e2e_doors:34d1d4f1 25  # wz-capi-pico --features <2> --test=e2e_doors
+wz-capi-pico:*:09c7a5f1 46  # wz-capi-pico --features <1> <whole crate>
+wz-capi-pico:additional_view_tests:::337b72eb 17  # wz-capi-pico --features <2> additional_view_tests::
+wz-capi-pico:additional_view_tests:::38c05b16 19  # wz-capi-pico --features <2> additional_view_tests::
+wz-capi-pico:additional::tests:::43e412fe 11  # wz-capi-pico --features <1> additional::tests::
+wz-capi-pico:app_transport::tests:::50997a15 20  # wz-capi-pico --features <1> app_transport::tests::
+wz-capi-pico:config_policy::tests:::f5c1be69 10  # wz-capi-pico --features <1> config_policy::tests::
+wz-capi-pico:key_ids:::821ad718 19  # wz-capi-pico --features <1> key_ids::
+wz-capi-pico:--test=app_transport_doors:50997a15 27  # wz-capi-pico --features <1> --test=app_transport_doors
+wz-capi-pico:app_transport:775767fa 32  # wz-capi-pico --features <8> app_transport
+wz-capi-pico:--test=key_ids_tokio:821ad718 25  # wz-capi-pico --features <1> --test=key_ids_tokio
+wz-capi-pico:--test=batch_size_per_session:f5c1be69 7  # wz-capi-pico --features <1> --test=batch_size_per_session
+wz-capi-pico:time_base:0a17fd74 18  # wz-capi-pico --features <1> time_base
+wz-capi-pico:time_base:5ac54f18 15  # wz-capi-pico --features <7> time_base
+wz-app-frame:*:53dd6c90 9  # wz-app-frame --features <1> <whole crate>
+wz-capi-pico:--test=message_catalog_doors:43e412fe 7  # wz-capi-pico --features <1> --test=message_catalog_doors
+wz-capi-pico:--test=message_catalog_doors:0ada2a79 24  # wz-capi-pico --features <4> --test=message_catalog_doors
+wz-capi-pico:--test=message_catalog_doors:eada96e7 7  # wz-capi-pico --features <3> --test=message_catalog_doors
+wz-capi-pico:--test=message_payload_doors:9c8c02ac 10  # wz-capi-pico --features <1> --test=message_payload_doors
+wz-capi-pico:object_pool:::a031b592 8  # wz-capi-pico --features <1> object_pool::
+wz-capi-pico:object_slot:::a031b592 10  # wz-capi-pico --features <1> object_slot::
+wz-capi-pico:--test=object_pool_doors:a031b592 6  # wz-capi-pico --features <1> --test=object_pool_doors
+wz-capi-pico:--test=object_pool_doors:d3759313 8  # wz-capi-pico --features <1> --test=object_pool_doors
+wz-app-frame:*:a02fa4f3 8  # wz-app-frame --features <1> <whole crate>
+wz-app-frame:message_payload_tests:::9c8c02ac 9  # wz-app-frame --features <1> message_payload_tests::
+wz-capi-pico:--test=instance_key_doors:a02fa4f3 7  # wz-capi-pico --features <1> --test=instance_key_doors
+wz-capi-pico:--test=instance_key_doors:1ede5ed0 10  # wz-capi-pico --features <4> --test=instance_key_doors
+wz-capi-pico:*:ad417909 45  # wz-capi-pico --features <2> <whole crate>
+wz-capi-pico:--test=decl_watch_doors:9ffa78ca 16  # wz-capi-pico --features <1> --test=decl_watch_doors
+wz-capi-pico:session_memory:b337b76f 8  # wz-capi-pico --features <1> session_memory
+wz-capi-pico:session_memory:aa28b123 18  # wz-capi-pico --features <6> session_memory
+wz-capi-pico:session_memory_door::a_document:98b57d1e 8  # wz-capi-pico --features <2> session_memory_door::a_document
+wz-capi-port:*:7084c3a5 9  # wz-capi-port --features <5> <whole crate>
+wz-capi-port:link_form_tests:::821ad718 6  # wz-capi-port --features <1> link_form_tests::
+wz-capi-port:os::sys::tests:::da6d04f2 8  # wz-capi-port --features <1> os::sys::tests::
+wz-capi-c:*:ad9df26f 77  # wz-capi-c --features <9> <whole crate>
+wz-capi-c:--test=session_roles:3bd2a72b 48  # wz-capi-c --features <1> --test=session_roles
+wz-capi-c:time_base:0a17fd74 33  # wz-capi-c --features <1> time_base
+wz-capi-c:config::tests::wz_member:::821ad718 42  # wz-capi-c --features <1> config::tests::wz_member::
+wz-capi-pico:key_ids::tests:::c6f801e4 8  # wz-capi-pico --features <2> key_ids::tests::
+wz-capi-pico:config_policy::tests::the_document_door_refuses_key_ids_without_the_capability:f5c1be69 10  # wz-capi-pico --features <1> config_policy::tests::the_document_door_refuses_key_ids_without_the_capability
+wz-capi-core:*:1119f98e 35  # wz-capi-core --features <2> <whole crate>
+wz-capi-core:faces::multicast:::237d74d7 33  # wz-capi-core --features <1> faces::multicast::
+wz-capi-core:drive::router_node:::3bd2a72b 26  # wz-capi-core --features <1> drive::router_node::
+wz-capi-core:drive::router_node::engine::port_tests:::cd349f1e 36  # wz-capi-core --features <2> drive::router_node::engine::port_tests::
+wz-capi-core:drive::router_node::engine::port_tests::shared_memory:::9567c493 27  # wz-capi-core --features <3> drive::router_node::engine::port_tests::shared_memory::
+wz-capi-core:open_plan:::bbc7d74d 33  # wz-capi-core --features <2> open_plan::
+wz-capi-core:open_plan:::e5734ccf 25  # wz-capi-core --features <3> open_plan::
+wz-capi-core:open_plan:::6a211afb 33  # wz-capi-core --features <3> open_plan::
+wz-capi-core:caller_span:::9834b8ee 33  # wz-capi-core --features <2> caller_span::
+wz-capi-core:session_defaults:::9834b8ee 44  # wz-capi-core --features <2> session_defaults::
+wz-capi-coop:*:71e98847 36  # wz-capi-coop --features <12> <whole crate>
+wz-capi-coop:tests::shared_key_ids:::da050f60 17  # wz-capi-coop --features <6> tests::shared_key_ids::
+wz-capi-coop:tests::group:::65bc6508 15  # wz-capi-coop --features <2> tests::group::
+wz-capi-coop:tests::group:::5925a59e 19  # wz-capi-coop --features <4> tests::group::
+wz-capi-coop:tests::group:::7d3386d5 13  # wz-capi-coop --features <3> tests::group::
+wz-capi-coop:tests::group:::fe4785fc 17  # wz-capi-coop --features <3> tests::group::
+wz-capi-coop:tests::group::congested:::df68c142 10  # wz-capi-coop --features <3> tests::group::congested::
+wz-capi-coop:host_group:::ca30cd31 14  # wz-capi-coop --features <1> host_group::
+wz-capi-coop:clock_moves_tests:::0a17fd74 11  # wz-capi-coop --features <1> clock_moves_tests::
+wz-capi-coop:engine::decl_watch:::6863d900 14  # wz-capi-coop --features <3> engine::decl_watch::
+wz-capi-coop:tests::decl_watch:::6863d900 12  # wz-capi-coop --features <3> tests::decl_watch::
+wz-host-net:*:a358969b 1  # wz-host-net --features <1> <whole crate>
+wz-runtime-posix:*:d866f4e4 6  # wz-runtime-posix --features <1> <whole crate>
+lwip-sys:tcp_smoke:::7c44ebf4 11  # lwip-sys --features <1> tcp_smoke::
+wz-ext-pubsub:*:0a162c36 8  # wz-ext-pubsub --features <8> <whole crate>
+wz-node-time:*:e47ef2e0 8  # wz-node-time --features <7> <whole crate>
+wz-runtime-tokio-test-support:*:24a60c91 13  # wz-runtime-tokio-test-support --features <1> <whole crate>
+wz-capture:*:14ae1d83 543  # wz-capture --features <3> <whole crate>
+wz-capture:proto_encode_tests:::9c8c02ac 23  # wz-capture --features <1> proto_encode_tests::
+wz-mcu-multicast-e2e:*:0022f6e7 13  # wz-mcu-multicast-e2e --features <2> <whole crate>
+wz-mcu-session-acceptor:*:daa6bd9f 11  # wz-mcu-session-acceptor --features <3> <whole crate>
+wz-packet-socket:*:7ff5b2fa 16  # wz-packet-socket --features <1> <whole crate>
+wz-rest:*:8749a640 21  # wz-rest --features <2> <whole crate>
+wz-runtime-coop:*:18efc1e7 10  # wz-runtime-coop --features <22> <whole crate>
+wz-runtime-coop:*:7b47ad05 6  # wz-runtime-coop --features <4> <whole crate>
+wz-runtime-coop:app_link:::f6310848 8  # wz-runtime-coop --features <2> app_link::
+wz-tls-mbedtls:*:9a3212b4 21  # wz-tls-mbedtls --features <2> <whole crate>
+wz-tls-mbedtls:*:4058c3e5 24  # wz-tls-mbedtls --features <3> <whole crate>
+wz-runtime-core:*:c47c106c 1  # wz-runtime-core --features <1> <whole crate>
+wz-session-core:*:8e8ed35f 83  # wz-session-core --features <92> <whole crate>
+wz-session-core:*:7e915390 22  # wz-session-core --features <15> <whole crate>
+wz-session-core:*:d1554218 27  # wz-session-core --features <16> <whole crate>
+wz-session-core:*:5da653a0 26  # wz-session-core --features <9> <whole crate>
+wz-session-core:*:742376dd 32  # wz-session-core --features <12> <whole crate>
+wz-session-core:initial_sn:::9843d809 12  # wz-session-core --features <2> initial_sn::
+wz-session-lwip:*:099faf21 14  # wz-session-lwip --features <17> <whole crate>
+wz-session-lwip:*:1b9b56e5 8  # wz-session-lwip --features <6> <whole crate>
+wz-session-lwip:--test=link_state_allocations:f7fa5f9f 12  # wz-session-lwip --features <4> --test=link_state_allocations
+wz-link-lwip:--test=link_storage_allocations:0b7f5cf9 9  # wz-link-lwip --features <1> --test=link_storage_allocations
+wz-link-lwip:--test=link_storage_allocations:b85b4a29 9  # wz-link-lwip --features <2> --test=link_storage_allocations
+wz-link-lwip:tcp:::48b42565 8  # wz-link-lwip --features <2> tcp::
+wz-link-lwip:tcp:::0d3a9126 2  # wz-link-lwip --features <3> tcp::
+wz-session-lwip:stream:::7c44ebf4 9  # wz-session-lwip --features <1> stream::
+wz-session-lwip:stream:::e8fcf5ca 7  # wz-session-lwip --features <2> stream::
+wz-session-lwip:stream:::cd6066b6 11  # wz-session-lwip --features <9> stream::
+wz-session-lwip:--test=session_over_tcp:cd6066b6 12  # wz-session-lwip --features <9> --test=session_over_tcp
+wz-session-lwip:--test=admin_node_over_tcp:cd6066b6 10  # wz-session-lwip --features <9> --test=admin_node_over_tcp
+wz-session-lwip:stream:::cd52ad7d 15  # wz-session-lwip --features <10> stream::
+wz-session-lwip:--test=session_over_tcp:cd52ad7d 2  # wz-session-lwip --features <10> --test=session_over_tcp
+wz-session-lwip:--test=admin_node_over_tcp:cd52ad7d 2  # wz-session-lwip --features <10> --test=admin_node_over_tcp
+wz-session-lwip:*:9f907cc9 9  # wz-session-lwip --features <7> <whole crate>
+wz-session-lwip:--test=session_dial_exhaustion:4fe77093 9  # wz-session-lwip --features <6> --test=session_dial_exhaustion
+wz-session-lwip:--test=session_dial_for_a_node:4fe77093 6  # wz-session-lwip --features <6> --test=session_dial_for_a_node
+wz-session-lwip:--test=multicast_slot:47e0ffdb 8  # wz-session-lwip --features <5> --test=multicast_slot
+wz-session-lwip:--test=admin_node_slot:518f2df6 7  # wz-session-lwip --features <8> --test=admin_node_slot
+wz-session-mcu:*:5e6a1d26 12  # wz-session-mcu --features <15> <whole crate>
+wz-session-mcu:*:4bd92058 9  # wz-session-mcu --features <7> <whole crate>
+wz-session-mcu:*:45f6a7c7 14  # wz-session-mcu --features <4> <whole crate>
+wz-session-mcu:group_drive:::d0e3933f 7  # wz-session-mcu --features <2> group_drive::
+wz-session-core:*:ad2676d9 37  # wz-session-core --features <22> <whole crate>
+wz-session-core:pool_gauge:::b9f8ec49 11  # wz-session-core --features <1> pool_gauge::
+wz-session-core:app_link_table:::eed4bd40 15  # wz-session-core --features <1> app_link_table::
+wz-session-core:app_transport:::eed4bd40 12  # wz-session-core --features <1> app_transport::
+wz-runtime-coop:app_link:::f6310848~1 7  # wz-runtime-coop --features <2> app_link::
+wz-session-core:decl_sink:::30a94b8c 11  # wz-session-core --features <1> decl_sink::
+wz-session-core:shared_key_ids:::42d6c4ac 18  # wz-session-core --features <3> shared_key_ids::
+wz-session-core:limits::enforcement:::7f092e79 13  # wz-session-core --features <2> limits::enforcement::
+wz-storage:*:b7c4ecc5 10  # wz-storage --features <7> <whole crate>
+wz-admin:*:cbabfdf7 6  # wz-admin --features <8> <whole crate>
+wz-admin:*:ed73d755 11  # wz-admin --features <17> <whole crate>
+wz-session-lwip:--test=slot_control_records:ba35aa87 8  # wz-session-lwip --features <8> --test=slot_control_records
+wz-session-lwip:--test=slot_frames_without_alloc:5abc602c 7  # wz-session-lwip --features <9> --test=slot_frames_without_alloc
+wz-ap-demo:*:c1ddd554 60  # wz-ap-demo --features <44> <whole crate>
+wz-runtime-tokio:*:9c745920 227  # wz-runtime-tokio --features <90> <whole crate>
+wz-runtime-tokio:multicast_glue:4c31cf14 29  # wz-runtime-tokio --features <2> multicast_glue
+wz-runtime-tokio:app_link:::61a47551 36  # wz-runtime-tokio --features <2> app_link::
+wz-runtime-tokio:--test=session_program_time:af7d6dfc 10  # wz-runtime-tokio --features <1> --test=session_program_time
+wz-runtime-tokio:session::tests::a_stable_declarations_wait_on_program_time_ends_only_when_that_time_passes:af7d6dfc 23  # wz-runtime-tokio --features <1> session::tests::a_stable_declarations_wait_on_program_time_ends_only_when_that_time_passes
+wz-runtime-tokio:router_forward::routing_spans:::3e4dcdcf 43  # wz-runtime-tokio --features <3> router_forward::routing_spans::
+wz-runtime-tokio:runtime_pool::span_tests:::3e4dcdcf 55  # wz-runtime-tokio --features <3> runtime_pool::span_tests::
+wz-capi-c:publisher::congestion_tests:::dcea5959 28  # wz-capi-c --features <1> publisher::congestion_tests::
+zenoh-keyexpr:*:9baf38c1 10  # zenoh-keyexpr --features <2> <whole crate>
+zenoh-config:*:3f76efba 23  # zenoh-config --features <1> <whole crate>
+zenoh:*:9baf38c1 86  # zenoh --features <2> <whole crate>
+zenoh:*:b8944e48 78  # zenoh --features <2> <whole crate>
+zenoh:api::config::tests::the_members_key_ids_are_read_as_a_documents:821ad718 56  # zenoh --features <1> api::config::tests::the_members_key_ids_are_read_as_a_documents

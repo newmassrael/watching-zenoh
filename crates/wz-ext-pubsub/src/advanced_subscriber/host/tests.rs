@@ -133,8 +133,8 @@ impl SessionEngine for Script {
     fn next_entity_id(&self) -> Option<u32> {
         u32::try_from(self.take_id()).ok()
     }
-    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
-        Vec::new()
+    fn next_peer(&self, _from: u64) -> Option<(u64, wz_capi_port::PeerIdentity)> {
+        None
     }
     fn has_router_peer(&self) -> bool {
         false
@@ -150,7 +150,7 @@ impl SessionEngine for Script {
     }
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
@@ -164,7 +164,7 @@ impl SessionEngine for Script {
         self.subscriptions
             .lock()
             .unwrap()
-            .push((id, keyexpr, wire, sink));
+            .push((id, keyexpr.to_owned(), wire, sink));
         Some(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
@@ -185,7 +185,7 @@ impl SessionEngine for Script {
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
     }
-    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
         None
     }
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
@@ -195,7 +195,7 @@ impl SessionEngine for Script {
     fn declare_matching_listener(
         &self,
         _plane: FilterPlane,
-        _keyexpr: String,
+        _keyexpr: &str,
         _sink: MatchingSink,
         _count_local: bool,
     ) -> MatchId {
@@ -205,7 +205,7 @@ impl SessionEngine for Script {
     fn declare_write_filter(
         &self,
         _plane: FilterPlane,
-        _keyexpr: String,
+        _keyexpr: &str,
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
@@ -240,7 +240,7 @@ impl SessionEngine for Script {
     }
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
@@ -253,7 +253,7 @@ impl SessionEngine for Script {
     }
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
@@ -263,7 +263,7 @@ impl SessionEngine for Script {
         self.liveliness
             .lock()
             .unwrap()
-            .push((id, keyexpr, history, sink));
+            .push((id, keyexpr.to_owned(), history, sink));
         Some(id)
     }
     fn get_on_wire(
@@ -312,7 +312,7 @@ impl SessionEngine for Script {
     }
     fn declare_queryable_on_wire(
         &self,
-        _keyexpr: String,
+        _keyexpr: &str,
         _wire: WireKey,
         _complete: bool,
         _allowed_origin: Locality,
