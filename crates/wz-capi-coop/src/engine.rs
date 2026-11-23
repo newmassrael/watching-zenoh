@@ -85,7 +85,6 @@ use wz_runtime_coop::session_drive::{
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare::matching::BoxedMatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
@@ -1410,12 +1409,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// (`crate::lane::LaneGate`).
     lane: Arc<SharedLane>,
     /// The one reassembly Router the session's links share, each link's receive holding a handle:
-    /// its chains are keyed by their peers, staged in `reassembly`. Before the buffers, so it lets
-    /// them go first.
-    router: SharedReassembly<SessionReassembly>,
-    /// The buffers the session's links stage the chains of their fragmented messages in, each
+    /// its chains are keyed by their peers, and staged in the session's buffers for them, each
     /// claimed by a chain while it is open, lent from the arena (`ArenaPlan::reassembly`).
-    reassembly: LentByteCells,
+    router: SharedReassembly<SessionReassembly>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -3602,7 +3598,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
             router,
-            reassembly,
             arena,
         };
         #[cfg(feature = "queryable")]
