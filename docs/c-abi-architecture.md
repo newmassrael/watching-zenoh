@@ -246,7 +246,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-021 | `wz-session-core` | `stats_registry` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 31 | open |
 | TD-022 | `wz-session-core` | `resource_snapshot` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 30 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
-| TD-024 | `wz-session-core` | `keyexpr_canon` | `indexing_slicing`, `arithmetic_side_effects` | 28 | open |
 | TD-026 | `wz-session-core` | `row_pool` | `panic`, `arithmetic_side_effects` | 27 | open |
 | TD-027 | `wz-session-core` | `sorted_chunks` | `indexing_slicing`, `arithmetic_side_effects` | 27 | open |
 | TD-028 | `wz-session-core` | `dissect` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 26 | open |
@@ -436,8 +435,8 @@ callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no poin
 to give, and whose refusal belongs in that trait of `wz-session-core`.
 
 Some rows keep only `panic` for a check that runs while the build evaluates a constant, where the
-panic is how a wrong generated table stops the build that holds it: TD-014's `KeyCatalogue::new`,
-and TD-023's refusal of a `WZ_POLICY_*` value no choice spells (its indexing is the `ALL[index]`
-of `policy_generated.rs`, which `wz_config.py` writes).
-Its refusal as a value is `try_new`; the panic moves out when the generator writes the `match`
-on `try_new` into the image's own crate.
+panic is how a wrong generated table or a misspelt build value stops the build that holds it.
+TD-014 is `KeyCatalogue::new`: its refusal as a value is `try_new`, and the panic moves out when
+the generator writes the `match` on `try_new` into the image's own crate. TD-023 is the refusal of
+a `WZ_POLICY_*` value no choice spells; its indexing is the `ALL[index]` of
+`policy_generated.rs`, which `wz_config.py` writes.
