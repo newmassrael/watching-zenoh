@@ -3677,8 +3677,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.dial_settled() {
-                let waited = core.idle_wait().wait(sleep_ms);
-                core.links.waited(waited);
+                let mut wait = core.idle_wait();
+                wait.wait(sleep_ms);
+                core.links.waited(wait);
                 core.local.run_until_idle();
                 let now_us = core.now_us();
                 core.poll_links(None, now_us)?;
@@ -6778,7 +6779,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
         // under a stream of batches each read takes the session once, for its step.
-        let wait = if self.input_held.swap(false, Ordering::Relaxed) {
+        let mut wait = if self.input_held.swap(false, Ordering::Relaxed) {
             IdleWait::None
         } else {
             // Marked as a holder that holds no send, so a droppable publish that finds the session
@@ -6791,14 +6792,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(test)]
         self.takes.wait(&wait);
-        let waited = wait.wait(sleep_ms);
+        wait.wait(sleep_ms);
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         // One take of the session for the step: its links, what publishes handed to it, and
         // whether a periodic job is due by the clock reading the step made.
         let (stepped, handed, jobs_due_ms) = match self.live() {
             Some(mut core) => {
-                core.0.links.waited(waited);
+                core.0.links.waited(wait);
                 let stepped = self.step(&mut core.0);
                 self.input_held
                     .store(stepped.is_some() && core.0.holds_input(), Ordering::Relaxed);

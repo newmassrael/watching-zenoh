@@ -290,45 +290,21 @@ pub enum IdleWait {
     Sleep(u32),
 }
 
-/// What a read's wait leaves the step after it ([`LinkSupervisor::waited`]).
-pub struct Waited {
-    spare: Vec<Arc<dyn LinkReadiness>>,
-    read: Option<(FaceId, RxLease)>,
-}
-
 impl IdleWait {
-    /// Wait, sleeping with `sleep` (milliseconds) where there is nothing to wait on, and hand back
-    /// what the wait leaves. Out of line: a session's open and each of its reads wait, and a copy
-    /// in each is larger than the call.
+    /// Wait, sleeping with `sleep` (milliseconds) where there is nothing to wait on. The wait
+    /// keeps what it was made of, emptied, and what its read brought, for the session to hand
+    /// back ([`LinkSupervisor::waited`]). Out of line: a session's open and each of its reads
+    /// wait.
     #[inline(never)]
-    pub fn wait(self, sleep: impl FnOnce(u32)) -> Waited {
+    pub fn wait(&mut self, sleep: impl FnOnce(u32)) {
         match self {
-            IdleWait::None => Waited {
-                spare: Vec::new(),
-                read: None,
-            },
-            IdleWait::Input(mut waits, ms) => {
-                wait_any(&waits, ms);
+            IdleWait::None => {}
+            IdleWait::Input(waits, ms) => {
+                wait_any(waits, *ms);
                 waits.clear();
-                Waited {
-                    spare: waits,
-                    read: None,
-                }
             }
-            IdleWait::Read(face, mut lease, ms) => {
-                lease.read(ms);
-                Waited {
-                    spare: Vec::new(),
-                    read: Some((face, lease)),
-                }
-            }
-            IdleWait::Sleep(ms) => {
-                sleep(ms);
-                Waited {
-                    spare: Vec::new(),
-                    read: None,
-                }
-            }
+            IdleWait::Read(_, lease, ms) => lease.read(*ms),
+            IdleWait::Sleep(ms) => sleep(*ms),
         }
     }
 }
@@ -337,8 +313,9 @@ impl IdleWait {
 /// record `F`. The first face is the dial role's, which is never removed.
 pub struct LinkSupervisor<L: SessionLinks, F> {
     links: L,
+    /// The faces, reserved for as many as the session admits: its capacity is the room, and a
+    /// face past it is refused, never grown into.
     faces: Vec<F>,
-    face_room: usize,
     listeners: Vec<Listening<L::Pump>>,
     waits: Vec<Arc<dyn LinkReadiness>>,
     next_face: FaceId,
@@ -350,13 +327,11 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
     /// a read makes at once, reserved now. The ports are the open's, taken as it listens
     /// ([`Self::listen`]). Faces taken after are numbered from 1.
     pub fn new(links: L, dial: F, faces: usize, waits: usize) -> Self {
-        let face_room = faces.max(1);
-        let mut table = Vec::with_capacity(face_room);
+        let mut table = Vec::with_capacity(faces.max(1));
         table.push(dial);
         Self {
             links,
             faces: table,
-            face_room,
             listeners: Vec::new(),
             waits: Vec::with_capacity(waits),
             next_face: 1,
@@ -390,7 +365,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
 
     /// Add `face`, or hand it back when every face the table was reserved for is taken.
     pub fn push_face(&mut self, face: F) -> Result<(), F> {
-        if self.faces.len() >= self.face_room {
+        if self.faces.len() >= self.faces.capacity() {
             return Err(face);
         }
         self.faces.push(face);
@@ -564,7 +539,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         let mut own_loop = false;
         let mut dial_left_ms = None;
         let mut read_face = None;
-        for face in &self.faces {
+        for (at, face) in self.faces.iter().enumerate() {
             match face.link() {
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
@@ -574,7 +549,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                             waits.push(AndRoom::of(ready.clone()));
                         } else {
                             waits.push(ready.clone());
-                            read_face = Some(face.id());
+                            read_face = Some(at);
                         }
                     } else {
                         own_loop = true;
@@ -616,7 +591,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             },
             (false, _) if most > 0 => {
                 let lent = match (read_face, waits.len(), own_loop || look_again) {
-                    (Some(face), 1, false) if may_lend() => self.lend_rx_of(face),
+                    (Some(at), 1, false) if may_lend() => self.lend_rx_at(at),
                     _ => None,
                 };
                 let most = if own_loop || look_again {
@@ -637,31 +612,39 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
         wait
     }
 
-    /// The lease of the receive buffer of face `face`'s link, for a read's wait to be made in the
-    /// read of that link; `None` from a link that gives none.
-    fn lend_rx_of(&self, face: FaceId) -> Option<(FaceId, RxLease)> {
-        let held = self.faces.iter().find(|held| held.id() == face)?;
+    /// The lease of the receive buffer of the link of the face at `at`, for a read's wait to be
+    /// made in the read of that link, with the face's number; `None` from a link that gives none.
+    fn lend_rx_at(&self, at: usize) -> Option<(FaceId, RxLease)> {
+        let held = self.faces.get(at)?;
         let lease = held.link().wire()?.ungated.lend_rx()?;
-        Some((face, lease))
+        Some((held.id(), lease))
     }
 
-    /// Take back what a read's wait left: the buffer of its waits, the larger of it and the one
-    /// held kept, and the lease its read was made in, landed on the link of the face that lent
-    /// it. A lease whose face has gone, or holds another link by now, is let go of.
-    pub fn waited(&mut self, waited: Waited) {
-        if waited.spare.capacity() > self.waits.capacity() {
-            self.waits = waited.spare;
-        }
-        let Some((face, lease)) = waited.read else {
-            return;
-        };
-        if let Some(wire) = self
-            .faces
-            .iter()
-            .find(|held| held.id() == face)
-            .and_then(|held| held.link().wire())
-        {
-            wire.ungated.land_rx(lease);
+    /// Take back a read's wait, once made ([`IdleWait::wait`]): the buffer of its waits, which
+    /// the wait took whole ([`Self::idle_wait`]), the larger of it and the one held kept, and the
+    /// lease its read was made in, landed on
+    /// the link of the face that lent it. A lease whose face has gone, or holds another link by
+    /// now, is let go of.
+    pub fn waited(&mut self, wait: IdleWait) {
+        match wait {
+            // A wait made of more than the buffer (the program's clock word beside it) leaves the
+            // larger of the two here.
+            IdleWait::Input(spare, _) => {
+                if spare.capacity() > self.waits.capacity() {
+                    self.waits = spare;
+                }
+            }
+            IdleWait::Read(face, lease, _) => {
+                if let Some(wire) = self
+                    .faces
+                    .iter()
+                    .find(|held| held.id() == face)
+                    .and_then(|held| held.link().wire())
+                {
+                    wire.ungated.land_rx(lease);
+                }
+            }
+            IdleWait::None | IdleWait::Sleep(_) => {}
         }
     }
 
