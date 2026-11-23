@@ -318,7 +318,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-109 | `wz-session-core` | `reset_generations` | `indexing_slicing`, `unreachable` | 3 | open |
 | TD-113 | `wz-session-core` | `compression` | `indexing_slicing`, `expect_used` | 2 | open |
 | TD-114 | `wz-session-core` | `declare_ext_keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
-| TD-115 | `wz-session-core` | `encoding` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
 | TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
 | TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
 | TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |

@@ -1085,8 +1085,6 @@ pub mod declare_form;
 // composable code path). Gated on `alloc` (it builds the `String`-bearing
 // `sample::EncodingHint`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-115 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod encoding;
 
 /// zid <-> zenoh `ZenohId` Display hex — the SSOT recipe for rendering a
