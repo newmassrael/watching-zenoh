@@ -111,10 +111,10 @@ pub const DELIVERY_LANE_CALLBACKS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
-    storage: Storage::Quota,
+    storage: Storage::Both,
     scope: &[Scope::Entity],
-    binding_heap: Some(Binding::Live),
-    binding_fixed: None,
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
 
@@ -639,6 +639,30 @@ pub const MAX_ACCEPT_PENDING: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Remote),
     range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::RX_POOL_BUFFERS`] is bound.
+pub const RX_POOL_BUFFERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::TX_POOL_SLOTS`] is bound.
+pub const TX_POOL_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),

@@ -106,10 +106,10 @@ fn a_subscribers_callback_is_dropped_once_on_close() {
     );
 }
 
-/// The close takes the whole table of callbacks at once: after it the table holds none, whatever
-/// kind of declaration each was minted for, and each is let go of.
+/// The close lets go of every callback, whatever kind of declaration each was minted for: each is
+/// held by its own row, and the close empties the rows.
 #[test]
-fn the_close_leaves_no_callback_in_the_table() {
+fn the_close_lets_go_of_every_rows_callback() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let counts = Counts::default();
@@ -119,11 +119,17 @@ fn the_close_leaves_no_callback_in_the_table() {
     assert!(engine
         .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
         .is_ok());
-    assert_eq!(engine.callbacks_held(), 2, "one for each declaration");
     assert_eq!(engine.subscriber_rows(), 1);
+    assert!(
+        alive.upgrade().is_some(),
+        "the listener's row holds its sink"
+    );
     SessionDrive::close(&*engine);
-    assert_eq!(engine.callbacks_held(), 0, "the close took the table whole");
-    assert_eq!(engine.subscriber_rows(), 0, "and the subscribers' rows");
+    assert_eq!(
+        engine.subscriber_rows(),
+        0,
+        "the close emptied the subscribers' rows"
+    );
     assert_eq!(counts.callbacks_dropped(), 1);
     assert!(
         alive.upgrade().is_none(),

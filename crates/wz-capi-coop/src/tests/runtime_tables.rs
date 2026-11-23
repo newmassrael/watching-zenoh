@@ -29,17 +29,65 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
 }
 
-/// A listener reserves a cell for the dial role's link, each face it admits and each handshake it
-/// holds, as its arena lays out a link for each.
+/// A listener reserves a cell for each face it admits, a link in its handshake among them, and for
+/// the dial role's link only when it dials; a link past them is closed before it has a task, so a
+/// handshake it holds takes no cell of its own.
 #[test]
-fn a_listener_reserves_a_cell_for_each_link_it_admits() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+fn a_listener_reserves_a_cell_for_each_face_it_admits() {
+    let listener = |endpoints: Vec<String>| CoopConfig {
+        endpoints,
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
         accept_pending: 2,
         ..client_config()
+    };
+    let tables = RuntimeTables::of::<PosixClock>(&listener(Vec::new()));
+    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(3));
+    let tables = RuntimeTables::of::<PosixClock>(&listener(vec!["tcp/127.0.0.1:7447".to_owned()]));
+    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3));
+}
+
+/// A session that listens with the peers zenoh-pico takes (its ten, `Z_LISTEN_MAX_CONNECTION_NB`)
+/// runs a task for each: ten cells, and the eighth to the tenth session are spawned as the first
+/// is; one that also dials has a cell for its dial beside them. Only a link past the faces it
+/// admits finds no cell.
+#[test]
+fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
+    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 10,
+        accept_pending: 1,
+        ..client_config()
     });
-    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3 + 2));
+    assert_eq!(tables.rows.tasks, 10, "the ten faces, and no dial");
+    let dialling = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 10,
+        accept_pending: 1,
+        ..client_config()
+    });
+    assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
+    let runtime = tables.runtime(PosixClock);
+    let local = CoopLocalSet::new(&runtime);
+    let sessions: Vec<_> = (0..10u8)
+        .map(|at| {
+            local
+                .try_spawn_local(async move { at })
+                .unwrap_or_else(|_| panic!("the session of link {at} has a cell"))
+        })
+        .collect();
+    assert!(
+        matches!(
+            local
+                .try_spawn_local(async { 0u8 })
+                .map(|_| ())
+                .map_err(|refused| refused.why),
+            Err(SpawnRefusal::NoTaskCell)
+        ),
+        "a link past the faces finds no cell"
+    );
+    drop(sessions);
 }
 
 /// The cells are held to the build's `MAX_TASKS` whatever the config admits, a count past the
@@ -77,4 +125,58 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         .try_spawn_local(async { 3u8 })
         .expect("a link's cell takes a small task");
     assert_eq!(local.block_on_local(small).expect("ran"), 3);
+}
+
+/// The parts of the cell a link's session task takes, by size, for the cell to be made smaller
+/// where it is largest: the pump (the session's machine, its handle, its timers, its receive with
+/// the reassembly Router and the record buffer) built in the task's own memory, what the task holds
+/// to build it, and what it hands each event to. Read with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints the parts of a link task's cell"]
+fn print_the_parts_of_a_link_tasks_cell() {
+    use core::mem::size_of;
+    use wz_runtime_coop::reassembly_rx::SessionReassembly;
+    use wz_runtime_coop::session_drive::{SessionDatagramLink, SessionDriveConfig, SessionPump};
+    use wz_runtime_coop::session_runtime::SessionHandle;
+    use wz_runtime_coop::{CoopRuntime, CoopTime};
+    use wz_session_core::drive::SessionEngine;
+    use wz_session_core::link::BoxedLinkDriver;
+    use wz_session_core::network_message::RecordBuf;
+    use wz_session_core::transport_timers::TransportTimers;
+    use wz_session_core::unicast_rx::RouterLend;
+    use wz_session_core::unicast_rx::UnicastRx;
+
+    use crate::engine::FaceDispatch;
+
+    type C = PosixClock;
+    type Link = wz_runtime_coop::link_cells::CellRc<dyn SessionDatagramLink>;
+    type Router = RouterLend<SessionReassembly>;
+    let cell = link_task_bytes::<C>();
+    let pump = size_of::<SessionPump<C, Link, dyn BoxedLinkDriver, Router>>();
+    let parts: [(&str, usize); 13] = [
+        ("pump", pump),
+        (
+            "  engine (the session machine)",
+            size_of::<SessionEngine<CoopRuntime<C>, CoopTime<C>>>(),
+        ),
+        ("  rx (receive)", size_of::<UnicastRx<Router>>()),
+        ("    router lend (reassembly)", size_of::<Router>()),
+        ("  the session's one router", size_of::<SessionReassembly>()),
+        ("    record buffer", size_of::<RecordBuf>()),
+        ("  timers", size_of::<TransportTimers>()),
+        ("  actions handle", size_of::<SessionHandle<C>>()),
+        ("  runtime", size_of::<CoopRuntime<C>>()),
+        ("  clock", size_of::<CoopTime<C>>()),
+        ("  link", size_of::<Link>()),
+        (
+            "parts to build it: maker + config",
+            size_of::<Router>() + size_of::<SessionDriveConfig>(),
+        ),
+        ("event sink (FaceDispatch)", size_of::<FaceDispatch<C>>()),
+    ];
+    std::println!("link task cell: {cell} B");
+    for (name, bytes) in parts {
+        std::println!("{name:<40} {bytes:>7} B");
+    }
+    assert!(pump <= cell, "the pump is built in the cell");
 }

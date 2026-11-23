@@ -339,10 +339,12 @@ enum Numbers {
 /// here, and is written as the JSON STRING of its source text rather than as a
 /// number rounded on the way.
 fn write_json_number(text: &str, out: &mut String) {
-    let (negative, body) = match text.as_bytes().first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
+    let (negative, body) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, text)
     };
     if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
         match u128::from_str_radix(hex, 16) {
@@ -423,11 +425,15 @@ fn write_upstream_number(text: &str, out: &mut String) -> Result<(), UpstreamNum
         out.push_str("null");
         return Ok(());
     }
-    let hex = text.len() > 2 && matches!(&text[..2], "0x" | "0X");
-    let integral = !text.contains('.') && (hex || !text.contains(['e', 'E']));
+    // A prefix read as text, not cut at a byte: a number's text may hold any character.
+    let hex = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .filter(|digits| !digits.is_empty());
+    let integral = !text.contains('.') && (hex.is_some() || !text.contains(['e', 'E']));
     if integral {
-        let value = if hex {
-            match u32::from_str_radix(&text[2..], 16) {
+        let value = if let Some(digits) = hex {
+            match u32::from_str_radix(digits, 16) {
                 Ok(n) => i64::from(n),
                 Err(_) => return Err(UpstreamNumberError::HexWiderThanU32(text.into())),
             }
@@ -481,7 +487,7 @@ fn write_zmij_f64(value: f64, out: &mut String) {
     let length = digits.len() as isize;
     let exp = exponent.parse::<isize>().unwrap_or(0);
     if (-5..=15).contains(&exp) {
-        if length - 1 <= exp {
+        if length.saturating_sub(1) <= exp {
             // 1234e7 -> 12340000000.0
             out.push_str(&digits);
             for _ in length..=exp {
@@ -490,14 +496,18 @@ fn write_zmij_f64(value: f64, out: &mut String) {
             out.push_str(".0");
         } else if 0 <= exp {
             // 1234e-2 -> 12.34
-            let point = (exp + 1) as usize;
-            out.push_str(&digits[..point]);
+            // Below the digits' length in this arm, and the digits are ASCII.
+            let point = exp.saturating_add(1) as usize;
+            let (whole, fraction) = digits
+                .split_at_checked(point)
+                .unwrap_or((digits.as_str(), ""));
+            out.push_str(whole);
             out.push('.');
-            out.push_str(&digits[point..]);
+            out.push_str(fraction);
         } else {
             // 1234e-6 -> 0.001234
             out.push_str("0.");
-            for _ in exp + 1..0 {
+            for _ in exp.saturating_add(1)..0 {
                 out.push('0');
             }
             out.push_str(&digits);
@@ -505,10 +515,11 @@ fn write_zmij_f64(value: f64, out: &mut String) {
         return;
     }
     // 1234e30 -> 1.234e+33
-    out.push_str(&digits[..1]);
+    let (first, rest) = digits.split_at_checked(1).unwrap_or((digits.as_str(), ""));
+    out.push_str(first);
     if length > 1 {
         out.push('.');
-        out.push_str(&digits[1..]);
+        out.push_str(rest);
     }
     out.push_str(if exp >= 0 { "e+" } else { "e-" });
     out.push_str(&exp.unsigned_abs().to_string());
@@ -574,7 +585,7 @@ impl Parser<'_> {
             }
             let key = decode(&self.lex.member_name()?)?;
             self.lex.skip_trivia()?;
-            self.lex.expect(b':', ": after a member name")?;
+            self.lex.consume(b':', ": after a member name")?;
             self.lex.skip_trivia()?;
             let value = self.value()?;
             entries.push((key, value));

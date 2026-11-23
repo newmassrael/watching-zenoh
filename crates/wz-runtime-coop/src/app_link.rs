@@ -47,7 +47,6 @@
 //! it held nearly always, and the read task, which takes it again at once, keeps it.
 
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -56,16 +55,18 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
     kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
-    SendStep, StreamRead,
+    SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
+use wz_session_core::byte_cells::LentByteCells;
 
 use crate::group_transport::{GroupSend, GroupTransport};
-use crate::ip_stack::{HeapIpDriver, IpDriver};
+use crate::ip_stack::{heap_link, HeapLink};
+use crate::link_cells::CellRc;
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator, OpenedLink,
-    PendingDial, SessionLinks,
+    Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator,
+    OpenedLink, PendingDial, SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -618,7 +619,10 @@ pub struct AppStreamSocket {
 impl StreamSocket for AppStreamSocket {
     type Error = AppLinkError;
 
-    type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+    type Link<
+        B: crate::link_storage::RxStore + 'static,
+        X: crate::link_storage::TxStore + 'static,
+    >
         = crate::stream_link::StreamDriver<Self, B, X>
     where
         Self: 'static;
@@ -714,6 +718,33 @@ impl StreamDial for AppStreamDial {
     }
 }
 
+/// A dial of [`AppLinks`] ([`SessionLinks::begin_initiator`]): a link made when it was begun, or
+/// one the program was asked to open and has not reported up.
+pub struct AppDial(AppDialing);
+
+/// Where an [`AppDial`] stands.
+// Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
+#[allow(clippy::large_enum_variant)]
+enum AppDialing {
+    Made(Dialled<HeapLink>),
+    Pending(PendingAppLink),
+}
+
+impl PendingDial<HeapLink> for AppDial {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+        match &mut self.0 {
+            AppDialing::Made(made) => made.poll(),
+            AppDialing::Pending(pending) => pending.poll(),
+        }
+    }
+}
+
+impl From<OpenedLink<HeapLink>> for AppDial {
+    fn from(opened: OpenedLink<HeapLink>) -> Self {
+        Self(AppDialing::Made(Dialled::new(opened)))
+    }
+}
+
 /// A link the program was asked to open and has not reported up ([`AppLinks`]'s begun dial):
 /// asked without waiting whether it is up. Dropped before it is, it releases the link, which the
 /// program is told to close.
@@ -725,10 +756,12 @@ struct PendingAppLink {
     datagram: bool,
     /// Whether the link is waited on by its owner once it is up, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells the link is placed in once it is up, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
-impl PendingDial<Rc<AppDriver>> for PendingAppLink {
-    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<AppDriver>>, LinkOpenError>> {
+impl PendingDial<HeapLink> for PendingAppLink {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
         let held = self.held.as_ref()?;
         let handle = held.handle;
         match held.transport.with(|table| table.poll_open(handle, None)) {
@@ -742,33 +775,34 @@ impl PendingDial<Rc<AppDriver>> for PendingAppLink {
             OpenProgress::Open => {
                 let held = self.held.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                let driver: AppDriver = if self.datagram {
-                    IpDriver::Udp(self.owner_waits.datagram(UdpDriver::initiator_in(
-                        AppDatagramSocket {
-                            held,
-                            peer: self.to,
-                            reads_sources: true,
-                        },
-                        self.to,
-                        rx,
-                        tx,
-                    )))
+                Some(if self.datagram {
+                    heap_link(
+                        self.cells.as_ref(),
+                        self.owner_waits.datagram(UdpDriver::initiator_in(
+                            AppDatagramSocket {
+                                held,
+                                peer: self.to,
+                                reads_sources: true,
+                            },
+                            self.to,
+                            rx,
+                            tx,
+                        )),
+                    )
                 } else {
-                    IpDriver::Tcp(self.owner_waits.stream(StreamDriver::over(
-                        AppStreamSocket {
-                            held,
-                            local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                            peer: self.to,
-                        },
-                        rx,
-                        tx,
-                    )))
-                };
-                let driver = Rc::new(driver);
-                Some(Ok(OpenedLink {
-                    sink: driver.clone(),
-                    pump: driver,
-                }))
+                    heap_link(
+                        self.cells.as_ref(),
+                        self.owner_waits.stream(StreamDriver::over(
+                            AppStreamSocket {
+                                held,
+                                local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                                peer: self.to,
+                            },
+                            rx,
+                            tx,
+                        )),
+                    )
+                })
             }
         }
     }
@@ -788,15 +822,16 @@ impl StreamListen for AppStreamListener {
     }
 
     fn accept(&self) -> Result<Option<AppStreamSocket>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         match next {
-            AcceptRead::Accepted(handle, remote) => Ok(Some(AppStreamSocket {
+            AcceptRead::Accepted((handle, peer)) => Ok(Some(AppStreamSocket {
                 held: Held::accepted(&self.held.transport, handle),
                 local: self.at,
-                peer: socket_of(&remote),
+                peer,
             })),
             AcceptRead::Empty => Ok(None),
             AcceptRead::End => Err(LinkOpenError::Unsupported),
@@ -844,11 +879,11 @@ impl AppDatagramSocket {
     }
 
     /// The datagram link of the source the program accepted on a datagram listener as `handle`,
-    /// naming it `remote`.
-    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, remote: &str) -> Self {
+    /// at `peer`, the address of the locator the program named for it.
+    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, peer: SocketAddr) -> Self {
         Self {
             held: Held::accepted(transport, handle),
-            peer: socket_of(remote),
+            peer,
             reads_sources: false,
         }
     }
@@ -856,21 +891,18 @@ impl AppDatagramSocket {
     /// Take the next datagram into `buf`: its length (cut to `buf`) and source.
     fn take(&self, buf: &mut [u8]) -> Result<Option<Received>, AppLinkError> {
         let handle = self.held.handle;
-        let read = self
-            .held
-            .transport
-            .with(|table| table.read_datagram(handle, None));
-        self.held.tell_drained();
-        match read {
-            DatagramRead::Datagram(datagram) => {
-                let n = datagram.bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&datagram.bytes[..n]);
-                let source = match datagram.source.as_deref() {
+        let read = self.held.transport.with(|table| {
+            table.read_datagram(handle, None, |datagram| {
+                let source = match datagram.source() {
                     Some(named) if self.reads_sources => socket_of(named),
                     _ => self.peer,
                 };
-                Ok(Some((n, source)))
-            }
+                (datagram.copy_to(buf), source)
+            })
+        });
+        self.held.tell_drained();
+        match read {
+            DatagramRead::Datagram(taken) => Ok(Some(taken)),
             DatagramRead::Empty => Ok(None),
             DatagramRead::End => Err(AppLinkError::Closed),
         }
@@ -924,9 +956,12 @@ impl DatagramSocket for AppDatagramSocket {
 /// group is closing the link.
 pub struct AppGroupTransport {
     held: Option<Held>,
-    /// The datagram the last receive lent and the source it came from, which the transport
-    /// keeps until its next receive so that a datagram asked to be kept is lent again whole.
-    lent: Option<(alloc::vec::Vec<u8>, SocketAddr)>,
+    /// The datagram the last receive lent, which the transport keeps until its next receive so
+    /// that a datagram asked to be kept is lent again whole. Its storage is taken when the group
+    /// is joined, room for the widest datagram, and each receive copies into it.
+    lent: alloc::vec::Vec<u8>,
+    /// The source of the datagram in `lent`, `None` while it holds none.
+    lent_from: Option<SocketAddr>,
     /// Whether the next receive lends `lent` again ([`GroupTransport::keep`]).
     kept: bool,
 }
@@ -947,7 +982,8 @@ impl AppGroupTransport {
     ) -> Result<Self, LinkOpenError> {
         Ok(Self {
             held: Some(open_link(transport, AppLinkKind::Group, locator, bound)?),
-            lent: None,
+            lent: alloc::vec::Vec::with_capacity(DATAGRAM_MAX),
+            lent_from: None,
             kept: false,
         })
     }
@@ -971,7 +1007,7 @@ impl GroupTransport for AppGroupTransport {
     fn close(&mut self) {
         // Dropping the link closes it on the program, which is the leave.
         self.held = None;
-        self.lent = None;
+        self.lent_from = None;
         self.kept = false;
     }
 
@@ -1039,28 +1075,31 @@ impl GroupTransport for AppGroupTransport {
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         // A datagram kept is lent again before the program's next one is read.
         if core::mem::take(&mut self.kept) {
-            if let Some((bytes, source)) = &self.lent {
-                f(bytes, *source);
+            if let Some(source) = self.lent_from {
+                f(self.lent.as_slice(), source);
                 return true;
             }
         }
         let Some(held) = &self.held else {
             return false;
         };
-        let read = held
-            .transport
-            .with(|table| table.read_datagram(held.handle, None));
-        held.tell_drained();
-        match read {
-            DatagramRead::Datagram(datagram) => {
+        let lent = &mut self.lent;
+        let read = held.transport.with(|table| {
+            table.read_datagram(held.handle, None, |datagram| {
+                lent.resize(datagram.len(), 0);
+                datagram.copy_to(lent);
                 // The table holds a group's datagrams only with their source.
-                let source = datagram.source.as_deref().map_or(
+                datagram.source().map_or(
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                     socket_of,
-                );
-                f(&datagram.bytes, source);
-                // Moved, not copied: the table handed the datagram over whole.
-                self.lent = Some((datagram.bytes, source));
+                )
+            })
+        });
+        held.tell_drained();
+        match read {
+            DatagramRead::Datagram(source) => {
+                self.lent_from = Some(source);
+                f(self.lent.as_slice(), source);
                 true
             }
             DatagramRead::Empty | DatagramRead::End => false,
@@ -1073,7 +1112,7 @@ impl GroupTransport for AppGroupTransport {
     }
 
     fn keep(&mut self) {
-        self.kept = self.lent.is_some();
+        self.kept = self.lent_from.is_some();
     }
 }
 
@@ -1092,6 +1131,9 @@ pub struct AppLinks {
     lent: Option<LinkTables>,
     /// Whether each link is waited on by its owner ([`Self::waited_by_owner`]).
     owner_waits: OwnerWaits,
+    /// The cells of the session the links serve, when it lent some
+    /// ([`SessionLinks::lend_cells`]): every link is placed in one, and none on the heap.
+    cells: Option<LentByteCells>,
 }
 
 /// Whether the links of an [`AppLinks`] are waited on by their owner
@@ -1138,6 +1180,7 @@ impl AppLinks {
             open_bound: None,
             lent: None,
             owner_waits: OwnerWaits(false),
+            cells: None,
         }
     }
 
@@ -1171,11 +1214,10 @@ impl AppLinks {
     }
 }
 
-/// The driver a link of [`AppLinks`] is: a datagram or a stream link over the program's transport.
-pub type AppDriver = HeapIpDriver<AppDatagramSocket, AppStreamSocket>;
-
 impl SessionLinks for AppLinks {
-    type Pump = Rc<AppDriver>;
+    type Pump = HeapLink;
+
+    type Dial = AppDial;
 
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // A datagram port that takes whoever sends first is a socket of the system's; the
@@ -1187,35 +1229,33 @@ impl SessionLinks for AppLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The buffers are claimed before the program is asked for a link, so a session whose
         // tables are full asks it for none.
-        let driver: AppDriver = match to.proto {
+        match to.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-                IpDriver::Udp(self.owner_waits.datagram(UdpDriver::initiator_in(
-                    AppDatagramSocket::dial_bounded(
-                        &self.transport,
+                heap_link(
+                    self.cells.as_ref(),
+                    self.owner_waits.datagram(UdpDriver::initiator_in(
+                        AppDatagramSocket::dial_bounded(
+                            &self.transport,
+                            to.at,
+                            self.open_bound.as_ref(),
+                        )?,
                         to.at,
-                        self.open_bound.as_ref(),
-                    )?,
-                    to.at,
-                    rx,
-                    tx,
-                )))
+                        rx,
+                        tx,
+                    )),
+                )
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                IpDriver::Tcp(self.owner_waits.stream(StreamDriver::over(
-                    self.dial.dial(to.at)?,
-                    rx,
-                    tx,
-                )))
+                heap_link(
+                    self.cells.as_ref(),
+                    self.owner_waits
+                        .stream(StreamDriver::over(self.dial.dial(to.at)?, rx, tx)),
+                )
             }
-            LinkProto::Tls => return Err(LinkOpenError::Unsupported),
-        };
-        let driver = Rc::new(driver);
-        Ok(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        })
+            LinkProto::Tls => Err(LinkOpenError::Unsupported),
+        }
     }
 
     /// The program is asked for the link and the dial returned before it reports the link up
@@ -1224,10 +1264,7 @@ impl SessionLinks for AppLinks {
     /// on the session's clock, in place of the `OPEN_WAIT_MS` a waiting open is held to. The
     /// buffers are claimed before the program is asked, as a waiting open's are, and go back with
     /// an open that is refused or given up.
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
         let (kind, rx, datagram) = match to.proto {
             LinkProto::Udp => (AppLinkKind::Datagram, self.datagram_rx, true),
             LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
@@ -1235,7 +1272,7 @@ impl SessionLinks for AppLinks {
         };
         let buffers = heap_link_buffers(self.lent.as_ref(), rx, 0, 0)?;
         let handle = self.transport.begin_open(kind, &to.to_string());
-        Ok(Box::new(PendingAppLink {
+        Ok(AppDial(AppDialing::Pending(PendingAppLink {
             held: Some(Held {
                 transport: Arc::clone(&self.transport.transport),
                 handle,
@@ -1245,7 +1282,8 @@ impl SessionLinks for AppLinks {
             to: to.at,
             datagram,
             owner_waits: self.owner_waits,
-        }))
+            cells: self.cells,
+        })))
     }
 
     fn open_listener(
@@ -1257,6 +1295,7 @@ impl SessionLinks for AppLinks {
                 listener: self.dial.listen(at.at)?,
                 lent: self.lent,
                 owner_waits: self.owner_waits,
+                cells: self.cells,
             })),
             LinkProto::Udp => {
                 let locator = Locator::udp(at.at).to_string();
@@ -1272,6 +1311,7 @@ impl SessionLinks for AppLinks {
                     datagram_rx: self.datagram_rx,
                     lent: self.lent,
                     owner_waits: self.owner_waits,
+                    cells: self.cells,
                 }))
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
@@ -1282,9 +1322,23 @@ impl SessionLinks for AppLinks {
     /// which is what the table opens as a group. Any other endpoint is no group the program's
     /// transport carries, and is refused before the program is asked.
     /// Every link opened from now on, and every one a listener opened after this takes, claims its
-    /// buffers from `tables`.
+    /// buffers from `tables`, and its row of the program's transport is taken now, one for each
+    /// link the tables hold.
     fn lend_buffers(&mut self, tables: LinkTables) {
+        self.transport.provision(tables.links());
         self.lent = Some(tables);
+    }
+
+    /// The larger cell of these links' two: a datagram link's and a stream link's.
+    fn link_cell_bytes(&self) -> usize {
+        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer, TxBuffer>>::cell_bytes()
+            .max(CellRc::<StreamDriver<AppStreamSocket, RxBuffer, TxBuffer>>::cell_bytes())
+    }
+
+    /// Every link opened from now on, and every one a listener opened after this takes, is placed
+    /// in a cell of `cells`.
+    fn lend_cells(&mut self, cells: LentByteCells) {
+        self.cells = Some(cells);
     }
 
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
@@ -1296,6 +1350,13 @@ impl SessionLinks for AppLinks {
             endpoint,
             self.open_bound.as_ref(),
         )?))
+    }
+
+    /// A link of these is shared already: the pump is the handle the sink is a clone of.
+    fn share_pump(
+        pump: Self::Pump,
+    ) -> crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink> {
+        pump
     }
 }
 
@@ -1309,21 +1370,24 @@ struct AppDatagramListener {
     lent: Option<LinkTables>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells each accepted link is placed in, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
-impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
+impl LinkListener<HeapLink> for AppDatagramListener {
     fn local(&self) -> Locator {
         Locator::udp(self.at)
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
-        let next = self
-            .held
-            .transport
-            .with(|table| table.next_accepted(self.held.handle, None));
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
+        let next = self.held.transport.with(|table| {
+            table.next_accepted(self.held.handle, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        });
         let socket = match next {
-            AcceptRead::Accepted(handle, remote) => {
-                AppDatagramSocket::accepted(&self.held.transport, handle, &remote)
+            AcceptRead::Accepted((handle, peer)) => {
+                AppDatagramSocket::accepted(&self.held.transport, handle, peer)
             }
             AcceptRead::Empty => return Ok(None),
             AcceptRead::End => return Err(LinkOpenError::Unsupported),
@@ -1334,14 +1398,12 @@ impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        let driver = Rc::new(IpDriver::Udp(
+        heap_link(
+            self.cells.as_ref(),
             self.owner_waits
                 .datagram(UdpDriver::initiator_in(socket, peer, rx, tx)),
-        ));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        )
+        .map(Some)
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1358,25 +1420,25 @@ struct AppLinkListener {
     lent: Option<LinkTables>,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
+    /// The cells each accepted link is placed in, as its links' are.
+    cells: Option<LentByteCells>,
 }
 
-impl LinkListener<Rc<AppDriver>> for AppLinkListener {
+impl LinkListener<HeapLink> for AppLinkListener {
     fn local(&self) -> Locator {
         Locator::tcp(self.listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        let driver = Rc::new(IpDriver::Tcp(
+        heap_link(
+            self.cells.as_ref(),
             self.owner_waits.stream(StreamDriver::over(stream, rx, tx)),
-        ));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        )
+        .map(Some)
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -1945,12 +2007,14 @@ mod tests {
         transport
             .accepted(listening, "udp/198.51.100.3:50000")
             .unwrap();
-        let AcceptRead::Accepted(handle, remote) =
-            transport.with(|table| table.next_accepted(listening, None))
-        else {
+        let AcceptRead::Accepted((handle, peer)) = transport.with(|table| {
+            table.next_accepted(listening, None, |handle, remote| {
+                (handle, socket_of(remote))
+            })
+        }) else {
             panic!("the accepted source waits on the listener");
         };
-        let socket = AppDatagramSocket::accepted(&transport, handle, &remote);
+        let socket = AppDatagramSocket::accepted(&transport, handle, peer);
         // The program names another source, and then none: both are the accepted source's.
         transport
             .received(handle, b"one", Some("udp/203.0.113.7:9"))
@@ -2373,10 +2437,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         /// The links a session over `transport` holds: two dialled, one accepted, one begun.
-        fn opened(
-            transport: &Arc<AppTransport>,
-            links: &AppLinks,
-        ) -> Vec<OpenedLink<Rc<AppDriver>>> {
+        fn opened(transport: &Arc<AppTransport>, links: &AppLinks) -> Vec<OpenedLink<HeapLink>> {
             let mut opened = vec![
                 links.open_initiator(Locator::tcp(PEER)).expect("a stream"),
                 links

@@ -168,15 +168,23 @@ pub fn encode_region_name_ext(name: &RegionName) -> Result<ExtEntryOwned, CodecE
 /// not the 4-bit id: id `0x8` with another encoding is a different extension,
 /// the R311y505 discipline this crate pays elsewhere.
 pub fn peer_region(extensions: &[ExtEntryOwned]) -> Result<Option<RegionName>, RegionNameError> {
+    peer_region_in(extensions)
+}
+
+/// [`peer_region`] over the entries a chain yields, held or read where its message lies
+/// (`crate::inbound::ExtChainRead`): the name is read where its bytes lie.
+pub fn peer_region_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+) -> Result<Option<RegionName>, RegionNameError> {
     let want = crate::ext_header::ext_eid(REGION_NAME_EXT_HEADER);
     for ext in extensions {
-        if crate::ext_header::ext_eid(ext.header) != want {
+        if ext.eid() != want {
             continue;
         }
-        let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body else {
+        let Some(value) = ext.plain_zbuf() else {
             continue;
         };
-        let s = core::str::from_utf8(z.value.as_slice()).map_err(|_| RegionNameError::NotUtf8)?;
+        let s = core::str::from_utf8(value).map_err(|_| RegionNameError::NotUtf8)?;
         return RegionName::new(s).map(Some);
     }
     Ok(None)

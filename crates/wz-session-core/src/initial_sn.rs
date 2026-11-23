@@ -99,13 +99,16 @@ impl Shake128 {
     /// XOR one byte into the state at byte offset `at`, little-endian within
     /// its lane — the byte order FIPS 202 fixes for the state.
     fn xor_byte(&mut self, at: usize, byte: u8) {
-        self.state[at / 8] ^= u64::from(byte) << (8 * (at % 8));
+        // `at` is below the rate, inside the state; the shift is below 64.
+        if let Some(lane) = self.state.get_mut(at / 8) {
+            *lane ^= u64::from(byte).wrapping_shl(((at % 8) as u32).wrapping_mul(8));
+        }
     }
 
     fn absorb(&mut self, data: &[u8]) {
         for &byte in data {
             self.xor_byte(self.pos, byte);
-            self.pos += 1;
+            self.pos = self.pos.wrapping_add(1);
             if self.pos == SHAKE128_RATE {
                 keccak::f1600(&mut self.state);
                 self.pos = 0;
@@ -121,7 +124,8 @@ impl Shake128 {
         self.xor_byte(self.pos, 0x1F);
         self.xor_byte(SHAKE128_RATE - 1, 0x80);
         keccak::f1600(&mut self.state);
-        self.state[0].to_le_bytes()
+        let [first, ..] = self.state;
+        first.to_le_bytes()
     }
 }
 

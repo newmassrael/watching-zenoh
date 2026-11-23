@@ -77,7 +77,7 @@ use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_coop::session_drive::SessionPump;
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole};
-use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{
     yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime,
 };
@@ -345,8 +345,7 @@ fn application(actions: &Handle) -> (impl FnMut(IterationEvent<'_, '_>) + 'stati
     let counted = seen.clone();
     observer
         .borrow_mut()
-        .subscribers
-        .register_sink(
+        .register_subscriber(
             KEY,
             Locality::Any,
             BoxedSink::new(move |_sample| {
@@ -413,14 +412,14 @@ mod placing_in_slot {
         socket: SessionRxSocket,
         peer: Option<([u8; 4], u16)>,
         zid: u8,
-    ) -> (Handle, LwipSessionLink<LinkHandle>) {
+    ) -> (Handle, SessionEntropy, LwipSessionLink<LinkHandle>) {
         let driver = driver_over(socket, peer);
         let Ok(claim) = SESSIONS.claim(driver, Counting(zid)) else {
             panic!("a session slot is free");
         };
         let pump_link = LwipSessionLink::new(link, claim.driver_handle());
-        let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
-        (actions, pump_link)
+        let (actions, entropy) = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
+        (actions, entropy, pump_link)
     }
 
     /// A pump in a cell of the pump table.
@@ -428,12 +427,14 @@ mod placing_in_slot {
         runtime: &Rt,
         link: LwipSessionLink<LinkHandle>,
         actions: &Handle,
+        entropy: SessionEntropy,
         role: SessionRole,
     ) -> Pump {
         let Ok(pump) = PUMPS.claim(
             runtime.clone(),
             link,
             actions.clone(),
+            entropy,
             CoopTime::new(runtime),
             config(role),
         ) else {
@@ -515,11 +516,12 @@ mod placing_on_the_heap {
         socket: SessionRxSocket,
         peer: Option<([u8; 4], u16)>,
         zid: u8,
-    ) -> (Handle, LwipSessionLink<LinkHandle>) {
-        let driver = Rc::new(driver_over(socket, peer));
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+    ) -> (Handle, SessionEntropy, LwipSessionLink<LinkHandle>) {
+        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver_over(socket, peer));
+        let sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
+            driver.clone().into_sink();
         let actions = if zid == 0xa1 {
-            new_session_actions(sink, params(zid), CoopTime::new(runtime), Counting(zid))
+            new_session_actions(sink, params(zid), CoopTime::new(runtime))
         } else {
             SessionLinkActions::<Rt, CoopTime<Clk>>::new_generic(
                 sink,
@@ -527,19 +529,25 @@ mod placing_on_the_heap {
                 CoopTime::new(runtime),
             )
         };
-        (actions, LwipSessionLink::new(link, driver))
+        (
+            actions,
+            SessionEntropy::new(Counting(zid)),
+            LwipSessionLink::new(link, driver),
+        )
     }
 
     pub fn pump(
         runtime: &Rt,
         link: LwipSessionLink<LinkHandle>,
         actions: &Handle,
+        entropy: SessionEntropy,
         role: SessionRole,
     ) -> Pump {
         SessionPump::new(
             runtime.clone(),
             link,
             actions.clone(),
+            entropy,
             CoopTime::new(runtime),
             config(role),
         )
@@ -676,7 +684,10 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
 
     // The sessions' own state is step S5's, counted by its own witness; it is made
     // here, outside any window, because the pump is built over it.
-    let ((acceptor_actions, acceptor_link), (initiator_actions, initiator_link)) = (
+    let (
+        (acceptor_actions, acceptor_entropy, acceptor_link),
+        (initiator_actions, initiator_entropy, initiator_link),
+    ) = (
         placing::session(placing::share(&link), &runtime, acceptor_socket, None, 0xa1),
         placing::session(
             placing::share(&link),
@@ -707,12 +718,14 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
                 &runtime,
                 acceptor_link,
                 &acceptor_actions,
+                acceptor_entropy,
                 SessionRole::Acceptor,
             ),
             placing::pump(
                 &runtime,
                 initiator_link,
                 &initiator_actions,
+                initiator_entropy,
                 SessionRole::Initiator,
             ),
         )
@@ -825,12 +838,13 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     // and the refusal costs the heap nothing.
     #[cfg(feature = "session-slot")]
     {
-        let (extra_actions, extra_link) = spare;
+        let (extra_actions, extra_entropy, extra_link) = spare;
         let (refused, n) = m.count("a third pump", || {
             placing::PUMPS.claim(
                 runtime.clone(),
                 extra_link,
                 extra_actions,
+                extra_entropy,
                 CoopTime::new(&runtime),
                 config(SessionRole::Acceptor),
             )

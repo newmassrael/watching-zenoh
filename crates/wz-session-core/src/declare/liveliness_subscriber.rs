@@ -324,6 +324,23 @@ impl PeerTokens<crate::bounded::Lent> {
     ) {
         self.table.keep_rows_in(rows);
     }
+
+    /// The tokens the peer declared, as a table of their own that keeps their rows where they lie
+    /// in the session's pool and their keys in its key arena, held to the same quotas; this table
+    /// is left holding none and taking rows of the same pool, its refusals kept. What a face that
+    /// went still owes the liveliness subscribers, apart from the tables it held. `None`, taking
+    /// nothing, for a table whose rows lie in a span of its own, the one face of a session.
+    pub fn split_off(&mut self) -> Option<Self> {
+        let table = self.table.split_off()?;
+        Some(Self {
+            table,
+            quota: self.quota,
+            key_quota: self.key_quota,
+            oversize: 0,
+            keys: self.keys,
+            _policy: core::marker::PhantomData,
+        })
+    }
 }
 
 impl PeerTokens<Profile> {
@@ -511,6 +528,18 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
     /// counters by name.
     pub fn peer(&self) -> &PeerTokens<P> {
         &self.peer
+    }
+
+    /// The two halves apart: the application's LivelinessSubscriberTable<C, P> and the peer's PeerTokens<P>, for a caller
+    /// that hands the second to a method of the first, as a session whose application half is
+    /// shared with other faces must.
+    pub fn split_mut(&mut self) -> (&mut LivelinessSubscriberTable<C, P>, &mut PeerTokens<P>) {
+        (&mut self.table, &mut self.peer)
+    }
+
+    /// The two halves apart, to read ([`Self::split_mut`]).
+    pub fn split(&self) -> (&LivelinessSubscriberTable<C, P>, &PeerTokens<P>) {
+        (&self.table, &self.peer)
     }
 
     /// [`PeerTokens::limit_to`] for this registry's peer.
@@ -1772,9 +1801,9 @@ mod tests {
         let mut reg = LivelinessSubscriberRegistry::new();
         let ours: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         let theirs: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "ours/*", false, make_subscriber(ours.clone()))
+        reg.register(1, "ours/dev", false, make_subscriber(ours.clone()))
             .unwrap();
-        reg.register(2, "theirs/*", false, make_subscriber(theirs.clone()))
+        reg.register(2, "theirs/dev", false, make_subscriber(theirs.clone()))
             .unwrap();
 
         let mut peer = HashMap::new();
@@ -1841,6 +1870,7 @@ mod tests {
         assert_eq!(reg.keyexpr(7), Some("a"), "first registration retained");
     }
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn decl_token_dispatches_put_sample_on_pattern_match() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1881,6 +1911,7 @@ mod tests {
     /// the one-sided matcher treats as a pattern. Here they are swapped. One
     /// test passing while the other could not is exactly what a one-sided
     /// predicate looks like from outside.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn decl_token_on_a_wildcard_reaches_a_concrete_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1916,6 +1947,7 @@ mod tests {
     /// must be replayed it. Before this round the replay compared the slot
     /// pattern against the stored token keyexpr as a LITERAL, so the concrete
     /// subscriber was owed nothing.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn a_history_subscriber_is_replayed_a_wildcard_token_it_intersects() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1978,6 +2010,7 @@ mod tests {
     /// the shared `fan_to_matching_slots` would satisfy every count below
     /// except that one — subscriber A would be told a second time about
     /// tokens it was told about live.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_second_history_subscriber_is_replayed_the_tokens_already_known() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2035,6 +2068,7 @@ mod tests {
     /// rather than the fan, because the claim is about a value DERIVED from the
     /// envelope: a test that passed `historical` by hand would pass with the
     /// derivation deleted.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_historical_token_is_withheld_from_a_future_only_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2101,14 +2135,14 @@ mod tests {
         let with_history: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(
             1,
-            "liveliness/**",
+            "liveliness/a",
             false,
             make_subscriber(future_only.clone()),
         )
         .unwrap();
         reg.register(
             2,
-            "liveliness/**",
+            "liveliness/a",
             true,
             make_subscriber(with_history.clone()),
         )
@@ -2145,6 +2179,7 @@ mod tests {
     /// — so a historical Delete is withheld from a future-only subscriber for
     /// the same reason its Put was: that subscriber was never told the token
     /// existed, and a Delete for a token it never saw is a phantom retraction.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_historical_undeclaration_is_withheld_from_a_future_only_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2235,7 +2270,7 @@ mod tests {
         assert_eq!(reg.peer_token_count(), 2);
 
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/*", true, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/a", true, make_subscriber(sink.clone()))
             .unwrap();
 
         let replayed = sink.lock().unwrap().clone();
@@ -2302,7 +2337,7 @@ mod tests {
         );
 
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", true, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/a", true, make_subscriber(sink.clone()))
             .unwrap();
         assert_eq!(sink.lock().unwrap().len(), 1, "replayed once at declare");
 
@@ -2330,8 +2365,16 @@ mod tests {
     fn link_loss_flushes_every_remote_token_as_a_delete() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        // One subscriber on each token's key, all into one sink: each Delete reaches exactly the
+        // subscriber of its own key, so the sink reads the order the flush fires in.
+        for (subscriber, ke) in [
+            (1u64, "liveliness/a"),
+            (2, "liveliness/b"),
+            (3, "liveliness/c"),
+        ] {
+            reg.register(subscriber, ke, false, make_subscriber(sink.clone()))
+                .unwrap();
+        }
         for (id, ke) in [
             (7u64, "liveliness/a"),
             (3, "liveliness/b"),
@@ -2452,8 +2495,13 @@ mod tests {
     fn undecl_token_dispatches_delete_sample_using_remembered_keyexpr() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        reg.register(
+            1,
+            "liveliness/svc/api",
+            false,
+            make_subscriber(sink.clone()),
+        )
+        .unwrap();
 
         let decl =
             DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
@@ -2491,6 +2539,7 @@ mod tests {
     /// FIRST one — an implementation that suppressed the callback but still
     /// overwrote the table would satisfy a count-only assertion and then name
     /// the wrong keyexpr as dead. `Entry::Vacant` suppresses both.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_repeated_decl_token_for_a_known_id_fires_no_second_put() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2540,6 +2589,7 @@ mod tests {
     /// The ANTI-VACUITY twin of the gate above: a DISTINCT id declared after the
     /// first still fires. Without it, "no second Put" would be satisfied by a
     /// registry that had stopped firing Puts altogether.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_second_distinct_token_id_still_fires_its_own_put() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2563,6 +2613,7 @@ mod tests {
     /// every token declared by its keyexpr: the next peer's token on the same keyexpr is told as a
     /// first, not dropped as a repeat.
     #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_forgotten_peer_holds_no_token_declared_by_its_keyexpr() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2603,8 +2654,12 @@ mod tests {
 
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        // A subscriber on each key, both into one sink, so the sink reads the order the tokens
+        // are told in.
+        for (subscriber, key) in [(1u64, "liveliness/first"), (2, "liveliness/second")] {
+            reg.register(subscriber, key, false, make_subscriber(sink.clone()))
+                .unwrap();
+        }
         for key in ["liveliness/first", "liveliness/second", "liveliness/first"] {
             reg.dispatch_declare(
                 &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(0, 0, Some(key))),
@@ -2666,6 +2721,7 @@ mod tests {
     /// The message is built by the PRODUCTION builder
     /// [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr),
     /// not a hand-rolled fixture, so what the reader accepts is what wz emits.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn an_undecl_token_for_an_unknown_id_falls_back_to_its_ext_keyexpr() {
         use crate::declare_build::build_undeclare_token_with_keyexpr;
@@ -2734,6 +2790,7 @@ mod tests {
     /// successful `remote_tokens.remove` (`api/session.rs:2665-2679`), so a
     /// retraction whose ext disagrees with the observed declaration retracts what
     /// was actually declared.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_known_id_retracts_by_its_remembered_keyexpr_not_the_ext() {
         use crate::declare_build::build_undeclare_token_with_keyexpr;
@@ -2810,7 +2867,7 @@ mod tests {
 
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/dev", false, make_subscriber(sink.clone()))
             .unwrap();
         reg.dispatch_declare(&msg(), &peer);
         let captured = sink.lock().unwrap().clone();
@@ -2825,7 +2882,7 @@ mod tests {
         let unresolved: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         bare.register(
             1,
-            "liveliness/**",
+            "liveliness/dev",
             false,
             make_subscriber(unresolved.clone()),
         )
@@ -2885,6 +2942,7 @@ mod tests {
         assert_eq!(reg.peer_token_count(), 0);
     }
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn aliased_keyexpr_resolves_through_peer_table() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2907,6 +2965,10 @@ mod tests {
         assert_eq!(captured[0].2, 99);
     }
 
+    #[cfg(all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double"
+    ))]
     #[test]
     fn multiple_subscribers_fire_in_registration_order_on_overlap() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -3068,7 +3130,7 @@ mod tests {
         let mut reg = LivelinessSubscriberRegistry::new();
         let cap: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>> =
             Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "live/**", false, make_subscriber(cap.clone()))
+        reg.register(1, "live/dev/3", false, make_subscriber(cap.clone()))
             .unwrap();
 
         let fired = reg.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 77);

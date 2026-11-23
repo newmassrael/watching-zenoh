@@ -95,7 +95,9 @@ impl PublisherSlot {
     };
 
     fn zid(&self) -> &[u8] {
-        &self.zid[..usize::from(self.zid_len)]
+        self.zid
+            .get(..usize::from(self.zid_len))
+            .unwrap_or_default()
     }
 }
 
@@ -295,7 +297,11 @@ impl<'a> ReplaySubscriber<'a> {
                 if u32::try_from(held_cell).is_err() {
                     return Err(CreateRefused::HoldCellTooLarge);
                 }
-                let cells = held.len() / (HELD_HEADER + held_cell);
+                // A cell's header and body; one past the address space holds no sample.
+                let cells = HELD_HEADER
+                    .checked_add(held_cell)
+                    .and_then(|stride| held.len().checked_div(stride))
+                    .unwrap_or(0);
                 if held_cell == 0 || cells == 0 {
                     return Err(CreateRefused::NoHoldStore);
                 }
@@ -416,7 +422,9 @@ impl<'a> ReplaySubscriber<'a> {
             .position(|row| row.state != FREE && row.zid() == zid);
         match known {
             Some(index) => {
-                let row = &mut self.slots[index];
+                let Some(row) = self.slots.get_mut(index) else {
+                    return Ok(None);
+                };
                 row.declaration = declaration;
                 let back = row.state == ANSWERED && row.flags & GONE != 0;
                 row.flags &= !GONE;
@@ -436,11 +444,15 @@ impl<'a> ReplaySubscriber<'a> {
                 };
                 let mut row = PublisherSlot::EMPTY;
                 row.declaration = declaration;
-                row.zid[..zid.len()].copy_from_slice(zid);
                 // At most `ZID_MAX` bytes, checked above.
+                if let Some(into) = row.zid.get_mut(..zid.len()) {
+                    into.copy_from_slice(zid);
+                }
                 row.zid_len = zid.len() as u8;
                 row.state = WAITING;
-                self.slots[index] = row;
+                if let Some(slot) = self.slots.get_mut(index) {
+                    *slot = row;
+                }
             }
         }
         Ok(self.next_ask(now))
@@ -459,7 +471,9 @@ impl<'a> ReplaySubscriber<'a> {
         }) else {
             return;
         };
-        let row = &mut self.slots[index];
+        let Some(row) = self.slots.get_mut(index) else {
+            return;
+        };
         if row.state == WAITING {
             *row = PublisherSlot::EMPTY;
             self.check_done(now);
@@ -478,9 +492,10 @@ impl<'a> ReplaySubscriber<'a> {
         if !matches!(self.phase(), Phase::Asking | Phase::Answering) {
             self.drive(ReplayRoundEvent::PublisherAppeared, now);
         }
-        let row = &mut self.slots[index];
-        row.state = ASKED;
-        row.flags &= !ABANDONED;
+        if let Some(row) = self.slots.get_mut(index) {
+            row.state = ASKED;
+            row.flags &= !ABANDONED;
+        }
         Some(index)
     }
 
@@ -543,12 +558,22 @@ impl<'a> ReplaySubscriber<'a> {
             self.drive(ReplayRoundEvent::HoldFull, None);
             return LiveFate::Deliver;
         }
-        let cell = (self.held_head + self.held_count) % self.held_cells;
-        let at = cell * (HELD_HEADER + self.held_cell);
+        let cell = self
+            .held_head
+            .saturating_add(self.held_count)
+            .checked_rem(self.held_cells)
+            .unwrap_or(0);
+        let Some((length, body)) = self.held_cell_mut(cell) else {
+            // `new` cut the store into `held_cells` whole cells, so every cell is there.
+            self.drive(ReplayRoundEvent::HoldFull, None);
+            return LiveFate::Deliver;
+        };
         // At most `held_cell`, which `new` holds to 32 bits.
-        self.held[at..at + HELD_HEADER].copy_from_slice(&(sample.len() as u32).to_le_bytes());
-        self.held[at + HELD_HEADER..at + HELD_HEADER + sample.len()].copy_from_slice(sample);
-        self.held_count += 1;
+        *length = (sample.len() as u32).to_le_bytes();
+        if let Some(into) = body.get_mut(..sample.len()) {
+            into.copy_from_slice(sample);
+        }
+        self.held_count = self.held_count.saturating_add(1);
         self.counts.held = self.counts.held.saturating_add(1);
         LiveFate::Held
     }
@@ -561,18 +586,31 @@ impl<'a> ReplaySubscriber<'a> {
             return None;
         }
         while self.held_count > 0 {
-            let at = self.held_head * (HELD_HEADER + self.held_cell);
-            let mut word = [0u8; HELD_HEADER];
-            word.copy_from_slice(&self.held[at..at + HELD_HEADER]);
-            let len = u32::from_le_bytes(word) as usize;
-            self.held_head = (self.held_head + 1) % self.held_cells;
-            self.held_count -= 1;
-            if len <= out.len() {
-                out[..len].copy_from_slice(&self.held[at + HELD_HEADER..at + HELD_HEADER + len]);
+            let head = self.held_head;
+            self.held_head = head
+                .saturating_add(1)
+                .checked_rem(self.held_cells)
+                .unwrap_or(0);
+            self.held_count = self.held_count.saturating_sub(1);
+            let Some((length, body)) = self.held_cell_mut(head) else {
+                continue;
+            };
+            let len = u32::from_le_bytes(*length) as usize;
+            if let (Some(sample), Some(into)) = (body.get(..len), out.get_mut(..len)) {
+                into.copy_from_slice(sample);
                 return Some(len);
             }
         }
         None
+    }
+
+    /// The length word and the body of held cell `cell`; `None` for a cell past the store.
+    fn held_cell_mut(&mut self, cell: usize) -> Option<(&mut [u8; HELD_HEADER], &mut [u8])> {
+        let stride = HELD_HEADER.saturating_add(self.held_cell);
+        self.held
+            .get_mut(cell.saturating_mul(stride)..)?
+            .get_mut(..stride)?
+            .split_first_chunk_mut::<HELD_HEADER>()
     }
 
     /// Look at the deadlines at `now` (`None` when the clock could not say, which judges

@@ -13,9 +13,11 @@
 //! handed the engine:
 //!
 //! - the session's handle, once;
-//! - each link's transmit queue: as many batches as the queue sizes the snapshot states, one size
-//!   for each priority (`PICO_TX_QUEUE_SIZE`), each batch at most the batch the session advertises
-//!   (`PICO_UNICAST_BATCH_BYTES`): no batch the two sides of a link agree on is larger;
+//! - each link's transmit storage, each batch at most the batch the session advertises
+//!   (`PICO_UNICAST_BATCH_BYTES`), as no batch the two sides of a link agree on is larger: on the
+//!   tokio engine as many batches as the queue sizes the snapshot states, one size for each
+//!   priority (`PICO_TX_QUEUE_SIZE`); on the cooperative engine the slots its arena lends each
+//!   link (`LINK_TX_SLOTS`), which a frame is encoded into and sent from with no queue behind;
 //! - each link's receive buffer, the read storage the open states (upstream's default, one buffer
 //!   of the widest batch, `RX_BUFFER_SIZE`), which no batch of the session's outgrows;
 //! - each link's reassembly: a message of at most `PICO_FRAG_MAX_BYTES` for each of the two
@@ -51,6 +53,7 @@ use core::ffi::c_char;
 
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::process_limits::ProcessRows;
+use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::session_memory::{session_tables, Captures, MemoryRow, SessionMemory};
 
 use crate::ffi::guarded;
@@ -102,7 +105,8 @@ pub(crate) struct MemoryBasis {
     pub(crate) limits: SessionLimits,
     /// How many links the session holds at most; `None` where its open bounds them to none.
     pub(crate) links: Option<usize>,
-    /// The batches one link's transmit queue holds, every priority's together.
+    /// The batches one link holds to transmit from, every priority's together
+    /// (`link_tx_batches`).
     pub(crate) queue_batches: usize,
     /// The bytes of one batch: the batch the session advertises.
     pub(crate) batch_bytes: usize,
@@ -171,6 +175,29 @@ pub(crate) fn links_of(listen: Option<&str>, limits: &SessionLimits) -> Option<u
         .checked_add(1)
 }
 
+/// What sizes the transmit row's count: the queue sizes the snapshot states on the tokio engine,
+/// whose links queue their batches; the slots the cooperative engine's arena lends each link,
+/// whatever queue sizes the snapshot states, as no link of that engine queues a batch.
+#[cfg(feature = "engine-tokio")]
+const LINK_TX_BASIS: &core::ffi::CStr = c"PICO_TX_QUEUE_SIZE";
+#[cfg(not(feature = "engine-tokio"))]
+const LINK_TX_BASIS: &core::ffi::CStr = c"LINK_TX_SLOTS";
+
+/// The batches each link of a session holds to transmit from, its open having built the queue
+/// `tx_queue` from its snapshot: on the tokio engine that queue, every priority's batches.
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn link_tx_batches(tx_queue: &TxQueueConf) -> usize {
+    tx_queue.sizes.iter().sum()
+}
+
+/// The batches each link of a session holds to transmit from on the cooperative engine: the slots
+/// its arena lends each link (`LINK_TX_SLOTS`), which the open reserves whatever `tx_queue`
+/// states, as the engine sends a frame from its slot and queues none.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn link_tx_batches(_tx_queue: &TxQueueConf) -> usize {
+    wz_capi_coop::arena::LINK_TX_SLOTS
+}
+
 impl MemoryBasis {
     /// The session's report: the session core's rows for its limits, this ABI's, and those of the
     /// machines of the process under the rows its runtime limits lend them.
@@ -192,7 +219,7 @@ impl MemoryBasis {
             },
             MemoryRow {
                 part: c"link transmit queues",
-                basis: c"PICO_TX_QUEUE_SIZE",
+                basis: LINK_TX_BASIS,
                 count: per_link(self.queue_batches),
                 entry_bytes: self.batch_bytes,
                 enforced: self.links.is_some(),
@@ -518,6 +545,36 @@ mod tests {
         assert_eq!(link(c"link transmit queues").total(), Some(3 * 16 * 2048));
         assert_eq!(link(c"link receive buffers").total(), Some(3 * 65535));
         assert_eq!(link(c"link reassembly").total(), Some(3 * 2 * 4096));
+    }
+
+    /// The transmit row counts what the engine holds for each link: on the tokio engine the queue
+    /// the open builds from the snapshot, every priority's batches; on the cooperative engine the
+    /// arena's slots, whatever queue sizes the snapshot states. Its basis names which.
+    #[test]
+    fn the_transmit_row_counts_what_the_engine_holds() {
+        let queue = TxQueueConf::pico_of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &SessionLimits::defaults(),
+        );
+        #[cfg(feature = "engine-tokio")]
+        let (slots, basis) = (queue.sizes.iter().sum::<usize>(), c"PICO_TX_QUEUE_SIZE");
+        #[cfg(not(feature = "engine-tokio"))]
+        let (slots, basis) = (wz_capi_coop::arena::LINK_TX_SLOTS, c"LINK_TX_SLOTS");
+        assert_eq!(link_tx_batches(&queue), slots);
+        let memory = MemoryBasis {
+            links: Some(2),
+            queue_batches: link_tx_batches(&queue),
+            batch_bytes: 2048,
+            ..MemoryBasis::default()
+        }
+        .report();
+        let row = *memory
+            .rows()
+            .iter()
+            .find(|row| row.part == c"link transmit queues")
+            .expect("the report has the part");
+        assert_eq!(row.basis, basis);
+        assert_eq!(row.total(), Some(2 * slots * 2048));
     }
 
     /// A reassembly the limits hold to no bound has no count and is not enforced, so the report

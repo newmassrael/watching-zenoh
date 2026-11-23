@@ -98,7 +98,7 @@ impl TsStack {
 
     /// The bytes of the extension's body.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(2 + self.stack.len() * 18);
+        let mut out = Vec::with_capacity(self.stack.len().saturating_mul(18).saturating_add(2));
         out.push(self.conf_flags);
         push_zint(&mut out, self.stack.len() as u64);
         for interception in &self.stack {
@@ -118,7 +118,7 @@ impl TsStack {
             return None;
         }
         let (count, used) = wz_codecs::vle::decode_zint(rest)?;
-        let mut rest = &rest[used..];
+        let mut rest = rest.get(used..)?;
         let count = usize::try_from(count)
             .ok()
             .filter(|n| *n <= MAX_STACK_SIZE)?;
@@ -127,15 +127,13 @@ impl TsStack {
             let (&flags, tail) = rest.split_first()?;
             let (len, used) = wz_codecs::vle::decode_zint(tail)?;
             let len = usize::try_from(len).ok()?;
-            let tail = &tail[used..];
-            if tail.len() < len {
-                return None;
-            }
+            let tail = tail.get(used..)?;
+            let (timestamp, after) = (tail.get(..len)?, tail.get(len..)?);
             stack.push(Interception {
                 flags,
-                timestamp: tail[..len].to_vec(),
+                timestamp: timestamp.to_vec(),
             });
-            rest = &tail[len..];
+            rest = after;
         }
         rest.is_empty().then_some(Self { conf_flags, stack })
     }
@@ -144,7 +142,7 @@ impl TsStack {
 fn push_zint(out: &mut Vec<u8>, value: u64) {
     let mut buf = [0u8; 10];
     let n = wz_codecs::vle::encode_zint(&mut buf, value);
-    out.extend_from_slice(&buf[..n]);
+    out.extend_from_slice(buf.get(..n).unwrap_or(&buf));
 }
 
 /// The stack a chain of extensions carries, or `None` when it carries none or one that does not
@@ -201,7 +199,7 @@ pub fn set_ts_stack<S: for<'x> ExtEntryFrom<'x>>(
 /// wire (zenoh's codec for a `uhlc::Timestamp`): the time word as a zint, then the length of the
 /// identity as a zint and the identity bytes.
 pub fn timestamp_bytes(time: u64, zid: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(10 + 2 + zid.len());
+    let mut out = Vec::with_capacity(zid.len().saturating_add(12));
     push_zint(&mut out, time);
     push_zint(&mut out, zid.len() as u64);
     out.extend_from_slice(zid);

@@ -59,10 +59,11 @@ pub const fn prefix_width(lowlatency: bool) -> usize {
 /// (a lost link there, a [`WindowError`] here), and a shared decoder that returned an `Option`
 /// would make one of them invent a cause for the other's refusal.
 pub fn decode_prefix(prefix: &[u8; 4], width: usize) -> usize {
+    let [b0, b1, b2, b3] = *prefix;
     if width == 4 {
-        u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize
+        u32::from_le_bytes([b0, b1, b2, b3]) as usize
     } else {
-        u16::from_le_bytes([prefix[0], prefix[1]]) as usize
+        u16::from_le_bytes([b0, b1]) as usize
     }
 }
 
@@ -174,13 +175,17 @@ impl<const N: usize> Carry for FixedCarry<N> {
     }
 
     fn extend(&mut self, bytes: &[u8]) {
-        // `begin` made room for the whole frame and the window adds no more than the frame.
-        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-        self.len += bytes.len();
+        // `begin` made room for the whole frame and the window adds no more than the frame, so
+        // the room after what is held is always there.
+        let end = self.len.saturating_add(bytes.len());
+        if let Some(into) = self.bytes.get_mut(self.len..end) {
+            into.copy_from_slice(bytes);
+            self.len = end;
+        }
     }
 
     fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        self.bytes.get(..self.len).unwrap_or_default()
     }
 
     fn release(&mut self) {
@@ -269,7 +274,8 @@ impl<C: Carry> RxWindow<C> {
     {
         while !bytes.is_empty() {
             let used = self.push_frame(bytes, width, on_frame)?;
-            bytes = &bytes[used..];
+            // At most the bytes it was handed.
+            bytes = bytes.get(used..).unwrap_or_default();
         }
         Ok(())
     }
@@ -309,10 +315,13 @@ impl<C: Carry> RxWindow<C> {
                     mut have,
                     width,
                 } => {
-                    let n = (width - have).min(bytes.len());
-                    prefix[have..have + n].copy_from_slice(&bytes[..n]);
-                    have += n;
-                    bytes = &bytes[n..];
+                    let n = width.saturating_sub(have).min(bytes.len());
+                    let (head, rest) = bytes.split_at_checked(n).unwrap_or((bytes, &[]));
+                    for (slot, byte) in prefix.iter_mut().skip(have).zip(head) {
+                        *slot = *byte;
+                    }
+                    have = have.saturating_add(n);
+                    bytes = rest;
                     if have < width {
                         self.state = State::Prefix {
                             prefix,
@@ -337,20 +346,23 @@ impl<C: Carry> RxWindow<C> {
                     self.state = State::Payload { want, have: 0 };
                 }
                 State::Payload { want, mut have } => {
-                    if have == 0 && bytes.len() >= want {
-                        // Whole inside this push: lend it.
-                        on_frame(&bytes[..want]);
-                        self.state = State::Between;
-                        return Ok(total - bytes.len() + want);
+                    if have == 0 {
+                        if let Some((frame, rest)) = bytes.split_at_checked(want) {
+                            // Whole inside this push: lend it.
+                            on_frame(frame);
+                            self.state = State::Between;
+                            return Ok(total.saturating_sub(rest.len()));
+                        }
                     }
                     if have == 0 && !self.carry.begin(want) {
                         self.reset();
                         return Err(WindowError::CarryTooSmall { named: want });
                     }
-                    let n = (want - have).min(bytes.len());
-                    self.carry.extend(&bytes[..n]);
-                    have += n;
-                    bytes = &bytes[n..];
+                    let n = want.saturating_sub(have).min(bytes.len());
+                    let (head, rest) = bytes.split_at_checked(n).unwrap_or((bytes, &[]));
+                    self.carry.extend(head);
+                    have = have.saturating_add(n);
+                    bytes = rest;
                     if have < want {
                         self.state = State::Payload { want, have };
                         continue;
@@ -358,7 +370,7 @@ impl<C: Carry> RxWindow<C> {
                     on_frame(self.carry.bytes());
                     self.carry.release();
                     self.state = State::Between;
-                    return Ok(total - bytes.len());
+                    return Ok(total.saturating_sub(bytes.len()));
                 }
             }
         }

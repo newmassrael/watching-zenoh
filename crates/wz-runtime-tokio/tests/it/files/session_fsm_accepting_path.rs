@@ -386,7 +386,7 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // bound by being under the MAC rather than by being hashed into it.
     let nonce = actions
         .cookie_nonce()
-        .expect("new_session_actions installs a cookie nonce at construction");
+        .expect("the InitAck drew a cookie nonce through the binding's source");
     let carried = decode_accept_cookie(&fixture_session_init_params().cookie_signing_key, &cookie)
         .expect("the acceptor's own cookie verifies under the deploy key");
     assert_eq!(
@@ -438,32 +438,22 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
 /// either the mint or the verify makes exactly this test fail; every other
 /// accept-path test fixes one bundle and cannot see across two.
 ///
-/// The nonces are INSTALLED rather than drawn so the outcome is decided by the
-/// binding and not by entropy luck (that `new_session_actions` really draws
-/// distinct ones is a separate assertion, in `session_glue`'s unit tests).
-///
-/// R2763 — and installing them now means building through `new_generic`. The
-/// AP seam installs an entropy SOURCE, and a bundle that has one re-draws on
-/// every InitAck, so a hand-installed nonce would be overwritten before it was
-/// used. That ordering is deliberate — a configured source is the live answer
-/// and `refresh_cookie_nonce` is the affordance for a bundle without one — and
-/// this test is the FSM-level witness of the other arm: no source installed
-/// leaves the nonce exactly as a host put it.
+/// Each InitAck draws its nonce through the binding's source, the AP's one source; that two
+/// draws are distinct is a separate assertion, in `session_glue`'s unit tests, and the
+/// cookies' difference is asserted below.
 /// Both halves of the pair are asserted: the stale cookie is refused AND the
 /// second acceptor's OWN cookie is admitted, so a refusal cannot come from the
 /// second bundle simply being broken.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
     /// Drive a fresh acceptor bundle to `SentInitAck` with the shared crafted
-    /// InitSyn, under a caller-chosen cookie nonce.
+    /// InitSyn; its InitAck draws its own cookie nonce.
     /// R2769 — the driver RECORDS, so the caller takes the cookie the
     /// acceptor really emitted instead of re-deriving what it thinks it
     /// emitted. That is the whole point of a replay test: the attacker's
     /// capability is "I saw the wire", and a reconstruction models the mint
     /// rather than the wire.
-    async fn acceptor_at_sent_init_ack(
-        nonce: u64,
-    ) -> (
+    async fn acceptor_at_sent_init_ack() -> (
         Arc<SessionLinkActions>,
         Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
         Vec<u8>,
@@ -477,7 +467,6 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
             fixture_session_init_params(),
             TokioTime::new(),
         );
-        actions.refresh_cookie_nonce(nonce);
         let mut engine = new_session_engine(&actions);
         engine.initialize().unwrap_or_else(|never| match never {});
         engine.process_event(E::InboundStart);
@@ -489,14 +478,11 @@ async fn a_cookie_from_an_earlier_handshake_is_refused_by_the_next() {
         (actions, engine, cookie)
     }
 
-    const FIRST_NONCE: u64 = 0x1111_1111_1111_1111;
-    const SECOND_NONCE: u64 = 0x2222_2222_2222_2222;
-
     // Handshake 1 — the observer captures this cookie off the wire.
-    let (_first_actions, _first_engine, captured) = acceptor_at_sent_init_ack(FIRST_NONCE).await;
+    let (_first_actions, _first_engine, captured) = acceptor_at_sent_init_ack().await;
 
     // Handshake 2 — a NEW connection from the same peer, same deploy key.
-    let (actions, mut engine, own) = acceptor_at_sent_init_ack(SECOND_NONCE).await;
+    let (actions, mut engine, own) = acceptor_at_sent_init_ack().await;
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(craft_opensyn_wire(
         &captured,
     )))]);

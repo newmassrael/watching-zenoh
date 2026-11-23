@@ -632,7 +632,7 @@ impl<'a> InPlaceFragment<'a> {
 
     /// The payload: the bytes staged into the chain's slot.
     pub fn payload(&self) -> &'a [u8] {
-        &self.unit[self.payload_at..]
+        self.unit.get(self.payload_at..).unwrap_or_default()
     }
 
     /// Whether the fragment rode the reliable channel (the R bit).
@@ -1528,6 +1528,12 @@ pub trait EventSink {
     fn holds_datagram(&self) -> bool {
         false
     }
+
+    /// The records handed from here on lie in `message`, a message rejoined from its fragments in
+    /// the buffer its chain was staged into, until the same call with `None`. A host that keeps
+    /// what it is handed past the call may read it there for as long as it lets no fragment be
+    /// staged again, which is what overwrites the buffer. Defaults to nothing.
+    fn lend_rejoined(&mut self, _message: Option<&[u8]>) {}
 }
 
 impl<F: FnMut(IterationEvent<'_, '_>) + ?Sized> EventSink for F {

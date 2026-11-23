@@ -86,6 +86,9 @@ enum Command {
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
+    /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
+    /// payload of each is its index.
+    PushBatch(&'static str, u8),
     /// [`Command::Push`] stamped with a time by the router.
     PushStamped(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
@@ -335,14 +338,13 @@ fn run_router(
     let runtime = CoopRuntime::new(PosixClock);
     let local = CoopLocalSet::new(&runtime);
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime), PosixEntropy);
+    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 "**",
                 Locality::Any,
                 BoxedSink::new(move |sample: &dyn SampleView| {
@@ -369,19 +371,21 @@ fn run_router(
         let undeclared = seen.clone();
         let mut observer = observer.borrow_mut();
         observer
-            .liveliness
-            .on_token_declared(move |token| {
-                declared
-                    .lock()
-                    .unwrap()
-                    .tokens
-                    .push((token.id(), token.keyexpr().to_owned()));
+            .with_app(|app| {
+                app.liveliness.on_token_declared(move |token| {
+                    declared
+                        .lock()
+                        .unwrap()
+                        .tokens
+                        .push((token.id(), token.keyexpr().to_owned()));
+                })
             })
             .expect("no quota is stated on this table");
         observer
-            .liveliness
-            .on_token_undeclared(move |id| {
-                undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+            .with_app(|app| {
+                app.liveliness.on_token_undeclared(move |id| {
+                    undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+                })
             })
             .expect("no quota is stated on this table");
     }
@@ -399,6 +403,7 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -525,10 +530,17 @@ fn run_router(
         local.run_until_idle();
         match inbox.try_recv() {
             Ok(Command::DeclareSubscriber(id, key)) => {
-                let _ = actions.send_declare_subscriber(id, 0, Some(key));
+                let _ = actions.send_declare_subscriber(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             Ok(Command::DeclareQueryable(id, key, complete)) => {
-                let _ = actions.send_declare_queryable(id, 0, Some(key), complete);
+                let _ = actions.send_declare_queryable(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    complete,
+                );
             }
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
@@ -542,22 +554,35 @@ fn run_router(
             Ok(Command::DeclareToken(id, key)) => {
                 let _ = holding
                     .borrow_mut()
-                    .local_tokens
-                    .register(u64::from(id), key);
-                let _ = actions.send_declare_token(id, 0, Some(key));
+                    .with_app(|app| app.local_tokens.register(u64::from(id), key));
+                let _ = actions.send_declare_token(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::UndeclareToken(id)) => {
-                holding.borrow_mut().local_tokens.unregister(id);
+                holding
+                    .borrow_mut()
+                    .with_app(|app| app.local_tokens.unregister(id));
                 actions.send_undeclare_token(id);
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::HoldToken(id, key)) => {
-                let _ = holding.borrow_mut().local_tokens.register(id, key);
+                let _ = holding
+                    .borrow_mut()
+                    .with_app(|app| app.local_tokens.register(id, key));
                 holds.lock().unwrap().held += 1;
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            Ok(Command::PushBatch(key, count)) => {
+                let _ = actions.batch_start();
+                for index in 0..count {
+                    let _ = actions.send_push_literal(key, &[index], true);
+                }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushStamped(key, value)) => {
                 let meta = wz_session_core::metadata::PushMetadata {
@@ -612,17 +637,18 @@ fn run_router(
             Ok(Command::Answer(key, value)) => {
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        key,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                let _ = out.reply_keyed(query.keyexpr(), value);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    let _ = out.reply_keyed(query.keyexpr(), value);
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's queryable");
                 counted_queries.lock().unwrap().settled = true;
             }
@@ -631,18 +657,23 @@ fn run_router(
                 let stamp = router_stamp(zid);
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        key,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                let _ =
-                                    out.reply_keyed_stamped(query.keyexpr(), value, None, &stamp);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    let _ = out.reply_keyed_stamped(
+                                        query.keyexpr(),
+                                        value,
+                                        None,
+                                        &stamp,
+                                    );
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's queryable");
                 counted_queries.lock().unwrap().settled = true;
             }
@@ -693,21 +724,22 @@ fn run_router(
                 let asked = counted_queries.clone();
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        ADVANCED_PUBLISHER_KEY,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                asked.lock().unwrap().selectors.push(
-                                    String::from_utf8_lossy(query.parameters().unwrap_or(&[]))
-                                        .into_owned(),
-                                );
-                                cache(query, out);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            ADVANCED_PUBLISHER_KEY,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    asked.lock().unwrap().selectors.push(
+                                        String::from_utf8_lossy(query.parameters().unwrap_or(&[]))
+                                            .into_owned(),
+                                    );
+                                    cache(query, out);
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's cache");
                 counted_queries.lock().unwrap().settled = true;
             }
@@ -946,6 +978,46 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
         2,
         "one take for the wait and one for the step"
     );
+}
+
+/// The session's step ends a chain of its one reassembly Router once the chain is past its
+/// deadline, though no link's receive sweeps it, and not before: a step at once leaves a chain
+/// staged now on the Router's epoch open, as one measured on another epoch would not be. The
+/// CONTROL is the chain, open when it is begun.
+#[test]
+fn the_sessions_step_ends_a_chain_past_its_deadline() {
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome};
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let begun = engine.with_chain_router(|reassembly, now_ms| {
+        reassembly.ingest(
+            Fragment {
+                peer_key: &[0x5a; 16],
+                reliable: true,
+                sn: 1,
+                more: 1,
+                payload: b"part",
+                priority: Priority::DEFAULT,
+                markers: FragmentMarkers::NONE,
+            },
+            wz_session_core::sn::mask_from_res(0x02),
+            now_ms,
+            |_| {},
+        )
+    });
+    assert_eq!(begun, IngestOutcome::Begun);
+    let open_chains = || engine.with_chain_router(|reassembly, _| reassembly.active_chains());
+    assert_eq!(open_chains(), 1, "CONTROL: the chain is open");
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        open_chains(),
+        1,
+        "a step before the deadline leaves the chain open"
+    );
+    until(&engine, "the step to end the chain", || open_chains() == 0);
 }
 
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
@@ -2072,10 +2144,10 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
     .err();
     assert_eq!(
         refused,
-        Some(OpenError::Group(EndpointRefusal {
-            endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
-            why: Refusal::GroupsNotBuilt,
-        }))
+        Some(OpenError::Group(EndpointRefusal::new(
+            "udp/239.7.7.7:7447#iface=lan7",
+            Refusal::GroupsNotBuilt,
+        )))
     );
 }
 
@@ -2088,13 +2160,7 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
     use wz_runtime_coop::session_drive::LinkOpenError;
     use wz_session_mcu::connect_manager::DialRefused;
 
-    let refusal = |endpoint: &str, why| {
-        EndpointRefusal {
-            endpoint: endpoint.to_owned(),
-            why,
-        }
-        .to_string()
-    };
+    let refusal = |endpoint: &str, why| EndpointRefusal::new(endpoint, why).to_string();
     assert_eq!(
         refusal("udp/239.7.7.7:7447", Refusal::GroupsNotBuilt),
         "udp/239.7.7.7:7447: joining a group is not built"
@@ -2123,6 +2189,101 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
         "tcp/127.0.0.1:7447: the handshake ended: Generic"
     );
     assert_eq!(refusal("", Refusal::LinkLost), "the link was lost");
+    assert_eq!(
+        refusal("tcp/127.0.0.1:7447", Refusal::TextTooLong),
+        "tcp/127.0.0.1:7447: the endpoint is longer than MAX_LOCATOR_LEN"
+    );
+    // A text longer than a row keeps the whole characters that fit in one, and no more.
+    let long = format!(
+        "tcp/{}",
+        "\u{e9}".repeat(wz_session_core::caps::MAX_LOCATOR_LEN)
+    );
+    let kept = EndpointRefusal::new(&long, Refusal::TextTooLong).endpoint;
+    assert!(
+        long.starts_with(kept.as_str()),
+        "a cut at a character's end"
+    );
+    assert!(kept.len() <= wz_session_core::caps::MAX_LOCATOR_LEN);
+    assert!(
+        kept.len() + 2 > wz_session_core::caps::MAX_LOCATOR_LEN,
+        "every whole character that fits is kept"
+    );
+}
+
+/// The open writes each endpoint's text into a row of the session's arena: one longer than a row
+/// is refused by name, an endpoint to dial as unreachable and one to listen on as a port not
+/// listened on, and more endpoints than the build's rows refuse the arena. A face attached after
+/// the open keeps its endpoint's text in a row's length too, and one longer is refused before any
+/// dial. The CONTROL is the open of the same config with a text that fits.
+#[test]
+fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
+    use crate::arena::ArenaRefused;
+    use crate::{EndpointRefusal, OpenError, Refusal};
+    use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+
+    let router = Router::start(CatchAll::None);
+    let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![long.clone()],
+        ..config(&router)
+    });
+    assert_eq!(
+        refused,
+        Some(OpenError::Unreachable(EndpointRefusal::new(
+            &long,
+            Refusal::TextTooLong
+        )))
+    );
+    let refused = open_with_result(CoopConfig {
+        listen: vec![long.clone()],
+        max_faces: 1,
+        accept_pending: 1,
+        ..config(&router)
+    });
+    assert_eq!(
+        refused,
+        Some(OpenError::Listen(EndpointRefusal::new(
+            &long,
+            Refusal::TextTooLong
+        )))
+    );
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![router.endpoint(); MAX_STATIC_CONNECT + 1],
+        ..config(&router)
+    });
+    assert!(
+        matches!(
+            refused,
+            Some(OpenError::Arena(ArenaRefused::Limit {
+                limit: "MAX_STATIC_CONNECT",
+                ..
+            }))
+        ),
+        "{refused:?}"
+    );
+    // A face is attached beside the dial role's only in a build that adds faces (`listen`).
+    #[cfg(feature = "listen")]
+    {
+        let engine = open(&router);
+        assert_eq!(
+            engine.attach_face(&long).err(),
+            Some(OpenError::Unreachable(EndpointRefusal::new(
+                &long,
+                Refusal::TextTooLong
+            )))
+        );
+    }
+}
+
+/// What the open of `config` was refused with, `None` when it opened.
+fn open_with_result(config: CoopConfig) -> Option<crate::OpenError> {
+    Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        config,
+    )
+    .err()
 }
 
 /// The open with the config's maker answers what the open with the config answers, the maker run
@@ -2236,13 +2397,20 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+#[cfg(all(feature = "app-transport", feature = "listen"))]
+mod app_listen;
 mod arena;
 mod closure_drops;
 mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod entity_tables;
-#[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
+#[cfg(all(
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    feature = "local-queryable"
+))]
 mod face_table;
 #[cfg(feature = "connectivity")]
 mod faces;
@@ -2269,6 +2437,7 @@ mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
+mod redial_heap;
 mod redial_wait;
 mod replay;
 mod round;
@@ -2285,3 +2454,5 @@ mod snapshot;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
+#[cfg(feature = "listen")]
+mod tx_pool;

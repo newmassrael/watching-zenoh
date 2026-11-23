@@ -426,13 +426,9 @@ pub use wz_session_core::peer_init_caps::PeerInitCaps;
 /// `drive_session_until_terminal` also receives, so the lease comparator's
 /// `now_ms` and the recorded `keepalive_ms` / `established_ms` share an epoch.
 ///
-/// R311y813 — this is also where the per-handshake COOKIE NONCE is drawn. The
-/// construction seam, not each accept entry point: `accept_and_open_session`
-/// has six siblings today (`_with_auth`, `_with_multilink`, `_with_lowlatency`,
-/// …) plus the router / capi accept paths, and the auth nonce — installed at
-/// each seam instead — is why "a caller cannot forget it" had to be re-argued
-/// at every one of them. Drawing it once at construction makes a new accept
-/// path bound by default and costs an initiator-role bundle 8 unread bytes.
+/// The per-handshake COOKIE NONCE is not this seam's: every engine's binding holds the AP's one
+/// source ([`OsEntropy`], [`new_session_engine`]) and draws it at each InitAck, so no accept
+/// path can forget it.
 pub fn new_session_actions<T: TimeSource>(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
@@ -447,31 +443,6 @@ pub fn new_session_actions<T: TimeSource>(
     #[cfg(feature = "transport-batching")]
     let batching = params.tx_queue.batching;
     let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
-    // R311y813 — bind this bundle's acceptor cookie to one handshake. An
-    // entropy failure leaves the slot at its fail-closed `None`: the acceptor
-    // then mints no HMAC cookie and admits no OpenSyn, which is loud (no
-    // session establishes) rather than quietly replayable. Reported at `error`
-    // because a host without `/dev/urandom` is a deploy fault, not a runtime
-    // condition to absorb.
-    // R311y819 — drawn through the §2.5 port ([`OsEntropy`]) rather than by a
-    // direct `nonce_from_os_entropy()` call, so this seam and the MCU one
-    // (`wz_runtime_coop::session_runtime::new_session_actions`) differ in their
-    // SOURCE and in nothing else. The bytes are identical — `OsEntropy` is
-    // `getrandom` and the trait fixes the same little-endian decode
-    // `nonce_from_os_entropy` performs.
-    // R2763 — the source is INSTALLED, and the draw below goes through it. The
-    // bundle re-draws on every InitAck it mints, which is what makes the
-    // binding per-HANDSHAKE rather than per-bundle; this call is what gives it
-    // something to re-draw from. The construction-time draw is kept so an
-    // unusable source is reported HERE, at the seam that owns the deploy fault,
-    // instead of silently at the first handshake.
-    actions.install_cookie_entropy(Box::new(OsEntropy));
-    if !actions.draw_cookie_nonce() {
-        log::error!(
-            "wz-session: no OS entropy for the anti-amplification cookie nonce; \
-             this bundle will refuse every inbound OpenSyn"
-        );
-    }
     // Declare this profile's reassembly budget to the TX side, so an
     // oversize send is refused where the caller can see it instead of being
     // fragmented into a chain this host's own dispatcher would drop
@@ -518,7 +489,7 @@ pub fn new_session_actions<T: TimeSource>(
 pub fn new_session_engine<T: TimeSource>(
     actions: &Arc<SessionLinkActions<TokioRuntime, T>>,
 ) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<TokioRuntime, T>>> {
-    wz_session_core::drive::new_session_engine(actions)
+    wz_session_core::drive::new_session_engine(actions, OsEntropy)
 }
 
 // ─────────────────────────── codec wiring ───────────────────────────
@@ -669,7 +640,7 @@ pub use wz_session_core::qos::{CongestionControl, Priority};
 // R311di-8 — ConsolidationMode moved to wz-session-core::query_mode.
 pub use wz_session_core::query_mode::ConsolidationMode;
 
-// R311dv — the Response-builder cluster (build_response_{reply,err}_*
+// R311dv — the Response-builder cluster (build_response_{reply,err}
 // + ResponseReplyBuilder + ResponseErrBuilder) moved to
 // wz-session-core::response_build (runtime-agnostic wire-record
 // construction). Re-exported here so crate::session_glue::* callers
@@ -677,8 +648,7 @@ pub use wz_session_core::query_mode::ConsolidationMode;
 // unchanged across the reorg.
 #[cfg(feature = "codec-response")]
 pub use wz_session_core::response_build::{
-    build_response_err_aliased, build_response_err_literal, build_response_reply_aliased,
-    build_response_reply_literal, encode_responder_ext_body, ResponseErrBuilder,
+    build_response_err, build_response_reply, encode_responder_ext_body, ResponseErrBuilder,
     ResponseReplyBuilder,
 };
 // R311ek — `encode_source_info_ext_body` is also consumed by the
@@ -2274,18 +2244,13 @@ mod tests {
         );
     }
 
-    /// R311y813 — `new_session_actions` must install a cookie nonce, and two
-    /// bundles must not share one. This is the half the FSM discriminator
-    /// (`a_cookie_from_an_earlier_handshake_is_refused_by_the_next`)
-    /// deliberately does not test: that test INSTALLS its nonces so its
-    /// outcome is decided by the binding, which leaves "does anything draw a
-    /// fresh one in production" unasserted. Here.
-    ///
-    /// A regression that drops the draw fails on `Some`; one that hoists it to
-    /// a process-wide constant fails on distinctness — the same 2^64 argument
-    /// the signing-key test above makes at 2^256.
+    /// R311y813 — the AP's one source draws a fresh cookie nonce for each handshake of each
+    /// bundle. A bundle holds no source, so no nonce before its first InitAck; the binding's
+    /// source draws one there, and two draws, on one bundle or on two, are not one value. A
+    /// regression that hoists the draw to a process-wide constant fails on distinctness.
     #[test]
-    fn new_session_actions_draws_a_distinct_cookie_nonce_per_bundle() {
+    fn the_ap_source_draws_a_distinct_cookie_nonce_per_handshake() {
+        use crate::session_glue::OsEntropy;
         let mk = || {
             let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
                 Arc::new(wz_runtime_tokio_test_support::NoopOutboundDriver::default());
@@ -2296,15 +2261,24 @@ mod tests {
             )
         };
         let (a, b) = (mk(), mk());
-        let (na, nb) = (a.cookie_nonce(), b.cookie_nonce());
-        assert!(
-            na.is_some() && nb.is_some(),
-            "the AP construction seam must leave no bundle fail-closed"
+        assert_eq!(
+            a.cookie_nonce(),
+            None,
+            "a bundle keeps no source, so it holds no nonce before its first InitAck"
         );
+        assert!(a.draw_cookie_nonce(&mut OsEntropy) && b.draw_cookie_nonce(&mut OsEntropy));
+        let first = a.cookie_nonce();
         assert_ne!(
-            na, nb,
-            "each bundle must draw its OWN nonce -- a shared one makes every \
+            first,
+            b.cookie_nonce(),
+            "each bundle's handshake draws its OWN nonce -- a shared one makes every \
              acceptor on this node mint the same cookie for a given peer"
+        );
+        assert!(a.draw_cookie_nonce(&mut OsEntropy));
+        assert_ne!(
+            first,
+            a.cookie_nonce(),
+            "a second handshake on one bundle draws its own"
         );
     }
 
@@ -2328,14 +2302,22 @@ mod tests {
         params.initial_sn = 100;
         let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
-        let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
-            .build()
-            .unwrap();
+        let response = ResponseReplyBuilder::new(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"21.0",
+        )
+        .build()
+        .unwrap();
         let expected_wire = encode_frame_with_response(
             100,
-            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
-                .build()
-                .unwrap(),
+            ResponseReplyBuilder::new(
+                42,
+                wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+                b"21.0",
+            )
+            .build()
+            .unwrap(),
             /*reliable=*/ true,
         );
         actions.send_response(response);
@@ -2462,9 +2444,13 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
         actions.send_response(
-            ResponseReplyBuilder::new(99, 0, Some("k"), b"v")
-                .build()
-                .unwrap(),
+            ResponseReplyBuilder::new(
+                99,
+                wz_session_core::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .build()
+            .unwrap(),
         );
         actions.send_response_final(99, wz_session_core::sample::QosLevel::DEFAULT);
 
@@ -2928,7 +2914,10 @@ mod tests {
     fn send_declare_subscriber_rejects_with_feature_disabled_when_declare_subscriber_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_subscriber(1, 0, Some("home/temp")),
+            actions.send_declare_subscriber(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key")
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-subscriber OFF: send_declare_subscriber must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -2947,7 +2936,11 @@ mod tests {
     fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_queryable(1, 0, Some("home/temp"), false),
+            actions.send_declare_queryable(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key"),
+                false
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-queryable OFF: send_declare_queryable must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -2966,7 +2959,10 @@ mod tests {
     fn send_declare_token_rejects_with_feature_disabled_when_declare_token_off() {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
-            actions.send_declare_token(1, 0, Some("home/temp")),
+            actions.send_declare_token(
+                1,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key")
+            ),
             Err(SendDeclareError::FeatureDisabled),
             "declare-token OFF: send_declare_token must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
@@ -3520,7 +3516,7 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id = 0 + suffix = None → no keyexpr at all.
         let err = actions
-            .send_declare_subscriber(1, 0, None)
+            .with_outbound_key(0, None, |key| actions.send_declare_subscriber(1, key))
             .expect_err("MissingKeyexpr");
         assert_eq!(err, SendDeclareError::MissingKeyexpr);
         assert_eq!(driver.frame_count(), 0);
@@ -3532,7 +3528,9 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id != 0 but no prior send_declare_keyexpr.
         let err = actions
-            .send_declare_subscriber(1, 99, Some("/tail"))
+            .with_outbound_key(99, Some("/tail"), |key| {
+                actions.send_declare_subscriber(1, key)
+            })
             .expect_err("UnknownMappingId(99)");
         assert_eq!(err, SendDeclareError::UnknownMappingId(99));
         assert_eq!(driver.frame_count(), 0);
@@ -3555,7 +3553,9 @@ mod tests {
         assert_eq!(frames_before, 1);
 
         let err = actions
-            .send_declare_subscriber(1, /*mapping_id=*/ 7, Some("/c/*"))
+            .with_outbound_key(7, Some("/c/*"), |key| {
+                actions.send_declare_subscriber(1, key)
+            })
             .expect_err("reconstructed `**/c/*` must trigger bug #3 reject");
         match err {
             SendDeclareError::Keyexpr(
@@ -3582,16 +3582,49 @@ mod tests {
             .expect("safe prefix");
         // Pure alias mode: mapping_id=7 + suffix=None → "home"
         actions
-            .send_declare_subscriber(1, 7, None)
+            .with_outbound_key(7, None, |key| actions.send_declare_subscriber(1, key))
             .expect("alias to safe prefix");
         // Composite mode: mapping_id=7 + suffix=`/sensor` → "home/sensor"
         actions
-            .send_declare_subscriber(2, 7, Some("/sensor"))
+            .with_outbound_key(7, Some("/sensor"), |key| {
+                actions.send_declare_subscriber(2, key)
+            })
             .expect("composite to safe full keyexpr");
         // Literal mode: mapping_id=0 + suffix=Some("home/temp")
         actions
-            .send_declare_subscriber(3, 0, Some("home/temp"))
+            .send_declare_subscriber(
+                3,
+                wz_session_core::named_key::NamedKey::literal("home/temp").expect("a key"),
+            )
             .expect("literal-mode safe keyexpr");
+    }
+
+    /// The link names a key by the declaration it holds while the declaration begins the key: the
+    /// declaration's id and the rest of the key, or the id alone for the whole of it. A key the
+    /// declaration does not begin, an id the link never declared and the id 0 are named whole; an
+    /// empty key is no key.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn a_link_names_a_key_by_the_declaration_it_holds() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions.send_declare_keyexpr(7, "home").expect("declared");
+        let named = actions.named_by("home/temp", 7).expect("a key");
+        assert_eq!(named.text(), "home/temp");
+        assert_eq!(
+            (named.wire().id(), named.wire().suffix()),
+            (7, Some("/temp"))
+        );
+        let whole = actions.named_by("home", 7).expect("a key");
+        assert_eq!((whole.wire().id(), whole.wire().suffix()), (7, None));
+        for (key, id) in [("away/temp", 7), ("home/temp", 99), ("home/temp", 0)] {
+            let named = actions.named_by(key, id).expect("a key");
+            assert_eq!(
+                (named.text(), named.wire().id(), named.wire().suffix()),
+                (key, 0, Some(key)),
+                "{key} by {id}"
+            );
+        }
+        assert_eq!(actions.named_by("", 7), None);
     }
 
     #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
@@ -3603,7 +3636,11 @@ mod tests {
             // R311y544 — was `**/foo/*`, which a real pico canonizes
             // to itself. The gate-inheritance claim needs a string that
             // actually aborts.
-            .send_declare_queryable(1, 0, Some("**/c/*"), false)
+            .send_declare_queryable(
+                1,
+                wz_session_core::named_key::NamedKey::literal("**/c/*").expect("a key"),
+                false,
+            )
             .expect_err("queryable inherits the same gate");
         assert!(matches!(
             err,
@@ -3620,7 +3657,10 @@ mod tests {
         let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
             // R311y544 — was `**/abc/*/def`; see the queryable test.
-            .send_declare_token(1, 0, Some("**/a/b/*"))
+            .send_declare_token(
+                1,
+                wz_session_core::named_key::NamedKey::literal("**/a/b/*").expect("a key"),
+            )
             .expect_err("token inherits the same gate");
         assert!(matches!(
             err,
@@ -3740,8 +3780,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All).unwrap();
+        let standalone = build_request_query_with_target(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            QueryTarget::All,
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3766,8 +3810,7 @@ mod tests {
 
         let standalone = build_request_query_with_consolidation(
             42,
-            0,
-            Some("home/temp"),
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
             ConsolidationMode::Latest,
         )
         .unwrap();
@@ -3793,8 +3836,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att").unwrap();
+        let standalone = build_request_query_with_attachment(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"q-att",
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3822,10 +3869,13 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone = RequestQueryBuilder::new(42, 0, Some("home/temp"))
-            .query_source_info(si)
-            .build()
-            .unwrap();
+        let standalone = RequestQueryBuilder::new(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+        )
+        .query_source_info(si)
+        .build()
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3858,7 +3908,11 @@ mod tests {
         // is not empty for is_empty() because attachment.is_some(),
         // but the wire emission elides the ext because the inner
         // slice is empty).
-        let baseline = build_request_query(42, 0, Some("home/temp")).unwrap();
+        let baseline = build_request_query(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+        )
+        .unwrap();
         let baseline_bytes = baseline.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3881,8 +3935,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000).unwrap();
+        let standalone = build_request_query_with_timeout_ms(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            5_000,
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -5359,8 +5417,7 @@ mod batch_tx_tests {
 
         actions
             .send_plain_put_qos(
-                0,
-                Some("home/ex"),
+                wz_session_core::named_key::NamedKey::literal("home/ex").expect("a key"),
                 b"EXEXEXEX",
                 None,
                 true,
@@ -5623,7 +5680,10 @@ mod link_priority_tests {
         use crate::session_glue::SessionActionsBinding;
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(actions);
+        let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(
+            actions,
+            crate::session_glue::OsEntropy,
+        );
         binding.send_init_syn();
         binding.send_open_syn();
         binding.send_init_ack_with_cookie();
@@ -6873,6 +6933,7 @@ mod reconnect_tx_tests {
         {
             let finals = finals.clone();
             observer
+                .face()
                 .liveliness_gets
                 .register_get(
                     14,
@@ -6936,13 +6997,23 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         actions
-            .send_declare_queryable(11, 0, Some("home/qry"), false)
+            .send_declare_queryable(
+                11,
+                wz_session_core::named_key::NamedKey::literal("home/qry").expect("a key"),
+                false,
+            )
             .expect("declare queryable");
         actions
-            .send_declare_token(12, 0, Some("home/tok"))
+            .send_declare_token(
+                12,
+                wz_session_core::named_key::NamedKey::literal("home/tok").expect("a key"),
+            )
             .expect("declare token");
         actions
             .send_interest_liveliness_subscriber(13, /*history=*/ false, 0, Some("home/liv"))
@@ -7004,10 +7075,18 @@ mod reconnect_tx_tests {
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_queryable(11, 0, Some("home/qry"), true)
+            .send_declare_queryable(
+                11,
+                wz_session_core::named_key::NamedKey::literal("home/qry").expect("a key"),
+                true,
+            )
             .expect("complete queryable");
         actions
-            .send_declare_queryable(12, 0, Some("home/inc"), false)
+            .send_declare_queryable(
+                12,
+                wz_session_core::named_key::NamedKey::literal("home/inc").expect("a key"),
+                false,
+            )
             .expect("incomplete queryable");
 
         let info_of = |frame: &[u8]| {
@@ -7075,7 +7154,9 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 7, Some("/tail"))
+            .with_outbound_key(7, Some("/tail"), |key| {
+                actions.send_declare_subscriber(10, key)
+            })
             .expect("aliased subscriber declare");
         actions
             .send_interest_liveliness_subscriber(13, true, 0, Some("home/liv"))
@@ -7133,11 +7214,17 @@ mod reconnect_tx_tests {
             .send_declare_keyexpr(7, "home/base")
             .expect("declare keyexpr");
         actions
-            .send_declare_subscriber(10, 7, Some("/tail"))
+            .with_outbound_key(7, Some("/tail"), |key| {
+                actions.send_declare_subscriber(10, key)
+            })
             .expect("aliased subscriber declare");
         for id in 0..plain_subscribers {
             actions
-                .send_declare_subscriber(11 + id, 0, Some(&format!("home/s{id}")))
+                .send_declare_subscriber(
+                    11 + id,
+                    wz_session_core::named_key::NamedKey::literal(&format!("home/s{id}"))
+                        .expect("a key"),
+                )
                 .expect("plain subscriber declare");
         }
         (0..driver.frame_count())
@@ -7221,7 +7308,10 @@ mod reconnect_tx_tests {
     fn a_session_with_no_interest_sent_is_synced() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         assert!(actions.declarations_synced());
     }
@@ -7415,7 +7505,10 @@ mod reconnect_tx_tests {
     fn a_replay_still_owed_is_not_synced_and_its_interests_are_waited_for_when_sent() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         actions
             .send_interest_liveliness_get(14, 0, Some("home/get"))
@@ -7445,7 +7538,10 @@ mod reconnect_tx_tests {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
         let start = actions.declaration_generation();
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
         let made = actions.declaration_generation();
         assert_ne!(made, start);
@@ -7494,7 +7590,9 @@ mod reconnect_tx_tests {
         let (reference, reference_driver) = crate::test_fixtures::recording_actions();
         paced_fixture_declarations(&reference, &reference_driver, 1);
         reference
-            .send_declare_subscriber(12, 7, Some("/new"))
+            .with_outbound_key(7, Some("/new"), |key| {
+                reference.send_declare_subscriber(12, key)
+            })
             .expect("the same declaration, made with no replay running");
         let expected: Vec<Vec<u8>> = (0..4).map(|i| reference_driver.frame_bytes(i)).collect();
 
@@ -7505,7 +7603,9 @@ mod reconnect_tx_tests {
         assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
         let before = driver.frame_count();
         actions
-            .send_declare_subscriber(12, 7, Some("/new"))
+            .with_outbound_key(7, Some("/new"), |key| {
+                actions.send_declare_subscriber(12, key)
+            })
             .expect("a live declaration during the replay succeeds from the caller's side");
         assert_eq!(
             driver.frame_count(),
@@ -7862,7 +7962,10 @@ mod reconnect_tx_tests {
         drop(old);
 
         actions
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare after swap");
         assert_eq!(
             first.frame_count(),

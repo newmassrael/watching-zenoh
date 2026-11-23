@@ -29,11 +29,12 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::bounded::{BoundedVec, CapacityFull};
+use wz_session_core::bounded::{BoundedVec, CapacityFull, Storage};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{BoxedLinkDriver, LinkDropCause};
 use wz_session_core::locality::Locality;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
@@ -941,15 +942,12 @@ fn declare<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
     id: EntityId,
     declaration: &Declaration,
 ) -> Result<(), SendDeclareError> {
+    let key = NamedKey::literal(declaration.key).ok_or(SendDeclareError::MissingKeyexpr)?;
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
     match declaration.kind {
-        DeclarationKind::Queryable => {
-            actions.send_declare_queryable(id, 0, Some(declaration.key), false)
-        }
-        DeclarationKind::Subscriber => {
-            actions.send_declare_subscriber(id, 0, Some(declaration.key))
-        }
-        DeclarationKind::Token => actions.send_declare_token(id, 0, Some(declaration.key)),
+        DeclarationKind::Queryable => actions.send_declare_queryable(id, key, false),
+        DeclarationKind::Subscriber => actions.send_declare_subscriber(id, key),
+        DeclarationKind::Token => actions.send_declare_token(id, key),
     }
 }
 
@@ -983,6 +981,9 @@ pub struct DocumentSinks;
 
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
+    type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type Delivery = ();
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;

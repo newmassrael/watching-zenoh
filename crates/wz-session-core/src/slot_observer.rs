@@ -56,7 +56,10 @@ use crate::driver_loop::IterationEvent;
 use crate::key_arena::KeySpace;
 use crate::limit_binding::{Quota, UnlentRows};
 use crate::peer_tables::PeerTables;
-use crate::pubsub::SubscriberTable;
+/// The session's own subscribers as the observer's paths read them, from the table of either
+/// storage profile or the session's one table set.
+pub use crate::pubsub::LocalSubscribers;
+use crate::pubsub::{SubscriberTable, SubscriptionId};
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
 use crate::query_sink::QuerySink;
@@ -65,7 +68,8 @@ use crate::reply_sink::ReplySink;
 #[cfg(feature = "query-queryable")]
 use crate::reply_stage::{FinalStaging, ReplyStaging};
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-use crate::sink::SampleSink;
+use crate::session_tables::{RowCallbacks, SessionTables, TableRows};
+use crate::sink::{SampleDelivery, SampleSink};
 #[cfg(all(feature = "alloc", feature = "switchboard"))]
 use crate::switchboard::{EventInjector, SwitchboardRegistry};
 
@@ -238,8 +242,10 @@ impl OtherPeers for NoOtherPeers {
 /// ([`SlotObserverOf::lent`]), the declaration watchers' lists among them. What a peer
 /// writes is in the [`PeerTables`] each call is handed, of their own policy.
 pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile> {
-    /// The local subscriptions. One registration serves every session.
-    pub subscribers: SubscriberTable<K::Subscriber, P>,
+    /// The application's tables `K` keeps (`ObserverSinks::Tables`): the local subscriptions
+    /// today, in the subscriber table or the session's one table set. One registration serves
+    /// every session.
+    pub subscribers: K::Tables<P>,
     /// The statechart switchboard (the keyexpr -> event table).
     #[cfg(feature = "switchboard")]
     pub switchboard: SwitchboardRegistry,
@@ -267,10 +273,15 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile>
 
 /// How many rows each application table of an observer of the lent policy is lent
 /// ([`SlotObserverOf::lent`]): the values of their limits the session's open resolved.
+///
+/// `S` is what the table the subscriptions are kept in is lent by ([`LentTables::Rows`]):
+/// a count for a subscriber table, every table's rows for the session's one table set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ObserverRows {
-    /// The subscriptions (`MAX_SUBSCRIPTIONS`).
-    pub subscribers: usize,
+pub struct ObserverRows<S = usize> {
+    /// The rows of the table the subscriptions are kept in: the subscriptions
+    /// (`MAX_SUBSCRIPTIONS`) of a subscriber table, or each table's of the session's one table set
+    /// ([`TableRows`]).
+    pub subscribers: S,
     /// The queryables (`MAX_QUERYABLES`).
     pub queryables: usize,
     /// The tokens the session holds (`MAX_LOCAL_TOKENS`).
@@ -285,8 +296,20 @@ pub struct ObserverRows {
 /// of its own (a function pointer and a `&'static` context, an enum over the few
 /// registrations it makes).
 pub trait ObserverSinks {
-    /// What a local subscription is delivered to.
-    type Subscriber: SampleSink;
+    /// What a local subscription's row keeps of its subscriber, delivered through
+    /// [`Self::Delivery`].
+    type Subscriber;
+    /// The id the tables give a subscription's row, which a delivery names it by.
+    type SubscriberId: Copy;
+    /// The context a matched row is delivered through, handed to the dispatch
+    /// ([`SlotObserverOf::dispatch_event`]) so a row holds no reference to the state its samples
+    /// go to. `()` for rows that deliver themselves ([`SampleSink`]).
+    type Delivery: SampleDelivery<Self::Subscriber, Self::SubscriberId>;
+    /// The application's tables, of storage `P`, as one bundle: the subscriber table of the
+    /// storage policies, or the session's one table set, whose rows are the session's only record
+    /// of each entity. One type for every kind the bundle holds, so a kind that moves into it adds
+    /// no type here (`docs/c-abi-architecture.md`, P1).
+    type Tables<P: Storage>: ObserverTables<Sink = Self::Subscriber, RowId = Self::SubscriberId>;
     /// What a local queryable is asked through, handed the view and the responder of the wire
     /// dispatch as their own types ([`crate::query::ResponderSink`]): a closed sink is called
     /// with no vtable.
@@ -308,6 +331,9 @@ pub struct HeapSinks;
 #[cfg(feature = "alloc")]
 impl ObserverSinks for HeapSinks {
     type Subscriber = crate::sink::BoxedSink;
+    type SubscriberId = SubscriptionId;
+    type Delivery = ();
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = crate::query_sink::BoxedQuerySink;
     type Declared = crate::decl_sink::BoxedDeclSink;
     type Undeclared = crate::decl_sink::BoxedUndeclSink;
@@ -347,11 +373,80 @@ impl UndeclSink for NoSink {
     }
 }
 
+/// What the observer asks of the application's tables ([`ObserverSinks::Tables`]) beyond what
+/// its paths read ([`LocalSubscribers`]): to be made empty and to be held to the session's
+/// limits.
+pub trait ObserverTables: LocalSubscribers + Sized {
+    /// A table of no subscription. Of the lent policy it was lent no rows, and refuses every
+    /// subscription; [`LentTables::lend`] makes the one a session holds.
+    fn empty() -> Self;
+
+    /// Hold the table to the limits `limits` states, what the creator of the session resolved for
+    /// it. What it holds is kept, and what it is asked for next is held to the new bound.
+    fn hold_to(&mut self, limits: &crate::limits::SessionLimits);
+}
+
+/// An [`ObserverTables`] whose rows a session's arena lends at its open
+/// ([`SlotObserverOf::lent`]).
+pub trait LentTables: ObserverTables {
+    /// What the table is lent by: how many rows, or how many of each kind.
+    type Rows;
+
+    /// A table of no subscription, its rows lent from `arena` as `rows` states, its keys kept in
+    /// `keys`, the session's key arena. Refused, the rows lent so far going back with the arena,
+    /// when the arena has not the room or `rows` is past the build's bound.
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: Self::Rows) -> Result<Self, LendRefused>;
+}
+
+impl<C, P: Storage> ObserverTables for SubscriberTable<C, P> {
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    fn hold_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.limit_to(limits.max_subscriptions_held());
+        self.limit_memo_to(limits.match_memo_slots());
+        self.limit_keys_to(limits.max_keyexpr_bytes_held());
+    }
+}
+
+impl<C> LentTables for SubscriberTable<C, Lent> {
+    type Rows = usize;
+
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
+        Self::lent(arena, keys, rows)
+    }
+}
+
+/// The session's one table set keeps no quota of its own: each table's bound is the rows its
+/// creator gave it ([`SessionTables::limit_to`], [`SessionTables::lent`]), and a key it cannot
+/// keep is refused by the key arena. Of the session's limits it reads the match cache's size.
+impl<F: RowCallbacks, P: Storage> ObserverTables for SessionTables<F, P> {
+    fn empty() -> Self {
+        Self::new()
+    }
+
+    fn hold_to(&mut self, limits: &crate::limits::SessionLimits) {
+        self.limit_memo_to(limits.match_memo_slots());
+    }
+}
+
+impl<F: RowCallbacks> LentTables for SessionTables<F, Lent> {
+    type Rows = TableRows;
+
+    fn lend(arena: &mut Arena, keys: KeySpace, rows: TableRows) -> Result<Self, LendRefused> {
+        Self::lent(arena, keys, &rows)
+    }
+}
+
 /// The observer with no registration of any kind.
 pub struct NoSinks;
 
 impl ObserverSinks for NoSinks {
     type Subscriber = NoSink;
+    type SubscriberId = SubscriptionId;
+    type Delivery = ();
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = NoSink;
     type Declared = NoSink;
     type Undeclared = NoSink;
@@ -555,10 +650,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         // item, and a statement here is not one.
         // SAFETY: the caller's; each field is written once through a pointer to it.
         unsafe {
-            ptr::write(
-                addr_of_mut!((*at).subscribers),
-                SubscriberTable::with_sink_backing(),
-            );
+            ptr::write(addr_of_mut!((*at).subscribers), ObserverTables::empty());
             #[cfg(feature = "switchboard")]
             ptr::write(addr_of_mut!((*at).switchboard), SwitchboardRegistry::new());
             #[cfg(feature = "query-queryable")]
@@ -615,7 +707,8 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
 
 impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
-    /// many rows each as `rows` states, their keys kept in `keys`, the session's key arena, and
+    /// many rows each as `rows` states (the subscriptions' table reads its own of them,
+    /// [`LentTables::lend`]), their keys kept in `keys`, the session's key arena, and
     /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. The declaration watchers'
     /// lists are lent too, as many rows each as `limits` admits watchers
     /// ([`Self::decl_watcher_rows`]). Refused, the rows lent so far going back with the arena,
@@ -623,9 +716,12 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     pub fn lent(
         arena: &mut Arena,
         keys: KeySpace,
-        rows: ObserverRows,
+        rows: ObserverRows<<K::Tables<Lent> as LentTables>::Rows>,
         limits: &crate::limits::SessionLimits,
-    ) -> Result<Self, LendRefused> {
+    ) -> Result<Self, LendRefused>
+    where
+        K::Tables<Lent>: LentTables,
+    {
         #[cfg(any(
             feature = "declare-subscriber",
             feature = "declare-queryable",
@@ -633,7 +729,7 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
         ))]
         let watchers = Self::decl_watcher_rows(limits)?;
         let mut observer = Self {
-            subscribers: SubscriberTable::lent(arena, keys, rows.subscribers)?,
+            subscribers: LentTables::lend(arena, keys, rows.subscribers)?,
             #[cfg(feature = "switchboard")]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "query-queryable")]
@@ -728,31 +824,20 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// states its limits before it registers. The tables of each peer, which this observer does not
     /// hold, are held to the same limits by [`PeerTables::limit_to`].
     pub fn limit_to(&mut self, limits: &crate::limits::SessionLimits) {
-        self.subscribers.limit_to(limits.max_subscriptions_held());
+        self.subscribers.hold_to(limits);
         #[cfg(feature = "query-queryable")]
         self.queryables.limit_to(limits.max_queryables_held());
-        self.subscribers.limit_memo_to(limits.match_memo_slots());
         // The longest key every table the application registers in stores; the tables each
         // peer fills are held to it by `PeerTables::limit_to`.
-        let keys = limits.max_keyexpr_bytes_held();
-        self.subscribers.limit_keys_to(keys);
         #[cfg(feature = "query-queryable")]
-        self.queryables.limit_keys_to(keys);
+        self.queryables
+            .limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "liveliness-token")]
-        self.local_tokens.limit_keys_to(keys);
+        self.local_tokens
+            .limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "liveliness-subscriber")]
-        self.liveliness_subscribers.limit_keys_to(keys);
-        #[cfg(feature = "query-queryable")]
-        self.queryables.limit_query_sizes_to(
-            limits.query_parameters_max_bytes_held(),
-            limits.query_attachment_max_bytes_held(),
-        );
-        #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interests_to(limits.max_inbound_sub_interests_held());
-        #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interest_replies_to(limits.max_pending_declares_held());
+        self.liveliness_subscribers
+            .limit_keys_to(limits.max_keyexpr_bytes_held());
         #[cfg(feature = "declare-subscriber")]
         self.remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
@@ -772,27 +857,6 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             .limit_to(limits.max_liveliness_subscriptions_held());
     }
 
-    /// Say which zid the key of the link of the session about to be dispatched PROVED, or `None`
-    /// (decision D12): the queryables answer the queries of that dispatch with it as
-    /// [`crate::query_sink::QueryView::requester`]. The observer is the process's and a session
-    /// is one link, so the session says it before every dispatch.
-    pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
-        #[cfg(feature = "query-queryable")]
-        self.queryables.set_requester(requester);
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = requester;
-    }
-
-    /// State the `query-unanswerable-final` value of the session about to be dispatched, from
-    /// the snapshot that session holds: the observer is the process's, so the session says it
-    /// before every dispatch, as it says who its link proved.
-    pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        #[cfg(feature = "query-queryable")]
-        self.queryables.set_unanswerable_final(value);
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = value;
-    }
-
     /// Fan an [`IterationEvent`] of one session into every registry, against that
     /// session's `peers`. The subscriber side runs first so its alias absorb
     /// binds a `DeclKexpr` BEFORE the planes that resolve keyexprs through it.
@@ -806,11 +870,12 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     #[inline(never)]
     pub fn dispatch_event<R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
+        cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
     ) {
-        self.dispatch_event_among(peers, requesters, event, &NoOtherPeers);
+        self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers);
     }
 
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
@@ -829,13 +894,15 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         T: Storage,
     >(
         &mut self,
+        cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
         others: &O,
     ) {
-        self.subscribers
-            .dispatch_iteration_event(&mut peers.subscribers, event);
+        peers
+            .subscribers
+            .dispatch_iteration_event(&mut self.subscribers, cx, event);
         // The two id spaces this session resolves through, as the subscriber side
         // just refreshed them (R311y739): an `M=0` alias names an id WE declared
         // and is answered out of the right table on every plane.
@@ -849,10 +916,13 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             feature = "codec-response",
             feature = "codec-response-final",
         ))]
-        let peer_table = peers.subscribers.mapping_spaces();
+        let peer_table = peers
+            .subscribers
+            .mapping_spaces_over(self.subscribers.own_space());
 
         #[cfg(feature = "query-queryable")]
-        self.queryables.dispatch_iteration_event(
+        peers.queries.dispatch_iteration_event(
+            &mut self.queryables,
             event,
             peer_table,
             &mut peers.replies,
@@ -999,6 +1069,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
     pub fn dispatch<S, R: ReplySink, G: ReplySink, Q: Storage, T: Storage>(
         &mut self,
+        cx: &mut K::Delivery,
         peers: &mut PeerTables<T>,
         requesters: &mut Requesters<R, G, Q>,
         event: IterationEvent<'_, '_>,
@@ -1006,7 +1077,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     ) where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        self.dispatch_event(peers, requesters, event);
+        self.dispatch_event(cx, peers, requesters, event);
         self.flush_pending(peers, requesters, actions);
     }
 
@@ -1021,7 +1092,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     ) -> usize {
         self.switchboard.dispatch_iteration_event(
             event,
-            peers.subscribers.mapping_spaces(),
+            peers
+                .subscribers
+                .mapping_spaces_over(self.subscribers.own_space()),
             injector,
         )
     }
@@ -1053,15 +1126,26 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         peers: &mut PeerTables<T>,
         room: &mut dyn FnMut() -> bool,
     ) -> bool {
+        self.flush_tokens_on_link_loss_while(&mut peers.tokens, room)
+    }
+
+    /// [`Self::flush_liveliness_on_link_loss_while`] of the tokens of a peer whose tables were let
+    /// go of, held apart from them (`PeerTokens::split_off`): what a face that went still owes.
+    /// Whether none is left.
+    pub fn flush_tokens_on_link_loss_while<T: Storage>(
+        &mut self,
+        tokens: &mut crate::declare::liveliness_subscriber::PeerTokens<T>,
+        room: &mut dyn FnMut() -> bool,
+    ) -> bool {
         #[cfg(feature = "liveliness-subscriber")]
         {
             self.liveliness_subscribers
-                .flush_peer_tokens_on_link_loss_while(&mut peers.tokens, room)
+                .flush_peer_tokens_on_link_loss_while(tokens, room)
                 .1
         }
         #[cfg(not(feature = "liveliness-subscriber"))]
         {
-            let _ = (peers, room);
+            let _ = (tokens, room);
             true
         }
     }
@@ -1136,7 +1220,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// builds the owned one it always did. A reply whose bounded field overflows cannot
     /// be wire-encoded and is skipped, as on the AP.
     #[inline(never)]
-    fn drain_query_replies<S: ResponseSink, T: Storage>(
+    pub(crate) fn drain_query_replies<S: ResponseSink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1151,7 +1235,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The `Final`s owed, through `send_response_final`.
     #[inline(never)]
-    fn drain_query_finals<S: ResponseSink, T: Storage>(
+    pub(crate) fn drain_query_finals<S: ResponseSink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1169,7 +1253,7 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     /// The answers to the peer's interests: the subscriber interest chains first,
     /// then the liveliness ones, each batch's items before its terminating `Final`.
     #[inline(never)]
-    fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
+    pub(crate) fn drain_declare_replies<S: DeclareReplySink, T: Storage>(
         &mut self,
         peers: &mut PeerTables<T>,
         sink: &S,
@@ -1184,9 +1268,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
                 | crate::pubsub::SubInterestReply::Concrete { interest_id, .. } => {
                     let interest_id = *interest_id;
                     let mut announced_aggregate = false;
-                    if let Some((subscriber_id, keyexpr)) = self
+                    if let Some((subscriber_id, keyexpr)) = peers
                         .subscribers
-                        .sub_interest_reply(&peers.subscribers, &item)
+                        .sub_interest_reply(&self.subscribers, &item)
                     {
                         sink.send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id);
                         announced_aggregate =
@@ -1202,9 +1286,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
                 }
                 #[cfg(feature = "declare-undeclare")]
                 crate::pubsub::SubInterestReply::AggregateRetract { interest_id } => {
-                    if let Some(decl_id) = self
+                    if let Some(decl_id) = peers
                         .subscribers
-                        .take_aggregate_retract(&mut peers.subscribers, *interest_id)
+                        .take_aggregate_retract(&self.subscribers, *interest_id)
                     {
                         sink.send_undeclare_subscriber_reply(decl_id);
                     }
@@ -1238,7 +1322,12 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
 
     /// The liveliness gets that terminated, through `prune_liveliness_get_interest`.
     #[inline(never)]
-    fn drain_get_prunes<S: LivelinessGetPrune, R: ReplySink, G: ReplySink, Q: Storage>(
+    pub(crate) fn drain_get_prunes<
+        S: LivelinessGetPrune,
+        R: ReplySink,
+        G: ReplySink,
+        Q: Storage,
+    >(
         &mut self,
         requesters: &mut Requesters<R, G, Q>,
         sink: &S,
@@ -1370,7 +1459,7 @@ mod tests {
             fx::declare_envelope_decl_kexpr(fx::decl_kexpr(7, "theirs/x")),
         ))]);
         crate::driver_loop::deliver_frame(&outcome, |event| {
-            observer.dispatch_event(&mut peers, &mut requesters, event)
+            observer.dispatch_event(&mut (), &mut peers, &mut requesters, event)
         });
 
         let mut record = |literal: &str| {
@@ -1408,6 +1497,121 @@ mod tests {
         }
     }
 
+    /// A Push on the literal key `key`.
+    fn push_literal(key: &str) -> crate::wire::PushOwned {
+        use wz_codecs::lent::{Push, WireexprLocal};
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(key.len() as u64),
+                    suffix: Some(sce_forge_runtime::codec::Bounded::new(key).unwrap()),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap()
+    }
+
+    /// The slot fan delivers a peer's Push to an observer whose subscriptions are kept in the
+    /// session's one table set as it does to a subscriber table: the matching key once, another
+    /// key not at all.
+    #[test]
+    fn the_slot_fan_delivers_a_peers_push_to_a_table_set() {
+        use crate::session_tables::KeyForm;
+        let mut observer = SlotObserverOf::<super::lent_tests::TableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let into = seen.clone();
+        observer
+            .subscribers
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(move |s: &dyn SampleView| {
+                    into.lock().unwrap().push(s.keyexpr().to_string());
+                }),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+            NetworkMessage::Push(Box::new(push_literal("topic/b"))),
+        ]);
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut (), &mut peers, &mut requesters, event)
+        });
+        assert_eq!(*seen.lock().unwrap(), vec!["topic/a".to_string()]);
+    }
+
+    /// A delivery context that records the handle of each row it is handed and calls no row.
+    #[derive(Default)]
+    struct HandleLog(Vec<crate::session_tables::SubscriberHandle>);
+
+    impl SampleDelivery<BoxedSink, crate::session_tables::SubscriberHandle> for HandleLog {
+        fn deliver(
+            &mut self,
+            id: crate::session_tables::SubscriberHandle,
+            _row: crate::sink::RowAccess<'_, BoxedSink>,
+            _sample: &dyn SampleView,
+        ) {
+            self.0.push(id);
+        }
+    }
+
+    /// Subscriptions kept in the session's one table set, delivered through a [`HandleLog`].
+    struct LoggedTableSinks;
+
+    impl ObserverSinks for LoggedTableSinks {
+        type Subscriber = BoxedSink;
+        type SubscriberId = crate::session_tables::SubscriberHandle;
+        type Delivery = HandleLog;
+        type Tables<P: Storage> = SessionTables<super::lent_tests::BoxedRows, P>;
+        type Queryable = NoSink;
+        type Declared = NoSink;
+        type Undeclared = NoSink;
+    }
+
+    /// The slot fan delivers a peer's Push through the context it is handed, naming the row it
+    /// matched by its handle, and the row's own sink is not called by the fan: the matching key
+    /// once, another key not at all.
+    #[test]
+    fn the_slot_fan_delivers_through_the_context_it_is_handed() {
+        use crate::session_tables::KeyForm;
+        let mut observer = SlotObserverOf::<LoggedTableSinks>::new();
+        let mut peers = PeerTables::new();
+        let mut requesters = Req::new();
+        let called = Arc::new(Mutex::new(0usize));
+        let into = called.clone();
+        let reached = observer
+            .subscribers
+            .declare_subscriber(
+                "topic/a",
+                Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(move |_s: &dyn SampleView| {
+                    *into.lock().unwrap() += 1;
+                }),
+            )
+            .expect("a table of the build's bound has room");
+        let outcome = frame(vec![
+            NetworkMessage::Push(Box::new(push_literal("topic/a"))),
+            NetworkMessage::Push(Box::new(push_literal("topic/b"))),
+        ]);
+        let mut log = HandleLog::default();
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            observer.dispatch_event(&mut log, &mut peers, &mut requesters, event)
+        });
+        assert_eq!(log.0, vec![reached.handle]);
+        assert_eq!(
+            *called.lock().unwrap(),
+            0,
+            "the context delivers, not the row"
+        );
+    }
+
     /// The same two messages in both tests: a Push and a `DeclareSubscriber`, each
     /// naming id 7 with `M=0`.
     fn own_alias_frame() -> DriverLoopOutcome {
@@ -1425,7 +1629,7 @@ mod tests {
         let outcome = own_alias_frame();
         crate::driver_loop::deliver_frame(&outcome, |event| {
             f.observer
-                .dispatch_event(&mut f.peers, &mut f.requesters, event)
+                .dispatch_event(&mut (), &mut f.peers, &mut f.requesters, event)
         });
         assert_eq!(
             *f.ours.lock().unwrap(),
@@ -1452,7 +1656,7 @@ mod tests {
         let outcome = own_alias_frame();
         crate::driver_loop::deliver_frame(&outcome, |event| {
             f.observer
-                .dispatch_event(&mut f.peers, &mut f.requesters, event)
+                .dispatch_event(&mut (), &mut f.peers, &mut f.requesters, event)
         });
         assert!(
             f.ours.lock().unwrap().is_empty() && f.theirs.lock().unwrap().is_empty(),
@@ -1613,6 +1817,76 @@ mod lent_tests {
         lent_in(subscribers, keys(4096))
     }
 
+    /// The callbacks of the table set an observer keeps its subscriptions in: boxed closures for
+    /// the subscribers, none for the kinds these tests declare none of.
+    pub(super) enum BoxedRows {}
+
+    impl RowCallbacks for BoxedRows {
+        type Subscriber = BoxedSink;
+        type Queryable = NoSink;
+        type LivelinessSubscriber = NoSink;
+        type Matching = NoSink;
+        type Reply = NoSink;
+    }
+
+    /// An observer whose subscriptions are kept in the session's one table set.
+    pub(super) struct TableSinks;
+
+    impl ObserverSinks for TableSinks {
+        type Subscriber = BoxedSink;
+        type SubscriberId = crate::session_tables::SubscriberHandle;
+        type Delivery = ();
+        type Tables<P: Storage> = SessionTables<BoxedRows, P>;
+        type Queryable = NoSink;
+        type Declared = NoSink;
+        type Undeclared = NoSink;
+    }
+
+    /// An observer of table-set subscriptions lent `subscribers` rows of that set.
+    fn table_set_lent(subscribers: usize) -> SlotObserverOf<TableSinks, Lent> {
+        let rows = ObserverRows {
+            subscribers: TableRows {
+                subscribers,
+                ..TableRows::default()
+            },
+            ..ObserverRows::default()
+        };
+        SlotObserverOf::<TableSinks, Lent>::lent(
+            &mut arena(1 << 16),
+            keys(4096),
+            rows,
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows")
+    }
+
+    /// A table set holding the observer's subscriptions is lent the rows its `TableRows` state:
+    /// one row lent, the second subscription is refused as a full table, and a set lent none
+    /// refuses the first.
+    #[test]
+    fn a_lent_table_set_keeps_the_subscriptions_its_rows_hold() {
+        use crate::session_tables::KeyForm;
+        let mut observer = table_set_lent(1);
+        observer
+            .subscribers
+            .declare_subscriber("demo/a", Locality::Any, KeyForm::default(), sink())
+            .expect("the one row is free");
+        let refused = observer
+            .subscribers
+            .declare_subscriber("demo/b", Locality::Any, KeyForm::default(), sink())
+            .expect_err("one row was lent");
+        assert!(matches!(refused.why, RegisterError::TableFull));
+        assert!(observer.subscribers.has_local_matching("demo/a"));
+        assert!(!observer.subscribers.has_local_matching("demo/b"));
+
+        let mut none = table_set_lent(0);
+        let refused = none
+            .subscribers
+            .declare_subscriber("demo/a", Locality::Any, KeyForm::default(), sink())
+            .expect_err("no row was lent");
+        assert!(matches!(refused.why, RegisterError::TableFull));
+    }
+
     /// The own zid a peer's tables hold is inline whatever their policy: a side of the lent policy,
     /// lent no rows at all, keeps it.
     #[test]
@@ -1630,7 +1904,12 @@ mod lent_tests {
         let mut observer = lent_with(2);
         let mut peers = PeerTables::<crate::bounded::Static>::new_static();
         let mut requesters = Requesters::<BoxedReplySink, BoxedReplySink>::new();
-        observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::AppWake);
+        observer.dispatch_event(
+            &mut (),
+            &mut peers,
+            &mut requesters,
+            IterationEvent::AppWake,
+        );
         assert_eq!(observer.flush_declarations_on_link_loss(&mut peers), 0);
     }
 
@@ -1755,7 +2034,7 @@ mod lent_tests {
     }
 
     /// The patterns of a lent observer's subscriptions lie in the key arena it was handed, a block
-    /// each as long as the pattern, and match as they did inline: a subscription on `demo/a/**`
+    /// each as long as the pattern, and match as they did inline: a subscription on `demo/a/x`
     /// matches `demo/a/x` and not `demo/b`. Its unregistration gives the block back, and the next
     /// pattern of that length takes the same bytes.
     #[test]
@@ -1766,13 +2045,13 @@ mod lent_tests {
         let mut observer = lent_in(2, keys);
         let id = observer
             .subscribers
-            .register_sink("demo/a/**", Locality::Any, sink())
+            .register_sink("demo/a/x", Locality::Any, sink())
             .expect("a row and a block are free");
         assert!(observer.subscribers.has_local_matching("demo/a/x"));
         assert!(!observer.subscribers.has_local_matching("demo/b"));
         assert_eq!(
             keys.counts().used,
-            block_bytes("demo/a/**".len()).expect("short"),
+            block_bytes("demo/a/x".len()).expect("short"),
             "one block of the pattern's length"
         );
         let peak = keys.counts().peak;
@@ -1780,7 +2059,7 @@ mod lent_tests {
         assert_eq!(keys.counts().used, 0, "the block went back");
         observer
             .subscribers
-            .register_sink("demo/c/**", Locality::Any, sink())
+            .register_sink("demo/c/y", Locality::Any, sink())
             .expect("the block given back holds the next");
         assert!(observer.subscribers.has_local_matching("demo/c/y"));
         assert_eq!(keys.counts().peak, peak, "the same bytes, taken again");
@@ -1919,7 +2198,7 @@ mod lent_tests {
             .respond_to_subscriber_interest_borrowed(
                 &mut peer,
                 7,
-                Some("demo/**"),
+                Some("demo/a"),
                 false,
                 true,
                 true,

@@ -599,8 +599,7 @@ fn census_reply_wire(attached: bool, del: bool) -> Vec<u8> {
 
     let mut builder = ResponseReplyBuilder::new(
         CENSUS_RID,
-        0,
-        Some("demo/census"),
+        wz_session_core::wire_key::WireKey::literal("demo/census").expect("a literal key"),
         &vec![0x5C; CENSUS_PAYLOAD],
     );
     if attached {

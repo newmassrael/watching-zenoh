@@ -63,7 +63,7 @@ impl WireNoise {
 
     /// A message: `first`, then one to 48 bytes of noise.
     pub fn message(&mut self, first: u8) -> Vec<u8> {
-        let len = 1 + (self.next_word() % 48) as usize;
+        let len = ((self.next_word() % 48) as usize).saturating_add(1);
         let mut out = alloc::vec![first];
         out.extend((0..len).map(|_| self.byte()));
         out

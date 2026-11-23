@@ -196,24 +196,22 @@ impl RawEthHeader {
     /// Write the header at the front of `out`, returning its width.
     pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, RawEthError> {
         let need = self.len();
-        if out.len() < need {
-            return Err(RawEthError::BufferTooSmall {
-                need,
-                got: out.len(),
-            });
-        }
-        out[0..MAC_LEN].copy_from_slice(&self.dmac);
-        out[MAC_LEN..2 * MAC_LEN].copy_from_slice(&self.smac);
-        let mut at = 2 * MAC_LEN;
-        if let Some(tag) = self.vlan {
+        let got = out.len();
+        let too_small = || RawEthError::BufferTooSmall { need, got };
+        // Nothing is written into a buffer too small for the whole header.
+        let head = out.get_mut(..need).ok_or_else(too_small)?;
+        let rest = put(head, self.dmac).and_then(|rest| put(rest, self.smac));
+        let rest = match self.vlan {
             // pico memcpy's the struct, so these two ride the host's order.
-            out[at..at + 2].copy_from_slice(&ETH_TYPE_VLAN.to_ne_bytes());
-            out[at + 2..at + 4].copy_from_slice(&tag.to_ne_bytes());
-            at += 4;
-        }
-        out[at..at + 2].copy_from_slice(&self.ethtype.to_ne_bytes());
-        // ...and this one alone goes through htons (tx.c:134/145).
-        out[at + 2..at + 4].copy_from_slice(&self.data_length.to_be_bytes());
+            Some(tag) => rest
+                .and_then(|rest| put(rest, ETH_TYPE_VLAN.to_ne_bytes()))
+                .and_then(|rest| put(rest, tag.to_ne_bytes())),
+            None => rest,
+        };
+        rest.and_then(|rest| put(rest, self.ethtype.to_ne_bytes()))
+            // ...and this one alone goes through htons (tx.c:134/145).
+            .and_then(|rest| put(rest, self.data_length.to_be_bytes()))
+            .ok_or_else(too_small)?;
         Ok(need)
     }
 
@@ -225,28 +223,31 @@ impl RawEthHeader {
     /// VLAN one, which works because the field sits at the same offset in
     /// both.
     pub fn decode(bytes: &[u8]) -> Result<(Self, usize), RawEthError> {
-        if bytes.len() < ETH_HEADER_LEN {
-            return Err(RawEthError::Truncated {
-                got: bytes.len(),
-                need: ETH_HEADER_LEN,
-            });
-        }
-        let mut dmac = [0u8; MAC_LEN];
-        let mut smac = [0u8; MAC_LEN];
-        dmac.copy_from_slice(&bytes[0..MAC_LEN]);
-        smac.copy_from_slice(&bytes[MAC_LEN..2 * MAC_LEN]);
-        let at = 2 * MAC_LEN;
-        let first = u16::from_ne_bytes([bytes[at], bytes[at + 1]]);
+        let truncated = |need: usize| RawEthError::Truncated {
+            got: bytes.len(),
+            need,
+        };
+        // The 16 bytes both widths begin with: two MACs and two 16-bit fields.
+        let Some((dmac, smac, first, second, rest)) =
+            take::<MAC_LEN>(bytes).and_then(|(dmac, rest)| {
+                let (smac, rest) = take::<MAC_LEN>(rest)?;
+                let (first, rest) = take::<2>(rest)?;
+                let (second, rest) = take::<2>(rest)?;
+                Some((dmac, smac, first, second, rest))
+            })
+        else {
+            return Err(truncated(ETH_HEADER_LEN));
+        };
+        let first = u16::from_ne_bytes(first);
         if first == ETH_TYPE_VLAN {
-            if bytes.len() < ETH_VLAN_HEADER_LEN {
-                return Err(RawEthError::Truncated {
-                    got: bytes.len(),
-                    need: ETH_VLAN_HEADER_LEN,
-                });
-            }
-            let tag = u16::from_ne_bytes([bytes[at + 2], bytes[at + 3]]);
-            let ethtype = u16::from_ne_bytes([bytes[at + 4], bytes[at + 5]]);
-            let data_length = u16::from_be_bytes([bytes[at + 6], bytes[at + 7]]);
+            let Some((ethtype, length)) =
+                take::<2>(rest).and_then(|(ethtype, rest)| Some((ethtype, take::<2>(rest)?.0)))
+            else {
+                return Err(truncated(ETH_VLAN_HEADER_LEN));
+            };
+            let tag = u16::from_ne_bytes(second);
+            let ethtype = u16::from_ne_bytes(ethtype);
+            let data_length = u16::from_be_bytes(length);
             Ok((
                 Self {
                     dmac,
@@ -258,7 +259,7 @@ impl RawEthHeader {
                 ETH_VLAN_HEADER_LEN,
             ))
         } else {
-            let data_length = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]);
+            let data_length = u16::from_be_bytes(second);
             Ok((
                 Self {
                     dmac,
@@ -273,6 +274,19 @@ impl RawEthHeader {
     }
 }
 
+/// `bytes` written at the front of `out`, and the rest of `out`; `None` when it is shorter.
+fn put<const N: usize>(out: &mut [u8], bytes: [u8; N]) -> Option<&mut [u8]> {
+    let (head, rest) = out.split_first_chunk_mut::<N>()?;
+    *head = bytes;
+    Some(rest)
+}
+
+/// The first `N` bytes of `bytes` and the rest; `None` when it is shorter.
+fn take<const N: usize>(bytes: &[u8]) -> Option<([u8; N], &[u8])> {
+    let (head, rest) = bytes.split_first_chunk::<N>()?;
+    Some((*head, rest))
+}
+
 /// Build one raweth frame: the header (with `data_length` set from `payload`)
 /// followed by the payload.
 ///
@@ -281,15 +295,17 @@ impl RawEthHeader {
 /// the one field a caller must not be able to get wrong, and pico computes it
 /// the same way (tx.c:134/145) rather than accepting it.
 pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<Vec<u8>, RawEthError> {
-    let total = header.len() + payload.len();
+    let total = header.len().saturating_add(payload.len());
     if total > MAX_ETH_FRAME_SIZE {
         return Err(RawEthError::FrameTooLarge { size: total });
     }
-    let mut out = alloc::vec![0u8; total];
     let mut sized = *header;
     sized.data_length = payload.len() as u16;
+    let mut out = Vec::with_capacity(total);
+    out.resize(sized.len(), 0);
     let n = sized.encode_into(&mut out)?;
-    out[n..].copy_from_slice(payload);
+    out.truncate(n);
+    out.extend_from_slice(payload);
     Ok(out)
 }
 
@@ -304,11 +320,12 @@ pub fn frame(header: &RawEthHeader, payload: &[u8]) -> Result<Vec<u8>, RawEthErr
 pub fn deframe(bytes: &[u8]) -> Result<(RawEthHeader, &[u8]), RawEthError> {
     let (header, n) = RawEthHeader::decode(bytes)?;
     let claimed = header.data_length as usize;
-    let available = bytes.len() - n;
-    if claimed > available {
-        return Err(RawEthError::LengthOverrun { claimed, available });
-    }
-    Ok((header, &bytes[n..n + claimed]))
+    let after = bytes.get(n..).unwrap_or_default();
+    let available = after.len();
+    let payload = after
+        .get(..claimed)
+        .ok_or(RawEthError::LengthOverrun { claimed, available })?;
+    Ok((header, payload))
 }
 
 /// The source-MAC allow-list a raweth link filters received frames through.
@@ -362,14 +379,17 @@ pub struct RawEthMapping {
     pub vlan: Option<u16>,
 }
 
+/// `_ZP_RAWETH_DEFAULT_MAPPING`, which a locator with no mapping of its own sends by.
+static DEFAULT_MAPPING: RawEthMapping = RawEthMapping {
+    keyexpr: String::new(),
+    dmac: DEFAULT_DMAC,
+    vlan: None,
+};
+
 impl RawEthMapping {
     /// `_ZP_RAWETH_DEFAULT_MAPPING`: [`DEFAULT_DMAC`], no VLAN, no key.
     pub fn default_entry() -> Self {
-        Self {
-            keyexpr: String::new(),
-            dmac: DEFAULT_DMAC,
-            vlan: None,
-        }
+        DEFAULT_MAPPING.clone()
     }
 }
 
@@ -399,8 +419,12 @@ impl RethLocator {
     /// first entry when none does or the message names no key
     /// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
     /// `static z_result_t _zp_raweth_set_socket(const _z_keyexpr_t *keyexpr, _z_raweth_socket_t *sock) {`).
+    /// A locator whose `mapping` was emptied after parsing sends by the default entry, as one
+    /// that named none does.
     pub fn mapping_for(&self, keyexpr: Option<&str>) -> &RawEthMapping {
-        &self.mapping[self.mapping_index_for(keyexpr)]
+        self.mapping
+            .get(self.mapping_index_for(keyexpr))
+            .unwrap_or(&DEFAULT_MAPPING)
     }
 
     /// The index in [`Self::mapping`] of the entry [`Self::mapping_for`] gives.
@@ -528,10 +552,11 @@ pub fn parse_reth_locator(locator: &str) -> Result<RethLocator, RawEthError> {
 /// are none, as pico reads an ethertype and a VLAN tag.
 fn strtol_hex(value: &str) -> i64 {
     let digits = value.trim_start_matches("0x").trim_start_matches("0X");
-    let end = digits
-        .find(|c: char| !c.is_ascii_hexdigit())
-        .unwrap_or(digits.len());
-    i64::from_str_radix(&digits[..end], 16).unwrap_or(0)
+    let leading = digits
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .next()
+        .unwrap_or_default();
+    i64::from_str_radix(leading, 16).unwrap_or(0)
 }
 
 /// `_z_valid_address_raweth`: six two-digit hex octets and five colons, seventeen characters.
@@ -559,15 +584,15 @@ fn mapping_entry(entry: &str) -> Option<RawEthMapping> {
 /// Parse `aa:bb:cc:dd:ee:ff`.
 pub fn parse_mac(s: &str) -> Result<[u8; MAC_LEN], RawEthError> {
     let mut out = [0u8; MAC_LEN];
-    let mut seen = 0usize;
-    for (i, octet) in s.split(':').enumerate() {
-        if i >= MAC_LEN || octet.len() != 2 {
+    let mut octets = s.split(':');
+    for slot in &mut out {
+        let octet = octets.next().ok_or(RawEthError::MalformedMac)?;
+        if octet.len() != 2 {
             return Err(RawEthError::MalformedMac);
         }
-        out[i] = u8::from_str_radix(octet, 16).map_err(|_| RawEthError::MalformedMac)?;
-        seen += 1;
+        *slot = u8::from_str_radix(octet, 16).map_err(|_| RawEthError::MalformedMac)?;
     }
-    if seen != MAC_LEN {
+    if octets.next().is_some() {
         return Err(RawEthError::MalformedMac);
     }
     Ok(out)

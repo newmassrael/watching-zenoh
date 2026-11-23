@@ -78,8 +78,17 @@ pub const MAX_KEY_ARENA_BYTES: usize = (u32::MAX - BLOCK_ALIGN as u32) as usize;
 /// The longest key a block's length word records (`held_word`).
 const MAX_KEY_LEN: usize = (u32::MAX >> 2) as usize;
 
+/// `BLOCK_ALIGN` as a shift: a count of granules shifted by it is their bytes.
+const GRANULE_SHIFT: u32 = 2;
+
+/// What a block's header and bytes are rounded up by before [`GRANULE_MASK`] cuts them.
+const ROUND_UP: usize = BLOCK_HEADER + BLOCK_ALIGN - 1;
+
+/// The bits of a length that are whole granules.
+const GRANULE_MASK: usize = !(BLOCK_ALIGN - 1);
+
 const _: () = assert!(
-    BLOCK_ALIGN == 4 && MIN_BLOCK - (BLOCK_ALIGN as u32) < 4 * BLOCK_ALIGN as u32,
+    BLOCK_ALIGN == 1 << GRANULE_SHIFT && MIN_BLOCK - (BLOCK_ALIGN as u32) < 4 * BLOCK_ALIGN as u32,
     "a held block's slack is at most three granules, which the length word's two low bits count"
 );
 
@@ -88,20 +97,21 @@ const _: () = assert!(
 /// granules in the two low bits. A walk of the blocks reads each key's length from it
 /// ([`KeySpace::kept`]).
 const fn held_word(len: u32, slack: u32) -> u32 {
-    (len << 2) | (slack / BLOCK_ALIGN as u32)
+    (len << 2) | (slack >> GRANULE_SHIFT)
 }
 
 /// The bytes of a held block whose length word is `word`.
 const fn held_bytes(word: u32) -> u32 {
-    let own = ((word >> 2) + (BLOCK_HEADER + BLOCK_ALIGN - 1) as u32) & !(BLOCK_ALIGN as u32 - 1);
-    own + (word & 3) * BLOCK_ALIGN as u32
+    // `word >> 2` is below 2^30 and the slack at most three granules: neither sum wraps.
+    let own = (word >> 2).wrapping_add(ROUND_UP as u32) & GRANULE_MASK as u32;
+    own.wrapping_add((word & 3) << GRANULE_SHIFT)
 }
 
 /// The bytes a key of `len` bytes takes as a block: its header and its bytes, rounded up to
 /// [`BLOCK_ALIGN`]. `None` past [`MAX_KEY_ARENA_BYTES`].
 pub const fn block_bytes(len: usize) -> Option<usize> {
-    match len.checked_add(BLOCK_HEADER + BLOCK_ALIGN - 1) {
-        Some(up) if up & !(BLOCK_ALIGN - 1) <= MAX_KEY_ARENA_BYTES => Some(up & !(BLOCK_ALIGN - 1)),
+    match len.checked_add(ROUND_UP) {
+        Some(up) if up & GRANULE_MASK <= MAX_KEY_ARENA_BYTES => Some(up & GRANULE_MASK),
         _ => None,
     }
 }
@@ -153,8 +163,9 @@ impl KeyStore {
         unsafe {
             self.blocks
                 .as_ptr()
-                .add(at as usize + 4 * word as usize)
+                .add(at as usize)
                 .cast::<u32>()
+                .add(word as usize)
                 .read()
         }
     }
@@ -165,8 +176,9 @@ impl KeyStore {
         unsafe {
             self.blocks
                 .as_ptr()
-                .add(at as usize + 4 * word as usize)
+                .add(at as usize)
                 .cast::<u32>()
+                .add(word as usize)
                 .write(value)
         }
     }
@@ -177,7 +189,7 @@ impl KeyStore {
         // blocks, which nothing writes while a holder of the block lives.
         unsafe {
             core::slice::from_raw_parts(
-                self.blocks.as_ptr().add(at as usize + BLOCK_HEADER),
+                self.blocks.as_ptr().add(at as usize).add(BLOCK_HEADER),
                 len as usize,
             )
         }
@@ -198,10 +210,10 @@ impl KeyStore {
         let (mut prev, mut at) = (NIL, self.free.get());
         while at != NIL {
             let (size, next) = (self.word(at, SIZE), self.word(at, LINK));
-            if size >= need {
-                let rest = size - need;
+            if let Some(rest) = size.checked_sub(need) {
                 if rest >= MIN_BLOCK {
-                    let tail = at + need;
+                    // The block ends inside the blocks, so its first `need` bytes do too.
+                    let tail = at.checked_add(need)?;
                     self.set_word(tail, SIZE, rest);
                     self.set_word(tail, LINK, next);
                     self.link(prev, tail);
@@ -215,10 +227,11 @@ impl KeyStore {
             at = next;
         }
         let top = self.top.get();
-        if self.bytes - top < need {
+        // `top` is never past `bytes`, so the difference is exact and the sum fits.
+        if self.bytes.saturating_sub(top) < need {
             return None;
         }
-        self.top.set(top + need);
+        self.top.set(top.checked_add(need)?);
         self.set_word(top, SIZE, need);
         Some(top)
     }
@@ -235,16 +248,18 @@ impl KeyStore {
             after = self.word(after, LINK);
         }
         let (mut start, mut prev) = (at, before);
-        if after != NIL && at + size == after {
-            size += self.word(after, SIZE);
+        // Every sum below is of a block and the bytes after it inside the blocks, so none wraps;
+        // a checked one that did would only keep two neighbours apart.
+        if after != NIL && at.checked_add(size) == Some(after) {
+            size = size.saturating_add(self.word(after, SIZE));
             after = self.word(after, LINK);
         }
-        if before != NIL && before + self.word(before, SIZE) == at {
+        if before != NIL && before.checked_add(self.word(before, SIZE)) == Some(at) {
             start = before;
-            size += self.word(before, SIZE);
+            size = size.saturating_add(self.word(before, SIZE));
             prev = before_prev;
         }
-        if start + size == self.top.get() {
+        if start.checked_add(size) == Some(self.top.get()) {
             // No free block lies above one that ends where the bump area starts.
             debug_assert_eq!(after, NIL, "a free block above the bump area's start");
             self.top.set(start);
@@ -301,10 +316,9 @@ pub struct KeySpace {
 
 impl KeySpace {
     /// The bytes the arena's own state takes at the start of its span, a whole span of the arena.
-    const STATE_BYTES: usize = match Arena::span(core::mem::size_of::<KeyStore>()) {
-        Some(bytes) => bytes,
-        None => panic!("the key arena's state fits the address space"),
-    };
+    /// Rounded as [`Arena::span`] rounds; a state past the address space stops the build here.
+    const STATE_BYTES: usize =
+        core::mem::size_of::<KeyStore>().next_multiple_of(crate::bounded::ARENA_ALIGN);
 
     /// The bytes a key arena of `bytes` bytes of blocks takes in an [`Arena`]: its state and its
     /// blocks. `None` past [`MAX_KEY_ARENA_BYTES`] or the address space.
@@ -395,18 +409,24 @@ impl KeySpace {
             return Err(refused(Some(need)));
         };
         let size = store.word(at, SIZE);
-        store.set_word(at, SIZE, held_word(text.len() as u32, size - need as u32));
+        // `take` gave a block of at least `need` bytes.
+        store.set_word(
+            at,
+            SIZE,
+            held_word(text.len() as u32, size.saturating_sub(need as u32)),
+        );
         store.set_word(at, LINK, 1);
         // SAFETY: the block at `at` holds its header and at least `text.len()` bytes after it,
         // inside the blocks, and no key reads them until this one is made.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 text.as_ptr(),
-                store.blocks.as_ptr().add(at as usize + BLOCK_HEADER),
+                store.blocks.as_ptr().add(at as usize).add(BLOCK_HEADER),
                 text.len(),
             );
         }
-        let used = store.used.get() + size;
+        // `used` counts held blocks, which lie inside the `u32` bytes of blocks.
+        let used = store.used.get().saturating_add(size);
         store.used.set(used);
         store.peak.set(store.peak.get().max(used));
         Ok(KeyRef {
@@ -426,20 +446,24 @@ impl KeySpace {
         let (mut at, mut free) = (0, store.free.get());
         while at < store.top.get() {
             let word = store.word(at, SIZE);
-            if at == free {
+            let next = if at == free {
                 free = store.word(at, LINK);
-                at += word;
-                continue;
-            }
-            if (word >> 2) as usize == text.len() && store.text(at, word >> 2) == text.as_bytes() {
-                store.set_word(at, LINK, store.word(at, LINK) + 1);
-                return Some(KeyRef {
-                    store: self.store,
-                    at,
-                    len: word >> 2,
-                });
-            }
-            at += held_bytes(word);
+                at.checked_add(word)
+            } else {
+                if (word >> 2) as usize == text.len()
+                    && store.text(at, word >> 2) == text.as_bytes()
+                {
+                    store.set_word(at, LINK, store.word(at, LINK).saturating_add(1));
+                    return Some(KeyRef {
+                        store: self.store,
+                        at,
+                        len: word >> 2,
+                    });
+                }
+                at.checked_add(held_bytes(word))
+            };
+            // A block past the `u32` offsets is no block of the arena: the walk ends.
+            at = next?;
         }
         None
     }
@@ -488,7 +512,7 @@ impl KeySpace {
             bytes: store.bytes as usize,
             used: store.used.get() as usize,
             peak: store.peak.get() as usize,
-            untouched: (store.bytes - store.top.get()) as usize,
+            untouched: store.bytes.saturating_sub(store.top.get()) as usize,
             refused: store.refused.get(),
         }
     }
@@ -532,6 +556,21 @@ impl KeyMaker<KeyRef> for LentKeys {
             return Err(KeyUnkept::TooLong);
         }
         keys.key(text).map_err(|_| KeyUnkept::NoRoom)
+    }
+
+    /// The block the arena keeps `text` in already, one holder more, whoever holds it
+    /// ([`KeySpace::kept`]); a new block otherwise, as [`Self::key`].
+    fn shared(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
+        let Some(keys) = &self.0 else {
+            return Err(KeyUnkept::NoRoom);
+        };
+        if !keys.holds_key(text.len()) {
+            return Err(KeyUnkept::TooLong);
+        }
+        match keys.kept(text) {
+            Some(kept) => Ok(kept),
+            None => keys.key(text).map_err(|_| KeyUnkept::NoRoom),
+        }
     }
 }
 
@@ -591,8 +630,9 @@ impl Clone for KeyRef {
             // SAFETY: as `as_str`.
             let store = unsafe { self.store.as_ref() };
             store.assert_owner_lock();
+            // A count held at its largest keeps the block for good rather than wrap to none.
             let holders = store.word(self.at, LINK);
-            store.set_word(self.at, LINK, holders + 1);
+            store.set_word(self.at, LINK, holders.saturating_add(1));
         }
         Self {
             store: self.store,
@@ -610,13 +650,13 @@ impl Drop for KeyRef {
         // SAFETY: as `as_str`.
         let store = unsafe { self.store.as_ref() };
         store.assert_owner_lock();
-        let holders = store.word(self.at, LINK) - 1;
+        let holders = store.word(self.at, LINK).saturating_sub(1);
         if holders > 0 {
             store.set_word(self.at, LINK, holders);
             return;
         }
         let size = held_bytes(store.word(self.at, SIZE));
-        store.used.set(store.used.get() - size);
+        store.used.set(store.used.get().saturating_sub(size));
         store.give_back(self.at, size);
     }
 }

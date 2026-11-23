@@ -102,9 +102,20 @@ pub type PatchLevel = u8;
 pub const PATCH_BITS: u32 = PatchLevel::BITS;
 
 pub fn peer_patch(extensions: &[ExtEntryOwned]) -> PatchLevel {
+    peer_patch_in(extensions)
+}
+
+/// [`peer_patch`] over the entries a chain yields, held or read where its message lies
+/// (`crate::inbound::ExtChainRead`), so a handshake read in place is answered without its chain
+/// being made owned.
+// Out of line: a handshake step's, which the receive of every message would carry inlined.
+#[inline(never)]
+pub fn peer_patch_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+) -> PatchLevel {
     extensions
-        .iter()
-        .find_map(patch_of_entry)
+        .into_iter()
+        .find_map(|ext| patch_of_entry(&ext))
         .unwrap_or(NO_PATCH)
 }
 

@@ -20,11 +20,6 @@
 //! action bodies stay gated on their codec / handshake-role feature —
 //! cfg-off is a documented no-emit no-op, not a build error.
 
-#[cfg(all(
-    feature = "alloc",
-    any(not(feature = "session-slot"), feature = "session-extshm")
-))]
-use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
@@ -307,8 +302,6 @@ use crate::interest_build::*;
 use crate::interest_build::InterestKinds;
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::push_build::*;
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::request_build::*;
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use crate::response_final_build::*;
 
@@ -546,6 +539,90 @@ enum FrameLend {
     /// Nothing was sent: no slot, or a slot too short to say; encode on the
     /// heap as before.
     Heap,
+    /// Nothing was sent: the message's own encoder refused it, which no other
+    /// buffer would answer otherwise.
+    Refused(sce_forge_runtime::codec::CodecError),
+}
+
+/// What writing a frame (its envelope and the message) into a slot a link lent came to, the
+/// frame held to the batch budget: the one rule a batch frame's opening and a single frame's
+/// send both judge a lent slot by.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LentFill {
+    /// The frame is in the slot.
+    Fits,
+    /// The frame crossed the budget in a slot that holds the whole budget: the
+    /// message alone is past it.
+    PastBudget,
+    /// The frame crossed the end of a slot shorter than the budget, which says
+    /// nothing of the message.
+    ShortSlot,
+    /// The message's own encoder refused it.
+    Refused(sce_forge_runtime::codec::CodecError),
+}
+
+/// Write the frame of `sn` with the message `encode_body` writes into `slot`, through a cap at
+/// `mtu`, so a message past the budget is refused where it crosses it and its payload is not
+/// copied in only to be thrown away.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[inline(never)]
+fn fill_lent_frame<D, P>(
+    slot: &mut crate::tx_lease::TxLease<'_, D>,
+    mtu: usize,
+    sn: u64,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+    encode_body: &P,
+) -> LentFill
+where
+    D: crate::link::BoxedLinkDriver + ?Sized,
+    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    use crate::tx_buf::TxBuf;
+    use sce_forge_runtime::codec::CodecError;
+    let whole_budget = slot.capacity() >= mtu;
+    let written = crate::frame_encode::encode_frame_envelope_into(
+        &mut crate::tx_buf::CappedTxBuf::new(&mut *slot, mtu),
+        sn,
+        crate::frame_encode::frame_flags(reliable),
+        ext_qos,
+        encode_body,
+    );
+    match written {
+        Ok(()) if slot.len() <= mtu => LentFill::Fits,
+        Ok(()) | Err(CodecError::BufferOverflow) if whole_budget => LentFill::PastBudget,
+        Ok(()) | Err(CodecError::BufferOverflow) => LentFill::ShortSlot,
+        Err(refused) => LentFill::Refused(refused),
+    }
 }
 
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
@@ -1494,23 +1571,6 @@ impl FrameTxConduits {
     }
 }
 
-/// The entropy source a session re-draws its cookie nonce from, as the session
-/// holds it: the §2.5 plugin-tier port behind a `Box` on every profile but
-/// `session-slot`.
-///
-/// Under `session-slot` (fixed-memory step S5) it is a reference to a source the
-/// session's own slot holds beside the bundle, so installing one allocates
-/// nothing. It stays a trait object, and not a type parameter of the bundle,
-/// for the reason `Box<dyn ..>` was chosen at R2763: a parameter would be one
-/// more thing every `SessionLinkActions` mention in the workspace would have to
-/// carry. What the profile removes is the allocation, and the slot, which is
-/// generic over the source's type, is where its type is named.
-#[cfg(not(feature = "session-slot"))]
-pub type CookieEntropy = Box<dyn EntropySource + Send>;
-/// See the `Box` form of this alias.
-#[cfg(feature = "session-slot")]
-pub type CookieEntropy = &'static mut (dyn EntropySource + Send);
-
 /// What every send reads before it takes its conduit's lock, kept where it can be read
 /// without a lock: the negotiated frame budget and SN ring (`SessionLinkActions::negotiated_tx_limits`).
 /// They change when a handshake sets the peer's capabilities and when a reconnect clears
@@ -1868,67 +1928,31 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `(deploy key, peer zid)` alone, which is constant for the life of the
     /// process — a captured OpenSyn echo replayed forever.
     ///
-    /// `None` is FAIL-CLOSED and is the only default: the no_std core draws no
-    /// entropy (`getrandom` has no bare-metal backend), so the nonce is
-    /// installed from outside via `Self::refresh_cookie_nonce` — by
-    /// `new_session_actions` on the AP profile. An acceptor that never
-    /// received one mints no HMAC cookie and its `cookie_valid` denies every
-    /// OpenSyn; it does NOT fall back to the un-bound derivation, because a
-    /// fallback is indistinguishable from the defect this slot removes.
+    /// `None` is FAIL-CLOSED and is the only default. The nonce is drawn INSIDE
+    /// the InitAck path, once per handshake, as upstream draws it
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`)
+    /// and rejects a mismatched echo
+    /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if input.cookie_nonce != cookie.nonce {`):
+    /// a value drawn once per BUNDLE would hand two handshakes on one bundle the
+    /// same sixteen cookie bytes. The source is the session's one source, which
+    /// the session's handshake binding holds ([`SessionActionsBinding`], as the
+    /// runtime's [`SessionRuntime::EntropyDraw`](crate::link::SessionRuntime::EntropyDraw))
+    /// and hands to [`Self::draw_cookie_nonce`]; this bundle, which is one link's,
+    /// keeps none. A source that FAILS clears the nonce, so the acceptor mints no
+    /// HMAC cookie and its `cookie_valid` denies every OpenSyn; it does NOT fall
+    /// back to the un-bound derivation, because a fallback is indistinguishable
+    /// from the defect this slot removes.
     ///
-    /// Survives `Self::reset_for_reopen` alongside the ext-chain staging
-    /// slots and the auth challenge nonce, for the same reason: it is
-    /// locally-sourced configuration rather than captured peer state, and the
-    /// host that supplied it is the one positioned to refresh it. See
-    /// `Self::refresh_cookie_nonce` for what an acceptor-role re-handshake
-    /// owes.
+    /// Survives `Self::reset_for_reopen` alongside the ext-chain staging slots
+    /// and the auth challenge nonce; the next InitAck draws over it.
     ///
     /// R2782 — and it is SPENT by the OpenSyn it admits
     /// (`SessionLinkActions::admit_open_syn`), so it binds exactly one:
     /// upstream's is a value its accept path carries from `send_init_ack` into
     /// `recv_open_syn` and then drops. A nonce that stayed let a replay of
     /// the admitting OpenSyn be admitted again after `Established`. The next
-    /// handshake draws its own at InitAck, or has it refreshed out of band.
+    /// handshake draws its own at InitAck.
     pub cookie_nonce: R::Mutex<Option<u64>>,
-    /// R2763 — the entropy SOURCE the acceptor re-draws `cookie_nonce` from on
-    /// every InitAck it mints.
-    ///
-    /// (Code spans, not links, for that slot throughout this note: the name is
-    /// carried by BOTH the field above and its accessor, which is the
-    /// ambiguity `refresh_cookie_nonce`'s own doc already declines to write as
-    /// a link.)
-    ///
-    /// ## Why a source and not the value beside it
-    ///
-    /// R311y813 gave this bundle a nonce and R311y819 gave both profiles a
-    /// construction seam that draws one. Both are about a value, and a value
-    /// drawn once is per BUNDLE: two handshakes on one bundle mint the same
-    /// sixteen cookie bytes, so an initiator that echoed the first handshake's
-    /// cookie passes the second's [`Self::cookie_valid`]. Upstream has no such
-    /// window because it draws INSIDE the InitAck path —
-    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`
-    /// — and rejects a mismatched echo at
-    /// `io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if input.cookie_nonce != cookie.nonce {`.
-    /// (Both citations carry the root rather than saying "the same file": an
-    /// unrooted one cannot be graded, and it hides a path that moved.)
-    ///
-    /// A per-handshake draw needs a source that lives as long as the bundle,
-    /// which is why this is an owned slot rather than the borrow the two
-    /// construction seams took. `Box<dyn ..>` follows
-    /// `crate::extshm::ShmAuthDispatch`'s installed-authenticator slot rather
-    /// than adding a type parameter every `SessionLinkActions` mention would
-    /// have to carry.
-    ///
-    /// ## `None` does not deny by itself
-    ///
-    /// An absent source leaves `cookie_nonce` exactly as some host put
-    /// it, because [`Self::refresh_cookie_nonce`] is a documented out-of-band
-    /// install and the MCU e2e fixture uses it. What is fail-closed is a source
-    /// that FAILS: [`Self::draw_cookie_nonce`] then clears the nonce, so the
-    /// acceptor mints no HMAC cookie and admits no OpenSyn rather than reusing
-    /// the previous handshake's binding. Both production construction seams
-    /// install one, so no shipped acceptor keeps the per-bundle behaviour.
-    cookie_entropy: R::Mutex<Option<CookieEntropy>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -2204,8 +2228,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `_z_session_t._local_resources`): what a later aliased publish, a loopback delivery and
     /// a received `M=0` alias resolve against. Either this link keeps them, recorded as
     /// `Self::send_declare_keyexpr` sends each and forgotten as `Self::send_undeclare_kexpr`
-    /// retracts it, or the session keeps one table for all its links and this link reads it
-    /// through the handle the session installed (`Self::install_session_keyexprs`).
+    /// retracts it, or the session keeps one table for all its links and this link keeps none
+    /// and reads none (`Self::keep_no_keyexprs`).
     ///
     /// A mutex rather than a read-write lock: it is written when a key is declared (rare) and
     /// read one id at a time on the publish path, where a read-write lock's write penalty would
@@ -3195,25 +3219,34 @@ enum LentDeclaration<'a> {
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
-    /// A retraction, naming its key when `key` holds the `ext_keyexpr` body.
+    /// A retraction, naming its key when `key` holds it.
     #[cfg(all(
         feature = "alloc",
         feature = "declare-subscriber",
         feature = "declare-undeclare"
     ))]
-    UndeclareSubscriber { id: u64, key: Option<&'a [u8]> },
+    UndeclareSubscriber {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-queryable",
         feature = "declare-undeclare"
     ))]
-    UndeclareQueryable { id: u64, key: Option<&'a [u8]> },
+    UndeclareQueryable {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-token",
         feature = "declare-undeclare"
     ))]
-    UndeclareToken { id: u64, key: Option<&'a [u8]> },
+    UndeclareToken {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
 }
 
 #[cfg(all(
@@ -3559,6 +3592,32 @@ enum Dispatched {
     Chain,
 }
 
+/// What a send that does not wait for a slot did
+/// ([`SessionLinkActions::try_send_plain_put_qos`]).
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probed {
+    /// The message was handed to the link, or dropped by a rule that is not congestion.
+    Sent,
+    /// Its link had no room for it now: nothing was sent, and the message is still the caller's.
+    NoRoom,
+    /// The message is a chain of fragments, which a send that may not wait does not begin:
+    /// nothing was sent, and the caller sends it as its own send.
+    Chain,
+}
+
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+impl Probed {
+    fn of(sent: Dispatched) -> Self {
+        match sent {
+            Dispatched::Sent => Self::Sent,
+            Dispatched::NoRoom => Self::NoRoom,
+            #[cfg(feature = "transport-fragmentation")]
+            Dispatched::Chain => Self::Chain,
+        }
+    }
+}
+
 /// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`]: a trait
 /// object, so the dispatch (some 7 KB on a host, 1.3 KB on the slot profile) is one copy and not
 /// one per kind of message sent, at the cost of one call through a pointer per message.
@@ -3782,7 +3841,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().append_own_mapping(id, out)
+            keys.space()?.append_own_mapping(id, out)
         })
     }
 
@@ -4361,7 +4420,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
     /// refcount-1 pointers, behavior-identical to the pre-split struct.
     #[cfg(not(feature = "session-slot"))]
-    pub(crate) fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
+    pub fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
         let seed = LinkSeed::open::<R>(&driver);
         let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
         let mut core = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
@@ -4525,9 +4584,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R311y813 — fail-closed until a host with an entropy source
                 // installs one; this crate has none to draw from.
                 cookie_nonce: R::new_mutex(None::<u64>),
-                // R2763 — no source until a profile's construction seam
-                // installs one; the core names no entropy source (§2.5).
-                cookie_entropy: R::new_mutex(None::<CookieEntropy>),
                 // R3b — empty dispatch (no auth ext, admits all = zenoh
                 // `Auth::default()`); the AP layer installs the configured one.
                 #[cfg(feature = "session-extauth")]
@@ -4669,7 +4725,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // acceptor then took a few hundred bytes more of its 4 KB heap than they need, which
         // ran it out mid-handshake (Layer Q's microbit leg, from `47d33579d`). Built by value,
         // as it is three words on the stack.
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         {
             let chain = if patch {
                 alloc::vec![default_init_patch_ext_entry()]
@@ -4679,7 +4735,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // SAFETY: the caller's contract.
             unsafe { at.write(R::new_mutex(chain)) };
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(feature = "session-fixed-storage")]
         {
             // SAFETY: the caller's contract.
             unsafe { at.write(R::new_mutex(ExtChainBuf::default())) };
@@ -4748,6 +4804,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// holds it (behind `R::Shared`, or as its own field under `session-slot`):
     /// for the places that compare it by address or hand it on, where `&*self.link`
     /// would name one of the two forms.
+    /// Whether this session's link would lend a slot now as far as its pool goes
+    /// ([`BoxedLinkDriver::tx_slot_claimable`](crate::link::BoxedLinkDriver::tx_slot_claimable)).
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    fn tx_slot_claimable(&self) -> bool {
+        self.own_link().link_driver().tx_slot_claimable()
+    }
+
     #[allow(dead_code)]
     fn own_link(&self) -> &LinkState<R> {
         &self.link
@@ -4997,10 +5060,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the message addresses, asked only for a payload class of a session that holds a filter,
     /// and never while the metrics are held, since resolving an alias takes the mapping table.
     #[cfg(feature = "transport-stats")]
-    pub(crate) fn stats_keys_of(
+    pub(crate) fn stats_keys_of<K: AsRef<str>>(
         &self,
         class: crate::stats::NetworkStatsClass,
-        keyexpr: impl FnOnce() -> Option<alloc::string::String>,
+        keyexpr: impl FnOnce() -> Option<K>,
     ) -> crate::stats::NetworkStatsClass {
         if class.payload.is_none()
             || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
@@ -5011,7 +5074,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return class;
         };
         let keys = R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.key_filters().matching(&keyexpr)
+            metrics.key_filters().matching(keyexpr.as_ref())
         });
         class.with_keys(keys)
     }
@@ -5196,25 +5259,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // reserves for the same frame.
         let want = 1 + 10 + 2 + worst_case_payload;
         let lent = self.send_lent(reliability, priority, want, |slot| {
-            // The frame is encoded through a cap at the batch budget, so a frame
-            // past it is refused as soon as it crosses it and its payload is not
-            // copied in only to be thrown away. Over a slot that holds the whole
-            // budget a refusal can only mean the frame is past the budget; over a
-            // shorter one it may mean the slot is short, and the heap decides.
-            let whole_budget = slot.capacity() >= emit.mtu;
-            let mut capped = crate::tx_buf::CappedTxBuf::new(slot, emit.mtu);
-            match crate::frame_encode::encode_frame_envelope_into(
-                &mut capped,
+            // Over a slot that holds the whole budget a frame that crosses it is
+            // past the budget; over a shorter one the slot may be what is short,
+            // and the heap decides.
+            match fill_lent_frame(
+                slot,
+                emit.mtu,
                 emit.sn,
-                crate::frame_encode::frame_flags(emit.reliable),
+                emit.reliable,
                 emit.ext_qos,
                 encode_body,
             ) {
-                Ok(()) => Ok(()),
-                Err(sce_forge_runtime::codec::CodecError::BufferOverflow) if whole_budget => {
-                    Err(FrameLend::PastMtu)
-                }
-                Err(_) => Err(FrameLend::Heap),
+                LentFill::Fits => Ok(()),
+                LentFill::PastBudget => Err(FrameLend::PastMtu),
+                LentFill::ShortSlot => Err(FrameLend::Heap),
+                LentFill::Refused(refused) => Err(FrameLend::Refused(refused)),
             }
         });
         match lent {
@@ -5326,7 +5385,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        use crate::tx_buf::TxBuf;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
@@ -5338,19 +5396,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if slot.capacity() < mtu {
                 return LentBatchOpen::Heap(HeapStage::ShortSlot);
             }
-            // Through a cap at the budget, as a whole frame is: a message past
-            // it is refused where it crosses it, and its payload is never copied
-            // into a slot it cannot leave in.
-            let fits = crate::frame_encode::encode_frame_envelope_into(
-                &mut crate::tx_buf::CappedTxBuf::new(&mut slot, mtu),
-                sn,
-                crate::frame_encode::frame_flags(reliable),
-                ext_qos,
-                encode_body,
-            )
-            .is_ok()
-                && slot.len() <= mtu;
-            if !fits {
+            // A message its encoder refuses takes the oversize path too, which
+            // measures it again and answers the refusal (`emit_fragments_encoded`).
+            if fill_lent_frame(&mut slot, mtu, sn, reliable, ext_qos, encode_body) != LentFill::Fits
+            {
                 return LentBatchOpen::Heap(HeapStage::PastBudget);
             }
             if let Some(stale) = link.batch_slots[idx].take() {
@@ -5359,6 +5408,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // the slot back rather than lose it, and say so.
                 link.link_driver().tx_slot_abort(stale);
                 batch.lend.lost = batch.lend.lost.wrapping_add(1);
+            }
+            // A link whose slots come from a pool the session's other links share keeps none
+            // past this message while the pool has no other free: the frame leaves now with this
+            // message alone, as the window's flush would send it, and the next link that asks
+            // for a slot finds one.
+            #[cfg(feature = "session-unicast-accept")]
+            if !link.link_driver().tx_slot_spare() {
+                self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+                batch.stage.count = 0;
+                batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
+                return LentBatchOpen::Opened;
             }
             let open = slot.keep_open();
             link.batch_slots[idx].hold(open.slot());
@@ -6064,6 +6124,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-batching",
         feature = "transport-keepalive",
     ))]
+    // Out of line: every send path ends here, and a copy inlined into each of them cost more
+    // than the call.
+    #[inline(never)]
     fn emit_on_link(
         &self,
         link: &LinkState<R>,
@@ -6397,6 +6460,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             ),
         )
     ))]
+    // Out of line for the same reason as `emit_on_link`: every lend-only refusal reaches it.
+    #[inline(never)]
     fn refuse_tx(&self, cause: crate::link::LinkDropCause) -> crate::link::LinkDropCause {
         R::with_mutex_mut(&self.tx_refusals, |counts| match cause {
             crate::link::LinkDropCause::NoTxSlot => counts.no_slot = counts.no_slot.wrapping_add(1),
@@ -6525,7 +6590,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 encode_open_head_into(buf, &self.params, initial_sn, is_ack, None, has_ext)?;
             }
             R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
-                crate::ext_chain::encode_ext_chain_into(buf, chain)
+                crate::handshake_encode::encode_held_chain_into(buf, chain)
             })?;
             // The initiator's OpenSyn is the answer a replay sends again, as written.
             if holds_answer(role) {
@@ -7085,7 +7150,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The entries are held in upstream's encode order, ascending extension
     /// id (stable, so entries of one id keep the order given): the stagers
     /// keep that order, and a chain handed over whole is written as theirs is.
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(feature = "session-fixed-storage"))]
     pub fn set_ext_chain(&self, role: ExtChainRole, mut entries: Vec<ExtEntryOwned>) {
         crate::ext_chain::sort_into_canonical_order(&mut entries);
         R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);
@@ -7229,7 +7294,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R2779 — draw every auth method's per-handshake challenge, ONE DRAW PER
-    /// METHOD, from the installed entropy source, at InitAck.
+    /// METHOD, from the session's entropy source, at InitAck.
     ///
     /// This replaced `refresh_auth_challenge_nonce`, which took ONE value and
     /// handed it to every method: with usrpwd and pubkey on one responder, the
@@ -7243,25 +7308,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// and in its InitAck path, which is where this is called — the same move
     /// R2763 made for the cookie nonce, and from the same source.
     ///
-    /// The three arms are the cookie nonce's: no source installed leaves each
-    /// method as it is (a host that supplied challenges itself keeps them); a
-    /// draw that fails releases THAT method, which then issues nothing and
-    /// admits no OpenSyn; a draw that succeeds replaces it. The two mutexes are
-    /// taken in sequence and never nested, the rule `draw_cookie_nonce` states.
+    /// The arms are the cookie nonce's: a draw that fails releases THAT method,
+    /// which then issues nothing and admits no OpenSyn; a draw that succeeds
+    /// replaces it. `entropy` is the session's one source, which the handshake
+    /// binding holds.
     #[cfg(all(
         feature = "session-extauth",
         feature = "codec-init-body",
         feature = "session-unicast-accept"
     ))]
-    fn draw_auth_challenges(&self) {
+    fn draw_auth_challenges<E: EntropySource + ?Sized>(&self, entropy: &mut E) {
         let count = R::with_mutex_mut(&self.auth, |d| d.method_count());
-        let drawn: Option<Vec<Option<u64>>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
-            slot.as_mut()
-                .map(|src| (0..count).map(|_| src.try_next_u64().ok()).collect())
-        });
-        if let Some(draws) = drawn {
-            R::with_mutex_mut(&self.auth, |d| d.set_drawn_challenges(&draws));
-        }
+        let draws: Vec<Option<u64>> = (0..count).map(|_| entropy.try_next_u64().ok()).collect();
+        R::with_mutex_mut(&self.auth, |d| d.set_drawn_challenges(&draws));
     }
 
     /// R2783 — the 0x4 multilink method's challenge, drawn here for the same
@@ -7270,8 +7329,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// seam when the dispatch was installed, which a release after InitAck
     /// would leave empty for any second handshake on the bundle.
     ///
-    /// No source installed leaves the method as it is (the out-of-band path);
-    /// a source that FAILS releases the method's challenge -- and with it the
+    /// A source that FAILS releases the method's challenge -- and with it the
     /// captured key -- so the InitAck carries no 0x4 and the handshake falls
     /// back to single-link, rather than issuing a stale challenge.
     #[cfg(all(
@@ -7279,17 +7337,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-init-body",
         feature = "session-unicast-accept"
     ))]
-    fn draw_multilink_challenge(&self) {
-        let drawn: Option<Option<u64>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
-            slot.as_mut().map(|src| src.try_next_u64().ok())
+    fn draw_multilink_challenge<E: EntropySource + ?Sized>(&self, entropy: &mut E) {
+        let draw = entropy.try_next_u64().ok();
+        R::with_mutex_mut(&self.multilink, |slot| {
+            if let Some(d) = slot.as_mut() {
+                d.set_drawn_challenge(draw);
+            }
         });
-        if let Some(draw) = drawn {
-            R::with_mutex_mut(&self.multilink, |slot| {
-                if let Some(d) = slot.as_mut() {
-                    d.set_drawn_challenge(draw);
-                }
-            });
-        }
     }
 
     /// R2783 — this handshake's multilink accept state for the cookie, or
@@ -7306,109 +7360,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         crate::accept_cookie::MultilinkAcceptState(None)
     }
 
-    /// R311y813 — install the per-handshake cookie nonce, the term that binds
-    /// the Accepting side's anti-amplification cookie to ONE handshake (the
-    /// `cookie_nonce` slot). Supplied for the reason every per-handshake secret
-    /// here is: the no_std core draws no entropy, so the host that has a source
-    /// installs it. (Its auth sibling, `refresh_auth_challenge_nonce`, is gone
-    /// since R2779 — the auth challenges are drawn at InitAck, per method, by
-    /// `draw_auth_challenges`. Both are code spans rather than links, because
-    /// the auth one is `session-extauth`-gated and this one shares its name
-    /// with a field.)
-    ///
-    /// **Ungated, unlike the auth nonce.** The cookie is not an optional
-    /// extension — every acceptor mints one on InitAck — so a build that
-    /// carries the accept path at all carries this, and gating it would make
-    /// the fail-closed default the shipped behaviour in some feature subsets.
-    ///
-    /// Call it BEFORE the FSM reaches `SentInitAck`, i.e. before the InitSyn
-    /// that starts the handshake is dispatched; the AP profile does it at
-    /// construction (`new_session_actions`) so no accept seam can forget, the
-    /// way the auth seam had to be remembered at each of its entry points.
-    ///
-    /// **On a re-handshake.** The slot survives
-    /// [`reset_for_reopen`](Self::reset_for_reopen), so a bundle that
-    /// re-handshakes IN THE ACCEPTOR ROLE and is not refreshed re-mints the
-    /// cookie its previous handshake used — narrower than the deploy-lifetime
-    /// window this round closed, but the same shape. wz's reopen path is the
-    /// initiator-role auto-reconnect (`ReconnectingSession` builds a FRESH
-    /// bundle per attempt), so nothing reaches it today; a host that later
-    /// reopens as acceptor should call this again, exactly as the auth seam
-    /// documents for its own nonce.
-    /// R2763 — the same sentence, corrected by the round that gave this bundle
-    /// a source: "before the FSM reaches `SentInitAck`" is what an out-of-band
-    /// install still owes, and a profile that installs a source through
-    /// [`Self::install_cookie_entropy`] owes nothing, because the mint draws.
-    pub fn refresh_cookie_nonce(&self, nonce: u64) {
-        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = Some(nonce));
-    }
-
-    /// R2763 — install the entropy source this bundle re-draws its cookie
-    /// nonce from, once per handshake.
-    ///
-    /// The §2.5 plugin-tier counterpart of `install_auth_dispatch` (a code
-    /// span, not a link: that sibling is `session-extauth`-gated and this
-    /// method is not, so the link would dangle in every subset without it): the
-    /// no_std core names no source, so the profile hands it one and every
-    /// accept path built on this bundle is bound by default. Both production
-    /// construction seams call this — `wz_runtime_tokio::session_glue` with
-    /// `getrandom` and `wz_runtime_coop::session_runtime` with the board's —
-    /// which is what keeps a new accept entry point from having to remember
-    /// anything, the property R311y813 chose the construction seam for.
-    ///
-    /// Installing a source does NOT draw one; call [`Self::draw_cookie_nonce`]
-    /// if the bundle should be able to mint before its first InitAck (both
-    /// seams do, so an unusable source is visible at construction rather than
-    /// at the first handshake).
-    ///
-    /// What the slot holds is [`CookieEntropy`]: a `Box` on every profile but
-    /// `session-slot`, and under it a reference to a source the session's own
-    /// slot holds (fixed-memory step S5), so there is no allocation to make.
-    pub fn install_cookie_entropy(&self, source: CookieEntropy) {
-        R::with_mutex_mut(&self.cookie_entropy, |slot| *slot = Some(source));
-    }
-
-    /// R2763 — draw a FRESH cookie nonce through the installed source,
+    /// R2763 — draw a FRESH cookie nonce from `entropy`, the session's one source,
     /// reporting whether this acceptor can now mint.
     ///
     /// This is the per-handshake half of the binding, and
     /// `SessionActionsBinding::send_init_ack_with_cookie` calls it on every
-    /// InitAck, which is where zenoh draws too
+    /// InitAck with the source the binding holds, which is where zenoh draws too
     /// (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `let nonce: u64 = prng.gen();`).
     ///
-    /// Three outcomes, and the middle one is the one worth naming:
-    ///
-    /// - no source installed — `false`, and the nonce is LEFT ALONE. A host
-    ///   using [`Self::refresh_cookie_nonce`] out of band keeps what it put
-    ///   there; this is not a failure and the caller does not report it.
-    /// - the source failed — `false`, and the nonce is CLEARED. Reusing the
-    ///   previous handshake's value would be a silent fallback to exactly the
-    ///   binding this draw exists to refresh, so the acceptor is made to refuse
-    ///   instead (`cookie_valid` denies on an absent nonce).
-    /// - the source produced bytes — `true`, and the nonce is replaced.
-    ///
-    /// The two mutexes are taken SEQUENTIALLY, never nested: the MCU profile's
-    /// lock is non-reentrant (the 2b-① discipline the mint's own comment
-    /// records).
-    pub fn draw_cookie_nonce(&self) -> bool {
-        // `Option<Option<u64>>`: the outer arm is "was a source installed",
-        // the inner one "did it produce bytes". Collapsing them would make an
-        // absent source indistinguishable from a dry one, and those two want
-        // opposite treatment of the existing nonce.
-        let drawn: Option<Option<u64>> = R::with_mutex_mut(&self.cookie_entropy, |slot| {
-            slot.as_mut().map(|src| src.try_next_u64().ok())
-        });
-        match drawn {
-            None => false,
-            Some(Some(nonce)) => {
-                R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = Some(nonce));
-                true
-            }
-            Some(None) => {
-                R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = None);
-                false
-            }
-        }
+    /// A source that produced bytes replaces the nonce: `true`. One that failed
+    /// CLEARS it: `false`. Reusing the previous handshake's value would be a silent
+    /// fallback to exactly the binding this draw exists to refresh, so the acceptor
+    /// is made to refuse instead (`cookie_valid` denies on an absent nonce).
+    pub fn draw_cookie_nonce<E: EntropySource + ?Sized>(&self, entropy: &mut E) -> bool {
+        let nonce = entropy.try_next_u64().ok();
+        R::with_mutex_mut(&self.cookie_nonce, |slot| *slot = nonce);
+        nonce.is_some()
     }
 
     /// R311y813 — the installed per-handshake cookie nonce, or `None` when no
@@ -8478,6 +8445,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// shape as the lowlatency / compression merges above. Monotonically
     /// non-increasing, so a second Init cannot raise a level a first one
     /// lowered.
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
         R::with_mutex_mut(&self.negotiated_patch, |s| {
             // The first Init starts from wz's OWN announcement (R121f1 puts
@@ -8551,7 +8520,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// @ `other_bound: match open_syn.ext_remote_bound {`). A refused value
     /// leaves the slot untouched.
     pub fn admit_peer_remote_bound(&self, extensions: &[ExtEntryOwned]) -> bool {
-        match crate::extbound::peer_remote_bound(extensions) {
+        self.admit_peer_remote_bound_in(extensions)
+    }
+
+    /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
+    /// message lies (`crate::inbound::ExtChainRead`).
+    pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
+        &self,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> bool {
+        match crate::extbound::peer_remote_bound_in(extensions) {
             Ok(bound) => {
                 R::with_mutex_mut(&self.peer_remote_bound, |s| *s = bound);
                 true
@@ -8746,7 +8724,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the initiator the InitAck's — the both-sides shape
     /// [`Self::negotiate_patch_against_peer`] has.
     pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
-        match crate::extregion::peer_region(extensions) {
+        self.admit_peer_region_in(extensions)
+    }
+
+    /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
+    /// message lies (`crate::inbound::ExtChainRead`).
+    pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
+        &self,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> bool {
+        match crate::extregion::peer_region_in(extensions) {
             Ok(region) => {
                 R::with_mutex_mut(&self.peer_region, |s| *s = region);
                 true
@@ -8859,6 +8846,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the caller reads the chain ONCE — [`crate::extpatch::peer_patch`] is
     /// also what feeds [`Self::negotiate_patch_against_peer`] on the very next
     /// step, and a rejected level must never reach that `min()`.
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn init_ack_patch_acceptable(&self, peer_patch: u8) -> bool {
         crate::extpatch::init_ack_patch_acceptable(self.advertised_patch(), peer_patch)
     }
@@ -9691,7 +9680,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn relayed_slice<'a>(
         &'a self,
         holds: &'a dyn crate::extshm::ShmRelayHolds,
-        reservations: &'a mut Vec<Box<dyn crate::extshm::ShmReservation>>,
+        reservations: &'a mut Vec<alloc::boxed::Box<dyn crate::extshm::ShmReservation>>,
     ) -> impl FnMut(&[u8]) -> Option<crate::put_payload::Relayed> + 'a {
         move |descriptor| {
             let held = holds.held(&crate::extshm::decode_shm_descriptor(descriptor)?)?;
@@ -10017,6 +10006,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// what makes the slot behave like the stack value -- the next handshake
     /// draws its own at InitAck ([`Self::draw_cookie_nonce`]).
     #[cfg(feature = "codec-open-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
         #[cfg(feature = "session-unicast-accept")]
         {
@@ -10112,23 +10103,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = self.held_answer.first() else {
             return false;
         };
-        // A copy of the hold's own type takes whatever the hold has: the session's storage on
-        // `session-slot`, and a buffer as long as the answer on every other profile.
-        let mut copy = HeldAnswer::default();
-        let copied = R::with_mutex_mut(slot, |held| copy.extend_from_slice(&held[..]).is_ok());
-        let len = copy.len();
-        if !copied || len == 0 {
-            return false;
-        }
+        // The heap profile copies the bytes out of the hold before the send, which takes locks of
+        // its own: a buffer as long as the answer.
         #[cfg(not(feature = "tx-lend-only"))]
         {
+            let mut copy = HeldAnswer::default();
+            let copied = R::with_mutex_mut(slot, |held| copy.extend_from_slice(&held[..]).is_ok());
+            if !copied || copy.is_empty() {
+                return false;
+            }
             self.send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
             true
         }
+        // The lend-only send writes the bytes from the hold straight into the slot the link
+        // lends, under the hold's lock alone: the slot is taken before and the frame sent after,
+        // as the lend-only Init send writes its staged chain (`send_init_lent`), so no copy of
+        // the answer is made.
         #[cfg(feature = "tx-lend-only")]
         {
+            let len = R::with_mutex_mut(slot, |held| held.len());
+            if len == 0 {
+                return false;
+            }
             self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
-                buf.append(&copy[..])
+                R::with_mutex_mut(slot, |held| {
+                    if held.is_empty() {
+                        return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
+                    }
+                    buf.append(&held[..])
+                })
             })
             .is_ok()
         }
@@ -10142,6 +10145,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// initiator's caps come off the InitAck and are held, so its seed has
     /// nothing to wait for but admission.
     #[cfg(feature = "codec-open-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
         R::with_mutex_mut(&self.awaiting_open_ack, |s| *s = false);
         // R311ke — pico captures `_initial_sn_rx` from either Open body
@@ -10228,13 +10233,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
     /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
-        self.observe_control(&frame.control_facts());
+        self.observe_control(&frame.control_facts().unchained());
     }
 
     /// What the link records about one received transport message, whichever read it: the
     /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
     /// taken, so it cannot fail.
-    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_, ()>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor
@@ -10827,6 +10832,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// then drives the FSM's `framing.error` arm, which closes with
     /// `CloseReason::Invalid`, upstream's reason for this check.
     #[cfg(feature = "codec-init-body")]
+    // Out of line: a handshake step's, which the receive of every message would carry inlined.
+    #[inline(never)]
     pub fn init_ack_zid_acceptable(&self, init_ack_zid: &[u8]) -> bool {
         // A `match`, not `is_none_or`: that method is stable since 1.82 and
         // this crate builds with 1.81.
@@ -10948,6 +10955,62 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// [`Self::dispatch_network_message_in`] for a send at `stage`. Inlined, so a caller that
+    /// names its stage, as every caller does, links only the body for that stage: a send of its
+    /// own (`Fresh`) is the body with every other stage's question answered when it is
+    /// compiled, and a build none of whose senders probes, reserves or schedules carries no code
+    /// for those stages.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn dispatch_network_message_at<P>(
+        &self,
+        stage: DispatchStage,
+        priority: Priority,
+        reliable: bool,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
+    ) -> Result<Dispatched, SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
+    {
+        if stage == DispatchStage::Fresh {
+            self.dispatch_network_message_in::<false, P>(
+                stage,
+                priority,
+                reliable,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
+        } else {
+            self.dispatch_network_message_in::<true, P>(
+                stage,
+                priority,
+                reliable,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
+        }
+    }
+
     /// Transport-framing chokepoint for every outbound network message —
     /// zenoh-pico `_z_transport_tx_send_n_msg_inner` parity
     /// (`src/transport/common/tx.c`). The chokepoint OWNS the frame
@@ -11002,7 +11065,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // host build, eight copies; 1.3 KB on the slot profile, three), differing in nothing but the
     // call that writes the message. The stack bound follows the call through the pointer by the
     // rule of `stack_call_contracts.json` that claims its site.
-    fn dispatch_network_message_at<P>(
+    fn dispatch_network_message_in<const STAGED: bool, P>(
         &self,
         stage: DispatchStage,
         priority: Priority,
@@ -11022,6 +11085,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // A send of its caller's own: every other stage's question is answered here.
+        let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
         // R2371 (`transport-stats`) — the NETWORK-message counters. Charged in
         // this function and not at `emit_on_link` because one wire write
@@ -11350,11 +11415,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // wait does not wait for it either: it goes ahead only when it can drain every
             // conduit now, and is told there is no room otherwise.
             #[cfg(feature = "alloc")]
-            if !self.drain_conduits(|idx| idx != control, !probing) {
+            if !self.drain_conduits(&|idx| idx != control, !probing) {
                 return Ok(Dispatched::NoRoom);
             }
             #[cfg(not(feature = "alloc"))]
-            self.drain_conduits(|idx| idx != control, true);
+            self.drain_conduits(&|idx| idx != control, true);
         }
         // The barrier's second half: a message staged on another conduit than the Control one
         // follows the control messages left open there, which leave first. A control message
@@ -11364,11 +11429,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && TxConduits::<R>::conduit_index(priority) != control
         {
             #[cfg(feature = "alloc")]
-            if !self.drain_conduits(|idx| idx == control, !probing) {
+            if !self.drain_conduits(&|idx| idx == control, !probing) {
                 return Ok(Dispatched::NoRoom);
             }
             #[cfg(not(feature = "alloc"))]
-            self.drain_conduits(|idx| idx == control, true);
+            self.drain_conduits(&|idx| idx == control, true);
         }
         // The same barrier on the link's side. Handing the staged data over is not leaving the
         // link first: a link that serves its priorities in strict order sends a Control frame
@@ -11656,6 +11721,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 FrameLend::Heap => {
                     batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
                 }
+                // Refused before a byte left, as the oversize path refuses it: the SN minted
+                // above is given back.
+                FrameLend::Refused(refused) => {
+                    self.outbound_frame_sn.unmint(priority, reliable);
+                    return Err(SendWireError::Codec(refused));
+                }
             }
             #[cfg(not(feature = "tx-lend-only"))]
             {
@@ -11697,6 +11768,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 FrameLend::Heap => Err(SendWireError::LinkRefused(
                     self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
                 )),
+                FrameLend::Refused(refused) => {
+                    self.outbound_frame_sn.unmint(priority, reliable);
+                    Err(SendWireError::Codec(refused))
+                }
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -11985,11 +12060,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
         let encode: &crate::frame_encode::BodyEncoder<'_> = encode_body;
-        // The heap path encodes into a vector, which cannot refuse, and treats
-        // a codec error as the bug it is; measuring runs the same encoder over
-        // nothing, so the same message cannot fail here either.
-        let body_len = crate::frame_encode::encoded_body_len(encode)
-            .expect("the encoder the heap path runs infallibly also measures");
+        // An encoder that refuses its message (a field past its codec bound) reaches here too:
+        // the slot of an open window answers its refusal as a message past the budget. It is
+        // refused typed, before a byte leaves, with the SN the caller minted for it given back,
+        // as `emit_fragment_chain` gives it back for a message past the reassembly cap.
+        let body_len = match crate::frame_encode::encoded_body_len(encode) {
+            Ok(len) => len,
+            Err(refused) => {
+                self.outbound_frame_sn
+                    .unmint(emit.ext_qos.unwrap_or(Priority::DEFAULT), emit.reliable);
+                return Err(SendWireError::Codec(refused));
+            }
+        };
         self.emit_fragment_chain(
             batch,
             crate::frame_encode::FragmentBody::Encoded(encode),
@@ -12335,7 +12417,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // ascending band: a conduit is still emitted whole under one hold, so
         // its frames keep their SN order, and the order across conduits is the
         // walk's.
-        self.drain_conduits(|_| true, true);
+        self.drain_conduits(&|_| true, true);
     }
 
     /// The drain an express message asks for, once it is staged on `priority`'s conduit: that
@@ -12361,7 +12443,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn flush_express(&self, priority: Priority) {
         let band = TxConduits::<R>::conduit_index(self.conduit_priority(priority));
-        self.drain_conduits(|idx| idx <= band, true);
+        self.drain_conduits(&|idx| idx <= band, true);
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
@@ -12385,15 +12467,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`DispatchStage::Probe`]).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
-        self.drain_conduits(|_| true, false)
+        self.drain_conduits(&|_| true, false)
     }
 
     /// Send the frames open in the conduits whose index `takes` answers `true` for, in
     /// ascending band, each under its own lock: waited for when `wait`, and otherwise taken only
     /// if free. Whether every conduit walked was taken and drained; a conduit whose lock a
     /// sender held is left as it was.
+    // One body for every walk: generic over the predicate it was one inlined copy per caller.
     #[cfg(feature = "transport-batching")]
-    fn drain_conduits(&self, takes: impl Fn(usize) -> bool, wait: bool) -> bool {
+    #[inline(never)]
+    fn drain_conduits(&self, takes: &dyn Fn(usize) -> bool, wait: bool) -> bool {
         let mut every_conduit = true;
         for idx in (0..TX_CONDUITS).filter(|&idx| takes(idx)) {
             // The walk is over BANDS, not slots: the index names a priority and
@@ -13299,7 +13383,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
                     crate::request_build::query_value_shm_descriptors(query),
                     crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
-                    Self::REQUEST_ROUTE_PRIORITY,
+                    crate::declare_ext_qos::read_request_qos(request).priority(),
                 ),
                 _ => return None,
             },
@@ -13672,12 +13756,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    /// R3122 -- the priority a Request is ROUTED on: the data plane, zenoh's default
-    /// `Priority::Data`. One definition for the dispatch below and for the sender's handoff, which
-    /// must open its transaction on the link the dispatch will pick.
-    #[cfg(all(feature = "codec-request", feature = "alloc"))]
-    const REQUEST_ROUTE_PRIORITY: Priority = Priority::DEFAULT;
-
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
     #[cfg(feature = "alloc")]
@@ -13702,6 +13780,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let class = self.outbound_request_class(request);
+        // The band and the express bit come off the Request itself, as a Response's do. Upstream's
+        // transport reads both off the message:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.get_priority(),`
+        // and `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.is_express(),`,
+        // and an express message leaves its batch at once
+        // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
+        let qos = crate::declare_ext_qos::read_request_qos(request);
         let encode_body = crate::frame_encode::request_body(request);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
@@ -13709,16 +13794,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
         #[cfg(not(feature = "tx-lend-only"))]
         let len = wz_codecs::request::RequestWire::measure(request).len();
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             stage,
-            // Request/Response = the data plane; zenoh default `Priority::Data`.
-            Self::REQUEST_ROUTE_PRIORITY,
+            qos.priority(),
             reliable,
-            crate::declare_ext_qos::read_request_qos(request),
+            qos,
             len,
             class,
             as_encoder(&encode_body),
-        )
+        )?;
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() && ended == Dispatched::Sent {
+            self.flush_express(qos.priority());
+        }
+        Ok(ended)
     }
 
     /// See [`Self::dispatch_push`]. The linkstate-peer query RETURN path: a
@@ -14104,9 +14193,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// A plain `Put` (no timestamp, encoding, source info or attachment), with the QoS the
-    /// publisher set, encoded from the caller's own text and bytes, on the key
-    /// `(mapping_id, suffix)`: `(0, Some(key))` is the literal key and any other id is a key
-    /// this session declared. The wire of
+    /// publisher set, encoded from the caller's own text and bytes, on `key`: named on the wire
+    /// as the caller's table names it, its whole text what the counters and filters read. The wire of
     /// [`crate::push_build::build_push_literal_with_meta`] with none of what that builder
     /// makes to be encoded once and dropped (an owned keyexpr, an owned payload, the
     /// extension chain, and the `Box` the network message travels in), which was the larger
@@ -14127,16 +14215,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// every session that has none.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn send_plain_put_qos(
+    fn send_plain_put_at(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        stage: DispatchStage,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
         express: bool,
         priority: Priority,
-    ) -> Option<Result<(), SendWireError>> {
+    ) -> Option<Result<Dispatched, SendWireError>> {
         if self.rewrites_originated_keys() {
             return None;
         }
@@ -14147,19 +14235,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = qos;
             crate::sample::QosLevel::DEFAULT
         };
+        let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
         #[cfg(feature = "transport-stats")]
-        let class = {
-            let resolve = |id| self.resolve_outbound_mapping(id);
-            let class = crate::network_message::plain_put_stats_class(
-                mapping_id,
-                suffix,
-                value.len(),
-                resolve,
-            );
-            self.stats_keys_of(class, || {
-                crate::network_message::stats_keyexpr_of_key(mapping_id, suffix, &resolve)
-            })
-        };
+        let class = self.stats_keys_of(
+            crate::network_message::named_put_stats_class(key.text(), value.len()),
+            || Some(key.text()),
+        );
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         // The Put's own size, worked out from its parts: a Push has no size constant (its
@@ -14167,29 +14248,94 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
         // below refuses it with the same error, which the dispatch reports.
         let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
-        let sent = self
-            .dispatch_network_message_at(
-                DispatchStage::Fresh,
-                priority,
-                reliable,
-                qos,
-                size,
-                class,
-                as_encoder(&|sink| {
-                    crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
-                }),
-            )
-            .map(|_| ());
-        if let Err(error) = sent {
-            return Some(Err(error));
-        }
+        let sent = self.dispatch_network_message_at(
+            stage,
+            priority,
+            reliable,
+            qos,
+            size,
+            class,
+            as_encoder(&|sink| {
+                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            }),
+        );
+        let sent = match sent {
+            Ok(sent) => sent,
+            Err(error) => return Some(Err(error)),
+        };
         #[cfg(feature = "transport-batching")]
         if express {
             self.flush_express(priority);
         }
         #[cfg(not(feature = "transport-batching"))]
         let _ = express;
-        Some(Ok(()))
+        Some(Ok(sent))
+    }
+
+    /// The caller's own send of a plain `Put` (`send_plain_put_at`, above, says what it writes):
+    /// the congestion control waits for room as the session's queue profile says.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_plain_put_qos(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        value: &[u8],
+        qos: Option<crate::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_plain_put_at(
+            DispatchStage::Fresh,
+            key,
+            value,
+            qos,
+            reliable,
+            express,
+            priority,
+        )
+        .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
+    /// it now leaves it unsent and the caller's ([`Probed::NoRoom`]), to be sent again once one
+    /// is free, with nothing counted as dropped and nothing closed. A want of room the link's own
+    /// stack answers is waited for as the caller's own send waits.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_send_plain_put_qos(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        value: &[u8],
+        qos: Option<crate::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<Probed, SendWireError>> {
+        let probed = self.send_plain_put_at(
+            DispatchStage::Probe,
+            key,
+            value,
+            qos,
+            reliable,
+            express,
+            priority,
+        );
+        // No room for a reason the link's own stack answers is the caller's own send, which waits
+        // for that stack as the queue profile says; only a pool with no slot is left the caller's.
+        let probed = match probed {
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
+                DispatchStage::Fresh,
+                key,
+                value,
+                qos,
+                reliable,
+                express,
+                priority,
+            ),
+            other => other,
+        };
+        probed.map(|sent| sent.map(Probed::of))
     }
 
     /// A Put or a Del with the metadata its publisher gave it, written from the caller's own key,
@@ -14209,22 +14355,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-tx-lend"
     ))]
     #[allow(clippy::too_many_arguments)]
-    pub fn send_publication_qos(
+    fn send_publication_at(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        stage: DispatchStage,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
         reliable: bool,
         express: bool,
         priority: Priority,
-    ) -> Option<Result<(), SendWireError>> {
+    ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
-            let _ = (
-                mapping_id, suffix, kind, value, meta, reliable, express, priority,
-            );
+            let _ = (stage, key, kind, value, meta, reliable, express, priority);
             None
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -14236,6 +14380,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if meta.ts_stack.is_some() {
                 return None;
             }
+            let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
             #[cfg(feature = "pubsub-qos")]
             let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
             #[cfg(not(feature = "pubsub-qos"))]
@@ -14248,28 +14393,103 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A publication the writer refuses counts as zero, and the dispatch's own run of the
             // writer refuses it with the same error, which it reports.
             let size = crate::tx_buf::encoded_len(encode);
-            let sent = self
-                .dispatch_network_message_at(
-                    DispatchStage::Fresh,
-                    priority,
-                    reliable,
-                    qos,
-                    size,
-                    crate::stats::NetworkStatsClass::unread(),
-                    encode,
-                )
-                .map(|_| ());
-            if let Err(error) = sent {
-                return Some(Err(error));
-            }
+            let sent = self.dispatch_network_message_at(
+                stage,
+                priority,
+                reliable,
+                qos,
+                size,
+                crate::stats::NetworkStatsClass::unread(),
+                encode,
+            );
+            let sent = match sent {
+                Ok(sent) => sent,
+                Err(error) => return Some(Err(error)),
+            };
             #[cfg(feature = "transport-batching")]
             if express {
                 self.flush_express(priority);
             }
             #[cfg(not(feature = "transport-batching"))]
             let _ = express;
-            Some(Ok(()))
+            Some(Ok(sent))
         }
+    }
+
+    /// The caller's own send of a publication (`send_publication_at`, above, says what it
+    /// writes).
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        feature = "transport-tx-lend"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_publication_qos(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        kind: crate::sample::SampleKind,
+        value: &[u8],
+        meta: &crate::metadata::PushMetadata,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_publication_at(
+            DispatchStage::Fresh,
+            key,
+            kind,
+            value,
+            meta,
+            reliable,
+            express,
+            priority,
+        )
+        .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_publication_qos`] that waits for nothing, as
+    /// [`Self::try_send_plain_put_qos`] is.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        feature = "transport-tx-lend"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_send_publication_qos(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        kind: crate::sample::SampleKind,
+        value: &[u8],
+        meta: &crate::metadata::PushMetadata,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<Probed, SendWireError>> {
+        let probed = self.send_publication_at(
+            DispatchStage::Probe,
+            key,
+            kind,
+            value,
+            meta,
+            reliable,
+            express,
+            priority,
+        );
+        // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
+        let probed = match probed {
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
+                DispatchStage::Fresh,
+                key,
+                kind,
+                value,
+                meta,
+                reliable,
+                express,
+                priority,
+            ),
+            other => other,
+        };
+        probed.map(|sent| sent.map(Probed::of))
     }
 
     /// R311y215 — the express (priority-carrying) twin of
@@ -14301,13 +14521,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-stats")]
             let class = self.stats_keys_of(
-                crate::network_message::plain_put_stats_class(
-                    0,
-                    Some(keyexpr_suffix),
-                    value.len(),
-                    |_| None,
-                ),
-                || Some(alloc::string::String::from(keyexpr_suffix)),
+                crate::network_message::named_put_stats_class(keyexpr_suffix, value.len()),
+                || Some(keyexpr_suffix),
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();
@@ -14713,9 +14928,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // With no allocator the declaration is written from the caller's own text
         // through the borrowed writer of `lent_control`, straight into the lent slot:
         // the owned `DeclareOwned` below is a heap object whose only job is to be
@@ -14723,7 +14938,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // does not exist in this profile.
         #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Subscriber {
                 id: u64::from(subscriber_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14739,7 +14954,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_subscriber_recorded(
                 subscriber_id,
                 keyexpr_mapping_id,
@@ -14765,8 +14980,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // seam-routed `Session::declare_subscriber`; this wrapper keeps the
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller).
-            let declare =
-                self.prepare_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_subscriber(subscriber_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_subscriber_recorded(
@@ -14811,15 +15025,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: no allocator, so the borrowed writer, with the
         // local `QueryableInfo` the owned form stamps (omitted when it is the default).
         #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Queryable {
                 id: u64::from(queryable_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14835,7 +15049,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_queryable_recorded(
                 queryable_id,
                 keyexpr_mapping_id,
@@ -14864,12 +15078,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller). Mirror of the declare-subscriber
             // split landed in R311ou.
-            let declare = self.prepare_declare_queryable(
-                queryable_id,
-                keyexpr_mapping_id,
-                keyexpr_suffix,
-                complete,
-            )?;
+            let declare = self.prepare_declare_queryable(queryable_id, key, complete)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`), carrying `complete` so a complete queryable survives the replay,
             // and send, as one step.
@@ -14921,15 +15130,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: with no allocator the declaration is written from the
         // caller's own text through the borrowed writer of `lent_control`, straight into the
         // lent slot, and there is no reconnect cache to copy the keyexpr into.
         #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Token {
                 id: u64::from(token_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14940,7 +15149,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A lend-only session: see `send_declare_subscriber`.
         #[cfg(all(feature = "declare-token", feature = "alloc", feature = "tx-lend-only"))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
                 self.dispatch_declare_lent(&LentDeclaration::Token {
                     id: u64::from(token_id),
@@ -14956,8 +15165,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             not(feature = "tx-lend-only")
         ))]
         {
-            let declare =
-                self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_token(token_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
@@ -14988,20 +15196,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        // R300 — same gate shape as `send_declare_subscriber`. The full path
-        // to `DeclareOwned` mirrors `dispatch_declare` — the module-level
-        // `use` is `liveliness-token`-gated but this build half is reachable
-        // under bare `declare-token` (the `send_declare_token` wrapper path).
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        // R300 — same gate shape as `send_declare_subscriber`, on the key's whole text, which
+        // the caller holds with the form that names it. The full path to `DeclareOwned` mirrors
+        // `dispatch_declare` — the module-level `use` is `liveliness-token`-gated but this
+        // build half is reachable under bare `declare-token` (the `send_declare_token` wrapper
+        // path).
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_token(
             u64::from(token_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15023,16 +15229,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_subscriber(
             u64::from(subscriber_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15148,15 +15351,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let mut declare =
-            build_declare_queryable(u64::from(queryable_id), keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
+        let mut declare = build_declare_queryable(
+            u64::from(queryable_id),
+            key.wire().id(),
+            key.wire().suffix(),
+        )?;
         // Stamp the local QueryableInfo completeness (the BestMatching producer
         // input). DEFAULT / incomplete omits the ext, so a plain queryable stays
         // byte-identical to before.
@@ -15381,20 +15584,128 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().resolve_own_mapping(mapping_id)
+            keys.space()?.resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
     }
 
-    /// Read the key expressions this link's session declared from the session's own table,
-    /// through `space`, and keep none on the link: what it declares from here on is recorded by
-    /// the session, which tells every link it has the same declarations under the same ids. A
-    /// session of several links installs it before the link carries anything; what the link had
-    /// kept until then is let go of.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    pub fn install_session_keyexprs(&self, space: crate::wireexpr_resolve::SharedOwnMappingSpace) {
+    /// `key`, which the caller names by the declaration this link's session calls `mapping_id`
+    /// (`0` for none), as this link sends it: named by that declaration while the link knows it
+    /// (its own record of the session's declarations, or the dictionary of shared key ids) and
+    /// it begins the key, and whole otherwise. The declaration's literal is read under the
+    /// link's lock into a buffer on the stack, so naming a key makes no string. `None` for an
+    /// empty key.
+    #[cfg(feature = "alloc")]
+    pub fn named_by<'k>(
+        &self,
+        key: &'k str,
+        mapping_id: crate::wire_id::ExprId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        let declared = crate::wire_key::MappedId::new(mapping_id).and_then(|id| {
+            let mut literal = crate::wireexpr_resolve::KeyexprBuf::new();
+            match self.append_own_mapping(mapping_id, &mut literal) {
+                Some(Ok(())) => crate::named_key::NamedKey::under(
+                    key,
+                    crate::named_key::Prefix::of(id, literal.as_str()),
+                ),
+                _ => self.named_by_shared_key(key, id),
+            }
+        });
+        declared.or_else(|| crate::named_key::NamedKey::literal(key))
+    }
+
+    /// `key` named by the shared key id `id` while the dictionary holds it and its entry begins
+    /// the key (`shared-key-ids`).
+    #[cfg(all(feature = "alloc", feature = "shared-key-ids"))]
+    fn named_by_shared_key<'k>(
+        &self,
+        key: &'k str,
+        id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            let entry = keys.ids()?.key_of(id.get())?;
+            crate::named_key::NamedKey::under(key, crate::named_key::Prefix::of(id, entry))
+        })
+    }
+
+    /// A build without the shared key ids has no dictionary to name a key by.
+    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    #[inline(always)]
+    fn named_by_shared_key<'k>(
+        &self,
+        _key: &'k str,
+        _id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        None
+    }
+
+    /// Run `f` on the key `(mapping_id, suffix)` names as this link resolves it: its whole text,
+    /// read from the declarations the link knows (its own record of them, or the dictionary of
+    /// shared key ids) and the rest after them, named on the wire by that declaration. For a caller
+    /// that holds a key as the wire names it and not its text: a session that keeps its
+    /// declarations names its keys from its own table. Refused, `f` not run, as
+    /// [`Self::reconstruct_outbound_keyexpr`] refuses: the id `0` with no text, or an id the link
+    /// does not know.
+    #[cfg(feature = "alloc")]
+    pub fn with_outbound_key<X>(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        f: impl FnOnce(crate::named_key::NamedKey<'_>) -> Result<X, SendDeclareError>,
+    ) -> Result<X, SendDeclareError> {
+        let text = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
+        let key = match crate::wire_key::MappedId::new(mapping_id) {
+            None => crate::named_key::NamedKey::literal(&text),
+            Some(id) => {
+                // The declaration's literal is the text before the suffix the caller named.
+                let declared = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::named_key::NamedKey::under(&text, crate::named_key::Prefix::of(id, declared))
+            }
+        };
+        f(key.ok_or(SendDeclareError::MissingKeyexpr)?)
+    }
+
+    /// `key` as this link names it, by the link's key-wire form (`shared-key-ids`): the declared
+    /// form keeps it as the session names it, the literal form names it whole, and the shared form
+    /// by the dictionary's id whose entry begins it and the rest after the entry.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn named_on_link<'k>(
+        &self,
+        key: crate::named_key::NamedKey<'k>,
+    ) -> crate::named_key::NamedKey<'k> {
+        let text = key.text();
+        match self.key_wire_on_link(text) {
+            crate::shared_key_ids::KeyWire::Declared => key,
+            crate::shared_key_ids::KeyWire::Literal => {
+                crate::named_key::NamedKey::literal(text).unwrap_or(key)
+            }
+            crate::shared_key_ids::KeyWire::Shared { id, suffix } => {
+                let entry = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::wire_key::MappedId::new(id)
+                    .and_then(|id| {
+                        crate::named_key::NamedKey::under(
+                            text,
+                            crate::named_key::Prefix::of(id, entry),
+                        )
+                    })
+                    .unwrap_or(key)
+            }
+        }
+    }
+
+    /// Keep none of the key expressions this link's session declared, and read none: the
+    /// session records them, tells every link it has the same declarations under the same ids,
+    /// names each key it sends ([`crate::named_key::NamedKey`]) and reads a peer's `M=0` key
+    /// from its own tables. A session of several links does this before the link carries
+    /// anything; what the link had kept until then is let go of.
+    #[cfg(feature = "alloc")]
+    pub fn keep_no_keyexprs(&self) {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            *keys = crate::declared_keyexprs::LinkKeyexprs::Session(space)
+            *keys = crate::declared_keyexprs::LinkKeyexprs::Session
         });
     }
 
@@ -15648,52 +15959,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// What [`Self::reconstruct_outbound_keyexpr`] decides for a declaration's key, with
-    /// no allocator and so no string to build: the outbound pico-safety gate (R300) on
-    /// a literal key, and the refusals for a key that names nothing. A session with no
-    /// allocator declares no keyexpr of its own (`declare-keyexpr` needs the heap), so
-    /// its table of outbound mappings is always empty and every alias is unknown, the
-    /// answer the owned form gives for an empty table.
-    #[cfg(all(
-        not(feature = "alloc"),
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_declared_keyexpr(
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        match (mapping_id, suffix) {
-            (0, None) => Err(SendDeclareError::MissingKeyexpr),
-            (0, Some(literal)) => Ok(check_outbound_keyexpr_pico_safe(literal)?),
-            (id, _) => Err(SendDeclareError::UnknownMappingId(id)),
-        }
-    }
-
-    /// The outbound pico-safety gate (R300) of a declaration a lend-only session writes from its
-    /// parts: the key the peer will read, resolved through this session's outbound mappings, as
-    /// `prepare_declare_subscriber` gates it before it builds the owned one.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "tx-lend-only",
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_held_keyexpr(
-        &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        let reconstructed = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
-        Ok(check_outbound_keyexpr_pico_safe(&reconstructed)?)
-    }
-
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
     /// the outbound link, retracting a previously declared
     /// subscription (id) on the peer. The peer drops the
@@ -15746,10 +16011,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A lend-only session writes the retraction from its parts.
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
                     id: subscriber_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -15766,8 +16031,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
-    /// The `ext_keyexpr` body a retraction written from its parts names `key` by: the bytes of
-    /// the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// The `ext_keyexpr` body a retraction written from its parts names `key` by, made on the
+    /// stack: the bytes of the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// A suffix past the session's `MAX_KEYEXPR_BYTES`, a key the session holds no text for, is
+    /// not named, and the retraction goes by the id alone, which the peer retracts by as well.
     #[cfg(all(
         feature = "tx-lend-only",
         feature = "declare-undeclare",
@@ -15777,10 +16044,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body(key: Option<(crate::wire_id::ExprId, &str)>) -> Option<Vec<u8>> {
-        key.map(|(mapping_id, suffix)| {
-            crate::declare_ext_keyexpr::ext_wireexpr_body(mapping_id, suffix)
-        })
+    fn named_key_body(
+        &self,
+        key: Option<(crate::wire_id::ExprId, &str)>,
+    ) -> Option<crate::lent_control::NamedKeyexpr> {
+        let (mapping_id, suffix) = key?;
+        crate::lent_control::NamedKeyexpr::new(
+            mapping_id,
+            suffix,
+            self.params.limits.max_keyexpr_bytes_held(),
+        )
+        .ok()
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -15825,10 +16099,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_queryable_recorded(queryable_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
                     id: queryable_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -15892,10 +16166,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_token_recorded(token_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
                     id: token_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16519,101 +16793,70 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = interest_id;
     }
 
-    /// R121j-1 — encode + dispatch a `Request(Query)` on the outbound
-    /// link, sending a query to the peer for the keyexpr resolved by
-    /// `(keyexpr_mapping_id, keyexpr_suffix)`. The peer's inbound
-    /// dispatch (zenoh-pico's `_z_session_recv_request` ->
-    /// `_z_trigger_queryables`) routes the query into every queryable
-    /// callback registered for a matching keyexpr; each callback's
-    /// reply is delivered back to this peer as a `Response(Reply)`
-    /// carrying the same `rid`. Termination is signaled by the peer
-    /// emitting `ResponseFinal` with this `rid`.
+    /// Send a `Request(Query)` that asks nothing beyond its key, `(keyexpr_mapping_id,
+    /// keyexpr_suffix)` as the wire names it: [`Self::send_get_parts`] with every slot of the
+    /// query left out. The peer routes it into its queryables, answers with `Response`s naming
+    /// `rid` and ends it with a `ResponseFinal`.
     ///
-    /// AP MVP minimal shape: no consolidation, no parameters, no
-    /// Query-level extensions, no Request-level extensions. The
-    /// builder doc describes the layered helpers that lift those
-    /// constraints when needed.
-    ///
-    /// Reliable channel — the peer must observe the Query and any
-    /// out-of-order Reply / ResponseFinal must not race ahead of the
-    /// Request itself. SN-window ordering on the reliable channel
-    /// gives this guarantee; an unreliable Query could silently drop
-    /// and leave the local z_get future hung indefinitely.
-    /// R311j signature-stability retrofit per `feedback_signature_stability`
-    /// MEMORY note — body cfg-gated on `codec-request`; silent no-op
-    /// when the feature is off. The matching peer's z_get future hangs
-    /// until its per-call timeout fires (documented minus-codec-request
-    /// contract).
+    /// The id `0` with no text names no key and is refused as `Codec(LengthOutOfRange)`, and a
+    /// build without the Request codec refuses every query as `FeatureDisabled`: the asker's get
+    /// then ends at its own timeout.
     pub fn send_request_query(
         &self,
         rid: crate::wire_id::RequestId,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(all(feature = "codec-request", feature = "alloc"))]
+        #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
         {
-            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_request(request, /*reliable=*/ true)?;
-            Ok(())
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            self.send_get_parts(crate::query_parts::GetParts {
+                rid,
+                key,
+                query: crate::query_parts::QueryParts::PLAIN,
+            })
         }
-        // With no allocator the query is written from the caller's own text through the
-        // borrowed writer, which names a LITERAL keyexpr: a request that names a mapping
-        // id has no owned mirror to build, and is refused as a build without the codec
-        // refuses.
-        #[cfg(all(
-            feature = "codec-request",
-            feature = "storage-profile",
-            not(feature = "alloc")
-        ))]
-        {
-            match (keyexpr_mapping_id, keyexpr_suffix) {
-                (0, Some(keyexpr)) => self.send_get_parts(crate::lent_request::GetParts {
-                    rid,
-                    keyexpr,
-                    parameters: &[],
-                    consolidation: None,
-                    target: None,
-                    timeout_ms: 0,
-                    qos: crate::sample::QosLevel::DEFAULT,
-                }),
-                _ => Err(SendWireError::FeatureDisabled),
-            }
-        }
-        #[cfg(not(all(
-            feature = "codec-request",
-            any(feature = "alloc", feature = "storage-profile")
-        )))]
+        #[cfg(not(all(feature = "codec-request", feature = "storage-profile")))]
         {
             let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
         }
     }
 
-    /// A `get` written from the caller's own text, as the codec's borrowed `Request`,
-    /// straight into the slot the link lends ([`crate::lent_request::RequestWriter`]): no
-    /// owned request, no `String`, no `Vec`, so a session with no allocator can ask. The wire
-    /// is the owned builder's for the same description, which the writer's tests hold.
+    /// Send a `get`: written from its borrowed description straight into the slot the link lends
+    /// ([`crate::lent_request::RequestWriter`]), with no owned request and nothing allocated, the
+    /// bytes the owned builder writes for the same description.
     ///
-    /// Reliable, as every query is, and routed on the data plane at the band the request's QoS
-    /// names. An empty keyexpr is refused as `Codec(PresentIfMismatch)`: the same typed refusal
-    /// the owned builders give a description that contradicts itself.
+    /// The owned `Request` goes out instead where the session needs that message itself: a
+    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), a build
+    /// whose network counters classify a message by its owned form (`transport-stats`), and a
+    /// query that starts a timestamp stack. A build with no allocator has no owned message, and
+    /// refuses such a query as `FeatureDisabled`.
+    ///
+    /// Reliable, as every query is: a Query lost on the way would leave the asker waiting for
+    /// answers and a final that never come. Routed at the band its QoS names, and an express one
+    /// drains the open batch, as a `Response` is.
     #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
     pub fn send_get_parts(
         &self,
-        parts: crate::lent_request::GetParts<'_>,
+        parts: crate::query_parts::GetParts<'_>,
     ) -> Result<(), SendWireError> {
-        let writer = crate::lent_request::RequestWriter::new(parts).map_err(|_| {
-            SendWireError::Codec(sce_forge_runtime::codec::CodecError::PresentIfMismatch)
-        })?;
-        let qos = parts.qos;
+        let writer = crate::lent_request::RequestWriter::new(parts).filter(|_| {
+            !crate::lent_request::COUNTED_FROM_OWNED && !self.rewrites_originated_keys()
+        });
+        let Some(writer) = writer else {
+            return self.send_owned_get(parts);
+        };
+        let qos = parts.query.qos;
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
-        // Request has no size constant (its value's bound is a u32 length), and the link lends a
-        // slot of this size. A query the writer refuses is refused by the encode below too.
+        // Request has no size constant, and the link lends a slot of this size. A query the
+        // writer refuses counts as zero and is refused by the encode below with its own error.
         let size = {
             let mut count = sce_forge_runtime::codec::CountSink::new();
             writer.encode(&mut count).map_or(0, |()| count.len())
         };
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
@@ -16621,53 +16864,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             size,
             crate::stats::NetworkStatsClass::unread(),
             as_encoder(&|sink| writer.encode(sink)),
-        )
-        .map(|_| ())?;
+        )?;
         #[cfg(feature = "transport-batching")]
-        if qos.is_express() {
+        if qos.is_express() && ended == Dispatched::Sent {
             self.flush_express(qos.priority());
         }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = ended;
         Ok(())
     }
 
-    /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
-    /// Threads the caller-supplied [`QueryMetadata`] bundle through
-    /// the layered [`RequestQueryBuilder`] so the outbound
-    /// `Request(Query)` carries (when set):
-    ///
-    /// * `meta.target` → Q_T flag + request_target ext entry
-    ///   (`vendor/zenoh-pico/src/protocol/codec/network.c:140`)
-    /// * `meta.consolidation` → Q_C flag + consolidation wire byte
-    ///   (`vendor/zenoh-pico/src/protocol/codec/message.c:402-412`)
-    /// * `meta.parameters` → Q_P flag + params slice, gated
-    ///   `query-selector-parameters`
-    /// * `meta.value` → Query-body VALUE ext (id=0x03 ZBUF: encoding +
-    ///   payload) — emitted FIRST in the Query body ext chain — gated
-    ///   `query-value` (R311y250)
-    /// * `meta.source_info` → Query-body source-info ext (id=0x01 ZBUF),
-    ///   gated `query-source-info`
-    /// * `meta.attachment` → Query-body attachment ext (id=0x05 ZBUF),
-    ///   gated `query-attachment`
-    /// * `meta.timeout_ms` → Request-level timeout ext (gated by the
-    ///   `_z_n_msg_request_needed_exts._ext_timeout_ms != 0`
-    ///   predicate at `network.c`).
-    ///
-    /// The three Query-body exts emit in zenoh-pico's `_z_query_encode`
-    /// order (value 0x03 → source_info 0x01 → attachment 0x05,
-    /// `message.c:433-448`) regardless of `meta` field order.
-    ///
-    /// Empty slots elide the corresponding wire byte / ext so a
-    /// `meta = QueryMetadata::default()` call produces the same wire
-    /// frame as [`Self::send_request_query`]. Mirrors R233's
-    /// [`Self::send_push_with_meta_literal`] pattern on the publish
-    /// side — the queryable / z_get split now has matching
-    /// metadata-bearing surfaces.
-    ///
-    /// Same reliability contract as the no-metadata form: hard-coded
-    /// `reliable=true` per zenoh-pico's reliable-channel guarantee
-    /// for the Query / Reply / Final correlation chain.
-    /// R311j signature-stability retrofit — body cfg, signature stable.
-    /// Silent no-op when `codec-request` off.
+    /// The owned `Request` of `parts`, sent where [`Self::send_get_parts`] does not write it
+    /// from its parts.
+    #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+    fn send_owned_get(&self, parts: crate::query_parts::GetParts<'_>) -> Result<(), SendWireError> {
+        #[cfg(feature = "alloc")]
+        {
+            self.dispatch_request(parts.owned_request()?, /*reliable=*/ true)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = parts;
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
+    /// Send the `get` `meta` describes, on the key `(keyexpr_mapping_id, keyexpr_suffix)`:
+    /// [`Self::send_get_parts`] with the description read from the metadata
+    /// ([`crate::query_parts::QueryParts::of_metadata`]). Each slot rides as the owned builder
+    /// writes it, in the build that composes it: the target, the timeout and the QoS on the
+    /// envelope, and the consolidation, the parameters, the value, the source info and the
+    /// attachment in the Query, in zenoh-pico's order (`_z_query_encode`). Empty metadata is the
+    /// wire of [`Self::send_request_query`].
     #[cfg(feature = "alloc")]
     pub fn send_request_query_with_meta(
         &self,
@@ -16678,15 +16906,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-request")]
         {
-            // R311mu (B5b-2b-2) — the RequestQueryBuilder assembly moved to
-            // request_build::build_request_query_with_meta (the build/dispatch
-            // split), so the seam-routed z_get path and this send_* wrapper
-            // share one builder SSOT. This method keeps the dispatch half
-            // (reliable, no batch flush — a Query carries no express window).
-            let request =
-                build_request_query_with_meta(rid, keyexpr_mapping_id, keyexpr_suffix, meta)?;
-            self.dispatch_request(request, /*reliable=*/ true)?;
-            Ok(())
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            self.send_get_parts(crate::query_parts::GetParts {
+                rid,
+                key,
+                query: crate::query_parts::QueryParts::of_metadata(meta),
+            })
         }
         #[cfg(not(feature = "codec-request"))]
         {
@@ -16763,7 +16989,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// built upstream by `ResponseReplyBuilder` /
     /// `ResponseErrBuilder` (or composed from a
     /// `crate::query::QueryReply::into_response` call drained out of
-    /// `crate::query::QueryableRegistry::dispatch_messages`).
+    /// `crate::query::QueryPeer::dispatch_messages`).
     ///
     /// Always reliable — Reply data delivery loss would leave the
     /// requesting peer's `z_get` future waiting for a reply that never
@@ -18069,6 +18295,13 @@ pub const SESSION_HOST_REALIZATION: ::sce_rust_runtime::ActionRealization = if c
 /// resolution after R311ik did the same for scouting.
 pub struct SessionActionsBinding<R: SessionRuntime, T: TimeSource> {
     inner: R::ActionsHandle<T>,
+    /// The session's one entropy source, as the runtime hands it to each of the
+    /// session's links ([`SessionRuntime::EntropyDraw`]): what every InitAck this
+    /// binding sends draws its cookie nonce and its challenges from. The link's
+    /// bundle keeps none. Only an acceptor draws, so a build without the accept path
+    /// holds none.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    entropy: R::EntropyDraw,
 }
 
 impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
@@ -18079,8 +18312,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// callers reach this through `new_session_engine`; it is `pub` so a
     /// test can drive an individual action method directly (the
     /// engine-free successor of the retired `dispatch_script` shim).
-    pub fn new(actions: R::ActionsHandle<T>) -> Self {
-        Self { inner: actions }
+    pub fn new(actions: R::ActionsHandle<T>, entropy: R::EntropyDraw) -> Self {
+        #[cfg(not(all(feature = "codec-init-body", feature = "session-unicast-accept")))]
+        let _ = entropy;
+        Self {
+            inner: actions,
+            #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+            entropy,
+        }
     }
 
     /// R311y205 (transport-multilink IMPL-2a) — the per-link [`LinkState`] this
@@ -18355,7 +18594,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // immediately before the stage that issues it (open-debt item 803;
             // it used to be one value set by the AP seam at bring-up).
             #[cfg(feature = "session-extauth")]
-            a.draw_auth_challenges();
+            a.draw_auth_challenges(&mut self.entropy);
             #[cfg(feature = "session-extauth")]
             a.stage_auth_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // R311y205 (transport-multilink IMPL-2b-ii) — the responder's 0x4
@@ -18363,7 +18602,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // multilink is negotiated. R2783 — its challenge is drawn HERE, as
             // the auth methods' are, not once by the AP seam.
             #[cfg(feature = "transport-multilink")]
-            a.draw_multilink_challenge();
+            a.draw_multilink_challenge(&mut self.entropy);
             #[cfg(feature = "transport-multilink")]
             a.stage_multilink_send(ExtChainRole::InitAck, |d| d.accept_init_ack());
             // transport-lowlatency / -compression / -shm — the acceptor REFLECTS
@@ -18459,10 +18698,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // and a bundle that drew once at construction handed its second
             // handshake the first one's sixteen cookie bytes. The return value
             // is deliberately ignored: `draw_cookie_nonce` has already put the
-            // slot into the state the read below must see -- refreshed, left
-            // alone (no source installed), or cleared (the source failed) --
-            // and the `None` arm of that read is the single fail-closed exit
-            // for all three.
+            // slot into the state the read below must see -- refreshed, or
+            // cleared (the source failed) -- and the `None` arm of that read is
+            // the single fail-closed exit.
             //
             // R2769 — the cookie now CARRIES the acceptor's state instead of
             // being a bare tag over (nonce, zid). This is the seam the atom's
@@ -18482,7 +18720,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             if fixed_cookie {
                 R::with_mutex_mut(&a.cookie_nonce, |slot| *slot = Some(FIXED_COOKIE_PENDING));
             } else {
-                a.draw_cookie_nonce();
+                a.draw_cookie_nonce(&mut self.entropy);
             }
             let nonce: Option<u64> = if fixed_cookie {
                 None

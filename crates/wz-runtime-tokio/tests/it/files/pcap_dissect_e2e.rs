@@ -590,9 +590,18 @@ async fn a_fragmented_datagram_in_a_capture_file_decodes_end_to_end() {
         flow.frames()
     );
     assert!(
-        matches!(flow.frames().row(0).frame, Ok(InboundFrame::Init { .. })),
+        matches!(
+            flow.frames()
+                .get(0)
+                .expect("a message the list holds")
+                .frame,
+            Ok(InboundFrame::Init { .. })
+        ),
         "the reassembled datagram decodes to the Init the nodes really sent: {:?}",
-        flow.frames().row(0).frame
+        flow.frames()
+            .get(0)
+            .expect("a message the list holds")
+            .frame
     );
 
     // The reassembly must be VISIBLE, not inferred from the decode working:

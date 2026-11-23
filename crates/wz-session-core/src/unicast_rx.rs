@@ -43,6 +43,14 @@ use crate::session_actions::SessionLinkActions;
 /// What a unicast receive stages its fragments in: a reassembly Router (`ReassemblyDispatcher`,
 /// whatever arena its chains stage into), or `()` for a receive that rejoins no fragment.
 pub trait RxReassembly {
+    /// Whether a receive may take input now: a Router lent to the receive for the length of its
+    /// session's step ([`RouterLend`]) answers whether it is lent, so a receive outside the step
+    /// takes nothing it could not stage. The provided form, a Router of the receive's own or
+    /// none, always may.
+    fn ready(&self) -> bool {
+        true
+    }
+
     /// End the chains past their deadline at `now_ms`, telling `on_event` how many.
     fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink);
 
@@ -179,6 +187,155 @@ where
     }
 }
 
+/// A session's one reassembly Router, lent to its links' receives for the length of a step: the
+/// session owns the Router by value and keeps one table of chain slots, not one for each link, as
+/// its chains' buffers are one table already; the step that runs the links' tasks lends it
+/// ([`Self::lend_for`]), so no receive holds it past a step and none holds it beside another. A
+/// chain is keyed by its peer (`Fragment::peer_key`, the peer's zid on a unicast link) as well
+/// as its channel, so the links' chains never meet, and the per-peer quota keeps one peer from
+/// taking the others' slots; what a link sets on the Router before an ingest (its negotiated
+/// fragment markers, the session's message bound) is set in the same call, so a chain is read
+/// under its own link's rules.
+///
+/// A receive's task cannot be handed a borrow (an executor polls it with nothing but its
+/// context), so the lend is a place the task looks in: each call takes the Router out for its own
+/// length and puts it back. A receive asks [`RxReassembly::ready`] before it takes input, which
+/// is `false` outside a step and inside another receive's call, so it never takes a unit it
+/// could not stage; a call made anyway does nothing with the Router.
+#[cfg(feature = "alloc")]
+pub struct RouterLend<D>(alloc::rc::Rc<core::cell::Cell<Option<core::ptr::NonNull<D>>>>);
+
+#[cfg(feature = "alloc")]
+impl<D> RouterLend<D> {
+    /// A place nothing is lent in yet.
+    pub fn new() -> Self {
+        Self(alloc::rc::Rc::new(core::cell::Cell::new(None)))
+    }
+
+    /// Lend `router` to every receive that holds this place for the length of `f`, and take it
+    /// back when `f` returns or unwinds. The owner holds `router` borrowed for as long, so it
+    /// neither reads nor moves it meanwhile.
+    pub fn lend_for<T>(&self, router: &mut D, f: impl FnOnce() -> T) -> T {
+        /// Puts back what the place held before, however `f` ends.
+        struct Restore<'a, D> {
+            place: &'a core::cell::Cell<Option<core::ptr::NonNull<D>>>,
+            was: Option<core::ptr::NonNull<D>>,
+        }
+        impl<D> Drop for Restore<'_, D> {
+            fn drop(&mut self) {
+                self.place.set(self.was);
+            }
+        }
+        let _restore = Restore {
+            place: &self.0,
+            was: self.0.replace(Some(core::ptr::NonNull::from(router))),
+        };
+        f()
+    }
+
+    /// Whether the Router is lent here now, and not taken out by a call.
+    pub fn is_lent(&self) -> bool {
+        self.0.get().is_some()
+    }
+
+    /// Run `f` on the Router while it is lent here, taking it out for the length of `f`; `None`,
+    /// with `f` not run, while it is not.
+    pub fn with<T>(&self, f: impl FnOnce(&mut D) -> T) -> Option<T> {
+        let mut taken = self.0.take()?;
+        /// Puts the Router back in its place, however `f` ends.
+        struct PutBack<'a, D> {
+            place: &'a core::cell::Cell<Option<core::ptr::NonNull<D>>>,
+            router: core::ptr::NonNull<D>,
+        }
+        impl<D> Drop for PutBack<'_, D> {
+            fn drop(&mut self) {
+                self.place.set(Some(self.router));
+            }
+        }
+        let _back = PutBack {
+            place: &self.0,
+            router: taken,
+        };
+        // SAFETY: the pointer was set by `lend_for` from a `&mut D` its caller holds borrowed for
+        // the whole of the lend, which has not ended, since `lend_for` takes it back only after
+        // its `f` returns, and this call runs inside it. It was taken out of the place, so no
+        // other call reaches it until `PutBack` returns it: this is the one reference to the
+        // Router while `f` runs.
+        Some(f(unsafe { taken.as_mut() }))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D> Default for RouterLend<D> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D> Clone for RouterLend<D> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D: RxReassembly> RxReassembly for RouterLend<D> {
+    fn ready(&self) -> bool {
+        self.is_lent()
+    }
+
+    // The session sweeps the Router it owns once a step, with nothing lent.
+    fn sweep_chains(&mut self, _now_ms: u64, _on_event: &mut dyn EventSink) {}
+
+    fn report_copied<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        outcome: &DriverLoopOutcome,
+        actions: &SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) {
+        let reported = self.with(|router| router.report_copied(outcome, actions, now_ms, on_event));
+        if reported.is_none() {
+            ().report_copied(outcome, actions, now_ms, on_event);
+        }
+    }
+
+    #[cfg(feature = "rx-in-place")]
+    fn report_parked<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        outcome: &DriverLoopOutcome,
+        actions: &SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) {
+        let reported = self.with(|router| router.report_parked(outcome, actions, now_ms, on_event));
+        if reported.is_none() {
+            ().report_parked(outcome, actions, now_ms, on_event);
+        }
+    }
+
+    // A unit that finds no Router lent is not read, never through `()`'s dispatch, which hands a
+    // fragment to the copying path's owned decode that a build reassembling in place does not
+    // link; a receive asks `ready` before it takes input, so the arm is the totality answer, and
+    // counted so that a test sees it never runs.
+    #[cfg(feature = "rx-in-place")]
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        unit: &[u8],
+        actions: &SessionLinkActions<R, T>,
+        engine: &mut SessionEngine<R, T>,
+        record: &mut RecordBuf,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) -> DatagramPath {
+        self.with(|router| {
+            router.dispatch_in_place(unit, actions, engine, record, now_ms, on_event)
+        })
+        .unwrap_or(DatagramPath::RouterHeld)
+    }
+}
+
 /// The units a receive in place dispatched, by the path they took
 /// (`crate::drive::dispatch_datagram`): read in place as a `Frame`, a `Fragment` or a lean
 /// batch, or not read as one, for one of the documented reasons. A unit of the second kind is not
@@ -208,6 +365,9 @@ pub struct RxPathCounts {
     pub frame_ext_refused: u32,
     /// `Frame`s whose head does not decode.
     pub frame_head_undecodable: u32,
+    /// Units not read at all, the Router the session's links share being held by another receive
+    /// (`DatagramPath::RouterHeld`), which a session's one task never makes.
+    pub router_held: u32,
 }
 
 #[cfg(feature = "rx-in-place")]
@@ -229,6 +389,7 @@ impl RxPathCounts {
             DatagramPath::Copied(CopyReason::FrameHeadUndecodable) => {
                 &mut self.frame_head_undecodable
             }
+            DatagramPath::RouterHeld => &mut self.router_held,
         };
         *slot = slot.saturating_add(1);
     }
@@ -319,6 +480,13 @@ impl<Router> UnicastRx<Router> {
 }
 
 impl<Router: RxReassembly> UnicastRx<Router> {
+    /// Whether this receive may take input now ([`RxReassembly::ready`]): a driver asks before it
+    /// reads its link, so a unit its Router could not stage is left with the link and not read
+    /// and thrown away.
+    pub fn ready(&self) -> bool {
+        self.router.ready()
+    }
+
     /// End the fragment chains past their deadline at `now_ms`, telling `on_event` how many
     /// (`IterationEvent::ReassemblyTimeout`). A receive that rejoins no fragment has none.
     #[inline(never)]
@@ -417,6 +585,60 @@ mod tests {
     use super::*;
     use crate::driver_loop::IterationEvent;
 
+    /// A lent Router is reached inside the lend alone, by one call at a time: outside it no call
+    /// reaches it; inside it a call takes it out for its own length, so a call made meanwhile
+    /// (from inside the first) finds nothing and runs nothing; and once the lend ends the owner
+    /// holds it again, with what the call did to it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_lent_router_is_reached_inside_the_lend_alone_and_by_one_call_at_a_time() {
+        let lend = RouterLend::<u32>::new();
+        let link = lend.clone();
+        assert!(!lend.is_lent());
+        assert_eq!(
+            link.with(|router| *router),
+            None,
+            "no Router outside a lend"
+        );
+        let mut router = 7u32;
+        let seen = lend.lend_for(&mut router, || {
+            assert!(link.is_lent(), "every handle sees the lend");
+            link.with(|outer| {
+                *outer += 1;
+                assert!(!lend.is_lent(), "taken out for the call");
+                assert_eq!(
+                    lend.with(|inner| *inner),
+                    None,
+                    "a second call cannot reach it"
+                );
+                *outer
+            })
+        });
+        assert_eq!(seen, Some(8));
+        assert!(!lend.is_lent(), "back with its owner once the lend ends");
+        assert_eq!(router, 8, "with what the call did to it");
+    }
+
+    /// A receive over a lend takes input only while its Router is lent: outside its session's
+    /// step it answers that it is not ready, so its driver reads nothing from the link. A receive
+    /// over a Router of its own is always ready.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_receive_over_a_lend_takes_input_only_inside_the_lend() {
+        let lend = RouterLend::<()>::new();
+        let rx = UnicastRx::new(lend.clone());
+        assert!(!rx.ready(), "outside a step the receive takes no input");
+        let mut router = ();
+        lend.lend_for(&mut router, || {
+            assert!(rx.ready(), "inside the lend it does")
+        });
+        assert!(!rx.ready(), "and not after it");
+        assert!(
+            UnicastRx::new(()).ready(),
+            "a Router of its own is always there"
+        );
+    }
+
     /// A receive built in its place holds the Router its maker wrote there, with nothing read.
     #[test]
     fn a_receive_built_in_place_holds_the_router_its_maker_wrote() {
@@ -484,6 +706,44 @@ mod tests {
         assert_eq!(rx.router().active_chains(), 0);
     }
 
+    /// A receive over a lent Router ends no chain when it sweeps, past the chain's deadline and
+    /// inside the lend too: the session that owns the Router sweeps it, and that sweep ends it.
+    #[cfg(all(feature = "reassembly", feature = "alloc"))]
+    #[test]
+    fn a_receive_over_a_lent_router_leaves_the_sweep_to_the_session() {
+        use crate::reassembly_dispatch::{Fragment, IngestOutcome, ReassemblyConfig};
+        const TIMEOUT_MS: u64 = 500;
+        let mut router: ReassemblyDispatcher<2, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, TIMEOUT_MS));
+        let begun = router.ingest(
+            Fragment {
+                peer_key: &[0x11; 16],
+                reliable: true,
+                sn: 1,
+                more: 1,
+                payload: b"part",
+                priority: crate::qos::Priority::DEFAULT,
+                markers: crate::extfragment::FragmentMarkers::NONE,
+            },
+            crate::sn::mask_from_res(0x02),
+            0,
+            |_| {},
+        );
+        assert_eq!(begun, IngestOutcome::Begun);
+        let lend = RouterLend::new();
+        let mut rx = UnicastRx::new(lend.clone());
+        let mut events = 0usize;
+        lend.lend_for(&mut router, || {
+            rx.sweep(TIMEOUT_MS, &mut |_event: IterationEvent<'_, '_>| {
+                events += 1
+            });
+        });
+        assert_eq!(events, 0, "the link's receive sweeps nothing");
+        assert_eq!(router.active_chains(), 1);
+        assert_eq!(router.sweep(TIMEOUT_MS), 1);
+        assert_eq!(router.active_chains(), 0);
+    }
+
     /// Each path a unit takes is counted under its own name, and the copied total is the sum of
     /// the copying reasons alone.
     #[cfg(feature = "rx-in-place")]
@@ -497,6 +757,7 @@ mod tests {
         counts.count(DatagramPath::Copied(CopyReason::NotAFrame));
         counts.count(DatagramPath::Copied(CopyReason::Compressed));
         counts.count(DatagramPath::Copied(CopyReason::FrameHeadUndecodable));
+        counts.count(DatagramPath::RouterHeld);
         assert_eq!(counts.in_place, 2);
         assert_eq!(counts.fragment_in_place, 1);
         assert_eq!(counts.low_latency_in_place, 1);
@@ -504,7 +765,11 @@ mod tests {
         assert_eq!(counts.compressed, 1);
         assert_eq!(counts.frame_head_undecodable, 1);
         assert_eq!(counts.fragment, 0);
-        assert_eq!(counts.copied(), 3);
+        assert_eq!(
+            counts.router_held, 1,
+            "a unit no Router could take is its own count"
+        );
+        assert_eq!(counts.copied(), 3, "and is not one the copying path took");
         let full = RxPathCounts {
             in_place: u32::MAX,
             ..RxPathCounts::default()

@@ -66,6 +66,10 @@ struct LendingLink {
     /// Grants left before the link stops lending (a pool that runs dry part
     /// way through a send); `usize::MAX` for a link that never does.
     grants_left: AtomicUsize,
+    /// What the link answers when asked whether a slot it lent may stay open
+    /// past the call (`tx_slot_spare`): `false` for a link of a pool with none
+    /// free besides.
+    spare: core::sync::atomic::AtomicBool,
 }
 
 impl LendingLink {
@@ -73,6 +77,7 @@ impl LendingLink {
         Arc::new(Self {
             lends,
             grants_left: AtomicUsize::new(usize::MAX),
+            spare: core::sync::atomic::AtomicBool::new(true),
             headroom,
             slots: (0..n_slots)
                 .map(|_| SlotMem(UnsafeCell::new(vec![0u8; slot_len].into_boxed_slice())))
@@ -159,6 +164,10 @@ impl BoxedLinkDriver for LendingLink {
             slot: TxSlot(idx as u32),
             headroom: self.headroom,
         })
+    }
+
+    fn tx_slot_spare(&self) -> bool {
+        self.spare.load(Ordering::SeqCst)
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
@@ -325,6 +334,42 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
     assert_eq!(lent[0][1], 7);
     assert_eq!(heap[0][1], 8);
     assert_eq!(lent[1][1], 9);
+}
+
+/// A message its encoder refuses (a key past the protocol's u16 length), sent with no window open
+/// over a lending link: the slot comes back, the send is refused typed rather than handed to the
+/// heap encode, and the SN minted for it is given back, so the next frame carries it.
+#[test]
+fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
+    let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let long_key = "k".repeat(usize::from(u16::MAX) + 1);
+    let refused = actions.send_plain_put_qos(
+        wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
+        b"v",
+        None,
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(
+        matches!(
+            refused,
+            Some(Err(wz_session_core::send_wire_error::SendWireError::Codec(
+                _
+            )))
+        ),
+        "the encoder's refusal is the send's answer: {refused:?}"
+    );
+    actions
+        .send_push_literal("home/lent", b"after", true)
+        .expect("push");
+    let lent = link.lent();
+    assert_eq!(lent.len(), 1);
+    // Frame byte 1 is `VLE(sn)`.
+    assert_eq!(lent[0][1], 7, "the frame after carries the SN given back");
+    assert!(link.heap().is_empty());
+    link.assert_every_slot_home();
 }
 
 // transport-lowlatency: the bare network message with no Frame wrapper, no SN and
@@ -771,6 +816,29 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
     link.assert_every_slot_home();
 }
 
+/// A link whose slots come from a pool with none free besides the one a window's frame takes
+/// says it cannot keep it (`tx_slot_spare`): each message of the window leaves at once in a slot
+/// of its own, every slot is back when the window closes, and nothing crosses the byte door. The
+/// CONTROL is the same window on a link that may keep its slot, which leaves as one frame.
+#[cfg(all(feature = "transport-batching", feature = "session-unicast-accept"))]
+#[test]
+fn a_window_on_a_link_with_no_slot_to_spare_sends_each_message_at_once() {
+    let payloads: [&[u8]; 3] = [b"one", b"two", b"three"];
+    let roomy = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    run_window(&batching_session(roomy.clone()), &payloads);
+    assert_eq!(roomy.lent().len(), 1, "CONTROL: one frame for the window");
+
+    let short = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    short.spare.store(false, Ordering::SeqCst);
+    let actions = batching_session(short.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(short.lent().len(), 3, "a frame for each message");
+    assert_eq!(short.grants.load(Ordering::SeqCst), 3);
+    assert!(short.heap().is_empty(), "nothing crossed the byte door");
+    assert_eq!(actions.batch_lend_counts().slot_frames, 3);
+    short.assert_every_slot_home();
+}
+
 /// An open frame is filled without asking its link where the slot is: the grant asks once, and
 /// each message after the first is appended to the slot the conduit keeps, with no lock of the
 /// link's taken. CONTROL: a window of one message asks once too, so the count is one a frame and
@@ -937,6 +1005,53 @@ fn a_message_past_the_budget_mid_window_leaves_no_frame_half_built() {
         link.aborts() >= 1,
         "the slot lent for the oversize message came back"
     );
+    link.assert_every_slot_home();
+}
+
+/// A message its encoder refuses (a key past the protocol's u16 length) inside a window over a
+/// lending link: the slot the window opens for it answers the refusal as a message past the
+/// budget, which takes the fragment path. The send is refused typed, the slot comes back, and the
+/// SN minted for it is given back: the next message's frame is the one a window holding only that
+/// message writes. CONTROL: that window, alone, on a fresh session.
+#[cfg(all(feature = "transport-batching", feature = "transport-fragmentation"))]
+#[test]
+fn a_message_its_encoder_refuses_mid_window_is_refused_and_spends_no_sn() {
+    let control_link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    run_window(&batching_session(control_link.clone()), &[b"after"]);
+    let control = control_link.lent();
+    assert_eq!(control.len(), 1, "CONTROL: one frame, lent");
+
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    let long_key = "k".repeat(usize::from(u16::MAX) + 1);
+    let refused = actions.send_plain_put_qos(
+        wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
+        b"v",
+        None,
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(
+        matches!(
+            refused,
+            Some(Err(wz_session_core::send_wire_error::SendWireError::Codec(
+                _
+            )))
+        ),
+        "the encoder's refusal is the send's answer: {refused:?}"
+    );
+    actions
+        .send_push_literal("home/batch", b"after", true)
+        .expect("push");
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        link.lent(),
+        control,
+        "the next frame carries the SN given back"
+    );
+    assert!(link.heap().is_empty());
     link.assert_every_slot_home();
 }
 

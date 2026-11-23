@@ -56,7 +56,7 @@ use wz_session_core::reliability::Reliability;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
-use crate::link_storage::{TxLender, TxStore};
+use crate::link_storage::{RxStore, TxLender, TxStore};
 use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
 #[cfg(all(
     feature = "alloc",
@@ -88,7 +88,7 @@ pub trait StreamSocket: Sized {
     /// The link a stack holds over this stream: [`StreamDriver`] over it, for every stream there
     /// is one of. [`NoStream`] names itself, a link there is none of, so the case a stack keeps
     /// for a protocol it does not carry holds nothing and no code serves it.
-    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
     where
         Self: 'static;
 
@@ -320,7 +320,7 @@ pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
 pub fn link_over<S, B, X>(socket: S, rx: B, tx: X) -> S::Link<B, X>
 where
     S: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: RxStore + 'static,
     X: TxStore + 'static,
 {
     <S::Link<B, X> as StreamLink<S, B, X>>::over(socket, rx, tx)
@@ -338,7 +338,7 @@ pub enum NoStream {}
 impl StreamSocket for NoStream {
     type Error = core::convert::Infallible;
 
-    type Link<B: AsMut<[u8]> + 'static, X: TxStore + 'static>
+    type Link<B: RxStore + 'static, X: TxStore + 'static>
         = NoStream
     where
         Self: 'static;
@@ -682,7 +682,7 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// The peer is the other end of the connection, so the link has no binding to make: what arrives
 /// is the peer's. The receive buffer bounds the batch the link takes, and so the batch the session
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
-pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
+pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore> {
     socket: S,
     /// The link's two ends, `tcp/<ip>:<port>` each, known from the connection.
     endpoints: LinkEndpoints,
@@ -756,11 +756,11 @@ impl<S: StreamSocket> StreamDriver<S, Vec<u8>, HeapTx> {
     }
 }
 
-impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
+impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// The link over the connected `socket`, receiving into `rx_buf` and building its frames in
     /// `tx`.
     pub fn over(socket: S, mut rx_buf: B, tx: T) -> Self {
-        let rx_len = rx_buf.as_mut().len();
+        let rx_len = rx_buf.capacity();
         Self {
             endpoints: link_endpoints(S::PROTO, socket.local(), socket.peer()),
             socket,
@@ -848,7 +848,11 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             return false;
         }
         let mut buf = self.rx_buf.borrow_mut();
-        let bytes: &mut [u8] = buf.as_mut();
+        // A link of a pool that holds no buffer and finds none free reads nothing: what its peer
+        // sent waits in the stack (`SessionDatagramLink::waits_for_buffer`).
+        let Some(bytes) = buf.bytes() else {
+            return false;
+        };
         let mut start = self.spent.get();
         let mut held = self.held.get();
         let lent = loop {
@@ -901,6 +905,14 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             front(&bytes[start..held], self.rx_len),
             Front::Batch(_)
         ));
+        // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
+        // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
+        // this link's (`held`, `spent`), so its buffer stays its own while one is there.
+        if B::POOLED && start == held {
+            self.spent.set(0);
+            self.held.set(0);
+            buf.idle();
+        }
         lent
     }
 
@@ -1113,7 +1125,7 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
     }
 }
 
-impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> BoxedLinkDriver
+impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
     for StreamDriver<S, B, T>
 {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
@@ -1140,6 +1152,15 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         let owed_written = self.write_owed();
         if self.lost.get().is_some() {
             return RoomAnswer::at_once(LinkRoom::Free);
+        }
+        // A link of a pool whose every slot another link holds for a frame its stream has not
+        // finished has no slot for the next frame until that link's step writes it. It does not
+        // wait for that under the session's lock, where that step cannot run: it is congested now,
+        // and a droppable message is dropped at once, as zenoh-pico drops one that finds its
+        // transmit lock held (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+        // `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
+        if owed_written && !self.tx.claimable() {
+            return RoomAnswer::at_once(LinkRoom::Congested);
         }
         if !owed_written {
             let (room, waited_us) = self.socket.wait_writable_timed(wait_us);
@@ -1215,6 +1236,16 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         self.tx.release(slot);
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_spare(&self) -> bool {
+        self.tx.spare()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_claimable(&self) -> bool {
+        self.tx.claimable()
+    }
+
     fn open_blocking(&self) {}
 
     // The session's Close frame has been handed over; the stream ends behind it, and the peer
@@ -1230,6 +1261,11 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         Some(&self.endpoints)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(S::PROTO.subject())
     }
 
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
@@ -1260,7 +1296,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     }
 }
 
-impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> SessionDatagramLink
+impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
     for StreamDriver<S, B, T>
 {
     fn service(&self) {
@@ -1284,8 +1320,20 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         self.batch_held()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
+    }
+
     fn owes_write(&self) -> bool {
         self.owes()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        if self.owes() {
+            self.write_owed();
+        }
     }
 
     // A batch lies in the link's own receive buffer until the link moves what follows it to the
@@ -1334,7 +1382,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
             return None;
         }
         let mut buf = self.rx_buf.try_borrow_mut().ok()?;
-        let bytes: &mut [u8] = buf.as_mut();
+        let bytes = buf.bytes()?;
         let (start, mut held) = (self.spent.get(), self.held.get());
         // Nothing before what is left of a batch is lent any more (asked where a receive could
         // be): it moves to the front, as a receive moves it, and the read lands behind it.
@@ -1372,13 +1420,21 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
                 let held = (self.held.get() + n).min(self.rx_len);
                 self.held.set(held);
                 let mut buf = self.rx_buf.borrow_mut();
-                let bytes: &mut [u8] = buf.as_mut();
-                self.ready.set(matches!(
-                    front(&bytes[self.spent.get()..held], self.rx_len),
-                    Front::Batch(_)
-                ));
+                // The lease was lent from the buffer the link holds, which it holds still.
+                if let Some(bytes) = buf.bytes() {
+                    self.ready.set(matches!(
+                        front(&bytes[self.spent.get()..held], self.rx_len),
+                        Front::Batch(_)
+                    ));
+                }
             }
-            ReadWaited::Quiet => {}
+            ReadWaited::Quiet => {
+                // A read that brought nothing leaves a buffer that holds nothing of the link's
+                // own to its pool.
+                if B::POOLED && self.held.get() == self.spent.get() {
+                    self.rx_buf.borrow_mut().idle();
+                }
+            }
             ReadWaited::Ended => self.end(LostCause::PeerClosed),
             ReadWaited::Failed(code) => {
                 if let Some(error) = S::read_failure(code) {
@@ -1410,7 +1466,7 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 impl<S, B, X> StreamLink<S, B, X> for StreamDriver<S, B, X>
 where
     S: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: RxStore + 'static,
     X: TxStore + 'static,
 {
     fn over(socket: S, rx: B, tx: X) -> Self {
@@ -1428,7 +1484,7 @@ where
     not(feature = "session-slot"),
     target_has_atomic = "ptr"
 ))]
-impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> Drop for StreamDriver<S, B, T> {
+impl<S: StreamSocket, B: RxStore, T: TxStore> Drop for StreamDriver<S, B, T> {
     fn drop(&mut self) {
         if let (Some(owner), true) = (&self.owner_read, self.rx_lent.get()) {
             self.socket.shutdown();
@@ -1484,7 +1540,7 @@ mod tests {
     impl StreamSocket for Pipe {
         type Error = Broken;
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<B: RxStore + 'static, X: crate::link_storage::TxStore + 'static>
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1643,14 +1699,138 @@ mod tests {
         out
     }
 
-    fn queue(link: &Link, piece: &[u8]) {
+    fn queue<B: RxStore>(link: &StreamDriver<Pipe, B, Slots>, piece: &[u8]) {
         link.socket.pieces.borrow_mut().push_back(piece.to_vec());
     }
 
-    fn received(link: &Link) -> Option<Vec<u8>> {
+    fn received<B: RxStore + 'static>(link: &StreamDriver<Pipe, B, Slots>) -> Option<Vec<u8>> {
         let mut got = None;
         link.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
         got
+    }
+
+    /// A link that reads into a pool of receive buffers its session's links share.
+    #[cfg(feature = "session-unicast-accept")]
+    type Pooled = StreamDriver<Pipe, crate::link_storage::PooledRx, Slots>;
+
+    /// A pool of `buffers` receive buffers of 34 bytes, lent from an arena of its own that the test
+    /// process leaks, as a session's arena lends its links' pool.
+    #[cfg(feature = "session-unicast-accept")]
+    fn pool(buffers: usize) -> wz_session_core::byte_cells::LentByteCells {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = Arena::byte_cells_bytes(34, buffers).expect("a test's pool fits");
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every buffer.
+        let mut arena = unsafe {
+            Arena::over(
+                core::ptr::NonNull::from(region).cast::<u8>(),
+                blocks * ARENA_ALIGN,
+            )
+        };
+        arena
+            .lend_byte_cells(34, buffers)
+            .expect("the arena holds the pool")
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn pooled(pool: wz_session_core::byte_cells::LentByteCells) -> Pooled {
+        StreamDriver::over(
+            Pipe::default(),
+            crate::link_storage::PooledRx::of(pool),
+            Slots(UnsafeCell::new([0; 64])),
+        )
+    }
+
+    /// Two stream links over one pool, each sent its batch in parts that alternate with the
+    /// other's, the length cut in two as well: each hands over its own batch whole, never a byte
+    /// of the other's, because a link keeps the buffer that holds its part of a batch and the
+    /// other reads into another. Once both are handed over neither holds a buffer. Then byte by
+    /// byte, alternating, the same holds at every step.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn two_stream_links_over_one_pool_each_keep_their_part_of_a_batch() {
+        let pool = pool(2);
+        let (a, b) = (pooled(pool), pooled(pool));
+        let (to_a, to_b) = (
+            batch(b"to a, all of it here"),
+            batch(b"and to b, another one"),
+        );
+        queue(&a, &to_a[..1]);
+        assert_eq!(received(&a), None, "half a length");
+        queue(&b, &to_b[..5]);
+        assert_eq!(received(&b), None, "a length and part of a batch");
+        assert_eq!(pool.in_use(), 2, "each link holds the buffer of its part");
+        queue(&a, &to_a[1..9]);
+        assert_eq!(received(&a), None, "still part of a batch");
+        queue(&b, &to_b[5..]);
+        assert_eq!(received(&b).as_deref(), Some(&to_b[2..]));
+        assert_eq!(pool.in_use(), 1, "b holds nothing of its own now");
+        queue(&a, &to_a[9..]);
+        assert_eq!(received(&a).as_deref(), Some(&to_a[2..]));
+        assert_eq!(pool.in_use(), 0);
+        assert!(!a.waits_for_buffer() && !b.waits_for_buffer());
+
+        let mut got: [Vec<Vec<u8>>; 2] = [Vec::new(), Vec::new()];
+        for at in 0..to_a.len().max(to_b.len()) {
+            for (link, wire, into) in [(&a, &to_a, 0), (&b, &to_b, 1)] {
+                if let Some(byte) = wire.get(at) {
+                    queue(link, &[*byte]);
+                }
+                if let Some(whole) = received(link) {
+                    got[into].push(whole);
+                }
+                assert!(pool.in_use() <= 2);
+            }
+        }
+        assert_eq!(
+            got,
+            [std::vec![to_a[2..].to_vec()], std::vec![to_b[2..].to_vec()]]
+        );
+        assert_eq!(pool.in_use(), 0);
+    }
+
+    /// Over a pool of one buffer, a link whose part of a batch holds it leaves the other link
+    /// reading nothing: the other's batch stays in its stream, whole, and the link says it waits
+    /// for a buffer; once the first batch is handed over the buffer is free, the other no longer
+    /// waits, and its batch is read whole. A batch a link was asked to keep holds the buffer too,
+    /// until it is lent again and let go.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_link_that_finds_the_pool_dry_reads_nothing_and_loses_nothing() {
+        let pool = pool(1);
+        let (a, b) = (pooled(pool), pooled(pool));
+        let (to_a, to_b) = (batch(b"first"), batch(b"second"));
+        queue(&a, &to_a[..4]);
+        assert_eq!(received(&a), None);
+        queue(&b, &to_b);
+        assert_eq!(received(&b), None, "no buffer to read into");
+        assert!(b.waits_for_buffer());
+        assert_eq!(
+            b.socket.pieces.borrow().len(),
+            1,
+            "the batch waits in the stream, unread"
+        );
+        queue(&a, &to_a[4..]);
+        assert_eq!(received(&a).as_deref(), Some(&b"first"[..]));
+        assert!(!b.waits_for_buffer(), "the buffer is free");
+        assert_eq!(received(&b).as_deref(), Some(&b"second"[..]));
+        assert_eq!(pool.in_use(), 0);
+
+        queue(&a, &batch(b"kept"));
+        assert!(a.recv_with(&mut |_| a.keep()));
+        assert_eq!(pool.in_use(), 1, "a kept batch holds the buffer");
+        queue(&b, &batch(b"waits"));
+        assert_eq!(received(&b), None);
+        assert_eq!(received(&a).as_deref(), Some(&b"kept"[..]), "lent again");
+        assert_eq!(pool.in_use(), 0, "and let go");
+        assert_eq!(received(&b).as_deref(), Some(&b"waits"[..]));
     }
 
     /// A batch the session asks the link to keep, from inside the lend, is lent again whole by the
@@ -2207,6 +2387,172 @@ mod tests {
         );
     }
 
+    /// Links of a pool of `slots` outbound slots of 32 bytes with `places` places, and the tables.
+    #[cfg(feature = "session-unicast-accept")]
+    fn pooled_tx_links(
+        places: usize,
+        slots: usize,
+    ) -> (
+        crate::link_storage::LinkTables,
+        std::vec::Vec<StreamDriver<Pipe, [u8; 34], crate::link_storage::LinkTx>>,
+    ) {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = [(34, 1), (32, slots), (0, places)]
+            .iter()
+            .map(|&(size, count)| Arena::byte_cells_bytes(size, count).expect("fits"))
+            .sum::<usize>();
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every buffer.
+        let mut arena = unsafe {
+            Arena::over(
+                core::ptr::NonNull::from(region).cast::<u8>(),
+                blocks * ARENA_ALIGN,
+            )
+        };
+        let rx = arena.lend_byte_cells(34, 1).expect("the receive pool");
+        let tx = arena.lend_byte_cells(32, slots).expect("the slot pool");
+        let at = arena.lend_byte_cells(0, places).expect("the places");
+        let tables = crate::link_storage::LinkTables::pooled(rx, tx, at);
+        let links = (0..places)
+            .map(|_| {
+                let (_, tx) = tables.claim().expect("a place");
+                let link = StreamDriver::over(Pipe::default(), [0u8; 34], tx);
+                link.socket.tries.set(true);
+                link
+            })
+            .collect();
+        (tables, links)
+    }
+
+    /// Hand `link` a frame of `bytes` in a slot it lends, the stream taking `takes` of it.
+    #[cfg(feature = "session-unicast-accept")]
+    fn send_lent<T: TxStore + 'static>(
+        link: &StreamDriver<Pipe, [u8; 34], T>,
+        bytes: &[u8],
+        takes: Option<usize>,
+    ) -> LinkSendOutcome {
+        let grant = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a free slot");
+        let (base, _) = link.tx_slot_storage(grant.slot);
+        // SAFETY: the slot was just granted to this test, 32 bytes long, and the frame past its
+        // headroom is inside it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(grant.headroom), bytes.len())
+        };
+        link.socket.takes.set(takes);
+        link.tx_slot_send(
+            grant.slot,
+            grant.headroom,
+            bytes.len(),
+            Reliability::Reliable,
+            Priority::DEFAULT,
+        )
+    }
+
+    /// A link of a pool whose stream takes a frame only in part keeps its slot, as a link of its
+    /// own slots does, and writes nothing more until the stream has room: it does not wait. The other
+    /// links go on meanwhile through the slots left, each frame written whole, and once the slow
+    /// stream takes the rest the slot is back.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_slow_stream_keeps_its_slot_and_the_other_links_go_on() {
+        let (tables, links) = pooled_tx_links(3, 2);
+        assert_eq!(
+            send_lent(&links[0], b"slow!", Some(3)),
+            LinkSendOutcome::Sent
+        );
+        assert!(links[0].owes(), "the rest is owed");
+        assert_eq!(links[0].socket.waited_writes.get(), 0, "and nothing waited");
+        assert_eq!(tables.tx_in_use(), 1);
+        for round in 0..3u8 {
+            for link in &links[1..] {
+                assert_eq!(
+                    send_lent(link, &[b'a' + round; 4], None),
+                    LinkSendOutcome::Sent
+                );
+                assert_eq!(tables.tx_in_use(), 1, "the slot is back after each send");
+            }
+        }
+        for link in &links[1..] {
+            assert_eq!(link.socket.writes.borrow().len(), 3, "every frame, whole");
+            assert_eq!(link.socket.waited_writes.get(), 0);
+        }
+        assert!(links[0].owes(), "the slow stream still owes");
+        links[0].socket.takes.set(None);
+        links[0].service();
+        assert!(!links[0].owes());
+        assert_eq!(links[0].socket.writes.borrow().concat(), batch(b"slow!"));
+        assert_eq!(tables.tx_in_use(), 0, "written, its slot is back");
+    }
+
+    /// A link of a pool whose every slot another link holds for a frame its stream has not
+    /// finished is congested at once, whatever the message may wait, and waits on no stream: the
+    /// step that frees the slot is the other link's. Once that link's stream takes the rest, the
+    /// link has room and sends.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_link_that_finds_every_slot_held_is_congested_at_once_and_waits_for_none() {
+        let (tables, links) = pooled_tx_links(2, 1);
+        assert_eq!(
+            send_lent(&links[0], b"held", Some(2)),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(tables.tx_in_use(), 1);
+        for wait in [
+            RoomWait::Drop { wait_us: 1_000 },
+            RoomWait::Block { wait_us: 1_000_000 },
+        ] {
+            assert_eq!(
+                links[1].wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Congested)
+            );
+        }
+        assert!(links[1].socket.room_waits.borrow().is_empty(), "no wait");
+        assert!(links[1].tx_slot_acquire(16, Priority::DEFAULT).is_none());
+        links[0].socket.takes.set(None);
+        links[0].service();
+        assert_eq!(tables.tx_in_use(), 0);
+        assert_eq!(
+            links[1]
+                .wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 })
+                .room,
+            LinkRoom::Free
+        );
+        assert_eq!(send_lent(&links[1], b"after", None), LinkSendOutcome::Sent);
+    }
+
+    /// A link of a pool whose open batch frame would take the last free slot says so
+    /// (`tx_slot_spare`), and one with a slot free besides, or with a slot for every link, says
+    /// it may keep it.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_link_says_whether_the_slot_it_holds_leaves_one_spare() {
+        let (tables, links) = pooled_tx_links(3, 2);
+        let first = links[0]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a slot");
+        assert!(links[0].tx_slot_spare(), "another is free");
+        let second = links[1]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a slot");
+        assert!(!links[1].tx_slot_spare(), "it holds the last");
+        assert!(links[2].tx_slot_acquire(16, Priority::DEFAULT).is_none());
+        links[0].tx_slot_abort(first.slot);
+        links[1].tx_slot_abort(second.slot);
+        assert_eq!(tables.tx_in_use(), 0);
+        let own = link();
+        let _held = own.tx_slot_acquire(16, Priority::DEFAULT).expect("a slot");
+        assert!(own.tx_slot_spare(), "slots of its own: always");
+    }
+
     /// A link whose every slot is out, one of them held by a frame the stream took only part of,
     /// writes what it owes when it is asked for a slot and lends the one that frees, with no step
     /// between: one slot serves the frame after a batch the stream has not finished. While the
@@ -2267,9 +2613,7 @@ mod tests {
     mod session_room {
         extern crate std;
 
-        use alloc::rc::Rc;
         use std::vec::Vec;
-        use wz_session_core::link::BoxedLinkDriver;
         use wz_session_core::qos::CongestionControl;
         use wz_session_core::qos::Priority;
         use wz_session_core::sample::QosLevel;
@@ -2293,21 +2637,6 @@ mod tests {
         impl ClockSource for Stopped {
             fn now_us(&self) -> u64 {
                 1_000_000
-            }
-        }
-
-        struct Counting(u8);
-
-        impl wz_session_core::entropy::EntropySource for Counting {
-            fn try_fill_bytes(
-                &mut self,
-                buf: &mut [u8],
-            ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
-                for slot in buf.iter_mut() {
-                    *slot = self.0;
-                    self.0 = self.0.wrapping_add(1);
-                }
-                Ok(())
             }
         }
 
@@ -2341,8 +2670,8 @@ mod tests {
             }
         }
 
-        fn link() -> Rc<Heap> {
-            Rc::new(StreamDriver::with_buffers(
+        fn link() -> crate::link_cells::CellRc<Heap> {
+            crate::link_cells::CellRc::boxed(StreamDriver::with_buffers(
                 Pipe::default(),
                 STREAM_RX_CAPACITY,
                 HeapTx::new(4, 2048),
@@ -2356,8 +2685,8 @@ mod tests {
         fn a_droppable_message_on_a_full_stream_is_dropped_within_its_own_wait() {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
-            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            let sink = link.clone().into_sink();
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
             link.socket.full.set(true);
             actions
                 .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
@@ -2395,8 +2724,8 @@ mod tests {
         fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
-            let sink: Rc<dyn BoxedLinkDriver> = link.clone();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            let sink = link.clone().into_sink();
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
             link.socket.full.set(true);
             let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")
                 .expect("a literal Put encodes");

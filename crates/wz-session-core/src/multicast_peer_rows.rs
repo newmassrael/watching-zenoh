@@ -25,7 +25,6 @@
 use core::hash::Hash;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::ops::{Index, IndexMut};
 use core::ptr::addr_of_mut;
 
 /// Whether a member table grows past its fixed rows, as the types of what it holds for growth.
@@ -134,12 +133,13 @@ impl<T> GrownRows<T> for alloc::vec::Vec<T> {
     unsafe fn grow_with(&mut self, init: impl FnOnce(&mut MaybeUninit<T>)) -> Option<usize> {
         self.reserve(1);
         let at = self.len();
-        // SAFETY: `reserve` left room for at least one row past the length, which is the first
-        // cell of the spare capacity; `init` writes a whole row there (the caller's contract), so
-        // the length may count it. An `init` that unwinds leaves the length as it was.
+        // `reserve` left room for at least one row past the length: the first spare cell.
+        let cell = self.spare_capacity_mut().first_mut()?;
+        // SAFETY: `init` writes a whole row into the first cell past the length (the caller's
+        // contract), so the length may count it. An `init` that unwinds leaves the length as it was.
         unsafe {
-            init(&mut self.spare_capacity_mut()[0]);
-            self.set_len(at + 1);
+            init(cell);
+            self.set_len(at.saturating_add(1));
         }
         Some(at)
     }
@@ -276,7 +276,7 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
 
     /// How many rows the table has: the fixed ones and those grown past them.
     pub(crate) fn len(&self) -> usize {
-        N + self.grown.rows().len()
+        self.grown.rows().len().saturating_add(N)
     }
 
     /// Row `index`, or `None` past the last.
@@ -318,7 +318,7 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
         init: impl FnOnce(&mut MaybeUninit<T>),
     ) -> Option<usize> {
         // SAFETY: `init` writes a whole row, the caller's contract.
-        unsafe { self.grown.grow_with(init) }.map(|at| N + at)
+        unsafe { self.grown.grow_with(init) }.map(|at| at.saturating_add(N))
     }
 
     /// Let the grown rows go and keep the fixed ones: what a reset of the whole table does, since
@@ -328,7 +328,9 @@ impl<T, const N: usize, G: TableGrowth> PeerRows<T, N, G> {
     }
 }
 
-impl<T, const N: usize, G: TableGrowth> Index<usize> for PeerRows<T, N, G> {
+// Indexing that panics past the last row is for the tests alone: the table answers `get`.
+#[cfg(test)]
+impl<T, const N: usize, G: TableGrowth> core::ops::Index<usize> for PeerRows<T, N, G> {
     type Output = T;
 
     fn index(&self, index: usize) -> &T {
@@ -340,7 +342,8 @@ impl<T, const N: usize, G: TableGrowth> Index<usize> for PeerRows<T, N, G> {
     }
 }
 
-impl<T, const N: usize, G: TableGrowth> IndexMut<usize> for PeerRows<T, N, G> {
+#[cfg(test)]
+impl<T, const N: usize, G: TableGrowth> core::ops::IndexMut<usize> for PeerRows<T, N, G> {
     fn index_mut(&mut self, index: usize) -> &mut T {
         let rows = self.len();
         match self.get_mut(index) {

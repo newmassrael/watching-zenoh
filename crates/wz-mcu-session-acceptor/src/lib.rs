@@ -64,8 +64,6 @@
 extern crate alloc;
 
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
-use alloc::rc::Rc;
-#[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
 use alloc::vec::Vec;
 
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
@@ -189,7 +187,7 @@ impl wz_session_core::entropy::EntropySource for FixtureEntropy {
 /// and the drive loop's inbound [`SessionDatagramLink`]. The crafted peer is
 /// a plain socket on the same stack.
 ///
-/// Absent under `fixed-memory`: its acceptor sink is an `Rc<dyn BoxedLinkDriver>` and
+/// Absent under `fixed-memory`: its acceptor sink is a `CellRc<dyn BoxedLinkDriver>` and
 /// its peer's receive a `Vec`. The profile's e2e is `run_acceptor_e2e_fixed`, over
 /// statics.
 #[cfg(all(feature = "heap", not(feature = "fixed-memory")))]
@@ -198,7 +196,7 @@ pub trait AcceptorTopology {
     type Link: SessionDatagramLink;
 
     /// The acceptor's outbound sink, which the session's action bundle keeps.
-    fn acceptor_sink(&self) -> Rc<dyn BoxedLinkDriver>;
+    fn acceptor_sink(&self) -> wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver>;
 
     /// The acceptor's inbound face, which the drive loop owns. It must share
     /// its socket with [`Self::acceptor_sink`].
@@ -712,7 +710,6 @@ where
         topology.acceptor_sink(),
         params,
         clock.clone(),
-        entropy,
     );
 
     // Open the handshake: the initiator's first move. The reactive peer
@@ -730,6 +727,7 @@ where
         runtime.clone(),
         topology.acceptor_link(),
         actions.clone(),
+        wz::runtime_coop::session_runtime::SessionEntropy::new(entropy),
         clock.clone(),
         SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),

@@ -40,6 +40,8 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 #[cfg(feature = "session-slot")]
@@ -79,7 +81,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::SessionHandle;
+use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -181,6 +183,18 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// Whether the link has input waiting in its stack that it cannot read: it receives into a
+    /// pool of buffers its session's links share, holds none, and every one is held by another
+    /// link for something of its own. A wait on its readiness would end at once and the step
+    /// that follows would read nothing, so its owner leaves it out of the wait; the step that
+    /// gives a buffer back is woken by the holder's own input, and the link is waited on again
+    /// once a buffer is free. The provided form answers `false`: a link that receives into a
+    /// buffer of its own always can. Only a build that accepts links has pools.
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        false
+    }
+
     /// Whether the link owes its stack bytes of a frame it was already handed, which its next
     /// step writes as far as the stack takes them ([`Self::service`]). While it does, a wait its
     /// owner makes for the link's input must end on room as well (`AndRoom`, the heap profile's),
@@ -190,6 +204,14 @@ pub trait SessionDatagramLink {
     fn owes_write(&self) -> bool {
         false
     }
+
+    /// Write what the link owes its stack, as far as the stack takes it now, without waiting: what
+    /// [`Self::service`] writes before it waits. A publish that finds every slot of its session's
+    /// pool held asks it of every link, so a link whose stack has room by now gives its slot back
+    /// without a step of its own. The provided form owes nothing. Only a build that accepts links
+    /// has pools.
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {}
 
     /// Whether the session may be handed input now. A link whose owner holds its input back (the
     /// delivery lane of a session that cannot take another message) answers `false`, and the loop
@@ -581,6 +603,10 @@ impl<L: SessionDatagramLink + ?Sized, F: EventSink + ?Sized> EventSink for LinkS
     fn holds_datagram(&self) -> bool {
         self.link.keeps_input()
     }
+
+    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+        self.sink.lend_rejoined(message)
+    }
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -619,8 +645,101 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
         (**self).holds_input()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        (**self).waits_for_buffer()
+    }
+
     fn owes_write(&self) -> bool {
         (**self).owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        (**self).write_owed_now()
+    }
+
+    fn takes_input(&self) -> bool {
+        (**self).takes_input()
+    }
+
+    fn keeps_input(&self) -> bool {
+        (**self).keeps_input()
+    }
+
+    fn keep(&self) {
+        (**self).keep()
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        (**self).lends_until_next_receive()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        (**self).readiness()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn writability(&self) -> Option<Box<dyn LinkWritability>> {
+        (**self).writability()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn lend_rx(&self) -> Option<RxLease> {
+        (**self).lend_rx()
+    }
+
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn land_rx(&self, lease: RxLease) {
+        (**self).land_rx(lease)
+    }
+}
+
+/// A link in a cell is a link: the handle the drive loop pumps names the same driver the
+/// session's actions send through (`crate::link_cells`).
+#[cfg(not(feature = "session-slot"))]
+impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells::CellRc<T> {
+    fn service(&self) {
+        (**self).service()
+    }
+
+    fn service_within(&self, max_wait_ms: u64) {
+        (**self).service_within(max_wait_ms)
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        (**self).uses_wake_budget()
+    }
+
+    fn try_recv(&self) -> Option<RxFrame> {
+        (**self).try_recv()
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        (**self).recv_with(f)
+    }
+
+    fn lost(&self) -> Option<LostCause> {
+        (**self).lost()
+    }
+
+    fn holds_input(&self) -> bool {
+        (**self).holds_input()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        (**self).waits_for_buffer()
+    }
+
+    fn owes_write(&self) -> bool {
+        (**self).owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        (**self).write_owed_now()
     }
 
     fn takes_input(&self) -> bool {
@@ -679,6 +798,32 @@ impl LinkProto {
             LinkProto::Udp => "udp",
             LinkProto::Tcp => "tcp",
             LinkProto::Tls => "tls",
+        }
+    }
+
+    /// What a link of the protocol reports of itself to a connectivity plane
+    /// (`BoxedLinkDriver::link_subject`): its kind, which says whether it is streamed and how
+    /// reliable. The NICs its address sits on are not resolved, so they read as undetermined and
+    /// not as none: an answer a link that does not ask the platform cannot give.
+    #[cfg(feature = "alloc")]
+    pub fn subject(self) -> &'static wz_session_core::link::LinkSubject {
+        use wz_session_core::link::{LinkKind, LinkSubject};
+        static UDP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Udp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TCP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tcp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TLS: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tls),
+            ..LinkSubject::UNKNOWN
+        };
+        match self {
+            LinkProto::Udp => &UDP,
+            LinkProto::Tcp => &TCP,
+            LinkProto::Tls => &TLS,
         }
     }
 }
@@ -785,8 +930,9 @@ pub enum LinkOpenError {
 /// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
 #[cfg(not(feature = "session-slot"))]
 pub struct OpenedLink<P> {
-    /// What the session's actions send through.
-    pub sink: Rc<dyn BoxedLinkDriver>,
+    /// What the session's actions send through: a counted handle on the cell the link's driver
+    /// lives in (`crate::link_cells`).
+    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver>,
     /// What the drive loop services and takes datagrams from.
     pub pump: P,
 }
@@ -805,6 +951,12 @@ pub struct OpenedLink<P> {
 pub trait SessionLinks {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;
+
+    /// A dial this stack began ([`Self::begin_initiator`]), held by value where the session holds
+    /// its face: one type for each stack, so a dial is neither boxed nor called through a table of
+    /// its own. A link made at once is one ([`From`]), which is what [`Dialled`] is for a stack
+    /// whose dials do not wait.
+    type Dial: PendingDial<Self::Pump> + From<OpenedLink<Self::Pump>> + 'static;
 
     /// Whether the stack opens links to an IPv6 end. `false` for a stack built without IPv6:
     /// what reads an endpoint for it refuses a bracketed address as one it never dials and reads
@@ -832,18 +984,27 @@ pub trait SessionLinks {
         let _ = tables;
     }
 
+    /// The bytes of a cell that holds any link the stack opens (`crate::link_cells`): what a
+    /// session's arena lays the cells of its link table out with. The default, `0`, is a stack
+    /// that places each link on the heap.
+    fn link_cell_bytes(&self) -> usize {
+        0
+    }
+
+    /// The cells every link the stack opens from now on is placed in, for the session the links
+    /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
+    /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
+    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells) {
+        let _ = cells;
+    }
+
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the
     /// dial is asked again ([`PendingDial::poll`]) until its link is made or refused, so a dial that
     /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the
     /// session meanwhile. The default makes the link here, as [`Self::open_initiator`] does, which
     /// is the answer of a stack whose dials do not wait.
-    #[cfg(feature = "alloc")]
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
-        let opened = self.open_initiator(to)?;
-        Ok(Box::new(Dialled::new(opened)))
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
+        self.open_initiator(to).map(Into::into)
     }
 
     /// A listener on `at`, which yields one link for each connection a peer opens to it. A stack
@@ -872,6 +1033,14 @@ pub trait SessionLinks {
     ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
         let _ = endpoint;
         Err(LinkOpenError::Unsupported)
+    }
+
+    /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
+    /// its owner's read of it reach the same link through clones of this. The default puts the
+    /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
+    /// handle back, so its link is behind one pointer and not two.
+    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
+        crate::link_cells::CellRc::boxed(pump).into_link()
     }
 }
 
@@ -927,6 +1096,13 @@ impl<P> Dialled<P> {
 impl<P> PendingDial<P> for Dialled<P> {
     fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>> {
         self.0.take().map(Ok)
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<P> From<OpenedLink<P>> for Dialled<P> {
+    fn from(opened: OpenedLink<P>) -> Self {
+        Self::new(opened)
     }
 }
 
@@ -1010,6 +1186,7 @@ pub fn run_session<C, L, F>(
     runtime: &CoopRuntime<C>,
     link: L,
     actions: &SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: &CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -1023,6 +1200,7 @@ where
         runtime.clone(),
         link,
         actions.clone(),
+        entropy,
         clock.clone(),
         config,
     );
@@ -1141,6 +1319,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
@@ -1156,6 +1335,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             runtime,
             link,
             actions,
+            entropy,
             clock,
             config,
             #[cfg(feature = "reassembly")]
@@ -1174,12 +1354,13 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
     ) -> Self {
         let reasm = in_place_reassembly(arena, &actions.params.policy);
-        Self::build(runtime, link, actions, clock, config, reasm)
+        Self::build(runtime, link, actions, entropy, clock, config, reasm)
     }
 
     /// `rx-in-place` with `reassembly` — the session's reassembly Router, and
@@ -1208,11 +1389,12 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
     ) -> Self {
-        Self::build(runtime, link, actions, clock, config, reasm)
+        Self::build(runtime, link, actions, entropy, clock, config, reasm)
     }
 
     /// [`Self::with_router`] built in `place` and lent back, its Router made in its own field by
@@ -1223,21 +1405,39 @@ impl<
     ///
     /// `make_router` writes the Router in the place it is handed and lends it back, which safe
     /// code does only by writing it there ([`MaybeUninit::write`]); one that lends back anything
-    /// else is refused with a panic, before the pump is used. `place` is overwritten without
-    /// dropping what it held.
+    /// else has written no Router, and the pump is not built: `None`, with what it was to be made
+    /// of dropped. `place` is overwritten without dropping what it held.
     #[cfg(feature = "reassembly")]
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
-    ) -> &mut Self {
-        Self::build_in(place, runtime, link, actions, clock, config, make_router);
-        // SAFETY: `build_in` wrote every field of the pump into `place`.
-        unsafe { place.assume_init_mut() }
+    ) -> Option<&mut Self> {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is `place`, valid for writes of a `Self`, and the receive's field is lent as
+        // the uninitialised place `MaybeUninit<UnicastRx<R>>` lays out as a `UnicastRx<R>`.
+        let rx =
+            unsafe { &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>() };
+        UnicastRx::init_in(rx, make_router)?;
+        // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
+        unsafe {
+            Self::build_in(
+                place,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |_| {},
+            );
+            Some(place.assume_init_mut())
+        }
     }
 
     /// What `Self::new` and [`Self::with_reassembly_arena`] share: the pump as a value, made by
@@ -1247,16 +1447,30 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
-        Self::build_in(&mut place, runtime, link, actions, clock, config, |slot| {
-            slot.write(reasm)
-        });
-        // SAFETY: `build_in` wrote every field of the pump into `place`.
-        unsafe { place.assume_init() }
+        // SAFETY: the receive is written in the place it is handed: `MaybeUninit::write` lends back
+        // the place it wrote, so `init_in` takes it as written. Then `build_in` has written every
+        // field of the pump into `place`.
+        unsafe {
+            Self::build_in(
+                &mut place,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                },
+            );
+            place.assume_init()
+        }
     }
 
     /// Build the pump IN `place`: the engine is made in its field and initialised there, and
@@ -1268,21 +1482,22 @@ impl<
     /// sequence number) is on the stack for as long as it runs. Inlined into the caller of a
     /// slot, that caller's frame would be under all of it.
     ///
-    /// A panic in the middle leaves `place` partly written, and it is not dropped: a leak, and
-    /// on the profiles that build this (`panic = "abort"` on a board) not even that.
+    /// The receive is written first, by `write_rx` in its field (one already written, which
+    /// [`Self::with_router_in`] checked, is left as it is), so a receive whose Router could not be
+    /// made is refused before any other part is taken.
     ///
-    /// The receive's Router is written in its field by `make_router`, which lends it back from
-    /// there: a maker that lends back anything but the place it was handed has not written it, and
-    /// is refused with a panic (`UnicastRx::init_in`).
+    /// # Safety
+    /// `write_rx` leaves the receive written in the place it is handed, or finds it written.
     #[inline(never)]
-    fn build_in(
+    unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
+        write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
         let SessionDriveConfig {
             timeouts,
@@ -1294,11 +1509,13 @@ impl<
         // exactly once below through its own address, and the engine is used only after its
         // field is written.
         unsafe {
+            write_rx(&mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>());
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
                     .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D>, CoopTime<C>>>>(),
                 &actions,
+                entropy,
             );
             // `new_session_engine_in` yields an un-initialized engine (the AP
             // convention — the caller runs the SCXML initial transition into the
@@ -1319,9 +1536,6 @@ impl<
             core::ptr::addr_of_mut!((*at).actions).write(actions);
             core::ptr::addr_of_mut!((*at).clock).write(clock);
             core::ptr::addr_of_mut!((*at).timers).write(TransportTimers::new(timeouts));
-            let rx = &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>();
-            let built = UnicastRx::init_in(rx, make_router).is_some();
-            assert!(built, "the Router is written in the field it was handed");
             #[cfg(feature = "session-slot")]
             core::ptr::addr_of_mut!((*at).pending_role).write(Some(role));
             core::ptr::addr_of_mut!((*at).iter).write(0);
@@ -1423,6 +1637,12 @@ impl<
         // loop calls the same primitive). A stalled chain whose continuation
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
         self.rx.sweep(now_ms, &mut *on_event);
+
+        // A Router lent to the receive only for its session's step (`RxReassembly::ready`): outside
+        // the lend the step takes no input, which the link keeps for a step that can stage it.
+        if !self.rx.ready() {
+            return None;
+        }
 
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
@@ -1530,6 +1750,7 @@ pub async fn session_task<C, L, F>(
     runtime: CoopRuntime<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -1539,7 +1760,7 @@ where
     L: SessionDatagramLink,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    let mut pump = SessionPump::new(runtime, link, actions, clock, config);
+    let mut pump = SessionPump::new(runtime, link, actions, entropy, clock, config);
     loop {
         if let Some(outcome) = pump.step(&mut on_event) {
             return outcome;
@@ -1568,6 +1789,7 @@ pub fn spawn_session<C, L, F>(
     local: &CoopLocalSet<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -1581,6 +1803,7 @@ where
         local.runtime().clone(),
         link,
         actions,
+        entropy,
         clock,
         config,
         on_event,
@@ -1595,6 +1818,24 @@ where
 pub trait MakeRouter<R> {
     /// Write the Router in `place` and lend it back.
     fn make_in(self, place: &mut MaybeUninit<R>) -> &mut R;
+}
+
+/// The place a session lends its one Router in is its own maker: the pump holds the place, and
+/// the Router stays the session's, lent to the pump for the length of the session's step.
+#[cfg(all(
+    feature = "reassembly",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
+    for wz_session_core::unicast_rx::RouterLend<D>
+{
+    fn make_in(
+        self,
+        place: &mut MaybeUninit<wz_session_core::unicast_rx::RouterLend<D>>,
+    ) -> &mut wz_session_core::unicast_rx::RouterLend<D> {
+        place.write(self)
+    }
 }
 
 /// [`spawn_session`] over a reassembly Router its maker builds: a session whose fragment chains
@@ -1613,6 +1854,7 @@ pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1627,15 +1869,15 @@ where
 {
     let runtime = local.runtime().clone();
     local.spawn_local_with(move || RouterSessionTask {
-        parts: Some(PumpParts {
+        place: Becomes::new(PumpParts {
             runtime,
             link,
             actions,
+            entropy,
             clock,
             config,
             make_router,
         }),
-        place: InPlace::empty(),
         on_event,
         _pinned: core::marker::PhantomPinned,
     })
@@ -1653,13 +1895,16 @@ where
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
 {
-    /// What the pump is made of, until the task first runs.
-    parts: Option<PumpParts<C, L, M>>,
-    place: InPlace<SessionPump<C, L, dyn BoxedLinkDriver, R>>,
+    /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
+    place: TaskPlace<C, L, R, M>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
 }
+
+/// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
@@ -1667,6 +1912,7 @@ struct PumpParts<C: ClockSource + 'static, L, M> {
     runtime: CoopRuntime<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1687,25 +1933,35 @@ where
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<DriverOutcome> {
-        // SAFETY: nothing is moved out of the pinned task but `parts`, which nothing points
+        // SAFETY: nothing is moved out of the pinned task but the parts, which nothing points
         // into; the pump is built in `place` and stays there, as the task does (`PhantomPinned`).
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some(parts) = this.parts.take() {
+        let built = this.place.build(|parts, slot| {
             let PumpParts {
                 runtime,
                 link,
                 actions,
+                entropy,
                 clock,
                 config,
                 make_router,
             } = parts;
-            this.place.build(|slot| {
-                SessionPump::with_router_in(slot, runtime, link, actions, clock, config, |router| {
-                    make_router.make_in(router)
-                })
-            });
-        }
-        match this.place.get_mut().step(&mut this.on_event) {
+            SessionPump::with_router_in(
+                slot,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |router| make_router.make_in(router),
+            )
+        });
+        // A pump its maker did not build in its place is no session to drive: the task ends.
+        let Some(pump) = built else {
+            return core::task::Poll::Ready(DriverOutcome::Terminated);
+        };
+        match pump.step(&mut this.on_event) {
             Some(outcome) => core::task::Poll::Ready(outcome),
             None => {
                 // Yield: the task is ready again at once, after the executor has gone round.
@@ -1732,58 +1988,94 @@ where
     crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F>>()
 }
 
-/// A value built where its holder lies and dropped with it: the place a task's future keeps its
-/// pump in, so the pump is written in the future's own memory and not moved into it. Before it is
-/// built it holds nothing, and dropping it drops nothing.
+/// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts
+/// and the pump share them, so the task's cell is as large as the larger of the two and not their
+/// sum. The parts are taken out whole before the pump is written over them, and whichever the place
+/// holds is dropped with it.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct InPlace<T> {
-    value: MaybeUninit<T>,
-    built: bool,
+struct Becomes<P, T> {
+    place: MaybeUninit<Shared<P, T>>,
+    stage: Stage,
+}
+
+/// The parts or the value, in one place.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+union Shared<P, T> {
+    parts: ManuallyDrop<P>,
+    value: ManuallyDrop<T>,
+}
+
+/// What a [`Becomes`] holds.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The parts, not yet taken.
+    Parts,
+    /// The value, built of them.
+    Built,
+    /// Nothing: the parts were taken and no value was built.
+    Empty,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<T> InPlace<T> {
-    /// A place with nothing in it.
-    const fn empty() -> Self {
+impl<P, T> Becomes<P, T> {
+    /// A place that holds `parts`.
+    fn new(parts: P) -> Self {
         Self {
-            value: MaybeUninit::uninit(),
-            built: false,
+            place: MaybeUninit::new(Shared {
+                parts: ManuallyDrop::new(parts),
+            }),
+            stage: Stage::Parts,
         }
     }
 
-    /// Have `make` write the value in this place and lend it back, and lend it on. A maker that
-    /// lends back anything but the place it was handed has not written it there, and is refused
-    /// with a panic; the place then holds nothing still. Built once: the place is the value's for
-    /// as long as the holder lives.
-    fn build(&mut self, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> &mut T {
-        debug_assert!(!self.built, "a place is built once");
-        let place: *const T = self.value.as_ptr();
-        let made: *const T = make(&mut self.value);
-        assert!(
-            core::ptr::eq(made, place),
-            "the value is written in the place it was handed"
-        );
-        self.built = true;
-        // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing a
-        // `T` there (`MaybeUninit::write`).
-        unsafe { self.value.assume_init_mut() }
-    }
-
-    /// The value built here. Asked only once it is built.
-    fn get_mut(&mut self) -> &mut T {
-        assert!(self.built, "the place is built before it is read");
-        // SAFETY: `built` is set only once `build` saw the value written here.
-        unsafe { self.value.assume_init_mut() }
+    /// The value built here, built first when the place still holds its parts: they are taken
+    /// out and handed to `make`, which writes the value in the place it is handed and lends it
+    /// back. A maker that builds nothing answers `None`, and so does this; one that lends back
+    /// anything but the place it was handed has not written it there, and is refused the same way.
+    /// Either way the place holds nothing after, and `None` is the answer from then on.
+    fn build(
+        &mut self,
+        make: impl FnOnce(P, &mut MaybeUninit<T>) -> Option<&mut T>,
+    ) -> Option<&mut T> {
+        let at = self.place.as_mut_ptr();
+        if self.stage == Stage::Parts {
+            // SAFETY: the place holds the parts, untaken; they are read out once, and the stage
+            // says the place holds nothing before anything else is done with it.
+            let parts = ManuallyDrop::into_inner(unsafe {
+                core::ptr::read(core::ptr::addr_of!((*at).parts))
+            });
+            self.stage = Stage::Empty;
+            // SAFETY: the value's field of the place, as the uninitialised place
+            // `MaybeUninit<T>` lays out as a `T`, as `ManuallyDrop<T>` does.
+            let slot =
+                unsafe { &mut *core::ptr::addr_of_mut!((*at).value).cast::<MaybeUninit<T>>() };
+            let place: *const T = slot.as_ptr();
+            let made: *const T = make(parts, slot)?;
+            if !core::ptr::eq(made, place) {
+                return None;
+            }
+            self.stage = Stage::Built;
+        }
+        if self.stage != Stage::Built {
+            return None;
+        }
+        // SAFETY: the stage says the value is written here, by the maker that lent it back.
+        Some(unsafe { &mut *core::ptr::addr_of_mut!((*at).value).cast::<T>() })
     }
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<T> Drop for InPlace<T> {
+impl<P, T> Drop for Becomes<P, T> {
     fn drop(&mut self) {
-        if self.built {
-            // SAFETY: `built` is set only once `build` saw the value written here, and the value
-            // is dropped here alone, once.
-            unsafe { self.value.assume_init_drop() };
+        let at = self.place.as_mut_ptr();
+        // SAFETY: the stage says which of the two the place holds; it is dropped here alone, once.
+        unsafe {
+            match self.stage {
+                Stage::Parts => ManuallyDrop::drop(&mut *core::ptr::addr_of_mut!((*at).parts)),
+                Stage::Built => ManuallyDrop::drop(&mut *core::ptr::addr_of_mut!((*at).value)),
+                Stage::Empty => {}
+            }
         }
     }
 }
@@ -1977,7 +2269,7 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 ///
 /// ```ignore
 /// static PUMPS: PumpSlots<BoardClock, LwipSessionLink<&'static LwipLink>, 3> = PumpSlots::new();
-/// let pump = PUMPS.claim(runtime.clone(), link, actions, clock, config)?;
+/// let pump = PUMPS.claim(runtime.clone(), link, actions, entropy, clock, config)?;
 /// spawn_pump(&local, pump, on_event)?;
 /// ```
 ///
@@ -2069,6 +2361,7 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Result<PumpRef<C, L, D>, PumpsFull> {
@@ -2116,12 +2409,18 @@ impl<
                 runtime,
                 link,
                 actions,
+                entropy,
                 clock,
                 config,
+                // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
                 #[cfg(feature = "reassembly")]
-                |slot| slot.write(reasm),
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                },
                 #[cfg(not(feature = "reassembly"))]
-                |slot| slot.write(()),
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(()));
+                },
             );
         }
         Ok(PumpRef { cell })
@@ -2298,7 +2597,7 @@ mod wake_budget_tests {
     #[cfg(feature = "session-unicast-accept")]
     use wz_session_core::driver_loop::DriverLoopOutcome;
 
-    use crate::session_runtime::new_session_actions;
+    use crate::session_runtime::{new_session_actions, SessionEntropy};
     use crate::time::{ClockSource, CoopTime};
     use crate::CoopRuntime;
 
@@ -2318,6 +2617,8 @@ mod wake_budget_tests {
         gone: core::cell::Cell<Option<LostCause>>,
         /// Whether the link's owner holds its input back.
         holding: core::cell::Cell<bool>,
+        /// How many times the link was asked for a datagram.
+        reads: core::cell::Cell<u32>,
     }
 
     impl SessionDatagramLink for Recording {
@@ -2329,6 +2630,7 @@ mod wake_budget_tests {
             true
         }
         fn try_recv(&self) -> Option<RxFrame> {
+            self.reads.set(self.reads.get() + 1);
             None
         }
         fn lost(&self) -> Option<LostCause> {
@@ -2389,8 +2691,9 @@ mod wake_budget_tests {
     fn waited(in_ms: Option<u64>) -> u64 {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         // The session's own clock, whose epoch is its runtime's and not the board's.
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
@@ -2400,7 +2703,7 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
@@ -2411,8 +2714,9 @@ mod wake_budget_tests {
     fn raised(in_ms: Option<u64>) -> (usize, Option<u64>) {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
         let link = Rc::new(Recording::default());
@@ -2421,7 +2725,7 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link, actions.clone(), clock, config);
+        let mut pump = SessionPump::new(runtime, link, actions.clone(), entropy, clock, config);
         let mut wakes = 0;
         let _ = pump.step(&mut |event: IterationEvent<'_, '_>| {
             if matches!(event, IterationEvent::AppWake) {
@@ -2440,15 +2744,23 @@ mod wake_budget_tests {
     fn a_held_link_leaves_the_rest_of_a_datagram_parked() {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions.clone(), clock, config);
+        let mut pump = SessionPump::new(
+            runtime,
+            link.clone(),
+            actions.clone(),
+            entropy,
+            clock,
+            config,
+        );
         link.holding.set(true);
         actions.park_pending_batch(&[0xFF]);
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
@@ -2484,15 +2796,16 @@ mod wake_budget_tests {
     fn a_link_that_is_gone_ends_its_session() {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
         let mut lost = Vec::new();
         let mut record = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
@@ -2549,15 +2862,17 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
-        let before = Rc::strong_count(&actions);
+        let before = crate::link_cells::CellRc::handles(&actions);
         let task = spawn_session_with_router(
             &local,
             Rc::clone(&link),
             actions.clone(),
+            entropy,
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2582,15 +2897,66 @@ mod wake_budget_tests {
             !link.budgets.borrow().is_empty(),
             "the pump built in the task stepped its link"
         );
-        let running = Rc::strong_count(&actions);
+        let running = crate::link_cells::CellRc::handles(&actions);
         assert!(running > before, "the pump holds the handle to its session");
         task.abort();
         local.run_until_idle();
         assert_eq!(made.get(), 1, "a dropped task makes nothing more");
         assert!(
-            Rc::strong_count(&actions) < running,
+            crate::link_cells::CellRc::handles(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
+    }
+
+    /// A session over the Router its session lends it reads its link inside the lend alone: a
+    /// pass of its task outside the lend steps the link and asks it for nothing, which leaves the
+    /// link's input with the link, and a pass inside the lend asks it. The CONTROL is the step of
+    /// the link in the pass outside the lend.
+    #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+    #[test]
+    fn a_session_over_a_lent_router_reads_its_link_inside_the_lend_alone() {
+        use wz_session_core::unicast_rx::RouterLend;
+        type Router = crate::reassembly_rx::CoopReassembly;
+        let runtime = CoopRuntime::new(Stopped);
+        let local = CoopLocalSet::new(&runtime);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let link = Rc::new(Recording::default());
+        let lend = RouterLend::<Router>::new();
+        let mut router = crate::reassembly_rx::mcu_reassembly(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+        );
+        let task = spawn_session_with_router(
+            &local,
+            Rc::clone(&link),
+            actions,
+            entropy,
+            clock,
+            SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+            lend.clone(),
+            ignore as fn(IterationEvent<'_, '_>),
+        )
+        .expect("a grown table takes every task");
+        local.run_until_idle();
+        assert!(
+            !link.budgets.borrow().is_empty(),
+            "CONTROL: the pass stepped the link"
+        );
+        assert_eq!(
+            link.reads.get(),
+            0,
+            "outside the lend the link is asked nothing"
+        );
+        lend.lend_for(&mut router, || local.run_until_idle());
+        assert!(link.reads.get() > 0, "inside the lend the link is asked");
+        task.abort();
+        local.run_until_idle();
     }
 
     /// The bytes of a session's task are a constant of its types: a runtime reserved with cells of
@@ -2615,13 +2981,15 @@ mod wake_budget_tests {
             );
             let local = CoopLocalSet::new(&runtime);
             let clock = CoopTime::new(&runtime);
-            let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-            let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+            let sink = crate::link_cells::heap_sink(Null);
+            let actions = new_session_actions(sink, params(), clock.clone());
+            let entropy = SessionEntropy::new(Counting(0));
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
                 &local,
                 Rc::new(Recording::default()),
                 actions,
+                entropy,
                 clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -2695,12 +3063,14 @@ mod wake_budget_tests {
         runtime.seal();
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let task = spawn_session_with_router(
             &local,
             Rc::new(Recording::default()),
             actions,
+            entropy,
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2752,8 +3122,9 @@ mod wake_budget_tests {
     fn acceptor() -> (SessionPump<Stopped, Rc<Recording>>, u64) {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -2762,7 +3133,7 @@ mod wake_budget_tests {
         };
         let link = Rc::new(Recording::default());
         (
-            SessionPump::new(runtime, link, actions, clock, config),
+            SessionPump::new(runtime, link, actions, entropy, clock, config),
             now_ms,
         )
     }
@@ -2826,7 +3197,7 @@ mod wake_budget_tests {
 
 #[cfg(all(test, feature = "reassembly", not(feature = "session-slot")))]
 mod in_place_tests {
-    use super::InPlace;
+    use super::Becomes;
     use alloc::boxed::Box;
     use core::cell::Cell;
 
@@ -2839,25 +3210,51 @@ mod in_place_tests {
         }
     }
 
-    /// The value is written where the place lies, lent on, and dropped once, with the place.
+    /// The parts are handed to the maker, which writes the value where they lay; the value is
+    /// lent on each time after and dropped once, with the place, and the parts are not dropped
+    /// again.
     #[test]
-    fn a_value_built_in_place_is_dropped_once_with_its_holder() {
+    fn the_value_is_built_of_the_parts_in_their_place_and_each_is_dropped_once() {
+        let (parts_drops, value_drops) = (Cell::new(0), Cell::new(0));
+        {
+            let mut place = Becomes::new(Counted(&parts_drops));
+            let value = place
+                .build(|parts, slot| {
+                    drop(parts);
+                    Some(slot.write(Counted(&value_drops)))
+                })
+                .expect("written in its place");
+            assert_eq!(value.0.get(), 0, "built and lent, not dropped");
+            assert_eq!(parts_drops.get(), 1, "the parts were taken and let go of");
+            assert!(
+                place.build(|_parts, _slot| None).is_some(),
+                "built once, lent again"
+            );
+        }
+        assert_eq!(value_drops.get(), 1, "dropped once, with the place");
+        assert_eq!(parts_drops.get(), 1);
+    }
+
+    /// Parts never built into a value are dropped once, with the place.
+    #[test]
+    fn parts_never_built_are_dropped_with_the_place() {
         let drops = Cell::new(0);
         {
-            let mut place = InPlace::empty();
-            let value = place.build(|slot| slot.write(Counted(&drops)));
-            assert_eq!(value.0.get(), 0, "built and lent, not dropped");
+            let _place = Becomes::<Counted<'_>, u32>::new(Counted(&drops));
         }
-        assert_eq!(drops.get(), 1, "dropped once, with the place");
+        assert_eq!(drops.get(), 1);
     }
 
     /// A maker that lends back a value it did not write in the place is refused, and the place,
-    /// not taken as built, drops nothing as the refusal unwinds through it.
+    /// its parts taken and nothing built, lends nothing and drops nothing from then on.
     #[test]
-    #[should_panic(expected = "the value is written in the place it was handed")]
     fn a_maker_that_lends_back_another_value_is_refused() {
         let elsewhere: &'static mut u32 = Box::leak(Box::new(7));
-        let mut place = InPlace::<u32>::empty();
-        let _ = place.build(|_slot| elsewhere);
+        let mut place = Becomes::<(), u32>::new(());
+        assert!(place.build(|(), _slot| Some(elsewhere)).is_none());
+        assert!(
+            place.build(|(), _slot| None).is_none(),
+            "nothing was built, and the parts are gone"
+        );
     }
 }

@@ -339,7 +339,7 @@ impl AuthDispatch {
             {
                 let mut ids: Vec<u8> = methods.iter().map(|m| m.id()).collect();
                 ids.sort_unstable();
-                ids.windows(2).all(|w| w[0] != w[1])
+                ids.windows(2).all(|w| matches!(w, [a, b] if a != b))
             },
             "auth methods must carry distinct ids (sub-exts route by id)"
         );

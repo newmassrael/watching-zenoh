@@ -719,11 +719,11 @@ impl TxQueueShape {
     /// the last frame.
     pub fn lane_bytes(&self, priority: crate::qos::Priority) -> usize {
         let lane = if self.qos {
-            priority.wire_byte()
+            priority
         } else {
-            crate::qos::Priority::DEFAULT.wire_byte()
+            crate::qos::Priority::DEFAULT
         };
-        self.sizes[lane as usize].saturating_mul(self.queue_unit_bytes)
+        lane.of(&self.sizes).saturating_mul(self.queue_unit_bytes)
     }
 }
 
@@ -1346,6 +1346,24 @@ pub trait BoxedLinkDriver {
     fn tx_slot_abort(&self, slot: TxSlot) {
         let _ = slot;
     }
+
+    /// Whether a slot the session holds past the call that took it (a batch frame left open
+    /// across messages) leaves the link's slots for the session's other links: `false` from a
+    /// link whose slots come from a pool its session's links share and which has none free
+    /// besides, so the session sends the frame now rather than keep it, and a link that asks for
+    /// a slot always finds one. The default is a link whose slots are its own.
+    fn tx_slot_spare(&self) -> bool {
+        true
+    }
+
+    /// Whether a slot would be lent now as far as the link's pool goes: `false` from a link whose
+    /// slots come from a pool its session's links share, which holds none, and every slot of which
+    /// another link holds for a frame its stream has not finished. Then no wait on this link's own
+    /// stack gives it room; the session's other links' steps do. The default is a link whose slots
+    /// are its own.
+    fn tx_slot_claimable(&self) -> bool {
+        true
+    }
 }
 
 /// The name of one outbound slot a link lent: the `slot_id` of ARCHITECTURE
@@ -1725,6 +1743,19 @@ pub trait SessionRuntime: Runtime + Sized {
     /// one; everything else is the owning profile's business.
     type IterationWork: Default;
 
+    /// The session's one entropy source, as each of its links' handshake bindings holds it
+    /// ([`SessionActionsBinding`](crate::session_actions::SessionActionsBinding)): what every
+    /// InitAck the session sends draws its cookie nonce and its challenges from. A link's bundle
+    /// holds none, so there is one source per session however many links it has.
+    ///
+    /// The profile names the form, as it names [`LinkSink`](Self::LinkSink): a value that
+    /// stands for the one source (the AP's `getrandom`, a zero-sized type), a counted handle on
+    /// it (the cooperative profile, one per link), or the exclusive reference to it that a
+    /// session's own slot hands out once (the fixed-memory profile). Present where the
+    /// session's handshake is, as [`ActionsHandle`](Self::ActionsHandle) is.
+    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    type EntropyDraw: crate::entropy::EntropySource;
+
     /// Wrap an owned value in the per-profile [`Shared`](Self::Shared) pointer
     /// (tokio `Arc::new`, lwIP `Rc::new`). Generic-`R` code (the
     /// [`SessionLinkActions`] constructor + the multilink join) shares a
@@ -2057,9 +2088,11 @@ impl RxBytes {
                 storage,
                 start,
                 end,
-            } => &storage.as_slice()[*start..*end],
+            } => storage.as_slice().get(*start..*end).unwrap_or_default(),
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Leased { lease, start, end } => &lease.bytes()[*start..*end],
+            RxRepr::Leased { lease, start, end } => {
+                lease.bytes().get(*start..*end).unwrap_or_default()
+            }
         }
     }
 
@@ -2179,18 +2212,18 @@ impl RxBytes {
             return None;
         }
         Some(match &self.0 {
-            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes[range].to_vec())),
+            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes.get(range)?.to_vec())),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Shared { storage, start, .. } => Self(RxRepr::Shared {
                 storage: storage.clone(),
-                start: start + range.start,
-                end: start + range.end,
+                start: start.checked_add(range.start)?,
+                end: start.checked_add(range.end)?,
             }),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Leased { lease, start, .. } => Self(RxRepr::Leased {
                 lease: lease.clone(),
-                start: start + range.start,
-                end: start + range.end,
+                start: start.checked_add(range.start)?,
+                end: start.checked_add(range.end)?,
             }),
         })
     }
@@ -2248,13 +2281,13 @@ impl RxBytes {
         match &self.0 {
             RxRepr::Owned(bytes) => Some(bytes.len()),
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Leased { start, end, .. } => Some(end - start),
+            RxRepr::Leased { start, end, .. } => Some(end.saturating_sub(*start)),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Shared { start, end, .. } => {
                 if *start == 0 && self.whole_parts().is_some() {
                     None
                 } else {
-                    Some(end - start)
+                    Some(end.saturating_sub(*start))
                 }
             }
         }

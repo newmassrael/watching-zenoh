@@ -51,6 +51,7 @@ use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
+use crate::query::QueryPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
 #[cfg(feature = "peer-row-pools")]
 use crate::row_pool::{Keyed, OwnSpans, RowLender, RowSource, RowSpace};
@@ -84,6 +85,9 @@ pub struct PeerTables<P: Storage = Profile> {
     pub replies: ReplyStage<P>,
     /// The `Final`s owed to the peer's queries.
     pub finals: FinalStage<P>,
+    /// What the peer's queries are judged by: who its link proved it to be, the session's answer
+    /// to a key it cannot resolve, the bounds of its queries and the shared memory of their values.
+    pub queries: QueryPeer,
     /// The answers to the peer's liveliness interests, staged until the next
     /// drain: [`caps::MAX_PENDING_DECLARES`] items, whole chains or none.
     #[cfg(feature = "liveliness-token")]
@@ -133,6 +137,7 @@ impl<P: Storage> PeerTables<P> {
             ptr::write(addr_of_mut!((*at).tokens), PeerTokens::default());
             ptr::write(addr_of_mut!((*at).replies), ReplyStage::default());
             ptr::write(addr_of_mut!((*at).finals), FinalStage::default());
+            ptr::write(addr_of_mut!((*at).queries), QueryPeer::new());
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).pending_declares), BoundedVec::default());
             #[cfg(feature = "liveliness-token")]
@@ -153,6 +158,7 @@ impl<P: Storage> PeerTables<P> {
             tokens: _,
             replies: _,
             finals: _,
+            queries: _,
             #[cfg(feature = "liveliness-token")]
                 pending_declares: _,
             #[cfg(feature = "liveliness-token")]
@@ -172,6 +178,7 @@ impl PeerTables<Static> {
             tokens: PeerTokens::new_static(),
             replies: ReplyStage::new_static(),
             finals: FinalStage::new_static(),
+            queries: QueryPeer::new(),
             #[cfg(feature = "liveliness-token")]
             pending_declares: BoundedVec::new_static(),
             #[cfg(feature = "liveliness-token")]
@@ -297,16 +304,16 @@ impl PeerTables<Lent> {
             tokens,
         ];
         let mut sum = 0usize;
-        let mut at = 0;
-        while at < spans.len() {
-            sum = match spans[at] {
-                Some(span) => match sum.checked_add(span) {
+        let mut rest: &[Option<usize>] = &spans;
+        while let [span, tail @ ..] = rest {
+            sum = match span {
+                Some(span) => match sum.checked_add(*span) {
                     Some(sum) => sum,
                     None => return None,
                 },
                 None => return None,
             };
-            at += 1;
+            rest = tail;
         }
         Some(sum)
     }
@@ -597,16 +604,16 @@ impl PeerPools {
 /// The sum of `spans`, or `None` when one is `None` or the sum is past the address space.
 const fn sum_spans(spans: &[Option<usize>]) -> Option<usize> {
     let mut sum = 0usize;
-    let mut at = 0;
-    while at < spans.len() {
-        sum = match spans[at] {
-            Some(span) => match sum.checked_add(span) {
+    let mut rest = spans;
+    while let [span, tail @ ..] = rest {
+        sum = match span {
+            Some(span) => match sum.checked_add(*span) {
                 Some(sum) => sum,
                 None => return None,
             },
             None => return None,
         };
-        at += 1;
+        rest = tail;
     }
     Some(sum)
 }
@@ -643,8 +650,18 @@ impl<P: Storage> PeerTables<P> {
         self.replies
             .limit_to(crate::reply_stage::ReplyBounds::of(limits));
         self.finals.limit_to(limits.max_pending_finals_held());
+        self.queries.limit_query_sizes_to(
+            limits.query_parameters_max_bytes_held(),
+            limits.query_attachment_max_bytes_held(),
+        );
         self.subscribers
             .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
         let remote_decls = limits.max_remote_decls_held();
         self.remote_subscribers.limit_to(remote_decls);
         self.remote_queryables.limit_to(remote_decls);
@@ -758,11 +775,10 @@ mod tests {
         for round in 0..2 {
             for id in 1..=3u64 {
                 let key = std::format!("bound/{id}");
-                tables
-                    .subscribers
-                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                        id, &key,
-                    )));
+                tables.subscribers.absorb_declare(
+                    &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, &key)),
+                    None,
+                );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
                     &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
@@ -825,11 +841,10 @@ mod tests {
         let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
         for round in 0..2u32 {
             for (id, key) in [(1u64, "abc"), (2, "ab")] {
-                tables
-                    .subscribers
-                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                        id, key,
-                    )));
+                tables.subscribers.absorb_declare(
+                    &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
+                    None,
+                );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
                     &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
@@ -1286,11 +1301,10 @@ mod lent_tests {
         use crate::transport_profile::owned::DeclareOwnedVariant;
         use wz_session_core_test_support as fx;
 
-        tables
-            .subscribers
-            .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                id, key,
-            )));
+        tables.subscribers.absorb_declare(
+            &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
+            None,
+        );
     }
 
     /// What a peer declares is kept in the session's key arena, a block of each key's length,
@@ -1317,7 +1331,7 @@ mod lent_tests {
         .expect("the arena has the rows");
         let mut table = RemoteSubscribers::default();
         declare_alias(&mut tables, 3, "demo/alias");
-        declare_subscriber(&mut table, &mut tables, 1, "demo/sub/**");
+        declare_subscriber(&mut table, &mut tables, 1, "demo/sub/x");
         assert_eq!(
             tables.subscribers.resolve_inbound_mapping(3).as_deref(),
             Some("demo/alias")
@@ -1325,7 +1339,7 @@ mod lent_tests {
         assert!(tables.remote_subscribers.has_matching("demo/sub/x"));
         assert!(!tables.remote_subscribers.has_matching("demo/other"));
         let blocks = block_bytes("demo/alias".len()).expect("short")
-            + block_bytes("demo/sub/**".len()).expect("short");
+            + block_bytes("demo/sub/x".len()).expect("short");
         assert_eq!(keys.counts().used, blocks, "a block of each key's length");
         let peak = keys.counts().peak;
         tables.forget_peer();

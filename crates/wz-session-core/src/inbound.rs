@@ -572,13 +572,13 @@ impl InboundFrame {
 /// read where it lies in the receive buffer alike, and neither read is judged by a copy of the
 /// other's rules.
 #[derive(Debug, Clone, Copy)]
-pub enum ControlFacts<'f> {
+pub enum ControlFacts<'f, C = HeldChain<'f>> {
     /// An Init (`T_MID_INIT`).
     #[cfg(feature = "codec-init-body")]
-    Init(InitFacts<'f>),
+    Init(InitFacts<'f, C>),
     /// An Open (`T_MID_OPEN`).
     #[cfg(feature = "codec-open-body")]
-    Open(OpenFacts<'f>),
+    Open(OpenFacts<'f, C>),
     /// A Close (`T_MID_CLOSE`): its reason byte, and whether it closes the whole session
     /// (`_Z_FLAG_T_CLOSE_S`) or only the link it arrived on.
     #[cfg(feature = "codec-close")]
@@ -603,15 +603,15 @@ pub enum ControlFacts<'f> {
     /// A message this read does not take: an id this build has no reader for. It is refused as
     /// [`Self::Refused`] is, and it is no sign of the peer's life, since it was not read.
     ///
-    /// It carries the borrow of the facts' lifetime because a build with no handshake reader has
-    /// no other variant that does, and a lifetime parameter nothing names is refused.
-    Unread(core::marker::PhantomData<&'f ()>),
+    /// It carries the borrow of the facts' lifetime and their chain's type because a build with no
+    /// handshake reader has no other variant that does, and a parameter nothing names is refused.
+    Unread(core::marker::PhantomData<(&'f (), C)>),
 }
 
 /// The facts of an Init the judgement reads ([`ControlFacts::Init`]).
 #[cfg(feature = "codec-init-body")]
 #[derive(Debug, Clone, Copy)]
-pub struct InitFacts<'f> {
+pub struct InitFacts<'f, C = HeldChain<'f>> {
     /// `_Z_FLAG_T_INIT_A`: an InitAck, where clear an InitSyn.
     pub is_ack: bool,
     /// The protocol version.
@@ -624,14 +624,14 @@ pub struct InitFacts<'f> {
     pub s: Option<wz_codecs::init_body::InitBodyS>,
     /// The cookie an InitAck carries.
     pub cookie: Option<&'f [u8]>,
-    /// The extension chain, as the message keeps it.
-    pub extensions: &'f [crate::transport_profile::ExtEntryOwned],
+    /// The extension chain, held or read where the message lies.
+    pub extensions: C,
 }
 
 /// The facts of an Open the judgement reads ([`ControlFacts::Open`]).
 #[cfg(feature = "codec-open-body")]
 #[derive(Debug, Clone, Copy)]
-pub struct OpenFacts<'f> {
+pub struct OpenFacts<'f, C = HeldChain<'f>> {
     /// `_Z_FLAG_T_OPEN_A`: an OpenAck, where clear an OpenSyn.
     pub is_ack: bool,
     /// The lease, in milliseconds whatever unit the wire wrote it in.
@@ -640,11 +640,354 @@ pub struct OpenFacts<'f> {
     pub initial_sn: u64,
     /// The cookie an OpenSyn echoes.
     pub cookie: Option<&'f [u8]>,
-    /// The extension chain, as the message keeps it.
-    pub extensions: &'f [crate::transport_profile::ExtEntryOwned],
+    /// The extension chain, held or read where the message lies.
+    pub extensions: C,
 }
 
-impl ControlFacts<'_> {
+/// How the judgement of a received handshake message reads its extension chain, whichever read
+/// the message: the chain a decoded message owns ([`HeldChain`]), or the chain of a message read
+/// where it lies in the receive buffer (`ReadChain`). The judgement is compiled for the read that
+/// hands it the facts, so a receive that reads in place carries no reader of an owned chain, and
+/// the copying decode no reader of one read in place.
+pub trait ExtChainRead: Copy + core::fmt::Debug {
+    /// One entry as a reader sees it.
+    type Entry: crate::ext_view::ExtEntryView;
+    /// The walk of the chain.
+    type Entries: Iterator<Item = Self::Entry>;
+    /// The chain's entries as owned entries, for a reader of a slice.
+    #[cfg(feature = "alloc")]
+    type Held: core::ops::Deref<Target = [crate::transport_profile::ExtEntryOwned]>;
+
+    /// The entries, in the chain's order.
+    fn entries(self) -> Self::Entries;
+
+    /// The chain as the owned entries a reader of a slice takes: the held chain itself, or each
+    /// entry of a chain read where it lies made owned. For the readers of the extensions a build
+    /// with an allocator negotiates (QoS, compression, shared memory, authentication); the ones
+    /// every build reads take [`Self::entries`].
+    #[cfg(feature = "alloc")]
+    fn held(self) -> Self::Held;
+}
+
+/// The extension chain a decoded message owns ([`InboundFrame`]), as its judgement reads it.
+#[derive(Clone, Copy)]
+pub struct HeldChain<'f>(pub &'f [crate::transport_profile::ExtEntryOwned]);
+
+impl<'f> ExtChainRead for HeldChain<'f> {
+    type Entry = &'f crate::transport_profile::ExtEntryOwned;
+    type Entries = core::slice::Iter<'f, crate::transport_profile::ExtEntryOwned>;
+    #[cfg(feature = "alloc")]
+    type Held = &'f [crate::transport_profile::ExtEntryOwned];
+
+    fn entries(self) -> Self::Entries {
+        self.0.iter()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn held(self) -> Self::Held {
+        self.0
+    }
+}
+
+/// Each entry as a reader sees it, whichever way the chain was read, so the facts of a decoded
+/// message and of one read in place print alike.
+impl core::fmt::Debug for HeldChain<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        entries_fmt(f, self.entries())
+    }
+}
+
+/// A chain's entries printed as [`EntryFacts`].
+fn entries_fmt<E: crate::ext_view::ExtEntryView>(
+    f: &mut core::fmt::Formatter<'_>,
+    entries: impl Iterator<Item = E>,
+) -> core::fmt::Result {
+    f.debug_list().entries(entries.map(EntryFacts)).finish()
+}
+
+/// What a chain's `Debug` prints of one entry: its header, its z64 value and its plain ZBuf
+/// bytes.
+struct EntryFacts<E>(E);
+
+impl<E: crate::ext_view::ExtEntryView> core::fmt::Debug for EntryFacts<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Ext")
+            .field(&self.0.header())
+            .field(&self.0.zint())
+            .field(&self.0.plain_zbuf())
+            .finish()
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl<'f> ExtChainRead for ReadChain<'f> {
+    type Entry = wz_codecs::ext_entry::ExtEntryView<'f>;
+    type Entries = ReadEntries<'f>;
+    type Held = alloc::vec::Vec<crate::transport_profile::ExtEntryOwned>;
+
+    fn entries(self) -> Self::Entries {
+        ReadEntries(self.iter())
+    }
+
+    // Every entry was built as the decoder builds it before the message was handed out
+    // (`read_control`), so none is refused here.
+    fn held(self) -> Self::Held {
+        self.iter()
+            .filter_map(|entry| crate::ext_chain::received_entry(&entry).ok())
+            .collect()
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl core::fmt::Debug for ReadChain<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        entries_fmt(f, self.entries())
+    }
+}
+
+/// The walk of a [`ReadChain`] as a judgement reads it ([`ExtChainRead::entries`]).
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+pub struct ReadEntries<'f>(ReadChainIter<'f>);
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl<'f> Iterator for ReadEntries<'f> {
+    type Item = wz_codecs::ext_entry::ExtEntryView<'f>;
+
+    // The slot profile keeps only the entries of an extension it reads
+    // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
+    // the two reads of one message agree.
+    #[cfg(feature = "session-slot")]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.find(|entry| {
+            crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
+        })
+    }
+
+    #[cfg(not(feature = "session-slot"))]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+/// The extension chain of a control message read where it lies (`ControlRead`): the view its
+/// document read it as, walked again by each reader that asks.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+#[derive(Clone, Copy)]
+pub enum ReadChain<'a> {
+    /// An Init's chain.
+    #[cfg(feature = "codec-init-body")]
+    Init(
+        sce_forge_runtime::codec::ListView<
+            'a,
+            wz_codecs::transport_init::TransportInitExtensionsWalk,
+            0,
+        >,
+    ),
+    /// An Open's chain.
+    #[cfg(feature = "codec-open-body")]
+    Open(
+        sce_forge_runtime::codec::ListView<
+            'a,
+            wz_codecs::transport_open::TransportOpenExtensionsWalk,
+            0,
+        >,
+    ),
+    /// A Close's chain.
+    #[cfg(feature = "codec-close")]
+    Close(
+        sce_forge_runtime::codec::ListView<
+            'a,
+            wz_codecs::transport_close::TransportCloseExtensionsWalk,
+            0,
+        >,
+    ),
+    /// A KeepAlive's chain.
+    #[cfg(feature = "codec-keep-alive")]
+    KeepAlive(
+        sce_forge_runtime::codec::ListView<
+            'a,
+            wz_codecs::transport_keep_alive::TransportKeepAliveExtensionsWalk,
+            0,
+        >,
+    ),
+    /// A message that carried no chain.
+    Empty(core::marker::PhantomData<&'a ()>),
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl<'a> ReadChain<'a> {
+    /// The entries, in the chain's order, each decoded as the walk reaches it.
+    pub fn iter(&self) -> ReadChainIter<'a> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            Self::Init(list) => ReadChainIter::Init(list.iter()),
+            #[cfg(feature = "codec-open-body")]
+            Self::Open(list) => ReadChainIter::Open(list.iter()),
+            #[cfg(feature = "codec-close")]
+            Self::Close(list) => ReadChainIter::Close(list.iter()),
+            #[cfg(feature = "codec-keep-alive")]
+            Self::KeepAlive(list) => ReadChainIter::KeepAlive(list.iter()),
+            Self::Empty(_) => ReadChainIter::Done(core::marker::PhantomData),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl crate::ext_chain::ChainHeaders for ReadChain<'_> {
+    fn chain_headers(&self) -> impl Iterator<Item = u8> + '_ {
+        self.iter().map(|entry| entry.header)
+    }
+}
+
+/// The walk of a [`ReadChain`].
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+pub enum ReadChainIter<'a> {
+    /// An Init's.
+    #[cfg(feature = "codec-init-body")]
+    Init(
+        sce_forge_runtime::codec::ListIter<
+            'a,
+            wz_codecs::transport_init::TransportInitExtensionsWalk,
+            0,
+        >,
+    ),
+    /// An Open's.
+    #[cfg(feature = "codec-open-body")]
+    Open(
+        sce_forge_runtime::codec::ListIter<
+            'a,
+            wz_codecs::transport_open::TransportOpenExtensionsWalk,
+            0,
+        >,
+    ),
+    /// A Close's.
+    #[cfg(feature = "codec-close")]
+    Close(
+        sce_forge_runtime::codec::ListIter<
+            'a,
+            wz_codecs::transport_close::TransportCloseExtensionsWalk,
+            0,
+        >,
+    ),
+    /// A KeepAlive's.
+    #[cfg(feature = "codec-keep-alive")]
+    KeepAlive(
+        sce_forge_runtime::codec::ListIter<
+            'a,
+            wz_codecs::transport_keep_alive::TransportKeepAliveExtensionsWalk,
+            0,
+        >,
+    ),
+    /// The walk of no chain, or of one walked to its end.
+    Done(core::marker::PhantomData<&'a ()>),
+}
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast"
+))]
+impl<'a> Iterator for ReadChainIter<'a> {
+    type Item = wz_codecs::ext_entry::ExtEntryView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            Self::Init(entries) => entries.next(),
+            #[cfg(feature = "codec-open-body")]
+            Self::Open(entries) => entries.next(),
+            #[cfg(feature = "codec-close")]
+            Self::Close(entries) => entries.next(),
+            #[cfg(feature = "codec-keep-alive")]
+            Self::KeepAlive(entries) => entries.next(),
+            Self::Done(_) => None,
+        }
+    }
+}
+
+impl<'f, C> ControlFacts<'f, C> {
+    /// The facts without their extension chain: what a reader that takes nothing of the chain
+    /// reads, of one type whichever read gave them, so that reader is compiled once.
+    pub fn unchained(self) -> ControlFacts<'f, ()> {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            ControlFacts::Init(init) => ControlFacts::Init(InitFacts {
+                is_ack: init.is_ack,
+                version: init.version,
+                whatami: init.whatami,
+                zid: init.zid,
+                s: init.s,
+                cookie: init.cookie,
+                extensions: (),
+            }),
+            #[cfg(feature = "codec-open-body")]
+            ControlFacts::Open(open) => ControlFacts::Open(OpenFacts {
+                is_ack: open.is_ack,
+                lease: open.lease,
+                initial_sn: open.initial_sn,
+                cookie: open.cookie,
+                extensions: (),
+            }),
+            #[cfg(feature = "codec-close")]
+            ControlFacts::Close { reason, session } => ControlFacts::Close { reason, session },
+            #[cfg(feature = "codec-keep-alive")]
+            ControlFacts::KeepAlive => ControlFacts::KeepAlive,
+            #[cfg(all(
+                feature = "alloc",
+                any(feature = "codec-frame", feature = "reassembly")
+            ))]
+            ControlFacts::Data => ControlFacts::Data,
+            ControlFacts::Refused => ControlFacts::Refused,
+            ControlFacts::Unread(_) => ControlFacts::Unread(core::marker::PhantomData),
+        }
+    }
+
+    /// The extension chain of an Init or an Open, the messages whose chain a judgement reads.
+    pub fn chain(&self) -> Option<C>
+    where
+        C: Copy,
+    {
+        match self {
+            #[cfg(feature = "codec-init-body")]
+            ControlFacts::Init(init) => Some(init.extensions),
+            #[cfg(feature = "codec-open-body")]
+            ControlFacts::Open(open) => Some(open.extensions),
+            _ => None,
+        }
+    }
+
     /// The establishment message these facts are of, if they are of one.
     #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
     pub fn handshake_message(&self) -> Option<crate::handshake_stray::HandshakeMessage> {
@@ -680,7 +1023,7 @@ impl InboundFrame {
                 zid: body.zid.as_slice(),
                 s: body.s,
                 cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
-                extensions,
+                extensions: HeldChain(extensions),
             }),
             #[cfg(feature = "codec-open-body")]
             InboundFrame::Open {
@@ -693,7 +1036,7 @@ impl InboundFrame {
                 lease: body.lease,
                 initial_sn: body.initial_sn,
                 cookie: body.cookie.as_ref().map(|cookie| cookie.as_slice()),
-                extensions,
+                extensions: HeldChain(extensions),
             }),
             #[cfg(feature = "codec-close")]
             InboundFrame::Close {
@@ -1071,7 +1414,29 @@ impl KeptChain for Vec<ExtEntryOwned> {
 impl KeptChain for InPlaceExtChain {
     fn keep<'a>(
         mid: u8,
-        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+        mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    ) -> Result<Self, InboundParseError> {
+        Self::fold(mid, &mut walked)
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "storage-profile",
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl InPlaceExtChain {
+    /// The fold of [`KeptChain::keep`], over the walk as a trait object
+    /// ([`crate::ext_view::EntryWalk`]): each message's header document has a walk type of its
+    /// own (the Frame's, the Fragment's), and the fold is compiled once for all of them. A header's chain is a few entries at most, so a call through
+    /// the table per entry costs nothing a receive can see.
+    #[inline(never)]
+    fn fold<'a>(
+        mid: u8,
+        walked: &mut dyn crate::ext_view::EntryWalk<'a>,
     ) -> Result<Self, InboundParseError> {
         #[cfg(feature = "session-unicast")]
         let carrier = crate::ext_admit::ExtCarrier::Transport(mid);
@@ -1089,7 +1454,7 @@ impl KeptChain for InPlaceExtChain {
         #[cfg(feature = "reassembly")]
         let mut markers = crate::extfragment::FragmentMarkers::NONE;
         let mut priority = None;
-        for entry in walked {
+        while let Some(entry) = walked.next_entry() {
             #[cfg(all(
                 feature = "alloc",
                 any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
@@ -1651,7 +2016,7 @@ fn parse_close(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, InboundPar
 pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
-    control_event(frame.ext_admission(), &frame.control_facts())
+    control_event(frame.ext_admission(), &frame.control_facts().unchained())
 }
 
 /// [`inbound_to_fsm_event`] over the facts of a message, whichever read them, and the
@@ -1659,7 +2024,7 @@ pub fn inbound_to_fsm_event(
 #[cfg(feature = "session-unicast")]
 pub(crate) fn control_event(
     admission: crate::ext_admit::ExtAdmission,
-    facts: &ControlFacts<'_>,
+    facts: &ControlFacts<'_, ()>,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // R311y630 (§14.1) — THE MANDATORY-EXTENSION RULE, ahead of every
@@ -1730,25 +2095,25 @@ pub(crate) enum ControlRead<'a> {
     Init {
         header: u8,
         body: wz_codecs::init_body::InitBodyView<'a>,
-        extensions: ExtChainOwned,
+        extensions: ReadChain<'a>,
     },
     /// An Open: its header, its body as the document's view, its chain.
     #[cfg(feature = "codec-open-body")]
     Open {
         header: u8,
         body: wz_codecs::open_body::OpenBodyView<'a>,
-        extensions: ExtChainOwned,
+        extensions: ReadChain<'a>,
     },
     /// A Close: its reason, its scope bit, its chain.
     #[cfg(feature = "codec-close")]
     Close {
         reason: u8,
         session: bool,
-        extensions: ExtChainOwned,
+        extensions: ReadChain<'a>,
     },
     /// A KeepAlive: its chain.
     #[cfg(feature = "codec-keep-alive")]
-    KeepAlive { extensions: ExtChainOwned },
+    KeepAlive { extensions: ReadChain<'a> },
     /// A message a unicast participant refuses whatever it says, read to its end
     /// ([`ControlFacts::Refused`]): a JOIN, a transport OAM.
     Refused,
@@ -1766,7 +2131,7 @@ pub(crate) enum ControlRead<'a> {
 ))]
 impl ControlRead<'_> {
     /// What the session's judgement reads of this message ([`ControlFacts`]).
-    pub(crate) fn facts(&self) -> ControlFacts<'_> {
+    pub(crate) fn facts(&self) -> ControlFacts<'_, ReadChain<'_>> {
         match self {
             #[cfg(feature = "codec-init-body")]
             ControlRead::Init {
@@ -1780,7 +2145,7 @@ impl ControlRead<'_> {
                 zid: body.zid.inner(),
                 s: body.s,
                 cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                extensions,
+                extensions: *extensions,
             }),
             #[cfg(feature = "codec-open-body")]
             ControlRead::Open {
@@ -1797,7 +2162,7 @@ impl ControlRead<'_> {
                 ),
                 initial_sn: body.initial_sn,
                 cookie: body.cookie.as_ref().map(|cookie| *cookie.inner()),
-                extensions,
+                extensions: *extensions,
             }),
             #[cfg(feature = "codec-close")]
             ControlRead::Close {
@@ -1862,12 +2227,20 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             // capacity; the view holds any, so the decoder's storing is asked for its verdict.
             #[cfg(feature = "session-slot")]
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            // A cookie past the build's bound is refused as the slot profile's storing refuses
+            // it, and not read only to be left out of the Open that echoes it.
+            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
+            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
+            refuse_as_decoded(
                 wire_const::T_MID_INIT,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )?;
+            let extensions = view
+                .extensions
+                .as_ref()
+                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                    ReadChain::Init(*list.inner())
+                });
             // A zid that is no zid is refused, after the chain as the decoder refuses it
             // (`refuse_unnamed_zid`).
             if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.inner()) {
@@ -1884,12 +2257,20 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             let view = TransportOpenView::decode(&mut cursor)?;
             #[cfg(feature = "session-slot")]
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            // A cookie past the build's bound is refused as the slot profile's storing refuses
+            // it, and not read only to be left out of the Open that echoes it.
+            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
+            refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
+            refuse_as_decoded(
                 wire_const::T_MID_OPEN,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )?;
+            let extensions = view
+                .extensions
+                .as_ref()
+                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                    ReadChain::Open(*list.inner())
+                });
             ControlRead::Open {
                 header: view.header,
                 body: view.body,
@@ -1899,12 +2280,16 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         #[cfg(feature = "codec-close")]
         wire_const::T_MID_CLOSE => {
             let view = TransportCloseView::decode(&mut cursor)?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            refuse_as_decoded(
                 wire_const::T_MID_CLOSE,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )?;
+            let extensions = view
+                .extensions
+                .as_ref()
+                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                    ReadChain::Close(*list.inner())
+                });
             ControlRead::Close {
                 reason: view.body.reason,
                 session: (view.header & wire_const::FLAG_T_CLOSE_S) != 0,
@@ -1914,12 +2299,16 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => {
             let view = TransportKeepAliveView::decode(&mut cursor)?;
-            let mut extensions = ExtChainOwned::new();
-            collect_handshake_ext_chain(
+            refuse_as_decoded(
                 wire_const::T_MID_KEEP_ALIVE,
                 crate::ext_view::walked(view.extensions.as_ref()),
-                &mut extensions,
             )?;
+            let extensions = view
+                .extensions
+                .as_ref()
+                .map_or(ReadChain::Empty(core::marker::PhantomData), |list| {
+                    ReadChain::KeepAlive(*list.inner())
+                });
             ControlRead::KeepAlive { extensions }
         }
         // A JOIN is refused whatever it says, but it is read to its end with the decoder's
@@ -1949,6 +2338,57 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
     };
     Ok((read, bytes.len() - cursor.remaining()))
+}
+
+/// The refusal of a handshake cookie longer than the session keeps
+/// (`session_init_params::COOKIE_MAX`): what the slot profile's storing of the body answers
+/// (`CapacityExceeded`), for a build that keeps the cookie in storage of the build's size without
+/// storing the body.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    feature = "session-fixed-storage",
+    not(feature = "session-slot"),
+    any(feature = "codec-init-body", feature = "codec-open-body")
+))]
+fn refuse_unkept_cookie(cookie: Option<&[u8]>) -> Result<(), InboundParseError> {
+    match cookie {
+        Some(cookie) if cookie.len() > crate::session_init_params::COOKIE_MAX => {
+            Err(InboundParseError::Codec(CodecError::CapacityExceeded))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The refusals the decoder answers for a handshake chain ([`collect_handshake_ext_chain`]),
+/// asked of the document's view with nothing kept: each entry is built as the decoder builds it,
+/// and on `session-slot` the chain is also stored as that profile stores it, which refuses a peer
+/// that repeats an extension past the profile's room.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+fn refuse_as_decoded<'a>(
+    mid: u8,
+    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<(), InboundParseError> {
+    #[cfg(feature = "session-slot")]
+    {
+        collect_handshake_ext_chain(mid, walked, &mut ExtChainOwned::new())
+    }
+    #[cfg(not(feature = "session-slot"))]
+    {
+        let _ = mid;
+        crate::ext_chain::check_ext_chain(walked)
+    }
 }
 
 /// Where the Close, the KeepAlive or the transport OAM at the front of `bytes` ends, read by its
@@ -3084,14 +3524,23 @@ mod control_read_tests {
             (Ok((message, used)), Ok((frame, decoded_used))) => {
                 let facts = message.facts();
                 let frame_facts = frame.control_facts();
+                // Fact by fact and chain by chain: the two reads' facts are of two types.
                 assert_eq!(
-                    format!("{facts:?}"),
-                    format!("{frame_facts:?}"),
+                    format!("{:?}", facts.unchained()),
+                    format!("{:?}", frame_facts.unchained()),
+                    "{wire:02x?}"
+                );
+                assert_eq!(
+                    format!("{:?}", facts.chain()),
+                    format!("{:?}", frame_facts.chain()),
                     "{wire:02x?}"
                 );
                 assert_eq!(used, decoded_used, "{wire:02x?}");
                 assert_eq!(
-                    format!("{:?}", control_event(message.ext_admission(), &facts)),
+                    format!(
+                        "{:?}",
+                        control_event(message.ext_admission(), &facts.unchained())
+                    ),
                     format!("{:?}", inbound_to_fsm_event(&frame)),
                     "{wire:02x?}"
                 );
@@ -3195,5 +3644,130 @@ mod control_read_tests {
         let (message, used) = read_control(&[0x1F]).expect("an unread id");
         assert!(matches!(message.facts(), ControlFacts::Unread(_)));
         assert_eq!(used, 0);
+    }
+
+    /// The readers every build links read the chain of an Init read where it lies, and it reads
+    /// as the decoded message's owned chain does: the patch level (a z64 at id 0x7) and the
+    /// region name (a ZBuf at id 0x8), with nothing of the chain copied out of the unit.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn the_chain_read_in_place_answers_the_readers_as_the_held_chain_does() {
+        let wire = [
+            wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
+            0x09,
+            0x01,
+            0xAA,
+            0xA7,
+            0x01,
+            0x48,
+            0x05,
+            b'n',
+            b'o',
+            b'r',
+            b't',
+            b'h',
+        ];
+        let (message, used) = read_control(&wire).expect("an InitSyn with a chain");
+        assert_eq!(used, wire.len());
+        let ControlFacts::Init(read) = message.facts() else {
+            panic!("an Init");
+        };
+        let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
+        let ControlFacts::Init(held) = frame.control_facts() else {
+            panic!("an Init");
+        };
+        // Each read is judged over its own form of the chain.
+        let _: ReadChain<'_> = read.extensions;
+        let _: HeldChain<'_> = held.extensions;
+        fn answers<C: ExtChainRead>(chain: C) {
+            let north = crate::extregion::RegionName::new("north").expect("a region name");
+            assert_eq!(chain.entries().count(), 2);
+            assert_eq!(crate::extpatch::peer_patch_in(chain.entries()), 1);
+            assert_eq!(
+                crate::extregion::peer_region_in(chain.entries()),
+                Ok(Some(north))
+            );
+            assert_eq!(chain.held().len(), 2);
+        }
+        answers(read.extensions);
+        answers(held.extensions);
+        assert_eq!(
+            format!("{:?}", read.extensions),
+            format!("{:?}", held.extensions)
+        );
+    }
+
+    /// The facts without their chain read alike from both reads, of one type whichever read gave
+    /// them, and only an Init or an Open has a chain to read.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn the_facts_without_their_chain_agree_across_the_two_reads() {
+        let wire = [
+            wire_const::T_MID_INIT | wire_const::FLAG_T_Z,
+            0x09,
+            0x01,
+            0xAA,
+            0xA7,
+            0x01,
+            0x48,
+            0x05,
+            b'n',
+            b'o',
+            b'r',
+            b't',
+            b'h',
+        ];
+        let (message, _) = read_control(&wire).expect("an InitSyn with a chain");
+        let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
+        let read = message.facts();
+        let held = frame.control_facts();
+        assert!(read.chain().is_some());
+        assert!(held.chain().is_some());
+        let unchained: ControlFacts<'_, ()> = read.unchained();
+        assert_eq!(format!("{unchained:?}"), format!("{:?}", held.unchained()));
+        assert_eq!(
+            unchained.handshake_message(),
+            Some(crate::handshake_stray::HandshakeMessage::InitSyn)
+        );
+        #[cfg(feature = "codec-keep-alive")]
+        {
+            let (keep_alive, _) =
+                read_control(&[wire_const::T_MID_KEEP_ALIVE]).expect("a KeepAlive");
+            assert!(keep_alive.facts().chain().is_none());
+        }
+    }
+
+    /// A build that keeps a cookie in storage of its own size refuses an InitAck whose cookie is
+    /// longer, as the slot profile's storing does, and reads one of exactly that size.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-fixed-storage",
+        not(feature = "session-slot")
+    ))]
+    #[test]
+    fn a_cookie_past_the_build_bound_is_refused_in_place() {
+        use crate::session_init_params::COOKIE_MAX;
+        let init_ack = |len: usize| {
+            let mut wire = vec![
+                wire_const::T_MID_INIT | wire_const::FLAG_T_INIT_A,
+                0x09,
+                0x12,
+                0xAA,
+                0xBB,
+            ];
+            let mut n = len as u64;
+            while n >= 0x80 {
+                wire.push((n as u8 & 0x7F) | 0x80);
+                n >>= 7;
+            }
+            wire.push(n as u8);
+            wire.extend(core::iter::repeat(0x5A).take(len));
+            wire
+        };
+        assert!(read_control(&init_ack(COOKIE_MAX)).is_ok());
+        assert!(matches!(
+            read_control(&init_ack(COOKIE_MAX + 1)),
+            Err(InboundParseError::Codec(CodecError::CapacityExceeded))
+        ));
     }
 }

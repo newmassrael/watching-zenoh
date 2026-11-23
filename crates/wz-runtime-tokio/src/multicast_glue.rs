@@ -5111,8 +5111,7 @@ mod tests {
         {
             let fired = fired.clone();
             observer
-                .subscribers
-                .register("demo/mc", move |sample| {
+                .subscribe("demo/mc", move |sample| {
                     assert_eq!(sample.keyexpr(), "demo/mc");
                     assert_eq!(sample.payload(), b"over-multicast");
                     fired.fetch_add(1, Ordering::SeqCst);
@@ -5356,8 +5355,7 @@ mod tests {
             let fired = fired.clone();
             // The app names the RELATIVE keyexpr; the namespace is transparent.
             observer
-                .subscribers
-                .register("demo/mc", move |sample| {
+                .subscribe("demo/mc", move |sample| {
                     assert_eq!(sample.keyexpr(), "demo/mc");
                     assert_eq!(sample.payload(), b"in-ns");
                     fired.fetch_add(1, Ordering::SeqCst);
@@ -5413,7 +5411,11 @@ mod tests {
                                             // admits it).
         let query = encode_frame_with_request(
             /*sn=*/ 0,
-            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             /*reliable=*/ true,
         );
 
@@ -5422,12 +5424,14 @@ mod tests {
         let clock = TokioTime::new();
 
         let mut observer = ApplicationLayerObserver::new();
-        observer
-            .queryables
-            .register("demo/mc", |_query, responder| {
-                responder.reply(b"reply-over-multicast");
-            })
-            .expect("no quota is stated on this table");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("demo/mc", |_query, responder| {
+                    responder.reply(b"reply-over-multicast");
+                })
+                .expect("no quota is stated on this table")
+        });
 
         // The reply sink pushes through the group's producer: the closure
         // pushes each drained reply onto the pipeline the loop attached, and
@@ -5516,7 +5520,11 @@ mod tests {
         // the wire (request id 7, reliable, at the JOIN-advertised next SN).
         let query = encode_frame_with_request(
             0,
-            build_request_query(7, 0, Some("myns/demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("myns/demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             true,
         );
 
@@ -5528,12 +5536,14 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         // Registered on the RELATIVE keyexpr — it only matches if the inbound
         // Query was stripped from myns/demo/mc to demo/mc at ingress.
-        observer
-            .queryables
-            .register("demo/mc", |_query, responder| {
-                responder.reply(b"reply-over-multicast");
-            })
-            .expect("no quota is stated on this table");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("demo/mc", |_query, responder| {
+                    responder.reply(b"reply-over-multicast");
+                })
+                .expect("no quota is stated on this table")
+        });
 
         let producer = MulticastTxProducer::new();
         let sink = MulticastReplySink::new(TokioReplyBacking::new(producer.clone()));
@@ -5633,10 +5643,12 @@ mod tests {
         // A held local liveliness token at the queried keyexpr — the declarer
         // replies with it (and only it: the sole registered token matches).
         let mut observer = ApplicationLayerObserver::new();
-        observer
-            .local_tokens
-            .register(/*token_id=*/ 3, "demo/live")
-            .expect("register held token");
+        observer.with_app(|app_half| {
+            app_half
+                .local_tokens
+                .register(/*token_id=*/ 3, "demo/live")
+                .expect("register held token")
+        });
 
         // The reply sink pushes through the group's producer: the closure
         // drains the staged declare interest-response onto the attached
@@ -5728,8 +5740,7 @@ mod tests {
         {
             let fired = fired.clone();
             observer
-                .subscribers
-                .register("demo/mc", move |_| {
+                .subscribe("demo/mc", move |_| {
                     fired.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
@@ -5974,8 +5985,7 @@ mod tests {
             {
                 let fired = fired.clone();
                 observer
-                    .subscribers
-                    .register("demo/mc", move |sample| {
+                    .subscribe("demo/mc", move |sample| {
                         assert_eq!(sample.payload(), expect_payload);
                         fired.fetch_add(1, Ordering::SeqCst);
                     })
@@ -6407,8 +6417,7 @@ mod tests {
                 let fired = fired.clone();
                 let expect = payload.clone();
                 observer
-                    .subscribers
-                    .register("demo/mc", move |sample| {
+                    .subscribe("demo/mc", move |sample| {
                         assert_eq!(sample.payload(), &expect[..]);
                         fired.fetch_add(1, Ordering::SeqCst);
                     })
@@ -6796,8 +6805,7 @@ mod tests {
                 .observer()
                 .lock()
                 .unwrap()
-                .subscribers
-                .register("**", move |sample| {
+                .subscribe("**", move |sample| {
                     delivered.lock().unwrap().push(sample.keyexpr().to_owned());
                 })
                 .expect("no quota is stated on this table");

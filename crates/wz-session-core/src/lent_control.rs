@@ -192,8 +192,11 @@ impl NamedKeyexpr {
             header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
             body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
                 value_len: self.len as u64,
-                value: Bounded::new(&self.body[..self.len])
-                    .expect("a named key's body is within the u32 length"),
+                value: self
+                    .body
+                    .get(..self.len)
+                    .and_then(Bounded::new)
+                    .expect("the length is the sink's position, in a body within the u32 length"),
             }),
         }
     }
@@ -804,19 +807,6 @@ pub fn undeclare_token_naming(token_id: u64, key: &NamedKeyexpr) -> Declare<'_> 
     )
 }
 
-/// The `ext_keyexpr` entry over `body`, the bytes `declare_ext_keyexpr::ext_wireexpr_body`
-/// makes; `None` for a body past the u32 length the extension's `ZBuf` carries.
-#[cfg(feature = "codec-declare")]
-fn keyexpr_entry(body: &[u8]) -> Option<ExtEntry<'_>> {
-    Some(ExtEntry {
-        header: crate::declare_ext_keyexpr::KEYEXPR_EXT_HEADER,
-        body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
-            value_len: body.len() as u64,
-            value: Bounded::new(body)?,
-        }),
-    })
-}
-
 /// [`undeclare_kexpr`] as a declaration of that one kind ([`DeclarationOf`]).
 #[cfg(feature = "codec-declare")]
 pub fn undeclare_kexpr_declaration<'a>(
@@ -834,18 +824,16 @@ pub fn undeclare_kexpr_declaration<'a>(
 
 /// The retraction of subscriber `subscriber_id` as a declaration of that one kind
 /// ([`DeclarationOf`]): [`crate::declare_build::build_undeclare_subscriber`] without `key`, and
-/// with an `ext_keyexpr` body [`crate::declare_build::build_undeclare_subscriber_on_wire`], whose
-/// id-only fallback it shares.
+/// naming `key` [`crate::declare_build::build_undeclare_subscriber_on_wire`].
 #[cfg(feature = "codec-declare")]
 pub fn undeclare_subscriber_declaration(
     subscriber_id: u64,
-    key: Option<&[u8]>,
+    key: Option<&NamedKeyexpr>,
 ) -> DeclarationOf<'_, UndeclSubscriber<'_>> {
-    // Named when the extension can carry the key, by the id alone otherwise.
-    let (header, extensions) = match key.and_then(keyexpr_entry) {
-        Some(entry) => (
+    let (header, extensions) = match key {
+        Some(key) => (
             with_z(wire_const::D_MID_UNDECL_SUBSCRIBER),
-            Some(chain_of(entry)),
+            Some(chain_of(key.entry())),
         ),
         None => (wire_const::D_MID_UNDECL_SUBSCRIBER, None),
     };
@@ -863,13 +851,12 @@ pub fn undeclare_subscriber_declaration(
 #[cfg(feature = "codec-declare")]
 pub fn undeclare_queryable_declaration(
     queryable_id: u64,
-    key: Option<&[u8]>,
+    key: Option<&NamedKeyexpr>,
 ) -> DeclarationOf<'_, UndeclQueryable<'_>> {
-    // Named when the extension can carry the key, by the id alone otherwise.
-    let (header, extensions) = match key.and_then(keyexpr_entry) {
-        Some(entry) => (
+    let (header, extensions) = match key {
+        Some(key) => (
             with_z(wire_const::D_MID_UNDECL_QUERYABLE),
-            Some(chain_of(entry)),
+            Some(chain_of(key.entry())),
         ),
         None => (wire_const::D_MID_UNDECL_QUERYABLE, None),
     };
@@ -887,13 +874,12 @@ pub fn undeclare_queryable_declaration(
 #[cfg(feature = "codec-declare")]
 pub fn undeclare_token_declaration(
     token_id: u64,
-    key: Option<&[u8]>,
+    key: Option<&NamedKeyexpr>,
 ) -> DeclarationOf<'_, UndeclToken<'_>> {
-    // Named when the extension can carry the key, by the id alone otherwise.
-    let (header, extensions) = match key.and_then(keyexpr_entry) {
-        Some(entry) => (
+    let (header, extensions) = match key {
+        Some(key) => (
             with_z(wire_const::D_MID_UNDECL_TOKEN),
-            Some(chain_of(entry)),
+            Some(chain_of(key.entry())),
         ),
         None => (wire_const::D_MID_UNDECL_TOKEN, None),
     };
@@ -1402,23 +1388,23 @@ mod tests {
             );
             compared += 3;
             for (mapping, suffix) in named {
-                let body = crate::declare_ext_keyexpr::ext_wireexpr_body(mapping, suffix);
+                let key = NamedKeyexpr::new(mapping, suffix, build_keys()).unwrap();
                 assert_eq!(
-                    one_kind(&undeclare_subscriber_declaration(id, Some(&body))),
+                    one_kind(&undeclare_subscriber_declaration(id, Some(&key))),
                     owned_of(
                         &owned::build_undeclare_subscriber_on_wire(id, mapping, suffix).unwrap()
                     ),
                     "subscriber retraction {id} naming {mapping} {suffix:?}"
                 );
                 assert_eq!(
-                    one_kind(&undeclare_queryable_declaration(id, Some(&body))),
+                    one_kind(&undeclare_queryable_declaration(id, Some(&key))),
                     owned_of(
                         &owned::build_undeclare_queryable_on_wire(id, mapping, suffix).unwrap()
                     ),
                     "queryable retraction {id} naming {mapping} {suffix:?}"
                 );
                 assert_eq!(
-                    one_kind(&undeclare_token_declaration(id, Some(&body))),
+                    one_kind(&undeclare_token_declaration(id, Some(&key))),
                     owned_of(&owned::build_undeclare_token_on_wire(id, mapping, suffix).unwrap()),
                     "token retraction {id} naming {mapping} {suffix:?}"
                 );
@@ -1450,7 +1436,8 @@ mod tests {
     #[test]
     fn a_lend_only_kind_refuses_and_names_as_its_builder_does() {
         let body = crate::declare_ext_keyexpr::ext_wireexpr_body(0, "a/b");
-        let (named, _) = one_kind(&undeclare_subscriber_declaration(1, Some(&body)));
+        let key = NamedKeyexpr::literal("a/b", build_keys()).unwrap();
+        let (named, _) = one_kind(&undeclare_subscriber_declaration(1, Some(&key)));
         let (bare, _) = one_kind(&undeclare_subscriber_declaration(1, None));
         assert!(
             named.len() > bare.len(),

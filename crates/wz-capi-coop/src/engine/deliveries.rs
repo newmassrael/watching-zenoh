@@ -145,6 +145,15 @@ impl Deliveries {
         })
     }
 
+    /// Whether this thread delivers for the engine now: a callback of the session may run below
+    /// on its stack, so nothing here waits for a call to end.
+    pub(super) fn delivers_here(&self) -> bool {
+        let word = os::current_word();
+        self.owner.load(Ordering::Acquire) == word
+            || (self.beside.load(Ordering::Acquire) > 0
+                && self.with_others(|others| others.iter().any(|t| t.word == word && t.delivering)))
+    }
+
     /// The callback of `key` runs on this thread until the guard drops, or unwinds.
     #[cfg(feature = "local-queryable")]
     pub(super) fn run(&self, key: TargetKey) -> Running<'_> {
@@ -354,35 +363,35 @@ mod tests {
     fn a_callback_runs_here_only_on_its_own_thread() {
         let set = Deliveries::new();
         let owner = set.enter().expect("the owner's delivery");
-        let first = set.run(TargetKey::Subscriber(1));
-        assert!(set.runs_here(TargetKey::Subscriber(1)));
-        assert!(!set.runs_here(TargetKey::Subscriber(2)));
+        let first = set.run(TargetKey::Queryable(1));
+        assert!(set.runs_here(TargetKey::Queryable(1)));
+        assert!(!set.runs_here(TargetKey::Queryable(2)));
         assert_eq!(set.others_taken(), 0, "the owner's callbacks ask no lock");
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     assert!(
-                        !set.runs_here(TargetKey::Subscriber(1)),
+                        !set.runs_here(TargetKey::Queryable(1)),
                         "the owner's callback does not run on this thread"
                     );
                     let beside = set.enter().expect("a delivery beside the owner's");
-                    let second = set.run(TargetKey::Subscriber(2));
-                    assert!(set.runs_here(TargetKey::Subscriber(2)));
+                    let second = set.run(TargetKey::Queryable(2));
+                    assert!(set.runs_here(TargetKey::Queryable(2)));
                     drop(second);
-                    assert!(!set.runs_here(TargetKey::Subscriber(2)));
+                    assert!(!set.runs_here(TargetKey::Queryable(2)));
                     drop(beside);
                 })
                 .join()
                 .expect("the thread beside");
             scope
                 .spawn(|| {
-                    let outside = set.run(TargetKey::Subscriber(3));
+                    let outside = set.run(TargetKey::Queryable(3));
                     assert!(
-                        set.runs_here(TargetKey::Subscriber(3)),
+                        set.runs_here(TargetKey::Queryable(3)),
                         "run outside a delivery"
                     );
                     drop(outside);
-                    assert!(!set.runs_here(TargetKey::Subscriber(3)));
+                    assert!(!set.runs_here(TargetKey::Queryable(3)));
                 })
                 .join()
                 .expect("the thread outside a delivery");
@@ -393,12 +402,12 @@ mod tests {
             "nothing is left in the list"
         );
         assert!(
-            !set.runs_here(TargetKey::Subscriber(2)),
+            !set.runs_here(TargetKey::Queryable(2)),
             "another thread's callback"
         );
         drop(first);
         assert!(
-            !set.runs_here(TargetKey::Subscriber(1)),
+            !set.runs_here(TargetKey::Queryable(1)),
             "the callback returned"
         );
         drop(owner);

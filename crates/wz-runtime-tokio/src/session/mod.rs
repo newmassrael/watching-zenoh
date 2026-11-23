@@ -1996,16 +1996,17 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 && meta.is_plain_apart_from_qos()
                 && !self.egress_policy_active()
             {
-                match Tp::send_plain_put_qos(
-                    &self.transport,
-                    wire.mapping_id,
-                    wire.suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    priority,
-                ) {
+                match Tp::named_by(&self.transport, keyexpr, wire.mapping_id).and_then(|key| {
+                    Tp::send_plain_put_qos(
+                        &self.transport,
+                        key,
+                        payload,
+                        meta.qos,
+                        reliable,
+                        express,
+                        priority,
+                    )
+                }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -2041,7 +2042,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 if opts.allowed_destination.allows_local() && self.has_local_subscriber(keyexpr) {
                     let sample = build_loopback_sample(keyexpr, payload, &opts);
                     let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                        observer.subscribers.local_publish(&sample)
+                        observer.with_app(|app| {
+                            wz_session_core::pubsub::LocalSubscribers::local_publish(
+                                &mut *app.subscribers,
+                                &mut (),
+                                &sample,
+                            )
+                        })
                     });
                     // R311lh / R311lj — drain the fires THIS publish staged (the
                     // loopback `local_publish`) so the local subscriber callbacks
@@ -2192,7 +2199,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 match self.local_delivery {
                     LocalDeliveryDrain::Caller => {
                         R::with_mutex_mut(&self.observer, |observer| {
-                            observer.liveliness_gets.dispatch_final(interest_id)
+                            observer.face().liveliness_gets.dispatch_final(interest_id)
                         });
                         self.drain_deferred_fires_settled();
                     }
@@ -2200,7 +2207,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         let observer = self.observer.clone();
                         self.fires.stage(Box::new(move || {
                             R::with_mutex_mut(&observer, |observer| {
-                                observer.liveliness_gets.dispatch_final(interest_id)
+                                observer.face().liveliness_gets.dispatch_final(interest_id)
                             });
                         }));
                     }
@@ -2511,7 +2518,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         flow: crate::interceptor::InterceptorFlow,
     ) -> Option<String> {
         R::with_mutex_mut(&self.observer, |obs| {
-            let spaces = obs.subscribers.mapping_spaces();
+            let spaces = obs.face_ref().subscribers.mapping_spaces();
             let peer = spaces.peer();
             match flow {
                 crate::interceptor::InterceptorFlow::Ingress => {
@@ -2591,7 +2598,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 
     /// Borrow the observer handle. Application code registers
     /// callbacks on the contained registries through this — typically
-    /// `session.observer().lock().unwrap().subscribers.register(...)?`
+    /// `session.observer().lock().unwrap().with_app(|app| app.subscribers.register(...))?`
     /// (the table refuses a registration past its quota) on the AP
     /// profile (where `R::Mutex<T>` resolves to
     /// `std::sync::Mutex<T>`); generic-R callers must route through
@@ -2781,7 +2788,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// cancellation plane vanish on a feature subset that still compiles the
     /// token type.
     pub fn cancel_pending_query(&self, rid: wz_session_core::wire_id::RequestId) -> bool {
-        R::with_mutex_mut(&self.observer, |observer| observer.replies.unregister(rid))
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.face().replies.unregister(rid)
+        })
     }
 
     /// The link of this session is gone: end every query still pending on it as a final from the
@@ -2794,7 +2803,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// session, so the two hold one another and the get waits for ever for a drop that cannot
     /// come ([`wz_session_core::reply::ReplyRegistry::finish_all`]).
     pub fn end_pending_queries(&self) -> usize {
-        let ended = R::with_mutex_mut(&self.observer, |observer| observer.replies.finish_all());
+        let ended = R::with_mutex_mut(&self.observer, |observer| {
+            observer.face().replies.finish_all()
+        });
         if ended > 0 {
             self.drain_deferred_fires();
         }
@@ -2824,7 +2835,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "liveliness-get")]
         {
             R::with_mutex_mut(&self.observer, |observer| {
-                observer.liveliness_gets.unregister(interest_id)
+                observer.face().liveliness_gets.unregister(interest_id)
             })
         }
         #[cfg(not(feature = "liveliness-get"))]
@@ -2854,7 +2865,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             return false;
         }
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.has_local_matching(keyexpr)
+            observer.read_app(|app| app.subscribers.has_local_matching(keyexpr))
         })
     }
 
@@ -2924,7 +2935,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     return;
                 }
                 R::with_mutex_mut(&self.observer, |observer| {
-                    observer.replies.deliver_local_final(rid);
+                    observer.face().replies.deliver_local_final(rid);
                 });
                 self.drain_deferred_fires_settled();
             }
@@ -2938,7 +2949,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         return;
                     }
                     R::with_mutex_mut(&observer, |observer| {
-                        observer.replies.deliver_local_final(rid);
+                        observer.face().replies.deliver_local_final(rid);
                     });
                 }));
             }
@@ -2974,7 +2985,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     pub fn sweep_expired_queries_staged(&self) -> usize {
         let now_ms = self.clock.now_monotonic_ms();
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.replies.sweep_timed_out(now_ms)
+            observer.face().replies.sweep_timed_out(now_ms)
         })
     }
 
@@ -3003,7 +3014,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     #[cfg(feature = "query-get")]
     pub fn next_reply_deadline_ms(&self) -> Option<u64> {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.replies.next_deadline_ms()
+            observer.face().replies.next_deadline_ms()
         })
     }
 
@@ -3064,7 +3075,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// R-generic impl block.
     pub fn set_own_zid(&self, zid: Vec<u8>) -> bool {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.set_own_zid(zid)
+            observer.face().subscribers.set_own_zid_bytes(&zid)
         })
     }
 
@@ -3084,11 +3095,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         {
             let zid_hex = zid_hex.to_owned();
             let installed = R::with_mutex_mut(&self.observer, |observer| {
-                observer.remote_subscribers.on_subscriber_declared_sink(
-                    wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
-                        crate::session_spans::registered(&zid_hex, false, decl.keyexpr())
-                    }),
-                )
+                observer.with_app(|app| {
+                    app.remote_subscribers.on_subscriber_declared_sink(
+                        wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
+                            crate::session_spans::registered(&zid_hex, false, decl.keyexpr())
+                        }),
+                    )
+                })
             });
             if let Err(refusal) = installed {
                 log::warn!("the subscriber routing spans are not opened: {refusal}");
@@ -3098,11 +3111,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         {
             let zid_hex = zid_hex.to_owned();
             let installed = R::with_mutex_mut(&self.observer, |observer| {
-                observer.remote_queryables.on_queryable_declared_sink(
-                    wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
-                        crate::session_spans::registered(&zid_hex, true, decl.keyexpr())
-                    }),
-                )
+                observer.with_app(|app| {
+                    app.remote_queryables.on_queryable_declared_sink(
+                        wz_session_core::decl_sink::BoxedDeclSink::new(move |decl| {
+                            crate::session_spans::registered(&zid_hex, true, decl.keyexpr())
+                        }),
+                    )
+                })
             });
             if let Err(refusal) = installed {
                 log::warn!("the queryable routing spans are not opened: {refusal}");
@@ -3126,12 +3141,16 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             std::sync::Arc::from(resolver);
         R::with_mutex_mut(&self.observer, |observer| {
             observer
+                .face()
                 .subscribers
                 .set_shm_resolver_shared(resolver.clone());
-            observer.replies.set_shm_resolver_shared(resolver.clone());
+            observer
+                .face()
+                .replies
+                .set_shm_resolver_shared(resolver.clone());
             // R3044 -- and the queryable registry, which reads the value of a
             // query that arrives as a list of slices.
-            observer.queryables.set_shm_resolver_shared(resolver);
+            observer.face().queries.set_shm_resolver_shared(resolver);
         });
     }
 
@@ -3149,7 +3168,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         space: Arc<dyn wz_session_core::wireexpr_resolve::OwnMappingSpace + Send + Sync>,
     ) {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.set_own_mapping_space(space);
+            observer.face().subscribers.set_own_mapping_space(space);
         });
     }
 
@@ -3157,7 +3176,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// (the pre-R311y739 answer). The `clear_own_zid` sibling.
     pub fn clear_own_mapping_space(&self) {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.clear_own_mapping_space();
+            observer.face().subscribers.clear_own_mapping_space();
         });
     }
 
@@ -3172,7 +3191,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// migration rationale.
     pub fn clear_own_zid(&self) {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.subscribers.clear_own_zid();
+            observer.face().subscribers.clear_own_zid();
         });
     }
 
@@ -3221,9 +3240,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // The table admits what the quota its creator stated admits, on every backing, so a
         // refusal is the caller's to report.
         let id = R::with_mutex_mut(&self.observer, |observer| {
-            let id = observer
-                .subscribers
-                .register_sink(keyexpr, options.allowed_origin, sink)?;
+            let id = observer.register_subscriber(keyexpr, options.allowed_origin, sink)?;
             // R311y788 — a LOCAL declaration can flip a publisher's
             // matching status just as an inbound remote one can, and pico
             // reports both (`_z_write_filter_ctx_add_local_match`,
@@ -3232,9 +3249,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             // local half read from the sibling field.
             #[cfg(all(feature = "declare-subscriber", feature = "session-matching"))]
             {
-                let subscribers = &observer.subscribers;
-                observer.remote_subscribers.reevaluate_matching(&|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                observer.with_parts(|app, face| {
+                    let subscribers = &*app.subscribers;
+                    app.remote_subscribers
+                        .reevaluate_matching(&*face.remote_subscribers, &|c| {
+                            c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
+                        });
                 });
             }
             Ok(id)
@@ -3273,7 +3293,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         policy: wz_session_core::policy::SessionPolicy,
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
-        let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let local_live = R::with_mutex_mut(&observer, |o| {
+            o.read_app(|app| app.subscribers.local_live())
+        });
         let querier_max_pending_queries =
             R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
         #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
@@ -3462,7 +3484,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(feature = "liveliness-token")]
     pub fn hold_token(&self, id: u64, keyexpr: &str) -> Result<(), RegisterError> {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.local_tokens.register(id, keyexpr).map(|_| ())
+            observer.with_app(|app| app.local_tokens.register(id, keyexpr).map(|_| ()))
         })
     }
 
@@ -3471,7 +3493,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(feature = "liveliness-token")]
     pub fn release_token(&self, id: u64) {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.local_tokens.unregister(id);
+            observer.with_app(|app| app.local_tokens.unregister(id));
         });
     }
 
@@ -3632,9 +3654,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(feature = "transport-shm")]
     pub fn enable_shm(&self) {
         R::with_mutex_mut(&self.observer, |obs| {
-            obs.subscribers.set_shm_negotiated(true);
-            obs.replies.set_shm_negotiated(true);
-            obs.queryables.set_shm_negotiated(true);
+            obs.face().subscribers.set_shm_negotiated(true);
+            obs.face().replies.set_shm_negotiated(true);
+            obs.face().queries.set_shm_negotiated(true);
         });
     }
 
@@ -3924,12 +3946,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let (cell, sink) =
             self.deferred_query_sink(options.stamp_timestamp_by(&self.policy), callback);
         let id = R::with_mutex_mut(&self.observer, |observer| {
-            observer.queryables.register_sink(
-                &keyexpr_string,
-                options.allowed_origin,
-                options.complete,
-                crate::query_sink::BoxedQuerySink::new(sink),
-            )
+            observer.with_app(|app| {
+                app.queryables.register_sink(
+                    &keyexpr_string,
+                    options.allowed_origin,
+                    options.complete,
+                    crate::query_sink::BoxedQuerySink::new(sink),
+                )
+            })
         })?;
         Ok(Queryable {
             observer: self.observer.clone(),
@@ -4039,7 +4063,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             &policy,
             &wz_session_core::limits::RuntimeLimits::BUILD,
         );
-        let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        let local_live = R::with_mutex_mut(&observer, |o| {
+            o.read_app(|app| app.subscribers.local_live())
+        });
         let querier_max_pending_queries =
             R::with_mutex_mut(&observer, |o| o.querier_max_pending_queries());
         #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
@@ -4232,7 +4258,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn install_link_keys(&self, keys: wz_session_core::shared_key_ids::LinkKeys) {
         if let Some(ids) = keys.shared_ids().cloned() {
             R::with_mutex_mut(&self.observer, |observer| {
-                observer.subscribers.set_shared_key_ids(ids);
+                observer.face().subscribers.set_shared_key_ids(ids);
             });
         }
         self.actions().install_link_keys(keys);
@@ -4326,7 +4352,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             use put_route::Link;
             let memo = &self.put_route;
             let epoch = memo.epoch(|| {
-                R::with_mutex_mut(&self.observer, |obs| obs.remote_subscribers.peer().epoch())
+                R::with_mutex_mut(&self.observer, |obs| {
+                    obs.face_ref().remote_subscribers.epoch()
+                })
             });
             // Read BEFORE the answer is worked out: a declaration that lands in between moves the
             // epoch past this one, so the answer kept is a miss next time and never a stale hit.
@@ -4378,8 +4406,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             return false;
         }
         R::with_mutex_mut(&self.observer, |obs| {
-            obs.remote_subscribers.peer().initial_declarations_final()
-                && !obs.remote_subscribers.has_matching_for(
+            obs.face_ref()
+                .remote_subscribers
+                .initial_declarations_final()
+                && !obs.face_ref().remote_subscribers.has_matching_for(
                     &wz_session_core::declare::subscriber::PublisherCriterion::new(
                         keyexpr,
                         Locality::Remote,
@@ -4600,7 +4630,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             return 0;
         }
         let listened_to = R::with_mutex_mut(&self.observer, |o| {
-            o.subscribers.has_local_matching(keyexpr)
+            o.read_app(|app| app.subscribers.has_local_matching(keyexpr))
         });
         if !listened_to {
             return 0;
@@ -4610,7 +4640,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         if let Some(shared) = payload.into_view() {
             sample.payload = shared;
         }
-        let delivered = R::with_mutex_mut(&self.observer, |o| o.subscribers.local_publish(&sample));
+        let delivered = R::with_mutex_mut(&self.observer, |o| {
+            o.with_app(|app| {
+                wz_session_core::pubsub::LocalSubscribers::local_publish(
+                    &mut *app.subscribers,
+                    &mut (),
+                    &sample,
+                )
+            })
+        });
         // R311y554 — same policy gate as `Session::publish`.
         self.drain_local_fires_if_inline();
         delivered
@@ -4821,13 +4859,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "transport-shm")]
             {
                 let negotiated = self.actions().is_shm();
-                obs.subscribers.set_shm_negotiated(negotiated);
+                obs.face().subscribers.set_shm_negotiated(negotiated);
                 // R3042 -- and onto the reply registry, which un-swaps a reply as
                 // the subscriber registry does a push, behind the same gate.
-                obs.replies.set_shm_negotiated(negotiated);
+                obs.face().replies.set_shm_negotiated(negotiated);
                 // R3044 -- and the queryable registry, which un-swaps a query's
                 // value behind the same gate.
-                obs.queryables.set_shm_negotiated(negotiated);
+                obs.face().queries.set_shm_negotiated(negotiated);
             }
             // R3040 -- hand the registry the means of ACKNOWLEDGING the peer's
             // shared-memory slices, before the un-swap can run, as the negotiated
@@ -4843,9 +4881,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // through the same handoff a push's is.
                 let shared: Option<std::sync::Arc<dyn wz_session_core::extshm::ShmHandoff>> =
                     update.map(std::sync::Arc::from);
-                obs.subscribers.set_shm_handoff_shared(shared.clone());
-                obs.replies.set_shm_handoff_shared(shared.clone());
-                obs.queryables.set_shm_handoff_shared(shared);
+                obs.face()
+                    .subscribers
+                    .set_shm_handoff_shared(shared.clone());
+                obs.face().replies.set_shm_handoff_shared(shared.clone());
+                obs.face().queries.set_shm_handoff_shared(shared);
             }
             // The observer may serve more than this session, so the session states its own
             // `query-unanswerable-final` value, from the snapshot it was handed, before each
@@ -4857,11 +4897,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // (a peer repeating its final) tells nobody. A new establishment clears the flag with
             // the tables, so the next one is told again.
             #[cfg(feature = "declarations-synced-event")]
-            let was_final = obs.remote_subscribers.peer().initial_declarations_final();
+            let was_final = obs
+                .face_ref()
+                .remote_subscribers
+                .initial_declarations_final();
             obs.dispatch_event(event);
             #[cfg(feature = "declarations-synced-event")]
-            if !was_final && obs.remote_subscribers.peer().initial_declarations_final() {
-                obs.declarations_final.fire();
+            if !was_final
+                && obs
+                    .face_ref()
+                    .remote_subscribers
+                    .initial_declarations_final()
+            {
+                obs.with_app(|app| app.declarations_final.fire());
             }
             // R2690 (§5.23) — refresh the admin introspection cache from the
             // tables this dispatch has just moved. AFTER `dispatch_event`, not
@@ -4935,7 +4983,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "declare-subscriber")]
     pub fn peer_declarations_final(&self) -> bool {
         R::with_mutex_mut(&self.observer, |obs| {
-            obs.remote_subscribers.peer().initial_declarations_final()
+            obs.face_ref()
+                .remote_subscribers
+                .initial_declarations_final()
         })
     }
 
@@ -5149,15 +5199,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 && !self.egress_policy_active()
             {
                 // This body is the unicast session's, so the bundle is the send seam.
-                match self.actions().send_plain_put_qos(
-                    mapping_id,
-                    inline_suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    opts.priority_band(),
-                ) {
+                // The bundle names the key from its record of the session's declarations: the
+                // declared literal and the suffix the caller names, or the whole key.
+                let actions = self.actions();
+                match actions
+                    .named_by(loopback_keyexpr, mapping_id)
+                    .and_then(|key| {
+                        actions.send_plain_put_qos(
+                            key,
+                            payload,
+                            meta.qos,
+                            reliable,
+                            express,
+                            opts.priority_band(),
+                        )
+                    }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -5211,7 +5267,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             {
                 let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
                 let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                    observer.subscribers.local_publish(&sample)
+                    observer.with_app(|app| {
+                        wz_session_core::pubsub::LocalSubscribers::local_publish(
+                            &mut *app.subscribers,
+                            &mut (),
+                            &sample,
+                        )
+                    })
                 });
                 // R311lh / R311lj — drain the loopback-staged fires;
                 // gated on the local-delivery path, see `Session::publish`.
@@ -5680,6 +5742,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// refusal and not a send.
     pub fn publish_plain_declared(
         &self,
+        keyexpr: &str,
         mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &PlainPutParams,
@@ -5694,22 +5757,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(feature = "codec-push")]
         {
-            match self.actions().send_plain_put_qos(
-                mapping_id,
-                None,
-                payload,
-                params.qos,
-                params.reliable,
-                params.express,
-                params.priority,
-            ) {
+            // `keyexpr` is the whole key the declaration names; the bundle names it by that
+            // declaration from its own record.
+            let actions = self.actions();
+            match actions.named_by(keyexpr, mapping_id).and_then(|key| {
+                actions.send_plain_put_qos(
+                    key,
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+            }) {
                 Some(sent) => Ok(sent?),
                 None => Err(PublishError::ExceedsCapacity),
             }
         }
         #[cfg(not(feature = "codec-push"))]
         {
-            let _ = (mapping_id, payload, params);
+            let _ = (keyexpr, mapping_id, payload, params);
             Err(PublishError::ExceedsCapacity)
         }
     }
@@ -6115,9 +6182,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 
             // A query the registry refuses is registered nowhere and sent to no one.
             let handle = R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .replies
-                    .register_sink(rid, expected_finals, deadline_ms, accept, sink)
+                observer.face().replies.register_sink(
+                    rid,
+                    expected_finals,
+                    deadline_ms,
+                    accept,
+                    sink,
+                )
             })
             .map_err(QueryAliasError::Refused)?;
 
@@ -6158,20 +6229,22 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // reliable=true / express=false match the prior
                 // `send_request_query` (dispatch_request reliable, no flush);
                 // the builder's `CodecError` maps to `SendWireError::Codec`.
-                let emit = if meta.is_empty() {
-                    wz_session_core::request_build::build_request_query(
-                        rid,
-                        selector.mapping_id,
-                        selector.suffix,
-                    )
-                } else {
-                    wz_session_core::request_build::build_request_query_with_meta(
-                        rid,
-                        selector.mapping_id,
-                        selector.suffix,
-                        &meta,
-                    )
-                }
+                // A selector of the id 0 and no text names no key: the bound the wire puts on a
+                // key's length refuses it.
+                let emit = wz_session_core::wire_key::WireKey::from_parts(
+                    selector.mapping_id,
+                    selector.suffix,
+                )
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)
+                .and_then(|key| {
+                    if meta.is_empty() {
+                        wz_session_core::request_build::build_request_query(rid, key)
+                    } else {
+                        wz_session_core::request_build::build_request_query_with_meta(
+                            rid, key, &meta,
+                        )
+                    }
+                })
                 .map_err(SendWireError::Codec)
                 .and_then(|request| {
                     self.send_query_request(request, descriptor_value, opts.encoding.as_ref())
@@ -6180,7 +6253,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 // emit (unregister-only; see the header comment).
                 if let Err(e) = emit {
                     R::with_mutex_mut(&self.observer, |observer| {
-                        observer.replies.unregister(rid);
+                        observer.face().replies.unregister(rid);
                     });
                     return Err(e.into());
                 }
@@ -6207,9 +6280,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     let local_value = shm_value
                         .filter(|_| {
                             R::with_mutex_mut(&self.observer, |observer| {
-                                observer
-                                    .queryables
-                                    .has_local_matching(selector.loopback_keyexpr, false)
+                                observer.read_app(|app| {
+                                    app.queryables
+                                        .has_local_matching(selector.loopback_keyexpr, false)
+                                })
                             })
                         })
                         .and_then(|chunk| chunk.receiver_view())
@@ -6253,27 +6327,31 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         // The stack of the loopback leg is the query's own, not the wire's:
                         // the session's own queryables are not reached through a route.
                         #[cfg(feature = "pubsub-ts-stack")]
-                        observer.queryables.local_query_with_stack(
-                            envelope,
-                            selector.loopback_keyexpr,
-                            &query,
-                            local_value,
-                            opts.ts_stack.as_ref(),
-                            &mut replies,
-                        );
+                        observer.with_app(|app| {
+                            app.queryables.local_query_with_stack(
+                                envelope,
+                                selector.loopback_keyexpr,
+                                &query,
+                                local_value,
+                                opts.ts_stack.as_ref(),
+                                &mut replies,
+                            )
+                        });
                         #[cfg(not(feature = "pubsub-ts-stack"))]
-                        observer.queryables.local_query_with_value(
-                            envelope,
-                            selector.loopback_keyexpr,
-                            &query,
-                            local_value,
-                            &mut replies,
-                        );
+                        observer.with_app(|app| {
+                            app.queryables.local_query_with_value(
+                                envelope,
+                                selector.loopback_keyexpr,
+                                &query,
+                                local_value,
+                                &mut replies,
+                            )
+                        });
                         for reply in
                             wz_session_core::reply_stage::ReplyStaging::drain_staged(&mut replies)
                         {
                             let inbound: InboundReply = reply.into();
-                            observer.replies.deliver_local_reply(&inbound);
+                            observer.face().replies.deliver_local_reply(&inbound);
                         }
                     });
                 }
@@ -6397,7 +6475,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-subscriber")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.remote_subscribers.has_matching_for(
+                obs.face_ref().remote_subscribers.has_matching_for(
                     &wz_session_core::declare::subscriber::PublisherCriterion::new(
                         keyexpr, locality,
                     ),
@@ -6436,7 +6514,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         #[cfg(feature = "declare-queryable")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
-                obs.remote_queryables.has_matching_for(
+                obs.face_ref().remote_queryables.has_matching_for(
                     &wz_session_core::declare::queryable::QuerierCriterion::new(
                         keyexpr,
                         locality,
@@ -6472,8 +6550,8 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         {
             Some(R::with_mutex_mut(&self.observer, |obs| {
                 (
-                    obs.remote_subscribers.peer().epoch(),
-                    obs.remote_queryables.peer().epoch(),
+                    obs.face_ref().remote_subscribers.epoch(),
+                    obs.face_ref().remote_queryables.epoch(),
                 )
             }))
         }
@@ -7065,7 +7143,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// callback table entry, then — iff `_z_locality_allows_remote(allowed_origin)`
     /// — emit the wire `DeclQueryable` so a router routes matching `Query`
     /// requests to this session. The callback fires synchronously inside
-    /// [`crate::query::QueryableRegistry::dispatch_request`] (wire arrival) and
+    /// [`wz_session_core::query::QueryPeer::dispatch_request`] (wire arrival) and
     /// [`crate::query::QueryableRegistry::local_query`] (loopback, R238+).
     ///
     /// Returns a [`Queryable`] handle whose `Drop` (RAII) unregisters the local
@@ -7177,12 +7255,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // complete queryable must take this path.
                 // A registration the registry refuses changes nothing and is
                 // announced to no one.
-                let id = observer.queryables.register_sink(
-                    &keyexpr_string,
-                    options.allowed_origin,
-                    options.complete,
-                    crate::query_sink::BoxedQuerySink::new(sink),
-                )?;
+                let id = observer.with_app(|app| {
+                    app.queryables.register_sink(
+                        &keyexpr_string,
+                        options.allowed_origin,
+                        options.complete,
+                        crate::query_sink::BoxedQuerySink::new(sink),
+                    )
+                })?;
                 // R311y797 — a LOCAL declaration can flip a querier's
                 // matching status just as an inbound remote one can, and
                 // pico reports both
@@ -7194,10 +7274,14 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // with the local half read from the sibling field.
                 #[cfg(all(feature = "declare-queryable", feature = "session-matching"))]
                 {
-                    let queryables = &observer.queryables;
-                    observer.remote_queryables.reevaluate_matching(&|c| {
-                        c.locality.allows_local()
-                            && queryables.has_local_matching(&c.keyexpr, c.complete_required)
+                    observer.with_parts(|app, face| {
+                        let queryables = &*app.queryables;
+                        app.remote_queryables
+                            .reevaluate_matching(&*face.remote_queryables, &|c| {
+                                c.locality.allows_local()
+                                    && queryables
+                                        .has_local_matching(&c.keyexpr, c.complete_required)
+                            });
                     });
                 }
                 Ok(id)
@@ -7219,7 +7303,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 Err(e) => {
                     cell.kill();
                     R::with_mutex_mut(&self.observer, |observer| {
-                        let removed = observer.queryables.unregister(id);
+                        let removed = observer.with_app(|app| app.queryables.unregister(id));
                         // R311y797 — the rollback must undo the watch
                         // re-evaluation the register above fired, or a
                         // REJECTED declare leaves every querier watching
@@ -7227,11 +7311,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                         // the undeclare site, for the same reason.
                         #[cfg(all(feature = "declare-queryable", feature = "session-matching"))]
                         {
-                            let queryables = &observer.queryables;
-                            observer.remote_queryables.reevaluate_matching(&|c| {
-                                c.locality.allows_local()
-                                    && queryables
-                                        .has_local_matching(&c.keyexpr, c.complete_required)
+                            observer.with_parts(|app, face| {
+                                let queryables = &*app.queryables;
+                                app.remote_queryables.reevaluate_matching(
+                                    &*face.remote_queryables,
+                                    &|c| {
+                                        c.locality.allows_local()
+                                            && queryables
+                                                .has_local_matching(&c.keyexpr, c.complete_required)
+                                    },
+                                );
                             });
                         }
                         removed
@@ -7879,7 +7968,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(id.entity_id(), mapping_id, suffix, options.complete)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_queryable(id.entity_id(), key, options.complete)
+                })
                 .map_err(map_queryable_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step, like declare_subscriber.
@@ -8182,7 +8273,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // the register and this rollback.
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
-                    observer.subscribers.unregister(id)
+                    observer.unregister_subscriber(id)
                 });
                 return Err(e);
             }
@@ -8385,7 +8476,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_subscriber(id.entity_id(), mapping_id, suffix)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_subscriber(id.entity_id(), key)
+                })
                 .map_err(map_subscribe_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step: a declaration made while a paced replay is walking the cache is replayed in its
@@ -8557,8 +8650,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place =
                 liveliness::TokenPlace::take(self, u64::from(token_id), keyexpr_string.clone())
                     .map_err(LivelinessAliasError::Refused)?;
-            let declare = actions
-                .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+            let declare = wz_session_core::named_key::NamedKey::literal(&keyexpr_string)
+                .ok_or(SendDeclareError::MissingKeyexpr)
+                .and_then(|key| actions.prepare_declare_token(token_id, key))
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.
@@ -8721,7 +8815,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place = liveliness::TokenPlace::take(self, u64::from(token_id), resolved)
                 .map_err(LivelinessAliasError::Refused)?;
             let declare = actions
-                .prepare_declare_token(token_id, mapping_id, inline_suffix)
+                .with_outbound_key(mapping_id, inline_suffix, |key| {
+                    actions.prepare_declare_token(token_id, key)
+                })
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.
@@ -8924,12 +9020,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // subscriber the table refuses is registered nowhere and no
             // Interest is emitted for it.
             R::with_mutex_mut(&self.observer, |observer| {
-                observer.liveliness_subscribers.register(
-                    interest_id,
-                    &keyexpr_string,
-                    history,
-                    sink,
-                )
+                observer.with_parts(|app, face| {
+                    app.liveliness_subscribers.register(
+                        &*face.tokens,
+                        interest_id,
+                        &keyexpr_string,
+                        history,
+                        sink,
+                    )
+                })
             })
             .map_err(LivelinessSubscriberAliasError::Refused)?;
             // R311ll (Finding B) — roll the slot back if the wire emit
@@ -8984,7 +9083,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
-                    observer.liveliness_subscribers.unregister(interest_id);
+                    observer.with_app(|app| app.liveliness_subscribers.unregister(interest_id));
                 });
                 return Err(e.into());
             }
@@ -9125,9 +9224,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // refusal registers nothing and emits nothing, as the literal
             // path's does.
             R::with_mutex_mut(&self.observer, |observer| {
-                observer
-                    .liveliness_subscribers
-                    .register(interest_id, &resolved, history, sink)
+                observer.with_parts(|app, face| {
+                    app.liveliness_subscribers.register(
+                        &*face.tokens,
+                        interest_id,
+                        &resolved,
+                        history,
+                        sink,
+                    )
+                })
             })
             .map_err(LivelinessSubscriberAliasError::Refused)?;
             // Wire emit carries the alias form so the peer pays the
@@ -9171,7 +9276,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
-                    observer.liveliness_subscribers.unregister(interest_id);
+                    observer.with_app(|app| app.liveliness_subscribers.unregister(interest_id));
                 });
                 return Err(e.into());
             }
@@ -9227,8 +9332,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         let now_ms = self.clock.now_monotonic_ms();
         let actions = self.actions();
         R::with_mutex_mut(&self.observer, |observer| {
-            let swept = observer.liveliness_gets.sweep_timed_out(now_ms);
-            for interest_id in observer.liveliness_gets.take_finalized() {
+            let swept = observer.face().liveliness_gets.sweep_timed_out(now_ms);
+            for interest_id in observer.face().liveliness_gets.take_finalized() {
                 wz_session_core::response_sink::LivelinessGetPrune::prune_liveliness_get_interest(
                     &actions,
                     interest_id,
@@ -9249,7 +9354,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(feature = "liveliness-get")]
     pub fn next_liveliness_get_deadline_ms(&self) -> Option<u64> {
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.liveliness_gets.next_deadline_ms()
+            observer.face().liveliness_gets.next_deadline_ms()
         })
     }
 
@@ -9507,6 +9612,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // A get the registry refuses is registered nowhere and its Interest is not emitted.
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
+                    .face()
                     .liveliness_gets
                     .register(interest_id, deadline_ms, sink)
             })
@@ -9551,7 +9657,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             );
             if let Err(e) = emit {
                 R::with_mutex_mut(&self.observer, |observer| {
-                    observer.liveliness_gets.unregister(interest_id);
+                    observer.face().liveliness_gets.unregister(interest_id);
                 });
                 return Err(e.into());
             }

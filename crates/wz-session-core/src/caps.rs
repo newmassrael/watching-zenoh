@@ -86,15 +86,25 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
     let digits = text.as_bytes();
     assert!(!digits.is_empty(), "a WZ_LIMIT_* value is empty");
     let mut value = 0usize;
-    let mut i = 0;
-    while i < digits.len() {
-        let digit = digits[i];
+    let mut rest = digits;
+    while let [digit, tail @ ..] = rest {
         assert!(
             digit.is_ascii_digit(),
             "a WZ_LIMIT_* value is not a decimal number"
         );
-        value = value * 10 + (digit - b'0') as usize;
-        i += 1;
+        let next = match value.checked_mul(10) {
+            Some(tens) => tens.checked_add(digit.saturating_sub(b'0') as usize),
+            None => None,
+        };
+        assert!(
+            next.is_some(),
+            "a WZ_LIMIT_* value is past the address space"
+        );
+        value = match next {
+            Some(next) => next,
+            None => 0,
+        };
+        rest = tail;
     }
     value
 }
@@ -176,7 +186,7 @@ pub const DATAGRAM_FRAGMENT_GAP_US: usize = generated::DATAGRAM_FRAGMENT_GAP_US;
 
 /// The most bytes of selector parameters a query from a peer may carry for the node to run it;
 /// 0 sets no bound. A longer query reaches no queryable and is counted
-/// ([`crate::query::QueryableRegistry::oversize_refusals`]).
+/// ([`crate::query::QueryPeer::oversize_refusals`]).
 pub const QUERY_PARAMETERS_MAX_BYTES: usize = generated::QUERY_PARAMETERS_MAX_BYTES;
 
 /// The most bytes of attachment a query from a peer may carry for the node to run it; 0 sets no
@@ -564,6 +574,29 @@ pub const MAX_FACES: usize = generated::MAX_FACES;
 /// each link its buffers from the session's arena lends this many beyond the faces' own, so that
 /// a link past either bound is taken off its port and closed rather than left waiting there.
 pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
+
+/// How many receive buffers the links of a session whose engine lends them from its arena share
+/// at most: a link holds one only while it holds part of a batch or something it was asked to
+/// keep, and reads into a free one otherwise, as zenoh-pico reads every peer into its transport's
+/// one buffer and keeps a peer's partial stream batch apart. At least `1`.
+pub const RX_POOL_BUFFERS: usize = generated::RX_POOL_BUFFERS;
+
+const _: () = assert!(
+    RX_POOL_BUFFERS >= 1,
+    "a pool of no receive buffer reads nothing"
+);
+
+/// How many outbound slots the links of a session whose engine lends them from its arena share at
+/// most: a link holds one from a frame's encode to its write, a frame its stream took in part
+/// until the rest is written, and a batch frame left open only while the pool keeps another free,
+/// as zenoh-pico encodes every message into its transport's one write buffer.
+/// At least `1`.
+pub const TX_POOL_SLOTS: usize = generated::TX_POOL_SLOTS;
+
+const _: () = assert!(
+    TX_POOL_SLOTS >= 1,
+    "a pool of no outbound slot sends nothing"
+);
 
 /// Maximum number of key expressions all the peers of a session hold declared to it at once,
 /// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'

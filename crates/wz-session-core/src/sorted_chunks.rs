@@ -36,6 +36,9 @@ use alloc::vec::Vec;
 /// and the chunk list stays short: one entry of it per 64 of the map.
 pub const CHUNK: usize = 64;
 
+/// Where a full chunk is split: the entries from here on go to the chunk after it.
+const HALF: usize = CHUNK / 2;
+
 /// A map from an ordered key to a value, in sorted chunks.
 #[derive(Debug, Clone)]
 pub struct SortedChunks<K, V> {
@@ -79,12 +82,20 @@ impl<K, V> SortedChunks<K, V> {
     /// Bytes the map has allocated: every chunk's capacity and the list of chunks.
     /// Exact, because every allocation is a `Vec` or the deque that holds them.
     pub fn allocated_bytes(&self) -> usize {
-        self.chunks.capacity() * core::mem::size_of::<Vec<(K, V)>>()
-            + self
-                .chunks
-                .iter()
-                .map(|chunk| chunk.capacity() * core::mem::size_of::<(K, V)>())
-                .sum::<usize>()
+        // Allocated bytes are below `isize::MAX`, so no product or sum here saturates.
+        self.chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<(K, V)>())
+            })
+            .fold(
+                self.chunks
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<Vec<(K, V)>>()),
+                usize::saturating_add,
+            )
     }
 
     /// Every entry, in key order.
@@ -111,33 +122,38 @@ impl<K, V> SortedChunks<K, V> {
 
 impl<K: Ord, V> SortedChunks<K, V> {
     /// The chunk `key` belongs in, and whether it is the one before the first
-    /// (a key below every key held goes at the front of the first chunk).
+    /// (a key below every key held goes at the front of the first chunk). With no
+    /// chunk held it is `0`, which names none.
     fn chunk_for(&self, key: &K) -> usize {
         self.chunks
-            .partition_point(|chunk| chunk[0].0 <= *key)
+            .partition_point(|chunk| chunk.first().is_some_and(|(first, _)| first <= key))
             .saturating_sub(1)
     }
 
     /// Where `key` is: its chunk and its place in it.
     fn find(&self, key: &K) -> Option<(usize, usize)> {
-        if self.chunks.is_empty() {
-            return None;
-        }
         let at = self.chunk_for(key);
-        let place = self.chunks[at].binary_search_by(|(k, _)| k.cmp(key)).ok()?;
+        let place = self
+            .chunks
+            .get(at)?
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()?;
         Some((at, place))
     }
 
     /// The value at `key`.
     pub fn get(&self, key: &K) -> Option<&V> {
         let (at, place) = self.find(key)?;
-        Some(&self.chunks[at][place].1)
+        self.chunks.get(at)?.get(place).map(|(_, value)| value)
     }
 
     /// The value at `key`, for writing.
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let (at, place) = self.find(key)?;
-        Some(&mut self.chunks[at][place].1)
+        self.chunks
+            .get_mut(at)?
+            .get_mut(place)
+            .map(|(_, value)| value)
     }
 
     /// Whether `key` holds a value.
@@ -147,19 +163,24 @@ impl<K: Ord, V> SortedChunks<K, V> {
 
     /// Put `value` at `key`, and return the value it replaced.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if self.chunks.is_empty() {
-            self.chunks.push_back(Self::new_chunk(key, value));
-            self.len = 1;
-            return None;
-        }
         let at = self.chunk_for(&key);
-        match self.chunks[at].binary_search_by(|(k, _)| k.cmp(&key)) {
-            Ok(place) => Some(core::mem::replace(&mut self.chunks[at][place].1, value)),
+        // `at` names a chunk whenever one is held: past it is a chunk of its own.
+        let next = at.saturating_add(1);
+        let is_last = next == self.chunks.len();
+        let Some(chunk) = self.chunks.get_mut(at) else {
+            self.chunks.push_back(Self::new_chunk(key, value));
+            self.len = self.len.saturating_add(1);
+            return None;
+        };
+        match chunk.binary_search_by(|(k, _)| k.cmp(&key)) {
+            Ok(place) => chunk
+                .get_mut(place)
+                .map(|(_, held)| core::mem::replace(held, value)),
             Err(place) => {
-                self.len += 1;
-                if self.chunks[at].len() < CHUNK {
-                    self.chunks[at].insert(place, (key, value));
-                } else if at + 1 == self.chunks.len() && place == CHUNK {
+                self.len = self.len.saturating_add(1);
+                if chunk.len() < CHUNK {
+                    chunk.insert(place, (key, value));
+                } else if is_last && place == CHUNK {
                     // An append past the end of the last chunk: a chunk of its own,
                     // so a key handed out in order leaves every chunk full.
                     self.chunks.push_back(Self::new_chunk(key, value));
@@ -167,13 +188,12 @@ impl<K: Ord, V> SortedChunks<K, V> {
                     // A full chunk is split in the middle and the entry goes to the
                     // half it belongs in.
                     let mut upper: Vec<(K, V)> = Vec::with_capacity(CHUNK);
-                    upper.extend(self.chunks[at].drain(CHUNK / 2..));
-                    if place <= CHUNK / 2 {
-                        self.chunks[at].insert(place, (key, value));
-                    } else {
-                        upper.insert(place - CHUNK / 2, (key, value));
+                    upper.extend(chunk.drain(HALF..));
+                    match place.checked_sub(HALF) {
+                        Some(above) if above > 0 => upper.insert(above, (key, value)),
+                        _ => chunk.insert(place, (key, value)),
                     }
-                    self.chunks.insert(at + 1, upper);
+                    self.chunks.insert(next, upper);
                 }
                 None
             }
@@ -183,11 +203,12 @@ impl<K: Ord, V> SortedChunks<K, V> {
     /// Take the value at `key` out. A chunk that is left empty is given back.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let (at, place) = self.find(key)?;
-        let (_, value) = self.chunks[at].remove(place);
-        if self.chunks[at].is_empty() {
+        let chunk = self.chunks.get_mut(at)?;
+        let (_, value) = chunk.remove(place);
+        if chunk.is_empty() {
             let _ = self.chunks.remove(at);
         }
-        self.len -= 1;
+        self.len = self.len.saturating_sub(1);
         Some(value)
     }
 
@@ -197,14 +218,16 @@ impl<K: Ord, V> SortedChunks<K, V> {
         if other.is_empty() {
             return;
         }
-        let past_the_end = match (self.chunks.back(), other.chunks.front()) {
-            (Some(mine), Some(theirs)) => mine[mine.len() - 1].0 < theirs[0].0,
+        let mine = self.chunks.back().and_then(|chunk| chunk.last());
+        let theirs = other.chunks.front().and_then(|chunk| chunk.first());
+        let past_the_end = match (mine, theirs) {
+            (Some((mine, _)), Some((theirs, _))) => mine < theirs,
             _ => true,
         };
         if past_the_end {
             // Whole chunks, with no entry moved: the map a fold appends to is
             // usually older than what it takes.
-            self.len += other.len;
+            self.len = self.len.saturating_add(other.len);
             self.chunks.append(&mut other.chunks);
             other.len = 0;
             return;

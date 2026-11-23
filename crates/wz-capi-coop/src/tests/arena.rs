@@ -32,6 +32,7 @@ use super::{
 use crate::arena::{
     AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
+use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -101,6 +102,26 @@ fn open_dialling(
     )
 }
 
+/// The count of a link row of a pool of `pool` for `links` links: the pool's, at most the links,
+/// in a build that listens; one for each link in a build that only dials, whose links keep buffers
+/// of their own.
+fn pooled(pool: usize, links: usize) -> usize {
+    if cfg!(feature = "listen") {
+        pool.min(links)
+    } else {
+        links
+    }
+}
+
+/// How many links `plan` holds places for: its row of places in a build that listens, its
+/// transmit rows, one for each link, in a build that only dials.
+fn link_places(plan: &ArenaPlan) -> usize {
+    plan.rows()
+        .iter()
+        .find(|row| row.part == "link places")
+        .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
+}
+
 /// The row of `plan` named `part`.
 fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
     *plan
@@ -111,11 +132,18 @@ fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
 }
 
 /// The arena is the sum of its rows' spans, and lending every row from it brings its high-water
-/// mark to its size: the plan the open reserves by is exactly what the rows take.
+/// mark to its size: the plan the open reserves by is exactly what the rows take. The client
+/// dials an endpoint, whose text is a row as every other part is.
 #[test]
 fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
-    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
-        .expect("the build's limits lay an arena out");
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("the build's limits lay an arena out");
     let reserved = plan.reserved_bytes().expect("within the address space");
     assert!(
         plan.rows()
@@ -146,9 +174,17 @@ fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
 fn an_open_reserves_the_arena_its_plan_lays_out() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let plan = ArenaPlan::of(&super::config(&router), &SessionLimits::defaults())
-        .expect("the build's limits lay an arena out");
+    let plan = host_plan(&super::config(&router)).expect("the build's limits lay an arena out");
     assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
+}
+
+/// The arena an open of `config` over the host's links the tests open with reserves, as the
+/// engine plans it: its links' cells and their gates' included.
+fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
+    crate::engine::arena_plan::<PosixClock, _>(
+        &PosixLinks::new(super::LOOPBACK, PosixTcpDial),
+        config,
+    )
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
@@ -158,11 +194,8 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
     let probe = Probe::bind();
-    let plan = ArenaPlan::of(
-        &dialling(&probe, SessionLimits::defaults()),
-        &SessionLimits::defaults(),
-    )
-    .expect("the build's limits lay an arena out");
+    let plan = host_plan(&dialling(&probe, SessionLimits::defaults()))
+        .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     let refused = open_dialling(&probe, SessionLimits::defaults(), &NoMemory).err();
     assert_eq!(
@@ -216,8 +249,8 @@ fn a_limit_lowered_at_open_lowers_its_row() {
     let at_two = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&at_two, "subscribers").count, 2);
-    assert_eq!(row(&built, "subscribers").count, caps::MAX_SUBSCRIPTIONS);
+    assert_eq!(at_two.tables().subscribers, 2);
+    assert_eq!(built.tables().subscribers, caps::MAX_SUBSCRIPTIONS);
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
@@ -369,6 +402,146 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
     );
 }
 
+/// The plan counts the faces a config can open with and no more, all within the sets the arena
+/// lends (`MAX_FACE_SETS`): as many as the build admits besides the dial role's, and in a build
+/// that joins groups one for each group the task cells hold. A config told to join more groups than
+/// that, whose open is refused at the join past them, still lays out, so it is refused there as it
+/// was; a build without `group` counts no group, as it refuses any by name.
+#[test]
+fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
+    use crate::arena::{admitted_faces, MAX_FACE_SETS};
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    let join = GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    };
+    let most = admitted_faces(&SessionLimits::defaults()).expect("the build's limits");
+    let groups = if cfg!(feature = "group") {
+        caps::MAX_TASKS
+    } else {
+        0
+    };
+    for asked in [groups, groups + 2] {
+        // A session that dials as well as joining, so its dial role's face is counted whatever
+        // the groups it joins.
+        let plan = ArenaPlan::of(
+            &CoopConfig {
+                endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+                max_faces: most,
+                groups: vec![join.clone(); asked],
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        )
+        .expect("lays an arena out");
+        assert_eq!(
+            plan.peers().tables,
+            1 + most + groups,
+            "{asked} groups asked"
+        );
+        assert!(plan.peers().tables <= MAX_FACE_SETS);
+        assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
+        assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+    }
+}
+
+/// The tokens of faces that went before each was retracted are owed apart from the sets those
+/// faces gave back, a table of them lent at the open with a row for each row of the session's token
+/// pool: a face owes apart only while its tokens hold a row of the pool, so the faces owing at
+/// once are never more. A session of one face, whose one face never goes, is lent none.
+#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+#[test]
+fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
+    let many = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 3,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let pools = many.peers().pools;
+    assert!(pools.shared, "a session of many faces shares its pools");
+    assert_eq!(many.peers().owed_tokens(), pools.remote_decls);
+    assert_eq!(row(&many, "owed tokens").count, pools.remote_decls);
+    let one = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        !one.peers().pools.shared,
+        "CONTROL: one face shares nothing"
+    );
+    assert_eq!(one.peers().owed_tokens(), 0);
+    assert!(
+        one.rows().iter().all(|row| row.part != "owed tokens"),
+        "a session of one face is lent no table of tokens owed"
+    );
+}
+
+/// The round's tables are as many rows as the session's `DELIVERY_LANE_EVENTS` and
+/// `DELIVERY_LANE_CALLBACKS` state and two of its longest key, each lowered with its limit, and are
+/// laid out right after the lane's area, the order the open lends them in.
+#[test]
+fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        built.round(),
+        RoundRowCounts {
+            records: caps::DELIVERY_LANE_EVENTS,
+            callbacks: caps::DELIVERY_LANE_CALLBACKS,
+            longest_key: caps::MAX_KEYEXPR_BYTES,
+        }
+    );
+    assert_eq!(
+        row(&built, "delivery records").count,
+        caps::DELIVERY_LANE_EVENTS
+    );
+    assert_eq!(
+        row(&built, "delivery callbacks").count,
+        caps::DELIVERY_LANE_CALLBACKS
+    );
+    let lowered = lowered(|l| {
+        l.select_delivery_lane_events(Quota::at_most(4))?;
+        l.select_max_keyexpr_bytes(Quota::at_most(32))
+    });
+    let plan = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
+    assert_eq!(row(&plan, "delivery records").count, 4);
+    assert_eq!(row(&plan, "delivery keys").count, 1);
+    assert_eq!(row(&plan, "delivery keys").entry_bytes, 64);
+    assert!(
+        plan.reserved_bytes() < built.reserved_bytes(),
+        "the lowered limits lower the arena"
+    );
+    let parts: Vec<&str> = plan.rows().iter().map(|row| row.part).collect();
+    let lane = parts
+        .iter()
+        .position(|part| *part == "delivery lane")
+        .expect("the plan has the lane");
+    assert_eq!(
+        parts[lane + 1..lane + 4],
+        ["delivery records", "delivery callbacks", "delivery keys"]
+    );
+}
+
 /// The delivery lane's area is the `DELIVERY_LANE_BYTES` the session's limits state, one buffer
 /// and its flag: a lowered value lowers it, and one over the build's refuses the plan, naming the
 /// limit and both values.
@@ -458,8 +631,9 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
     let plan =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
-        row(&plan, "subscribers").entry_bytes,
-        SubscriberTable::<crate::engine::SubscriberRow, Lent>::ROW_BYTES
+        row(&plan, "session tables").entry_bytes,
+        crate::engine::CoopTables::arena_bytes(&plan.tables()).expect("within the address space"),
+        "the subscribers are rows of the session's one table set"
     );
     assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
     // A key of the static policy is its text and its length; a place is a few words.
@@ -483,10 +657,10 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
     }
 }
 
-/// A listener lays out the gets and the peer tables of a face for the dial role and each face it
-/// admits, a handshake among them, and no more; the buffers of a link for each of those and for
-/// each handshake it may take off its port besides; and the application's tables once, however many
-/// faces it holds.
+/// A listener lays out the gets and the peer tables of a face for each face it admits, a handshake
+/// among them, and for the dial role only when it dials; the buffers of a link for each of those
+/// and for each handshake it may take off its port besides; and the application's tables once,
+/// however many faces it holds.
 #[test]
 fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     let dial = ArenaPlan::of(
@@ -510,8 +684,8 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     // The gets pending on the session's own queryables are held apart from every face's.
     let own = usize::from(cfg!(feature = "local-queryable"));
     assert_eq!(row(&dial, "pending gets").count, 1 + own);
-    assert_eq!(row(&listening, "pending gets").count, 1 + 3 + own);
-    assert_eq!(listening.gets().tables, 1 + 3 + own);
+    assert_eq!(row(&listening, "pending gets").count, 3 + own);
+    assert_eq!(listening.gets().tables, 3 + own);
     assert_eq!(
         row(&listening, "pending gets").entry_bytes,
         row(&dial, "pending gets").entry_bytes,
@@ -520,21 +694,71 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     // What a face's peer writes is held once for each face, as its gets are, and never for the
     // session's own gets.
     assert_eq!(row(&dial, "peer tables").count, 1);
-    assert_eq!(row(&listening, "peer tables").count, 1 + 3);
-    assert_eq!(listening.peers().tables, 1 + 3);
+    assert_eq!(row(&listening, "peer tables").count, 3);
+    assert_eq!(listening.peers().tables, 3);
+    assert!(dial.peers().dial && !listening.peers().dial);
     assert_eq!(
         row(&listening, "peer tables").entry_bytes,
         row(&dial, "peer tables").entry_bytes,
         "every face's peer tables are the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
-    assert_eq!(row(&listening, "link receive buffers").count, 1 + 3 + 2);
+    assert_eq!(link_places(&listening), 3 + 2);
+    assert_eq!(
+        row(&listening, "link receive buffers").count,
+        pooled(caps::RX_POOL_BUFFERS, 3 + 2),
+        "the links share a pool of receive buffers"
+    );
     assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
     assert_eq!(
-        row(&listening, "subscribers"),
-        row(&dial, "subscribers"),
+        row(&listening, "session tables"),
+        row(&dial, "session tables"),
         "the application's tables are held once"
     );
+}
+
+/// The dial role's face is lent a link's buffers and a face's tables only when the session dials:
+/// a listener that lists an endpoint lays out one link and one face more than the same listener
+/// with none, and a session that lists neither an endpoint nor a port still lays the dial role's
+/// out, as its open tries to dial (and fails for want of an endpoint, as before).
+#[test]
+fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
+    let listener = |endpoints: Vec<String>| CoopConfig {
+        endpoints,
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 3,
+        accept_pending: 2,
+        ..client_config()
+    };
+    let plan = |config: &CoopConfig| {
+        ArenaPlan::of(config, &SessionLimits::defaults()).expect("lays an arena out")
+    };
+    let only = listener(Vec::new());
+    let dialling = listener(vec!["tcp/127.0.0.1:7447".to_owned()]);
+    assert!(!crate::arena::dials(&only) && crate::arena::dials(&dialling));
+    let (only, dialling) = (plan(&only), plan(&dialling));
+    let own = usize::from(cfg!(feature = "local-queryable"));
+    assert_eq!(link_places(&only), 3 + 2);
+    assert_eq!(link_places(&dialling), 1 + 3 + 2);
+    assert_eq!((only.peers().tables, only.gets().tables), (3, 3 + own));
+    assert_eq!(
+        (dialling.peers().tables, dialling.gets().tables),
+        (1 + 3, 1 + 3 + own)
+    );
+    assert!(dialling.peers().dial && !only.peers().dial);
+    assert!(
+        only.reserved_bytes() < dialling.reserved_bytes(),
+        "the listener that dials nothing reserves less"
+    );
+    let nothing = CoopConfig {
+        max_faces: 0,
+        ..client_config()
+    };
+    assert!(
+        crate::arena::dials(&nothing),
+        "its open tries the dial role"
+    );
+    assert_eq!(row(&plan(&nothing), "link receive buffers").count, 1);
 }
 
 /// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
@@ -813,7 +1037,7 @@ fn a_config_past_its_faces_or_handshakes_is_refused_by_name() {
         &two_faces,
     )
     .expect("CONTROL: the faces the session admits lay an arena out");
-    assert_eq!(at_two.peers().tables, 1 + 2);
+    assert_eq!(at_two.peers().tables, 2);
 
     let one_handshake = lowered(|l| l.select_max_accept_pending(Quota::at_most(1)));
     let listener = CoopConfig {
@@ -870,8 +1094,18 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     };
     let batch = usize::from(config.batch_size);
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&plan, "link receive buffers").count, 3);
+    assert_eq!(
+        row(&plan, "link receive buffers").count,
+        pooled(caps::RX_POOL_BUFFERS, 3),
+        "the links share a pool, of no more buffers than links"
+    );
     assert_eq!(row(&plan, "link receive buffers").entry_bytes, batch);
+    assert_eq!(link_places(&plan), 3);
+    assert_eq!(
+        row(&plan, "link transmit slots").count,
+        pooled(caps::TX_POOL_SLOTS, 3),
+        "the links share a pool of outbound slots, of no more than links"
+    );
     assert_eq!(
         row(&plan, "link transmit slots").entry_bytes,
         LINK_TX_SLOTS * batch
@@ -1056,6 +1290,7 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
 
 /// A session whose config admits no face besides the dial role's attaches none, as its arena holds
 /// the buffers of one link; the CONTROL is the plan of the same config.
+#[cfg(feature = "listen")]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_face_past_max_faces_is_not_attached() {
@@ -1164,20 +1399,35 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let mut held = 0;
     for row in plan.rows() {
         // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
-        // pool's one area of the rows its faces share, and the watchers' one row of the spans of
-        // their lists, not a row of each.
+        // pool's one area of the rows its faces share, the watchers' one row of the spans of
+        // their lists, and the session's table set one area of its tables, not a row of each.
         if row.basis == "DELIVERY_LANE_BYTES"
             || row.basis == "KEY_ARENA_BYTES"
             || row.basis == "MAX_DECL_OBSERVERS"
+            || row.part == "session tables"
             || POOL_PARTS.contains(&row.part)
         {
             continue;
         }
         if let Some(value) = preset_of(&presets, row.basis) {
+            // A pool the links share holds no more than the links: the client's one.
+            let value = if row.basis == "RX_POOL_BUFFERS" || row.basis == "TX_POOL_SLOTS" {
+                value.min(1)
+            } else {
+                value
+            };
             assert_eq!(row.count, value, "{} at the pico preset", row.part);
             held += 1;
         }
     }
+    // The session's table set is one row of the arena; the rows of each of its tables are the
+    // plan's own count of them.
+    assert_eq!(
+        plan.tables().keyexprs,
+        preset("MAX_DECLARED_KEYEXPRS"),
+        "the session's keyexpr table at the pico preset"
+    );
+    held += 1;
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
     assert_eq!(
@@ -1303,13 +1553,16 @@ const POOL_PARTS: [&str; 3] = [
     "peer interest pool",
 ];
 
-/// The parts of an arena held once for each link: its buffers and the flags that lend them.
-const LINK_PARTS: [&str; 4] = [
-    "link receive flags",
-    "link receive buffers",
-    "link transmit flags",
-    "link transmit slots",
-];
+/// The parts of an arena held once for each link: its place among the session's links.
+const LINK_PARTS: [&str; 1] = ["link places"];
+
+/// The parts of the pool of receive buffers the links share (`RX_POOL_BUFFERS`, at most one for
+/// each link).
+const RX_PARTS: [&str; 2] = ["link receive flags", "link receive buffers"];
+
+/// The parts of the pool of outbound slots the links share (`TX_POOL_SLOTS`, at most one for each
+/// link).
+const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 
 /// The pico preset holds a session's faces to zenoh-pico's own bounds: ten peers on a listener
 /// (`Z_LISTEN_MAX_CONNECTION_NB`) and one handshake at a time, and a client its one transport. A
@@ -1383,18 +1636,25 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     assert_eq!(client.peers().tables, 1);
     assert_eq!(client.gets().tables, 1 + own);
     assert_eq!(row(&client, "link receive buffers").count, 1);
-    assert_eq!(peer.peers().tables, 1 + faces);
-    assert_eq!(peer.gets().tables, 1 + faces + own);
+    assert_eq!(peer.peers().tables, faces);
+    assert_eq!(peer.gets().tables, faces + own);
+    assert_eq!(link_places(&peer), faces + handshakes);
+    assert_eq!(
+        row(&peer, "link transmit slots").count,
+        pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
+        "the peer's links share the preset's outbound pool"
+    );
     assert_eq!(
         row(&peer, "link receive buffers").count,
-        1 + faces + handshakes
+        pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
+        "the peer's links share the preset's pool"
     );
 
     // The pools hold the fewer of the session's limit and what the faces could hold, each at a
-    // peer's own bound: a client's one face what its tables held, and the peer's eleven the
-    // preset's.
+    // peer's own bound: a client's one face what its tables held, and the peer's ten the
+    // preset's: it listens and dials nothing, so its dial role's face holds none.
     let shared = |each: usize, session: &str, sets: usize| (each * sets).min(preset(session));
-    for (plan, sets) in [(&client, 1), (&peer, 1 + faces)] {
+    for (plan, sets) in [(&client, 1), (&peer, faces)] {
         let pools = plan.peers().pools;
         assert_eq!(
             (pools.remote_decls, pools.aliases, pools.interests),
@@ -1415,8 +1675,28 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         );
     }
 
-    assert_eq!(peer.rows().len(), client.rows().len());
-    for (theirs, ours) in peer.rows().iter().zip(client.rows()) {
+    // The tokens the faces that went owe apart are the peer's alone: a client's one face never
+    // goes. A row for each row of the session's token pool.
+    let owed: Vec<_> = peer
+        .rows()
+        .iter()
+        .filter(|row| row.part == "owed tokens")
+        .collect();
+    let owes = cfg!(all(
+        feature = "liveliness",
+        any(feature = "listen", feature = "group")
+    ));
+    assert_eq!(owed.len(), usize::from(owes), "{owed:?}");
+    if let Some(row) = owed.first() {
+        assert_eq!(row.count, peer.peers().pools.remote_decls);
+    }
+    let rows: Vec<_> = peer
+        .rows()
+        .iter()
+        .filter(|row| row.part != "owed tokens")
+        .collect();
+    assert_eq!(rows.len(), client.rows().len());
+    for (theirs, ours) in rows.into_iter().zip(client.rows()) {
         assert_eq!(
             (theirs.part, theirs.basis),
             (ours.part, ours.basis),
@@ -1431,17 +1711,36 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             assert_eq!(theirs.count, 1, "{} is one area", theirs.part);
             continue;
         }
+        // Each session's endpoint texts are its own config's, one area of them: the client here
+        // names none, the peer the one endpoint it listens on.
+        if theirs.part == "endpoint texts" {
+            assert_eq!((theirs.count, ours.count), (1, 1), "the texts are one area");
+            assert!(
+                theirs.entry_bytes > ours.entry_bytes,
+                "the peer's endpoint takes a text's row and the client's none"
+            );
+            continue;
+        }
         assert_eq!(
             theirs.entry_bytes, ours.entry_bytes,
             "a face's and a link's items are the same size on either"
         );
-        let count = if LINK_PARTS.contains(&theirs.part) {
-            ours.count * (1 + faces + handshakes)
+        // The peer listens and dials nothing: no link and no face of the dial role's. Its links
+        // share the preset's pool of receive buffers, of which the client's one link takes one.
+        let count = if RX_PARTS.contains(&theirs.part) {
+            pooled(preset("RX_POOL_BUFFERS"), faces + handshakes)
+        } else if TX_PARTS.contains(&theirs.part) {
+            pooled(preset("TX_POOL_SLOTS"), faces + handshakes)
+        } else if LINK_PARTS.contains(&theirs.part) {
+            ours.count * (faces + handshakes)
         } else if theirs.part == "peer tables" {
+            ours.count * faces
+        } else if ["face tables", "held faces"].contains(&theirs.part) {
+            // Its dial role's face holds a set of no rows all the same, first, beside the faces'.
             ours.count * (1 + faces)
         } else if FACE_PARTS.contains(&theirs.part) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
-            ours.count / (1 + own) * (1 + faces + own)
+            ours.count / (1 + own) * (faces + own)
         } else {
             ours.count
         };
@@ -1464,4 +1763,125 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             .reserved_bytes(),
         "a peer at the preset reserves less than a listener at the build's defaults"
     );
+}
+
+/// The rows of the arena a session reserves at its open, item by item, for a client and a peer at
+/// the build's limits and at the pico preset's: what each row holds, the limit that counts it, how
+/// many items, the bytes of one and of the row, and the reservation. What the measurement of a
+/// release library's memory against zenoh-pico's is read row by row from.
+///
+/// A MEASUREMENT: it asserts only that each plan lays out.
+#[test]
+#[ignore = "a measurement of a session's arena by row; run with --ignored --nocapture"]
+fn the_arena_of_a_session_by_row_measured() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    let print = |name: &str, plan: &ArenaPlan| {
+        println!("arena-rows: {name}");
+        for row in plan.rows() {
+            println!(
+                "arena-rows:   {:<36} {:<52} {:>6} x {:>7} = {:>9}",
+                row.part,
+                row.basis,
+                row.count,
+                row.entry_bytes,
+                row.bytes().unwrap_or(usize::MAX),
+            );
+        }
+        println!(
+            "arena-rows:   reserved {}",
+            plan.reserved_bytes().unwrap_or(usize::MAX)
+        );
+    };
+    let defaults = SessionLimits::defaults();
+    let preset = pico_preset_limits();
+    for (name, limits) in [("build limits", defaults), ("pico preset", preset)] {
+        let faces = admitted_faces(&limits).expect("the limits are under the build");
+        let handshakes = admitted_handshakes(&limits).expect("the limits are under the build");
+        let client = ArenaPlan::of(
+            &CoopConfig {
+                accept_pending: handshakes,
+                ..preset_client()
+            },
+            &limits,
+        )
+        .expect("a client's plan lays out");
+        print(&format!("client at the {name}"), &client);
+        let peer = ArenaPlan::of(
+            &CoopConfig {
+                listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                max_faces: faces,
+                accept_pending: handshakes,
+                ..client_config()
+            },
+            &limits,
+        )
+        .expect("a peer's plan lays out");
+        print(&format!("peer of {faces} faces at the {name}"), &peer);
+    }
+}
+/// What a listener's open reserves when it is opened at the build's own limits and at the pico
+/// preset's, its links' cells included, as the engine plans it: the measure of the default each
+/// ABI opens under (the pico ABI at its preset, zenoh-c and the Rust API at the build's). Read
+/// with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints the arena a listener reserves at each default"]
+fn print_the_arena_a_listener_reserves_at_each_default() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    for (name, limits) in [
+        ("build defaults", SessionLimits::defaults()),
+        ("pico preset", pico_preset_limits()),
+    ] {
+        let config = CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            max_faces: admitted_faces(&limits).expect("the limits admit their own faces"),
+            accept_pending: admitted_handshakes(&limits)
+                .expect("the limits admit their own handshakes"),
+            limits,
+            ..client_config()
+        };
+        let plan = host_plan(&config).expect("the limits lay an arena out");
+        std::println!(
+            "{name}: {} faces, {} pending: {} B",
+            config.max_faces,
+            config.accept_pending,
+            plan.reserved_bytes().unwrap_or(usize::MAX)
+        );
+        for row in plan.rows() {
+            std::println!(
+                "  {:<40} {:>6} x {:>7} = {:>9} B",
+                row.part,
+                row.count,
+                row.entry_bytes,
+                row.bytes().unwrap_or(usize::MAX)
+            );
+        }
+    }
+}
+
+/// A plan with every row of the build, the links' cells, their gates', their actions' and the
+/// ABI's handle among them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
+/// whichever build. A group that puts a row it does not count, or counts one it does not put,
+/// turns this red.
+#[test]
+fn a_plan_with_every_row_holds_exactly_arena_rows() {
+    // Faces that share their pools, so the table of tokens the faces that went owe is put too.
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 3,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .and_then(|plan| {
+        plan.holding_cells(crate::arena::LinkCells {
+            driver: 64,
+            gate: 64,
+            actions: 64,
+        })
+    })
+    .and_then(|plan| plan.holding(core::alloc::Layout::new::<u64>()))
+    .expect("the build's limits lay an arena out");
+    assert_eq!(plan.rows().len(), crate::arena::ARENA_ROWS);
 }

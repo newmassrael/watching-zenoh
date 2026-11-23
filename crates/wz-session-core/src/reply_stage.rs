@@ -592,7 +592,7 @@ impl<P: Storage> ReplyStage<P> {
     fn bytes(&self, span: Span<P>) -> &[u8] {
         let start = span.start.to_usize();
         self.arena
-            .get(start..start + span.len.to_usize())
+            .get(start..start.saturating_add(span.len.to_usize()))
             .unwrap_or_default()
     }
 
@@ -672,7 +672,7 @@ impl<P: Storage> ReplyStage<P> {
         ReplyParts {
             rid: row.rid,
             keyexpr: self.text(row.keyexpr),
-            responder: row.responder.as_ref().map(|(zid, eid)| (&zid[..], *eid)),
+            responder: row.responder.as_ref().map(|(zid, eid)| (&**zid, *eid)),
             qos: row.qos,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: row.ts_stack.as_ref(),
@@ -707,7 +707,7 @@ impl<P: Storage> Iterator for StagedIntoIter<P> {
 
     fn next(&mut self) -> Option<QueryReply> {
         let reply = self.stage.nth(self.next)?;
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         Some(reply)
     }
 }
@@ -739,7 +739,7 @@ impl<P: Storage> Iterator for StagedDrain<'_, P> {
 
     fn next(&mut self) -> Option<QueryReply> {
         let reply = self.stage.nth(self.next)?;
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         Some(reply)
     }
 }
@@ -799,7 +799,12 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
                 "a staged reply's bytes are addressed by offsets of the policy's width"
             );
         }
-        if self.rows.free_slots() == 0 || !self.bounds.replies.admits(self.rows.len() + 1) {
+        if self.rows.free_slots() == 0
+            || !self
+                .bounds
+                .replies
+                .admits(self.rows.len().saturating_add(1))
+        {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
@@ -824,7 +829,12 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
         // Sized and bounded as the handler described it, in every build: what a build's features
         // keep of a reply (`RowKind`) decides what goes out, not which replies a handler is told
         // were refused.
-        let need = parts.keyexpr.len() + payload_len + attachment_len + schema_len;
+        let need = parts
+            .keyexpr
+            .len()
+            .saturating_add(payload_len)
+            .saturating_add(attachment_len)
+            .saturating_add(schema_len);
         // The arena's room. On the fixed policy it is the declared bytes, and the
         // assertion above makes them addressable, so that is the whole check; on the
         // growable one the allocator has room, and what bounds the arena is the
@@ -1062,14 +1072,16 @@ impl<P: Storage> core::ops::Deref for FinalStage<P> {
 
 impl<P: Storage> FinalStaging for FinalStage<P> {
     fn has_room(&self) -> bool {
-        self.rows.free_slots() > 0 && self.quota.admits(self.rows.len() + 1)
+        self.rows.free_slots() > 0 && self.quota.admits(self.rows.len().saturating_add(1))
     }
 
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
         // Room was asked for before the request ran; a table that has none by
         // now is the caller's contract broken, and counted rather than dropped
         // in silence.
-        if !self.quota.admits(self.rows.len() + 1) || self.rows.push((rid, qos)).is_err() {
+        if !self.quota.admits(self.rows.len().saturating_add(1))
+            || self.rows.push((rid, qos)).is_err()
+        {
             self.refused_requests = self.refused_requests.saturating_add(1);
         }
     }
@@ -1108,7 +1120,7 @@ impl<P: Storage> Iterator for OwedDrain<'_, P> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let row = *self.rows.get(self.at)?;
-        self.at += 1;
+        self.at = self.at.saturating_add(1);
         Some(row)
     }
 }

@@ -915,17 +915,20 @@ fn split_locator_parts(body: &str) -> LocatorParts<'_> {
         (None, Some(c)) => c,
         (None, None) => body.len(),
     };
+    // Each separator is one ASCII byte, so a cut past it or before it is a
+    // char boundary; a cut `get` refuses is no part.
+    let after = |at: usize| at.saturating_add(1);
     let metadata = match (midx, cidx) {
-        (Some(m), Some(c)) if m < c => &body[m + 1..c],
-        (Some(m), None) => &body[m + 1..],
+        (Some(m), Some(c)) if m < c => body.get(after(m)..c).unwrap_or(""),
+        (Some(m), None) => body.get(after(m)..).unwrap_or(""),
         _ => "",
     };
     let config = match cidx {
-        Some(c) => &body[c + 1..],
+        Some(c) => body.get(after(c)..).unwrap_or(""),
         None => "",
     };
     LocatorParts {
-        address: &body[..address_end],
+        address: body.get(..address_end).unwrap_or(body),
         metadata,
         config,
     }

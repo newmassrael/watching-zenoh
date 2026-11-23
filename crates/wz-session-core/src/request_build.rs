@@ -23,7 +23,6 @@
 //! `all(alloc, codec-request)` — without the Request codec there is no
 //! wire frame to build, and the builders allocate owned codec buffers.
 
-use alloc::string::{String, ToString};
 // The production query-body / request-level ext chains build with
 // `Vec::new()` + `push` (the `vec![..]` macro is used only in the test
 // module, which carries its own `use alloc::vec`).
@@ -32,24 +31,25 @@ use alloc::vec::Vec;
 use wz_codecs::ext_zint::ExtZint;
 
 // R3011 — a Request is built at the wire profile (`crate::wire`), the type a
-// receive path hands to the registries, so the part types and the two byte/text
-// constructors are the wire-profile ones. The constructors keep the names the
-// default-profile helpers have in `codec_owned`: what they build is the same
+// receive path hands to the registries, so the part types and the byte
+// constructor are the wire-profile ones. The constructor keeps the name the
+// default-profile helper has in `codec_owned`: what it builds is the same
 // kind of field, at the profile the message is on.
 use crate::qos::{CongestionControl, Priority};
 use crate::query_mode::{ConsolidationMode, QueryTarget, TARGET_EXT_ID};
 use crate::request_routing_context::TIMEOUT_EXT_ID;
 use crate::wire::parts::{
     ExtEntryOwned, ExtEntryOwnedVariant, ExtZbufOwned, QueryOwned, TimestampOwned,
-    WireexprLocalOwned, WireexprOwned, WireexprOwnedVariant,
+    WireexprOwnedVariant,
 };
-use crate::wire::{wire_bytes as owned_bytes, wire_string as owned_string};
+use crate::wire::wire_bytes as owned_bytes;
 use crate::wire::{RequestOwned, RequestOwnedVariant};
+use crate::wire_key::{WireKey, WireKeyBuf};
 use sce_forge_runtime::codec::CodecError;
 
 /// R121j-1 — build a `Request` network-message that carries a
 /// `Query` body, addressed to the keyexpr resolved by
-/// `(keyexpr_mapping_id, keyexpr_suffix)`. Mirrors zenoh-pico
+/// `key`. Mirrors zenoh-pico
 /// `_z_request_encode` at
 /// `vendor/zenoh-pico/src/protocol/codec/network.c:114-169` with the
 /// `_Z_REQUEST_QUERY` tag-arm + `_z_query_encode` body at
@@ -91,51 +91,14 @@ use sce_forge_runtime::codec::CodecError;
 /// allocates a fresh `rid` per `z_get` to keep the in-flight Query
 /// table simple.
 ///
-/// `keyexpr_mapping_id` / `keyexpr_suffix` convention matches the
-/// DECLARE builders:
-///   - `(0, Some(s))`: literal — the queried keyexpr is `s` itself
-///     (id=0 is the wz literal-sentinel).
-///   - `(N, None)`: alias — the queried keyexpr is the peer's
-///     mapping for `N`.
-///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
+/// `key` is the queried keyexpr as the wire names it ([`WireKey`]): a literal, the peer's mapping
+/// for an id, or that mapping and a suffix. It has no value for no key.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
 ) -> Result<RequestOwned, CodecError> {
-    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
-    let n_flag = if keyexpr_suffix.is_some() {
-        0x20u8
-    } else {
-        0x00u8
-    };
-    // W3: bounded suffix copy in, fallible past the declared capacity.
-    Ok(RequestOwned {
-        // MID 0x1C (_Z_MID_N_REQUEST) + N gate; M is codegen-derived
-        // from the wireexpr Local arm. Z (outer ext) stays clear:
-        // this minimal builder emits no Request-level extensions.
-        header: 0x1C | n_flag,
-        rid,
-        keyexpr: WireexprOwned {
-            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                id: keyexpr_mapping_id,
-                suffix_len,
-                suffix: keyexpr_suffix.map(owned_string).transpose()?,
-            }),
-        },
-        extensions: None,
-        body: RequestOwnedVariant::CodecZenohQuery(QueryOwned {
-            // MID 0x03 (_Z_MID_Z_QUERY) only. No C (consolidation),
-            // no P (params), no Z (Query-level exts). The byte-
-            // compare test below pins this minimal shape.
-            header: 0x03,
-            consolidation: None,
-            parameters_len: None,
-            parameters: None,
-            extensions: None,
-        }),
-    })
+    RequestQueryBuilder::new(rid, key).build()
 }
 
 /// Re-express a `Request`'s keyexpr as the literal `suffix` (c3c-3 B1
@@ -205,59 +168,13 @@ pub fn reliteralize_request(
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_meta(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     meta: &crate::metadata::QueryMetadata,
 ) -> Result<RequestOwned, CodecError> {
-    let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
+    let mut builder = RequestQueryBuilder::new(rid, key);
+    builder.query = QueryBuilder::from_meta(meta);
     if let Some(target) = meta.target {
         builder = builder.request_target(target);
-    }
-    if let Some(consolidation) = meta.consolidation {
-        builder = builder.consolidation(consolidation);
-    }
-    // Query VALUE ext threading — gated `query-value` (the builder's
-    // `query_value` setter gates with it). Ordered FIRST; `build()` emits the
-    // Query body exts in zenoh-pico order (value 0x03 -> source_info 0x01 ->
-    // attachment 0x05) regardless of setter order. The builder applies
-    // zenoh-pico's `.body` empty-value predicate at `build()`, so a
-    // fully-empty value (empty payload + zero encoding) threads through as NO
-    // ext — no empty-guard needed here (unlike attachment, whose setter panics
-    // on empty; `query_value` accepts an encoding-only or fully-empty value).
-    #[cfg(feature = "query-value")]
-    if let Some((encoding, payload)) = meta.value.as_ref() {
-        builder = builder.query_value(payload, encoding.clone());
-    }
-    // Query source-info ext threading — gated `query-source-info` (the
-    // builder's `query_source_info` setter gates with it). Ordered before
-    // attachment; `build()` emits them in zenoh-pico Query body order
-    // (source_info 0x01 -> attachment 0x05) regardless of setter order.
-    #[cfg(feature = "query-source-info")]
-    if let Some(ref source_info) = meta.source_info {
-        builder = builder.query_source_info(source_info.clone());
-    }
-    // Query attachment ext threading — gated `query-attachment`. The
-    // builder's `query_attachment` setter panics on empty input
-    // (zenoh-pico's `_z_n_msg_query_needed_exts` clears the ext on len=0);
-    // the QueryMetadata contract "attachment = Some(empty) means clear the
-    // ext" is honoured by skipping the call when the inner slice is empty.
-    #[cfg(feature = "query-attachment")]
-    if let Some(attachment) = meta.attachment.as_deref() {
-        if !attachment.is_empty() {
-            builder = builder.query_attachment(attachment);
-        }
-    }
-    // Query selector-parameters threading — gated `query-selector-parameters`
-    // (the receive side gates the inbound parameters projection on the same
-    // feature, query.rs). The builder's `parameters` setter asserts non-empty
-    // (zenoh-pico's encoder clears Q_P on len=0), so the QueryMetadata
-    // contract "parameters = Some(empty) means clear Q_P" is honoured by
-    // skipping the call when the inner slice is empty.
-    #[cfg(feature = "query-selector-parameters")]
-    if let Some(params) = meta.parameters.as_deref() {
-        if !params.is_empty() {
-            builder = builder.parameters(params);
-        }
     }
     if meta.timeout_ms != 0 {
         builder = builder.request_timeout_ms(meta.timeout_ms as u64);
@@ -331,7 +248,9 @@ pub fn attach_query_value_shm(
 
     let descriptor_bytes = crate::extshm::encode_shm_descriptor(descriptor);
     let encoding_codec = encoding.to_codec()?;
-    let declared = encoding_codec.encode_to_vec().len() as u64 + 1 + u64::from(descriptor.data_len);
+    let declared = (encoding_codec.encode_to_vec().len() as u64)
+        .saturating_add(1)
+        .saturating_add(u64::from(descriptor.data_len));
     let marker = QueryExtEntryOwned {
         header: body_ext_id::QUERY_SHM,
         body: QueryExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
@@ -358,7 +277,8 @@ pub fn attach_query_value_shm(
             .map(|lawful| lawful.into_parts().1.into_inner())
             .unwrap_or_default(),
     );
-    let last = chain.len() - 1;
+    // The marker and the value at least, so the last is the chain's last entry.
+    let last = chain.len().saturating_sub(1);
     for (i, ext) in chain.iter_mut().enumerate() {
         ext.header = if i == last {
             ext.header & !EXT_FLAG_Z
@@ -484,7 +404,9 @@ pub fn relay_query_value_shm(
     let unrepresentable = |_| RelayFault::Unrepresentable;
     let entries = crate::held_list::HeldList::entries(&query.extensions)
         .ok_or(RelayFault::Unrepresentable)?;
-    let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &entries[index].body else {
+    let Some(QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value)) =
+        entries.get(index).map(|entry| &entry.body)
+    else {
         return Err(RelayFault::Unrepresentable);
     };
 
@@ -533,7 +455,8 @@ pub fn relay_query_value_shm(
             kept.push(ext.clone());
         }
     }
-    let last = kept.len() - 1;
+    // The value's plain entry at least, so the last is the chain's last entry.
+    let last = kept.len().saturating_sub(1);
     for (position, ext) in kept.iter_mut().enumerate() {
         ext.header = if position == last {
             ext.header & !EXT_FLAG_Z
@@ -611,23 +534,255 @@ pub type Budget = u32;
 #[cfg(feature = "codec-request")]
 pub const BUDGET_BITS: u32 = Budget::BITS;
 
+/// The Query body a Request carries: its consolidation, its parameters and its body extensions
+/// (the value, the source info, the attachment). Built inside [`RequestQueryBuilder`] for a
+/// Request, and on its own where only the body is wanted, as for a query a session answers
+/// itself ([`crate::query_options::QueryOptions::loopback_query`]).
 #[cfg(feature = "codec-request")]
-pub struct RequestQueryBuilder {
-    rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<String>,
-    // Query-layer settings.
+#[derive(Default)]
+pub struct QueryBuilder {
     consolidation: Option<ConsolidationMode>,
     parameters: Option<Vec<u8>>,
     #[cfg(feature = "query-source-info")]
-    query_source_info: Option<crate::sample::SourceInfo>,
+    source_info: Option<crate::sample::SourceInfo>,
     #[cfg(feature = "query-attachment")]
-    query_attachment: Option<Vec<u8>>,
+    attachment: Option<Vec<u8>>,
     #[cfg(feature = "query-value")]
-    query_value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
+    value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
+}
+
+#[cfg(feature = "codec-request")]
+impl QueryBuilder {
+    /// A Query body with nothing set: the header alone.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The Query body `meta` states: its consolidation, value, source info, attachment and
+    /// selector parameters, each under the feature that composes it. An attachment or parameters
+    /// of no bytes state that there are none.
+    pub fn from_meta(meta: &crate::metadata::QueryMetadata) -> Self {
+        let mut query = Self::new();
+        if let Some(consolidation) = meta.consolidation {
+            query = query.consolidation(consolidation);
+        }
+        // The builder applies zenoh-pico's `.body` empty-value predicate at `build()`, so a
+        // fully-empty value threads through as no extension.
+        #[cfg(feature = "query-value")]
+        if let Some((encoding, payload)) = meta.value.as_ref() {
+            query = query.query_value(payload, encoding.clone());
+        }
+        #[cfg(feature = "query-source-info")]
+        if let Some(ref source_info) = meta.source_info {
+            query = query.query_source_info(source_info.clone());
+        }
+        // The setter refuses an empty attachment (zenoh-pico's
+        // `_z_n_msg_query_needed_exts` clears the ext on len=0), so "attachment = Some(empty)
+        // means clear the ext" is honoured by skipping the call.
+        #[cfg(feature = "query-attachment")]
+        if let Some(attachment) = meta.attachment.as_deref() {
+            if !attachment.is_empty() {
+                query = query.query_attachment(attachment);
+            }
+        }
+        // As for the attachment: the setter refuses empty parameters (zenoh-pico's encoder
+        // clears Q_P on len=0), so "parameters = Some(empty) means clear Q_P" skips the call.
+        #[cfg(feature = "query-selector-parameters")]
+        if let Some(params) = meta.parameters.as_deref() {
+            if !params.is_empty() {
+                query = query.parameters(params);
+            }
+        }
+        query
+    }
+
+    /// Set the Query-body consolidation mode. Subsequent calls
+    /// overwrite (last-wins; standard builder idiom). See
+    /// [`ConsolidationMode`] for the wire-byte contract.
+    pub fn consolidation(mut self, mode: ConsolidationMode) -> Self {
+        self.consolidation = Some(mode);
+        self
+    }
+
+    /// Set the Query-body parameters slice. Panics on empty
+    /// (zenoh-pico's encoder clears Q_P on empty) and on
+    /// `len > REQUEST_QUERY_PARAMETERS_MAX_LEN` (wz codec bound).
+    pub fn parameters(mut self, params: &[u8]) -> Self {
+        assert!(
+            !params.is_empty(),
+            "QueryBuilder::parameters requires a non-empty params slice",
+        );
+        assert!(
+            params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN,
+            "params slice length {} exceeds wz Query codec's max-size ({})",
+            params.len(),
+            REQUEST_QUERY_PARAMETERS_MAX_LEN,
+        );
+        self.parameters = Some(params.to_vec());
+        self
+    }
+
+    /// Set the Query-level source-info extension (querier identity:
+    /// zid / eid / sn). Gated on `query-source-info` (wire-data helper)
+    /// so a `codec-request` subset that does not compose querier
+    /// provenance carries no source-info encode path. The ext is emitted
+    /// as `ENC_ZBUF | 0x01` on the Query body chain (zenoh-pico
+    /// `_z_query_encode` message.c:438-444) — the same wire shape as the
+    /// Push body source-info, built through the shared
+    /// [`crate::source_info_ext::encode_source_info_ext_body`] SSOT.
+    #[cfg(feature = "query-source-info")]
+    pub fn query_source_info(mut self, source_info: crate::sample::SourceInfo) -> Self {
+        self.source_info = Some(source_info);
+        self
+    }
+
+    /// Set the Query-level attachment extension payload. Panics on empty
+    /// (zenoh-pico's `_z_bytes_check` predicate clears the ext for an empty
+    /// slice, so an empty attachment is a caller error). Gated on
+    /// `query-attachment` (wire-data helper) so a `codec-request` subset that
+    /// does not compose query attachments carries no attachment encode path.
+    ///
+    /// **Size (A8c-1, corrected by the A8c session-review):** there is NO
+    /// builder-side size cap. This whole module is
+    /// `#[cfg(all(alloc, codec-request))]` (lib.rs), so it only ever compiles
+    /// with the `alloc` feature, where the ExtZbuf `value` carrier is an
+    /// unbounded `Vec` (the `N` of `SceBytes<N>` is advisory under `alloc` —
+    /// every `sce:max-size` field degrades to unbounded, proven by the
+    /// 200-byte reply attachment, A8a), matching zenoh's unbounded query
+    /// `ZBytes`. So a large attachment — e.g. a storage
+    /// `AlignmentQuery::Diff` / `Intervals` / `Events`, which exceeds 32
+    /// bytes — rides intact. [`QUERY_EXT_ZBUF_MAX_LEN`] (`32`) is the `no_std`
+    /// DECODE bound only: a `no_std` wz peer decodes the ext into a
+    /// `heapless::Vec<u8, 32>` and rejects an over-32 attachment with
+    /// `CodecError::TooManyElements` (a clean type-level reject, not
+    /// corruption). The A8c-1 `#[cfg(not(alloc))]` assert that lived here was
+    /// dead code (this module never compiles under `not(alloc)`) and was
+    /// removed; zenoh and alloc-wz peers accept arbitrarily large ZBuf.
+    #[cfg(feature = "query-attachment")]
+    pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
+        assert!(
+            !attachment.is_empty(),
+            "QueryBuilder::query_attachment requires a non-empty attachment slice",
+        );
+        self.attachment = Some(attachment.to_vec());
+        self
+    }
+
+    /// Set the Query-level VALUE extension (the querier's attached payload +
+    /// encoding — the "Q_B / Q_E" wire slots). Gated on `query-value` (wire-data
+    /// helper) so a `codec-request` subset that does not compose querier values
+    /// carries no value encode path. The ext is emitted as `ENC_ZBUF | 0x03` on
+    /// the Query body chain — FIRST, before source_info (`0x01`) and attachment
+    /// (`0x05`), matching zenoh-pico's `_z_query_encode` emit order (body →
+    /// info → attachment, `message.c:433-448`) — built through the shared
+    /// [`crate::query_value_ext::encode_query_value_ext`] SSOT. `encoding` is a
+    /// required argument; pass the zero encoding
+    /// (`EncodingHint { packed_id: 0, schema: None }`) to attach only a payload.
+    /// Unlike attachment, an EMPTY payload is allowed (a value may be
+    /// encoding-only) — but a fully-empty value (empty payload AND the zero
+    /// encoding) emits NO ext at all, matching zenoh-pico's `.body` predicate
+    /// (`build()` applies the guard, so this setter never forces a spurious
+    /// empty value ext).
+    #[cfg(feature = "query-value")]
+    pub fn query_value(mut self, payload: &[u8], encoding: crate::sample::EncodingHint) -> Self {
+        self.value = Some((encoding, payload.to_vec()));
+        self
+    }
+
+    /// Materialise the Query body: the header, with `Q_C` (0x20), `Q_P` (0x40) and `Q_Z` (0x80)
+    /// set as the consolidation, the parameters and the extension chain are there.
+    pub fn build(self) -> Result<QueryOwned, CodecError> {
+        let mut query = QueryOwned {
+            // MID 0x03 (_Z_MID_Z_QUERY); the flags follow from what is set.
+            header: 0x03,
+            consolidation: None,
+            parameters_len: None,
+            parameters: None,
+            extensions: None,
+        };
+        if let Some(mode) = self.consolidation {
+            query.header |= 0x20;
+            query.consolidation = Some(u64::from(mode.wire_byte()));
+        }
+        if let Some(params) = self.parameters {
+            query.header |= 0x40;
+            query.parameters_len = Some(params.len() as u64);
+            query.parameters = Some(owned_bytes(&params)?);
+        }
+        // Query body ext chain in zenoh-pico encode order:
+        // value (0x03) → source_info (0x01) → attachment (0x05)
+        // (message.c:433-448 — the value/body ext is emitted FIRST, before
+        // source_info, despite its higher id). Z chain-continuation bit set
+        // on every entry except the last (mirrors the Request-level ext
+        // assembly below); the Q_Z (0x80) header flag marks the chain's
+        // presence.
+        let mut query_exts: Vec<ExtEntryOwned> = Vec::new();
+        #[cfg(feature = "query-value")]
+        if let Some((encoding, payload)) = self.value {
+            // zenoh-pico emits the value ext iff the value is non-empty:
+            // `_z_msg_query_required_extensions.body =
+            //  _z_bytes_check(payload) || _z_encoding_check(encoding)`
+            // (definitions/message.c:33), where `_z_encoding_check` = id != 0
+            // || schema present (net/encoding.h). A fully-empty value (empty
+            // payload + default encoding id 0 / no schema) emits NO ext —
+            // matching pico byte-for-byte rather than a spurious empty
+            // `0x43 || VLE(1) || 0x00`. `EncodingHint.packed_id` is
+            // `id << 1 | schema_flag`, so id != 0 is `packed_id >> 1 != 0`.
+            let encoding_non_default = (encoding.packed_id >> 1) != 0 || encoding.schema.is_some();
+            if !payload.is_empty() || encoding_non_default {
+                // The value ext (ENC_ZBUF|0x03, body = encoding || payload);
+                // emitted first per pico's order. Z bit applied in the
+                // finalize loop below.
+                query_exts.push(crate::query_value_ext::encode_query_value_ext(
+                    &encoding, &payload,
+                )?);
+            }
+        }
+        #[cfg(feature = "query-source-info")]
+        if let Some(si) = self.source_info {
+            // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
+            // ExtZbuf wrap); the Z bit is applied in the finalize loop.
+            query_exts.push(crate::source_info_ext::encode_source_info_ext_entry(
+                si.zid_prefix(),
+                si.eid,
+                si.sn,
+            )?);
+        }
+        #[cfg(feature = "query-attachment")]
+        if let Some(attachment) = self.attachment {
+            query_exts.push(crate::attachment::encode_attachment_ext(
+                crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+                &attachment,
+            )?);
+        }
+        if !query_exts.is_empty() {
+            query.header |= 0x80; // Q_Z (Query body exts present)
+            crate::ext_nodeid::apply_chain_z_bits(&mut query_exts);
+            // R3044 -- the Query's chain holds its own kind of entry (the
+            // ZBuf arm reads a value differently after a shared-memory
+            // marker). The three entries built above are all plain, so each
+            // becomes the plain shape of the Query's entry.
+            query.extensions = Some(crate::held_list::lawful(crate::held_list::held(
+                query_exts
+                    .into_iter()
+                    .map(crate::ext_view::query_ext_from_generic)
+                    .collect(),
+            )?)?);
+        }
+        Ok(query)
+    }
+}
+
+#[cfg(feature = "codec-request")]
+pub struct RequestQueryBuilder {
+    rid: crate::wire_id::RequestId,
+    key: WireKeyBuf,
+    // Query-layer settings.
+    query: QueryBuilder,
     // Request-layer ext settings.
     request_qos: Option<u8>,
-    request_tstamp: Option<TimestampOwned>,
+    // The time and the zid, made the extension's timestamp when the Request is built.
+    request_tstamp: Option<(u64, Vec<u8>)>,
     request_target: Option<QueryTarget>,
     request_budget: Option<Budget>,
     request_timeout_ms: Option<u64>,
@@ -638,26 +793,12 @@ pub struct RequestQueryBuilder {
 #[cfg(feature = "codec-request")]
 impl RequestQueryBuilder {
     /// Begin a builder rooted in the same baseline contract as
-    /// [`build_request_query`]: minimal Request(Query) envelope with
-    /// the keyexpr arm (literal id=0 + Some, alias id=N + None,
-    /// compound id=N + Some). Same id/suffix semantics.
-    pub fn new(
-        rid: crate::wire_id::RequestId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
-    ) -> Self {
+    /// [`build_request_query`]: the minimal Request(Query) envelope naming `key`.
+    pub fn new(rid: crate::wire_id::RequestId, key: WireKey<'_>) -> Self {
         Self {
             rid,
-            keyexpr_mapping_id,
-            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
-            consolidation: None,
-            parameters: None,
-            #[cfg(feature = "query-source-info")]
-            query_source_info: None,
-            #[cfg(feature = "query-attachment")]
-            query_attachment: None,
-            #[cfg(feature = "query-value")]
-            query_value: None,
+            key: WireKeyBuf::from(key),
+            query: QueryBuilder::new(),
             request_qos: None,
             request_tstamp: None,
             request_target: None,
@@ -762,106 +903,40 @@ impl RequestQueryBuilder {
             "RequestQueryBuilder::request_tstamp zid length {} exceeds zenoh _Z_ID_LENGTH (16)",
             zid.len(),
         );
-        self.request_tstamp = Some(TimestampOwned {
-            time,
-            zid_len: zid.len() as u64,
-            // W3: zid owned mirror is bounded Vec<u8, 16>; the asserts above
-            // guarantee 1..=16, so the bounded copy cannot overflow.
-            zid: owned_bytes(zid).expect("zid length asserted in 1..=16"),
-        });
+        self.request_tstamp = Some((time, zid.to_vec()));
         self
     }
 
-    /// Set the Query-body consolidation mode. Subsequent calls
-    /// overwrite (last-wins; standard builder idiom). See
-    /// [`ConsolidationMode`] for the wire-byte contract.
+    /// The Query body's consolidation mode: [`QueryBuilder::consolidation`].
     pub fn consolidation(mut self, mode: ConsolidationMode) -> Self {
-        self.consolidation = Some(mode);
+        self.query = self.query.consolidation(mode);
         self
     }
 
-    /// Set the Query-body parameters slice. Panics on empty
-    /// (zenoh-pico's encoder clears Q_P on empty) and on
-    /// `len > REQUEST_QUERY_PARAMETERS_MAX_LEN` (wz codec bound).
+    /// The Query body's parameters: [`QueryBuilder::parameters`].
     pub fn parameters(mut self, params: &[u8]) -> Self {
-        assert!(
-            !params.is_empty(),
-            "RequestQueryBuilder::parameters requires a non-empty params slice",
-        );
-        assert!(
-            params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN,
-            "params slice length {} exceeds wz Query codec's max-size ({})",
-            params.len(),
-            REQUEST_QUERY_PARAMETERS_MAX_LEN,
-        );
-        self.parameters = Some(params.to_vec());
+        self.query = self.query.parameters(params);
         self
     }
 
-    /// Set the Query-level source-info extension (querier identity:
-    /// zid / eid / sn). Gated on `query-source-info` (wire-data helper)
-    /// so a `codec-request` subset that does not compose querier
-    /// provenance carries no source-info encode path. The ext is emitted
-    /// as `ENC_ZBUF | 0x01` on the Query body chain (zenoh-pico
-    /// `_z_query_encode` message.c:438-444) — the same wire shape as the
-    /// Push body source-info, built through the shared
-    /// [`crate::source_info_ext::encode_source_info_ext_body`] SSOT.
+    /// The Query body's source-info extension: [`QueryBuilder::query_source_info`].
     #[cfg(feature = "query-source-info")]
     pub fn query_source_info(mut self, source_info: crate::sample::SourceInfo) -> Self {
-        self.query_source_info = Some(source_info);
+        self.query = self.query.query_source_info(source_info);
         self
     }
 
-    /// Set the Query-level attachment extension payload. Panics on empty
-    /// (zenoh-pico's `_z_bytes_check` predicate clears the ext for an empty
-    /// slice, so an empty attachment is a caller error). Gated on
-    /// `query-attachment` (wire-data helper) so a `codec-request` subset that
-    /// does not compose query attachments carries no attachment encode path.
-    ///
-    /// **Size (A8c-1, corrected by the A8c session-review):** there is NO
-    /// builder-side size cap. This whole module is
-    /// `#[cfg(all(alloc, codec-request))]` (lib.rs), so it only ever compiles
-    /// with the `alloc` feature, where the ExtZbuf `value` carrier is an
-    /// unbounded `Vec` (the `N` of `SceBytes<N>` is advisory under `alloc` —
-    /// every `sce:max-size` field degrades to unbounded, proven by the
-    /// 200-byte reply attachment, A8a), matching zenoh's unbounded query
-    /// `ZBytes`. So a large attachment — e.g. a storage
-    /// `AlignmentQuery::Diff` / `Intervals` / `Events`, which exceeds 32
-    /// bytes — rides intact. [`QUERY_EXT_ZBUF_MAX_LEN`] (`32`) is the `no_std`
-    /// DECODE bound only: a `no_std` wz peer decodes the ext into a
-    /// `heapless::Vec<u8, 32>` and rejects an over-32 attachment with
-    /// `CodecError::TooManyElements` (a clean type-level reject, not
-    /// corruption). The A8c-1 `#[cfg(not(alloc))]` assert that lived here was
-    /// dead code (this module never compiles under `not(alloc)`) and was
-    /// removed; zenoh and alloc-wz peers accept arbitrarily large ZBuf.
+    /// The Query body's attachment extension: [`QueryBuilder::query_attachment`].
     #[cfg(feature = "query-attachment")]
     pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
-        assert!(
-            !attachment.is_empty(),
-            "RequestQueryBuilder::query_attachment requires a non-empty attachment slice",
-        );
-        self.query_attachment = Some(attachment.to_vec());
+        self.query = self.query.query_attachment(attachment);
         self
     }
 
-    /// Set the Query-level VALUE extension (the querier's attached payload +
-    /// encoding — the "Q_B / Q_E" wire slots). Gated on `query-value` (wire-data
-    /// helper) so a `codec-request` subset that does not compose querier values
-    /// carries no value encode path. The ext is emitted as `ENC_ZBUF | 0x03` on
-    /// the Query body chain — FIRST, before source_info (`0x01`) and attachment
-    /// (`0x05`), matching zenoh-pico's `_z_query_encode` emit order (body →
-    /// info → attachment, `message.c:433-448`) — built through the shared
-    /// [`crate::query_value_ext::encode_query_value_ext`] SSOT. `encoding` is a
-    /// required argument; pass the zero encoding
-    /// (`EncodingHint { packed_id: 0, schema: None }`) to attach only a payload.
-    /// Unlike attachment, an EMPTY payload is allowed (a value may be
-    /// encoding-only) — but a fully-empty value (empty payload AND the zero
-    /// encoding) emits NO ext at all, matching zenoh-pico's `.body` predicate
-    /// (`build()` applies the guard, so this setter never forces a spurious
-    /// empty value ext).
+    /// The Query body's value extension: [`QueryBuilder::query_value`].
     #[cfg(feature = "query-value")]
     pub fn query_value(mut self, payload: &[u8], encoding: crate::sample::EncodingHint) -> Self {
-        self.query_value = Some((encoding, payload.to_vec()));
+        self.query = self.query.query_value(payload, encoding);
         self
     }
 
@@ -910,103 +985,21 @@ impl RequestQueryBuilder {
         self
     }
 
-    /// Materialise the Request. Constructs the baseline envelope via
-    /// [`build_request_query`], applies all Query-layer settings to
-    /// the inner Query body, then assembles Request-level extensions
+    /// Materialise the Request: the envelope naming the key around the Query body
+    /// ([`QueryBuilder::build`]), then the Request-level extensions
     /// in zenoh-pico's emit order with proper Z chain-continuation
     /// bits on intermediate entries.
     pub fn build(self) -> Result<RequestOwned, CodecError> {
-        let mut request = build_request_query(
-            self.rid,
-            self.keyexpr_mapping_id,
-            self.keyexpr_suffix.as_deref(),
-        )?;
-
-        // Query-layer settings (consolidation / parameters /
-        // Q-attachment). The codec gates these on Query.header
-        // flags Q_C(0x20) / Q_P(0x40) / Q_Z(0x80).
-        if let RequestOwnedVariant::CodecZenohQuery(ref mut query) = request.body {
-            if let Some(mode) = self.consolidation {
-                query.header |= 0x20;
-                query.consolidation = Some(u64::from(mode.wire_byte()));
-            }
-            if let Some(params) = self.parameters {
-                query.header |= 0x40;
-                query.parameters_len = Some(params.len() as u64);
-                query.parameters = Some(owned_bytes(&params)?);
-            }
-            // Query body ext chain in zenoh-pico encode order:
-            // value (0x03) → source_info (0x01) → attachment (0x05)
-            // (message.c:433-448 — the value/body ext is emitted FIRST, before
-            // source_info, despite its higher id). Z chain-continuation bit set
-            // on every entry except the last (mirrors the Request-level ext
-            // assembly below); the Q_Z (0x80) header flag marks the chain's
-            // presence.
-            let mut query_exts: Vec<ExtEntryOwned> = Vec::new();
-            #[cfg(feature = "query-value")]
-            if let Some((encoding, payload)) = self.query_value {
-                // zenoh-pico emits the value ext iff the value is non-empty:
-                // `_z_msg_query_required_extensions.body =
-                //  _z_bytes_check(payload) || _z_encoding_check(encoding)`
-                // (definitions/message.c:33), where `_z_encoding_check` = id != 0
-                // || schema present (net/encoding.h). A fully-empty value (empty
-                // payload + default encoding id 0 / no schema) emits NO ext —
-                // matching pico byte-for-byte rather than a spurious empty
-                // `0x43 || VLE(1) || 0x00`. `EncodingHint.packed_id` is
-                // `id << 1 | schema_flag`, so id != 0 is `packed_id >> 1 != 0`.
-                let encoding_non_default =
-                    (encoding.packed_id >> 1) != 0 || encoding.schema.is_some();
-                if !payload.is_empty() || encoding_non_default {
-                    // The value ext (ENC_ZBUF|0x03, body = encoding || payload);
-                    // emitted first per pico's order. Z bit applied in the
-                    // finalize loop below.
-                    query_exts.push(crate::query_value_ext::encode_query_value_ext(
-                        &encoding, &payload,
-                    )?);
-                }
-            }
-            #[cfg(feature = "query-source-info")]
-            if let Some(si) = self.query_source_info {
-                // The full-entry source_info SSOT (header ENC_ZBUF|0x01 +
-                // ExtZbuf wrap); the Z bit is applied in the finalize loop.
-                query_exts.push(crate::source_info_ext::encode_source_info_ext_entry(
-                    si.zid_prefix(),
-                    si.eid,
-                    si.sn,
-                )?);
-            }
-            #[cfg(feature = "query-attachment")]
-            if let Some(attachment) = self.query_attachment {
-                query_exts.push(crate::attachment::encode_attachment_ext(
-                    crate::attachment::ATTACHMENT_EXT_ID_QUERY,
-                    &attachment,
-                )?);
-            }
-            if !query_exts.is_empty() {
-                query.header |= 0x80; // Q_Z (Query body exts present)
-                let last_idx = query_exts.len() - 1;
-                for (i, ext) in query_exts.iter_mut().enumerate() {
-                    if i < last_idx {
-                        ext.header |= 0x80;
-                    }
-                }
-                // R3044 -- the Query's chain holds its own kind of entry (the
-                // ZBuf arm reads a value differently after a shared-memory
-                // marker). The three entries built above are all plain, so each
-                // becomes the plain shape of the Query's entry.
-                query.extensions = Some(crate::held_list::lawful(crate::held_list::held(
-                    query_exts
-                        .into_iter()
-                        .map(crate::ext_view::query_ext_from_generic)
-                        .collect(),
-                )?)?);
-            }
-        } else {
-            unreachable!(
-                "build_request_query must produce a CodecZenohQuery body — \
-                 the layered builder relies on this invariant"
-            );
-        }
+        let key = self.key.as_key();
+        let mut request = RequestOwned {
+            // MID 0x1C (_Z_MID_N_REQUEST), and N when text follows the key's id. M is the codec's,
+            // from the Local arm; Z is set below with the Request's extensions.
+            header: 0x1C | crate::wireexpr_build::key_flags(key),
+            rid: self.rid,
+            keyexpr: crate::wireexpr_build::key_wireexpr(key)?,
+            extensions: None,
+            body: RequestOwnedVariant::CodecZenohQuery(self.query.build()?),
+        };
 
         // Request-level extensions in zenoh-pico encode order: qos →
         // tstamp → target → budget → timeout (network.c:122-167).
@@ -1027,7 +1020,13 @@ impl RequestQueryBuilder {
                 }),
             });
         }
-        if let Some(tstamp) = self.request_tstamp {
+        if let Some((time, zid)) = self.request_tstamp {
+            let tstamp = TimestampOwned {
+                time,
+                zid_len: zid.len() as u64,
+                // The zid field's bound is the 1..=16 the setter held the zid to.
+                zid: owned_bytes(&zid)?,
+            };
             // ENC_ZBUF(0x40) | id_tstamp(0x02). No M flag — zenoh-pico
             // emits ext_tstamp as non-mandatory at network.c:132-137
             // (only the Z chain-continuation bit is OR'd in, no
@@ -1090,14 +1089,9 @@ impl RequestQueryBuilder {
 
         if !request_exts.is_empty() {
             request.header |= 0x80; // N_Z (Request-level exts present)
-                                    // Z chain-continuation: set 0x80 on every entry except
-                                    // the last so the decoder loop consumes the whole chain.
-            let last_idx = request_exts.len() - 1;
-            for (i, ext) in request_exts.iter_mut().enumerate() {
-                if i < last_idx {
-                    ext.header |= 0x80;
-                }
-            }
+                                    // Z chain-continuation on every entry but the last, so the decoder loop consumes the
+                                    // whole chain.
+            crate::ext_nodeid::apply_chain_z_bits(&mut request_exts);
             request.extensions = Some(crate::held_list::held(request_exts)?);
         }
 
@@ -1123,17 +1117,15 @@ impl RequestQueryBuilder {
 /// (`msg->_consolidation != Z_CONSOLIDATION_MODE_DEFAULT`,
 /// message.c:402) is true and the encoder emits the flag + the byte.
 ///
-/// `keyexpr_mapping_id` / `keyexpr_suffix` follow the same convention
-/// as [`build_request_query`] (literal id=0 / alias / compound). No
+/// `key` is named as [`build_request_query`] names it. No
 /// params, no exts — those are separate layered helpers.
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_consolidation(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     consolidation: ConsolidationMode,
 ) -> Result<RequestOwned, CodecError> {
-    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+    RequestQueryBuilder::new(rid, key)
         .consolidation(consolidation)
         .build()
 }
@@ -1183,11 +1175,10 @@ pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256;
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_parameters(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     params: &[u8],
 ) -> Result<RequestOwned, CodecError> {
-    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+    RequestQueryBuilder::new(rid, key)
         .parameters(params)
         .build()
 }
@@ -1272,11 +1263,10 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
 pub fn build_request_query_with_attachment(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     attachment: &[u8],
 ) -> Result<RequestOwned, CodecError> {
-    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+    RequestQueryBuilder::new(rid, key)
         .query_attachment(attachment)
         .build()
 }
@@ -1330,11 +1320,10 @@ pub fn build_request_query_with_attachment(
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_timeout_ms(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     timeout_ms: u64,
 ) -> Result<RequestOwned, CodecError> {
-    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+    RequestQueryBuilder::new(rid, key)
         .request_timeout_ms(timeout_ms)
         .build()
 }
@@ -1378,11 +1367,10 @@ pub fn build_request_query_with_timeout_ms(
 #[cfg(feature = "codec-request")]
 pub fn build_request_query_with_target(
     rid: crate::wire_id::RequestId,
-    keyexpr_mapping_id: crate::wire_id::ExprId,
-    keyexpr_suffix: Option<&str>,
+    key: WireKey<'_>,
     target: QueryTarget,
 ) -> Result<RequestOwned, CodecError> {
-    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+    RequestQueryBuilder::new(rid, key)
         .request_target(target)
         .build()
 }
@@ -1418,7 +1406,11 @@ mod tests {
     #[test]
     fn build_request_query_wraps_query_in_request_envelope() {
         // Case 1 — pure alias.
-        let alias = build_request_query(42, 7, None).unwrap();
+        let alias = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap();
         assert_eq!(
             alias.header, 0x1C,
             "Request header carries MID 0x1C only (no N since no suffix); \
@@ -1451,7 +1443,11 @@ mod tests {
         }
 
         // Case 2 — composite (id=7 + tail "tail").
-        let composite = build_request_query(42, 7, Some("tail")).unwrap();
+        let composite = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, Some("tail")).expect("a key"),
+        )
+        .unwrap();
         assert_eq!(
             composite.header, 0x3C,
             "Request header carries MID 0x1C | N(0x20) = 0x3C when suffix present",
@@ -1469,7 +1465,11 @@ mod tests {
         }
 
         // Case 3 — literal (id=0 sentinel + suffix carries the keyexpr).
-        let literal = build_request_query(42, 0, Some("demo/test")).unwrap();
+        let literal = build_request_query(
+            42,
+            crate::wire_key::WireKey::literal("demo/test").expect("a literal key"),
+        )
+        .unwrap();
         assert_eq!(
             literal.header, 0x3C,
             "literal case still sets N (suffix present)"
@@ -1510,7 +1510,11 @@ mod tests {
         //   VLE(rid=42)     = 0x2A
         //   wireexpr.id VLE(7) = 0x07
         //   Query.header   = MID(0x03)
-        let alias = build_request_query(42, 7, None).unwrap();
+        let alias = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap();
         let alias_wire = alias.wire();
         let alias_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -1530,7 +1534,11 @@ mod tests {
         //   wireexpr.suffix_len VLE(3) = 0x03
         //   wireexpr.suffix bytes = "abc"
         //   Query.header = 0x03
-        let composite = build_request_query(42, 7, Some("abc")).unwrap();
+        let composite = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, Some("abc")).expect("a key"),
+        )
+        .unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7C, // MID | N | M
@@ -1550,7 +1558,11 @@ mod tests {
         //   wireexpr.suffix_len VLE(9) = 0x09
         //   wireexpr.suffix bytes = "demo/test"
         //   Query.header = 0x03
-        let literal = build_request_query(42, 0, Some("demo/test")).unwrap();
+        let literal = build_request_query(
+            42,
+            crate::wire_key::WireKey::literal("demo/test").expect("a literal key"),
+        )
+        .unwrap();
         let literal_wire = literal.wire();
         let mut literal_expected = vec![0x7C, 0x2A, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
@@ -1591,7 +1603,12 @@ mod tests {
             (ConsolidationMode::Latest, 0x03),
         ];
         for (mode, expected_byte) in cases {
-            let request = build_request_query_with_consolidation(42, 7, None, mode).unwrap();
+            let request = build_request_query_with_consolidation(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+                mode,
+            )
+            .unwrap();
             let wire = request.wire();
             let expected = vec![
                 0x5C,          // Request: MID 0x1C | M 0x40
@@ -1612,8 +1629,12 @@ mod tests {
         // Inner-arm sanity: Query.header carries Q_C set + consolidation
         // is Some(wire_byte) — matches the Optional-field shape that
         // the codegen produces from query.scxml's `sce:present-if`.
-        let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic)
-            .unwrap();
+        let r = build_request_query_with_consolidation(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            ConsolidationMode::Monotonic,
+        )
+        .unwrap();
         match &r.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(
@@ -1646,7 +1667,12 @@ mod tests {
         //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
         //   Query:   [0x43, 0x03, b'k', b'=', b'v']
         //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
-        let small = build_request_query_with_parameters(42, 7, None, b"k=v").unwrap();
+        let small = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            b"k=v",
+        )
+        .unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -1667,7 +1693,12 @@ mod tests {
         // 0x80, second byte = 0x01). Lock the VLE writer regression
         // on the parameters_len field specifically.
         let mid_params: Vec<u8> = (0u8..128).collect();
-        let mid = build_request_query_with_parameters(42, 7, None, &mid_params).unwrap();
+        let mid = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &mid_params,
+        )
+        .unwrap();
         let mid_wire = mid.wire();
         let mut mid_expected = vec![
             0x5C, 0x2A, 0x07, 0x43, 0x80, // VLE(128) low 7 + cont bit
@@ -1682,7 +1713,12 @@ mod tests {
 
         // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
         let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
-        let max = build_request_query_with_parameters(42, 7, None, &max_params).unwrap();
+        let max = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &max_params,
+        )
+        .unwrap();
         let max_wire = max.wire();
         let mut max_expected = vec![0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02];
         max_expected.extend_from_slice(&max_params);
@@ -1723,12 +1759,20 @@ mod tests {
             parameters: Some(b"_sn=1..".to_vec()),
             ..Default::default()
         };
-        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
-            .unwrap()
-            .wire();
-        let via_helper = build_request_query_with_parameters(42, 7, None, b"_sn=1..")
-            .unwrap()
-            .wire();
+        let via_meta = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &meta,
+        )
+        .unwrap()
+        .wire();
+        let via_helper = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            b"_sn=1..",
+        )
+        .unwrap()
+        .wire();
         assert_eq!(
             via_meta, via_helper,
             "QueryMetadata.parameters must thread onto Q_P byte-for-byte vs \
@@ -1740,10 +1784,19 @@ mod tests {
             parameters: Some(Vec::new()),
             ..Default::default()
         };
-        let via_empty = build_request_query_with_meta(42, 7, None, &empty)
-            .unwrap()
-            .wire();
-        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        let via_empty = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &empty,
+        )
+        .unwrap()
+        .wire();
+        let no_meta = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap()
+        .wire();
         assert_eq!(
             via_empty, no_meta,
             "empty parameters must elide Q_P (no-meta parity)",
@@ -1779,14 +1832,21 @@ mod tests {
             qos: Some(qos),
             ..Default::default()
         };
-        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
-            .unwrap()
-            .wire();
-        let via_builder = RequestQueryBuilder::new(42, 7, None)
-            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
-            .build()
-            .unwrap()
-            .wire();
+        let via_meta = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &meta,
+        )
+        .unwrap()
+        .wire();
+        let via_builder = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_meta, via_builder,
             "QueryMetadata.qos must thread onto the Request QoS ext byte-for-byte \
@@ -1795,7 +1855,12 @@ mod tests {
 
         // The ext is really THERE — otherwise (1) would hold vacuously if the
         // builder had also dropped it. A no-QoS build must differ.
-        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        let no_meta = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap()
+        .wire();
         assert_ne!(
             via_meta, no_meta,
             "a non-default QoS must CHANGE the wire; equality here would mean \
@@ -1809,9 +1874,13 @@ mod tests {
             qos: Some(QosLevel::DEFAULT),
             ..Default::default()
         };
-        let via_default = build_request_query_with_meta(42, 7, None, &default_meta)
-            .unwrap()
-            .wire();
+        let via_default = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &default_meta,
+        )
+        .unwrap()
+        .wire();
         assert_eq!(
             via_default, no_meta,
             "a DEFAULT QoS must elide the ext (no-meta parity), mirroring the \
@@ -1835,9 +1904,13 @@ mod tests {
                 qos: Some(one),
                 ..Default::default()
             };
-            let wire = build_request_query_with_meta(42, 7, None, &single)
-                .unwrap()
-                .wire();
+            let wire = build_request_query_with_meta(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+                &single,
+            )
+            .unwrap()
+            .wire();
             assert_ne!(
                 wire, no_meta,
                 "the {label} sub-field alone must reach the wire; if it does not, \
@@ -1865,14 +1938,21 @@ mod tests {
             value: Some((enc.clone(), b"q-value".to_vec())),
             ..Default::default()
         };
-        let via_meta = build_request_query_with_meta(42, 7, None, &meta)
-            .unwrap()
-            .wire();
-        let via_builder = RequestQueryBuilder::new(42, 7, None)
-            .query_value(b"q-value", enc)
-            .build()
-            .unwrap()
-            .wire();
+        let via_meta = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &meta,
+        )
+        .unwrap()
+        .wire();
+        let via_builder = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .query_value(b"q-value", enc)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_meta, via_builder,
             "QueryMetadata.value must thread onto the value ext (0x03) \
@@ -1890,10 +1970,19 @@ mod tests {
             )),
             ..Default::default()
         };
-        let via_empty = build_request_query_with_meta(42, 7, None, &empty)
-            .unwrap()
-            .wire();
-        let no_meta = build_request_query(42, 7, None).unwrap().wire();
+        let via_empty = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &empty,
+        )
+        .unwrap()
+        .wire();
+        let no_meta = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap()
+        .wire();
         assert_eq!(
             via_empty, no_meta,
             "fully-empty value must elide the value ext (no-meta parity)",
@@ -1904,7 +1993,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::parameters requires a non-empty params slice")]
     fn build_request_query_with_parameters_rejects_empty_slice() {
-        let _ = build_request_query_with_parameters(42, 7, None, b"");
+        let _ = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            b"",
+        );
     }
 
     #[cfg(feature = "codec-request")]
@@ -1912,7 +2005,11 @@ mod tests {
     #[should_panic(expected = "exceeds wz Query codec's max-size (256)")]
     fn build_request_query_with_parameters_rejects_over_max_size() {
         let over: Vec<u8> = vec![0u8; REQUEST_QUERY_PARAMETERS_MAX_LEN + 1];
-        let _ = build_request_query_with_parameters(42, 7, None, &over);
+        let _ = build_request_query_with_parameters(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &over,
+        );
     }
 
     /// R121j-1c — Wire-byte regression gate for
@@ -1933,7 +2030,12 @@ mod tests {
         //   Query:   [0x83]                  (MID(0x03) | Q_Z(0x80))
         //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
         //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
-        let small = build_request_query_with_attachment(42, 7, None, b"hi").unwrap();
+        let small = build_request_query_with_attachment(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            b"hi",
+        )
+        .unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -1953,7 +2055,12 @@ mod tests {
         // Case 2 — at-max attachment (32 bytes, all-distinct sequence
         // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
         let max_attach: Vec<u8> = (0u8..32).collect();
-        let max = build_request_query_with_attachment(42, 7, None, &max_attach).unwrap();
+        let max = build_request_query_with_attachment(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &max_attach,
+        )
+        .unwrap();
         let max_wire = max.wire();
         let mut max_expected = vec![
             0x5C, 0x2A, 0x07, 0x83, // Query header with Q_Z
@@ -2006,7 +2113,11 @@ mod tests {
         expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
     )]
     fn build_request_query_with_attachment_rejects_empty_slice() {
-        let _ = build_request_query_with_attachment(42, 7, None, b"");
+        let _ = build_request_query_with_attachment(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            b"",
+        );
     }
 
     /// A8c-1 — under `alloc` a query attachment LARGER than the 32-byte
@@ -2028,8 +2139,12 @@ mod tests {
             big.len() > QUERY_EXT_ZBUF_MAX_LEN,
             "exceeds the no_std ExtZbuf bound"
         );
-        let req = build_request_query_with_attachment(42, 7, None, &big)
-            .expect("an over-32 attachment builds under alloc (unbounded carrier)");
+        let req = build_request_query_with_attachment(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &big,
+        )
+        .expect("an over-32 attachment builds under alloc (unbounded carrier)");
         match &req.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header & 0x80, 0x80, "Q_Z set (ext chain present)");
@@ -2064,18 +2179,21 @@ mod tests {
     #[test]
     fn build_request_query_composed_exts_emit_value_source_info_attachment_in_order() {
         use crate::sample::{EncodingHint, SourceInfo};
-        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_source_info(SourceInfo::new(&[0xAA], 1, 2))
-            .query_attachment(b"att")
-            .query_value(
-                b"val",
-                EncodingHint {
-                    packed_id: 0,
-                    schema: None,
-                },
-            )
-            .build()
-            .expect("composed query builds");
+        let req = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_source_info(SourceInfo::new(&[0xAA], 1, 2))
+        .query_attachment(b"att")
+        .query_value(
+            b"val",
+            EncodingHint {
+                packed_id: 0,
+                schema: None,
+            },
+        )
+        .build()
+        .expect("composed query builds");
         match &req.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header & 0x80, 0x80, "Q_Z set (ext chain present)");
@@ -2112,16 +2230,19 @@ mod tests {
     #[test]
     fn query_value_empty_payload_default_encoding_emits_no_ext() {
         use crate::sample::EncodingHint;
-        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_value(
-                b"",
-                EncodingHint {
-                    packed_id: 0,
-                    schema: None,
-                },
-            )
-            .build()
-            .expect("builds");
+        let req = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_value(
+            b"",
+            EncodingHint {
+                packed_id: 0,
+                schema: None,
+            },
+        )
+        .build()
+        .expect("builds");
         match &req.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header & 0x80, 0x00, "Q_Z clear — no ext chain");
@@ -2142,16 +2263,19 @@ mod tests {
     fn query_value_empty_payload_nondefault_encoding_emits_ext() {
         use crate::sample::EncodingHint;
         // packed_id = 5 << 1 = 0x0A: id 5, no schema flag (non-default id).
-        let req = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_value(
-                b"",
-                EncodingHint {
-                    packed_id: 0x0A,
-                    schema: None,
-                },
-            )
-            .build()
-            .expect("builds");
+        let req = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_value(
+            b"",
+            EncodingHint {
+                packed_id: 0x0A,
+                schema: None,
+            },
+        )
+        .build()
+        .expect("builds");
         match &req.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header & 0x80, 0x80, "Q_Z set — value ext present");
@@ -2185,7 +2309,12 @@ mod tests {
         //   ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06) = 0x26
         //   ExtZint.value VLE(50) = 0x32
         //   Query.header = 0x03
-        let small = build_request_query_with_timeout_ms(42, 7, None, 50).unwrap();
+        let small = build_request_query_with_timeout_ms(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            50,
+        )
+        .unwrap();
         let small_wire = small.wire();
         assert_eq!(
             small_wire,
@@ -2202,7 +2331,12 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
-        let mid = build_request_query_with_timeout_ms(42, 7, None, 1000).unwrap();
+        let mid = build_request_query_with_timeout_ms(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            1000,
+        )
+        .unwrap();
         let mid_wire = mid.wire();
         assert_eq!(
             mid_wire,
@@ -2217,7 +2351,12 @@ mod tests {
 
         // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
         // base-128: 0x80 0x80 0x80 0x80 0x10).
-        let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32).unwrap();
+        let large = build_request_query_with_timeout_ms(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            1u64 << 32,
+        )
+        .unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -2263,7 +2402,11 @@ mod tests {
         expected = "RequestQueryBuilder::request_timeout_ms requires a non-zero timeout"
     )]
     fn build_request_query_with_timeout_ms_rejects_zero() {
-        let _ = build_request_query_with_timeout_ms(42, 7, None, 0);
+        let _ = build_request_query_with_timeout_ms(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            0,
+        );
     }
 
     /// R121j-1e — Wire-byte regression gate for
@@ -2285,7 +2428,12 @@ mod tests {
         let cases: [(QueryTarget, u8); 2] =
             [(QueryTarget::All, 0x01), (QueryTarget::AllComplete, 0x02)];
         for (target, target_byte) in cases {
-            let request = build_request_query_with_target(42, 7, None, target).unwrap();
+            let request = build_request_query_with_target(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+                target,
+            )
+            .unwrap();
             let wire = request.wire();
             assert_eq!(
                 wire,
@@ -2303,7 +2451,12 @@ mod tests {
         }
 
         // Inner-arm sanity check on the All case.
-        let r = build_request_query_with_target(42, 7, None, QueryTarget::All).unwrap();
+        let r = build_request_query_with_target(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            QueryTarget::All,
+        )
+        .unwrap();
         let req_exts = r
             .extensions
             .as_ref()
@@ -2343,11 +2496,14 @@ mod tests {
         //   consolidation byte = 0x02 (Monotonic, ZENOH numbering — R311y837)
         //   parameters_len VLE = 0x03
         //   "k=v" 3 bytes
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .consolidation(ConsolidationMode::Monotonic)
-            .parameters(b"k=v")
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .consolidation(ConsolidationMode::Monotonic)
+        .parameters(b"k=v")
+        .build()
+        .unwrap();
         let wire = request.wire();
         let mut expected = vec![
             0x5C, // Request: MID | M
@@ -2394,14 +2550,17 @@ mod tests {
         //   Q-attachment ext: header (ENC_ZBUF|id_attachment=0x45), no Z = 0x45
         //   ExtZbuf VLE(2) = 0x02
         //   "at"
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .consolidation(ConsolidationMode::Latest)
-            .parameters(b"k=v")
-            .query_attachment(b"at")
-            .request_target(QueryTarget::All)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .consolidation(ConsolidationMode::Latest)
+        .parameters(b"k=v")
+        .query_attachment(b"at")
+        .request_target(QueryTarget::All)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
         let wire = request.wire();
         let mut expected = vec![
             0xDC, // Request: MID | M | N_Z
@@ -2456,10 +2615,13 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_qos_emits_first_ext_with_no_m_flag() {
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x05) // priority=5, no nodrop, no express
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x05) // priority=5, no nodrop, no express
+        .build()
+        .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -2493,12 +2655,15 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico() {
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x05)
-            .request_target(QueryTarget::All)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x05)
+        .request_target(QueryTarget::All)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -2536,10 +2701,13 @@ mod tests {
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, vec![1, 2, 3], false);
 
-        let alone = RequestQueryBuilder::new(42, 7, None)
-            .request_ts_stack(&stack)
-            .build()
-            .unwrap();
+        let alone = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_ts_stack(&stack)
+        .build()
+        .unwrap();
         let exts = alone
             .extensions
             .as_ref()
@@ -2554,13 +2722,16 @@ mod tests {
         );
         assert_eq!(read_ts_stack(exts.iter()), Some(stack.clone()));
 
-        let after_all = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x0D)
-            .request_target(QueryTarget::All)
-            .request_timeout_ms(1000)
-            .request_ts_stack(&stack)
-            .build()
-            .unwrap();
+        let after_all = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x0D)
+        .request_target(QueryTarget::All)
+        .request_timeout_ms(1000)
+        .request_ts_stack(&stack)
+        .build()
+        .unwrap();
         let exts = after_all.extensions.as_ref().expect("four extensions");
         assert_eq!(exts.len(), 4, "qos, target, timeout and the stack");
         assert_eq!(exts[2].header & 0x7f, 0x20 | TIMEOUT_EXT_ID);
@@ -2580,10 +2751,20 @@ mod tests {
             ..Default::default()
         };
         assert!(!meta.is_empty());
-        let built = build_request_query_with_meta(42, 7, None, &meta).unwrap();
+        let built = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &meta,
+        )
+        .unwrap();
         let exts = built.extensions.as_ref().expect("the stack");
         assert_eq!(read_ts_stack(exts.iter()), Some(stack));
-        let none = build_request_query_with_meta(42, 7, None, &QueryMetadata::default()).unwrap();
+        let none = build_request_query_with_meta(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            &QueryMetadata::default(),
+        )
+        .unwrap();
         assert!(none.extensions.is_none());
     }
 
@@ -2596,10 +2777,13 @@ mod tests {
     fn request_query_builder_request_budget_emits_ext_between_target_and_timeout() {
         // Solo case: only budget set. Ext at index 0 (chain head), no
         // Z (it is the only ext, hence the last).
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_budget(0x1234_5678)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_budget(0x1234_5678)
+        .build()
+        .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -2624,13 +2808,16 @@ mod tests {
         // must be qos[0]->target[1]->budget[2]->timeout[3] per
         // zenoh-pico _z_request_encode at network.c:126-155. Z
         // continuation set on indices 0/1/2, clear on index 3.
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x05)
-            .request_target(QueryTarget::All)
-            .request_budget(100)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x05)
+        .request_target(QueryTarget::All)
+        .request_budget(100)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
         let req_exts = request.extensions.as_ref().expect("4 exts set");
         assert_eq!(req_exts.len(), 4, "qos + target + budget + timeout");
         assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
@@ -2664,10 +2851,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_budget requires a non-zero budget")]
     fn request_query_builder_budget_rejects_zero() {
-        let _ = RequestQueryBuilder::new(42, 7, None)
-            .request_budget(0)
-            .build()
-            .unwrap();
+        let _ = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_budget(0)
+        .build()
+        .unwrap();
     }
 
     /// R121j-tstamp — request_tstamp emits one Request-level ext at
@@ -2682,10 +2872,13 @@ mod tests {
         // both VLE fields single-byte so the body bytes are auditable
         // without an online VLE encoder: [VLE(42), VLE(2), 0xab, 0xcd]
         // = [0x2a, 0x02, 0xab, 0xcd], len=4.
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_tstamp(42, &[0xab, 0xcd])
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_tstamp(42, &[0xab, 0xcd])
+        .build()
+        .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -2725,14 +2918,17 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_full_chain_emits_zenoh_pico_encode_order() {
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x05)
-            .request_tstamp(7, &[0x01])
-            .request_target(QueryTarget::All)
-            .request_budget(100)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x05)
+        .request_tstamp(7, &[0x01])
+        .request_target(QueryTarget::All)
+        .request_budget(100)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
         let req_exts = request.extensions.as_ref().expect("5 exts set");
         assert_eq!(
             req_exts.len(),
@@ -2776,10 +2972,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_tstamp requires a non-empty zid")]
     fn request_query_builder_tstamp_rejects_empty_zid() {
-        let _ = RequestQueryBuilder::new(42, 7, None)
-            .request_tstamp(0, &[])
-            .build()
-            .unwrap();
+        let _ = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_tstamp(0, &[])
+        .build()
+        .unwrap();
     }
 
     /// R121j-tstamp — request_tstamp rejects zid longer than the
@@ -2789,10 +2988,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "exceeds zenoh _Z_ID_LENGTH (16)")]
     fn request_query_builder_tstamp_rejects_zid_over_16_bytes() {
-        let _ = RequestQueryBuilder::new(42, 7, None)
-            .request_tstamp(0, &[0u8; 17])
-            .build()
-            .unwrap();
+        let _ = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_tstamp(0, &[0u8; 17])
+        .build()
+        .unwrap();
     }
 
     /// R121j-1h — request_qos_typed packs `(Priority, CongestionControl,
@@ -2808,10 +3010,13 @@ mod tests {
         // Drop + Background priority + no express: priority=7 → low 3
         // bits = 0b111; congestion Drop → nodrop=0; express=false →
         // bit4=0. Expected packed byte = 0x07.
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos_typed(Priority::Background, CongestionControl::Drop, false)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos_typed(Priority::Background, CongestionControl::Drop, false)
+        .build()
+        .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -2823,10 +3028,13 @@ mod tests {
         // Block + RealTime + express: priority=1 (bits 0-2 = 0b001),
         // nodrop=1 (bit 3 = 0b1000), express=1 (bit 4 = 0b10000).
         // Expected packed byte = 0x10 | 0x08 | 0x01 = 0x19.
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+        .build()
+        .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -2841,10 +3049,13 @@ mod tests {
         // Default (Data priority, Drop, !express): priority=5
         // (0b101), nodrop=0, express=0 → 0x05. Sanity check that the
         // default-aligned values produce a clean low-bits byte.
-        let request = RequestQueryBuilder::new(42, 7, None)
-            .request_qos_typed(Priority::Data, CongestionControl::Drop, false)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos_typed(Priority::Data, CongestionControl::Drop, false)
+        .build()
+        .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -2867,18 +3078,24 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn request_qos_typed_composes_with_chain_identically_to_raw_qos() {
-        let typed = RequestQueryBuilder::new(42, 7, None)
-            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
-            .request_target(QueryTarget::All)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
-        let raw = RequestQueryBuilder::new(42, 7, None)
-            .request_qos(0x19) // same packed byte as the typed call
-            .request_target(QueryTarget::All)
-            .request_timeout_ms(1000)
-            .build()
-            .unwrap();
+        let typed = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+        .request_target(QueryTarget::All)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
+        let raw = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_qos(0x19) // same packed byte as the typed call
+        .request_target(QueryTarget::All)
+        .request_timeout_ms(1000)
+        .build()
+        .unwrap();
         assert_eq!(
             typed.wire(),
             raw.wire(),
@@ -2893,20 +3110,26 @@ mod tests {
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::parameters")]
     fn request_query_builder_parameters_rejects_empty() {
-        let _ = RequestQueryBuilder::new(42, 7, None)
-            .parameters(b"")
-            .build()
-            .unwrap();
+        let _ = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .parameters(b"")
+        .build()
+        .unwrap();
     }
 
     #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_timeout_ms")]
     fn request_query_builder_timeout_rejects_zero() {
-        let _ = RequestQueryBuilder::new(42, 7, None)
-            .request_timeout_ms(0)
-            .build()
-            .unwrap();
+        let _ = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .request_timeout_ms(0)
+        .build()
+        .unwrap();
     }
 }
 
@@ -2964,7 +3187,11 @@ mod shm_value_build_tests {
     /// against a re-derivation of the layout.
     #[test]
     fn the_value_is_the_bytes_upstream_writes() {
-        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         let wire = request.wire();
         assert!(
@@ -2979,10 +3206,13 @@ mod shm_value_build_tests {
     /// and the walk finds the attachment where it was.
     #[test]
     fn an_attachment_stays_after_the_value_and_the_chain_is_flagged_end_to_end() {
-        let mut request = RequestQueryBuilder::new(1, 0, Some("demo/example/**"))
-            .query_attachment(b"hi")
-            .build()
-            .unwrap();
+        let mut request = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .query_attachment(b"hi")
+        .build()
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         let wire = request.wire();
         let mut tail = UPSTREAMS_VALUE.to_vec();
@@ -3024,7 +3254,11 @@ mod shm_value_build_tests {
             .expect("the schema is within its bound")
             .encode_to_vec();
         let encoding_len = encoded.len();
-        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &encoding, &DESCRIPTOR).unwrap();
         let wire = request.wire();
         let declared = (encoding_len + 1 + 1024) as u64;
@@ -3066,12 +3300,20 @@ mod shm_value_build_tests {
     /// for byte, declared length included.
     #[test]
     fn a_value_relayed_as_a_descriptor_is_the_query_built_with_that_descriptor() {
-        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         let offered = relayed_descriptor(query_of(&mut request), FOR_A_RECEIVER);
         assert_eq!(offered, 1, "the one shared-memory slice is offered once");
 
-        let mut expected = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        let mut expected = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(
             query_of(&mut expected),
             &default_encoding(),
@@ -3088,17 +3330,24 @@ mod shm_value_build_tests {
     #[test]
     fn a_value_relayed_as_bytes_is_the_plain_value_a_peer_without_shared_memory_reads() {
         let chunk = alloc::vec![0x5au8; 1024];
-        let mut request = build_request_query(1, 0, Some("demo/example/**")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         relay_query_value_shm(query_of(&mut request), |_| {
             Some(crate::put_payload::Relayed::Bytes(chunk.clone()))
         })
         .expect("relayed");
 
-        let expected = RequestQueryBuilder::new(1, 0, Some("demo/example/**"))
-            .query_value(&chunk, default_encoding())
-            .build()
-            .unwrap();
+        let expected = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("demo/example/**").expect("a literal key"),
+        )
+        .query_value(&chunk, default_encoding())
+        .build()
+        .unwrap();
         assert_eq!(request.wire(), expected.wire());
         assert_eq!(
             query_value_shm_descriptors(query_of(&mut request)).len(),
@@ -3118,21 +3367,27 @@ mod shm_value_build_tests {
             schema: Some("json".into()),
         };
         let chunk = alloc::vec![0x21u8; 1024];
-        let mut request = RequestQueryBuilder::new(1, 0, Some("k"))
-            .query_attachment(b"hi")
-            .build()
-            .unwrap();
+        let mut request = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .query_attachment(b"hi")
+        .build()
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &encoding, &DESCRIPTOR).unwrap();
         relay_query_value_shm(query_of(&mut request), |_| {
             Some(crate::put_payload::Relayed::Bytes(chunk.clone()))
         })
         .expect("relayed");
 
-        let expected = RequestQueryBuilder::new(1, 0, Some("k"))
-            .query_attachment(b"hi")
-            .query_value(&chunk, encoding)
-            .build()
-            .unwrap();
+        let expected = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .query_attachment(b"hi")
+        .query_value(&chunk, encoding)
+        .build()
+        .unwrap();
         assert_eq!(request.wire(), expected.wire());
     }
 
@@ -3140,7 +3395,11 @@ mod shm_value_build_tests {
     /// sent in its place.
     #[test]
     fn a_value_with_a_slice_nobody_holds_is_refused_and_unchanged() {
-        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .unwrap();
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         let before = request.wire();
         let refused = relay_query_value_shm(query_of(&mut request), |_| None);
@@ -3156,15 +3415,22 @@ mod shm_value_build_tests {
         let ask_nobody = |_: &[u8]| -> Option<crate::put_payload::Relayed> {
             panic!("no slice of shared memory was named")
         };
-        let mut bare = build_request_query(1, 0, Some("k")).unwrap();
+        let mut bare = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .unwrap();
         let before = bare.wire();
         relay_query_value_shm(query_of(&mut bare), ask_nobody).expect("relayed");
         assert_eq!(bare.wire(), before);
 
-        let mut plain = RequestQueryBuilder::new(1, 0, Some("k"))
-            .query_value(b"plain", default_encoding())
-            .build()
-            .unwrap();
+        let mut plain = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .query_value(b"plain", default_encoding())
+        .build()
+        .unwrap();
         let before = plain.wire();
         relay_query_value_shm(query_of(&mut plain), ask_nobody).expect("relayed");
         assert_eq!(plain.wire(), before);
@@ -3173,7 +3439,11 @@ mod shm_value_build_tests {
     /// The descriptors a forwarder holds a chunk for are the slices of the value, in order.
     #[test]
     fn the_descriptors_of_a_value_are_those_of_its_slices() {
-        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .unwrap();
         assert!(query_value_shm_descriptors(query_of(&mut request)).is_empty());
         attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR).unwrap();
         let descriptors = query_value_shm_descriptors(query_of(&mut request));
@@ -3189,10 +3459,13 @@ mod shm_value_build_tests {
     #[cfg(feature = "query-value")]
     #[test]
     fn a_query_that_already_has_a_value_is_refused_and_unchanged() {
-        let mut request = RequestQueryBuilder::new(1, 0, Some("k"))
-            .query_value(b"plain", default_encoding())
-            .build()
-            .unwrap();
+        let mut request = RequestQueryBuilder::new(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .query_value(b"plain", default_encoding())
+        .build()
+        .unwrap();
         let before = request.wire();
         let refused =
             attach_query_value_shm(query_of(&mut request), &default_encoding(), &DESCRIPTOR);
@@ -3210,7 +3483,11 @@ mod shm_value_build_tests {
     fn an_extension_of_the_values_id_is_not_a_value() {
         use crate::wire::parts::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
         use wz_codecs::query_value_zbuf::{QueryValueZbufAfterShm, QueryValueZbufOwned};
-        let mut request = build_request_query(1, 0, Some("k")).unwrap();
+        let mut request = build_request_query(
+            1,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+        )
+        .unwrap();
         let query = query_of(&mut request);
         let lookalike = QueryExtEntryOwned {
             header: 0x53,

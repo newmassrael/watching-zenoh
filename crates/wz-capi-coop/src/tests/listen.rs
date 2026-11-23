@@ -259,6 +259,86 @@ fn a_connection_past_max_faces_is_closed_unread() {
     );
 }
 
+/// A full listener counts a face it has lost track of until the face's lease ends, as zenoh-pico
+/// counts a peer in its list until then (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+/// `if (_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB) {`): a
+/// connection that arrives while the silent face still holds its link and that link's buffers is
+/// closed unread, and one that arrives after the lease took the face is taken. The link of the
+/// face taken in its place, and the face that stood all along, carry every sample whole: no link
+/// reads into buffers another still holds. The CONTROL is the full listener before the face goes
+/// silent, whose two faces are heard.
+#[test]
+fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before() {
+    let (full, endpoint) = listening(|config| {
+        config.max_faces = 2;
+        config.accept_pending = 1;
+    });
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let into = heard.clone();
+    full.declare_subscriber_on_wire(
+        "demo/full/**",
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
+        }),
+    )
+    .expect("the session declares the subscriber");
+    let put = |peer: &Stepped, tag: u8, at: u8| {
+        // Long enough that a batch holds a few, so a sample read into another link's buffer
+        // would show in its bytes.
+        let payload = vec![tag ^ at; 200 + usize::from(at)];
+        peer.publish_on_wire_all(
+            "demo/full/x",
+            &WireKey::literal(),
+            &payload,
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+        payload
+    };
+
+    let silent = Stepped::new(open_with(CoopConfig {
+        endpoints: vec![endpoint.clone()],
+        zid: Some(vec![0xc1; 4]),
+        lease_ms: 600,
+        ..client_config()
+    }));
+    let standing = client(&endpoint, 0xc2);
+    eventually("the listener to be full", || full.faces_up() == 2);
+    let mut expected = vec![put(&silent, 0x10, 0), put(&standing, 0x20, 0)];
+    eventually("CONTROL: both faces heard", || {
+        heard.lock().unwrap().len() == 2
+    });
+
+    // The face goes silent: its socket stays open and nothing of its session is stepped, so the
+    // listener learns of it only when the lease it advertised ends.
+    SessionDrive::stop_read_task(&*silent).expect("the read task stops");
+    let port = endpoint.rsplit(':').next().unwrap().to_owned();
+    let mut early = TcpStream::connect(format!("127.0.0.1:{port}")).expect("the port accepts");
+    assert!(
+        closed_by_peer(&mut early, Duration::from_secs(3)),
+        "the silent face is still counted, so the listener is full and closes the connection"
+    );
+    eventually("the silent face's lease to end", || full.faces_up() == 1);
+
+    let late = client(&endpoint, 0xc3);
+    eventually("the face taken in its place", || full.faces_up() == 2);
+    for at in 1..=12u8 {
+        expected.push(put(&standing, 0x20, at));
+        expected.push(put(&late, 0x30, at));
+    }
+    eventually("every sample of both links", || {
+        heard.lock().unwrap().len() == expected.len()
+    });
+    let mut got = heard.lock().unwrap().clone();
+    got.sort();
+    expected.sort();
+    assert_eq!(got, expected, "each sample whole, as it was sent");
+    drop(silent);
+}
+
 /// A connection that arrives while as many handshakes are under way as the session allows is
 /// closed unread; one inside the bound is kept.
 #[test]

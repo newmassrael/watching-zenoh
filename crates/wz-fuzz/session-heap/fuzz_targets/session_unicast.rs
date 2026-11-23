@@ -145,18 +145,26 @@ fuzz_target!(|data: &[u8]| {
     reset_clock();
     let runtime = CoopRuntime::new(Clock);
     let clock = CoopTime::new(&runtime);
-    let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Nowhere);
-    let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+    let sink = wz_runtime_coop::link_cells::heap_sink(Nowhere);
+    let actions = new_session_actions(sink, params(), clock.clone());
     let feed = Rc::new(Feed::default());
     let config = SessionDriveConfig {
         timeouts: SessionTimeouts::from_build(),
         role: SessionRole::Initiator,
         max_iters: None,
     };
-    let mut pump = SessionPump::new(runtime, feed.clone(), actions.clone(), clock, config);
+    let entropy = wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0));
+    let mut pump = SessionPump::new(
+        runtime,
+        feed.clone(),
+        actions.clone(),
+        entropy,
+        clock,
+        config,
+    );
     let mut observer = ApplicationLayerObserver::new();
-    let _ = observer.subscribers.register("**", |_| {});
-    let _ = observer.queryables.register("**", |_, _| {});
+    let _ = observer.subscribe("**", |_| {});
+    let _ = observer.with_app(|app_half| app_half.queryables.register("**", |_, _| {}));
     let mut on_event = |event: IterationEvent<'_, '_>| {
         let _ = write!(Discard, "{event:?}");
         observer.set_unanswerable_final(actions.params.policy.query_unanswerable_final());

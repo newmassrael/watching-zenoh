@@ -1043,10 +1043,12 @@ mod tests {
         // A held local liveliness token at the queried keyexpr — the declarer
         // replies with it (and only it: the sole registered token matches).
         let mut observer = ApplicationLayerObserver::new();
-        observer
-            .local_tokens
-            .register(/*token_id=*/ 3, "demo/live")
-            .expect("register held token");
+        observer.with_app(|app_half| {
+            app_half
+                .local_tokens
+                .register(/*token_id=*/ 3, "demo/live")
+                .expect("register held token")
+        });
 
         // The reply backing shared between the sink (the observer flushes its
         // staged declare replies through it) and next_tx (drains them back out).
@@ -1143,7 +1145,11 @@ mod tests {
         // A literal-keyexpr Query for "demo/mc", request id 7, at SN 0.
         let query = encode_frame_with_request(
             0,
-            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             true,
         );
         socket.send_to(group, port, &query).expect("inject Query");
@@ -1159,17 +1165,19 @@ mod tests {
         // backings: this crate is also built with `bounded-heapless`, which
         // compiles out the infallible closure wrapper.
         let mut observer = ApplicationLayerObserver::new();
-        observer
-            .queryables
-            .register_sink(
-                "demo/mc",
-                wz_session_core::locality::Locality::Any,
-                false,
-                wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
-                    responder.reply(b"reply-over-multicast");
-                }),
-            )
-            .expect("a fresh observer takes the queryable");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register_sink(
+                    "demo/mc",
+                    wz_session_core::locality::Locality::Any,
+                    false,
+                    wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
+                        responder.reply(b"reply-over-multicast");
+                    }),
+                )
+                .expect("a fresh observer takes the queryable")
+        });
 
         // The reply backing shared between the sink (the observer flushes its
         // staged query replies through it) and next_tx (drains them back out).

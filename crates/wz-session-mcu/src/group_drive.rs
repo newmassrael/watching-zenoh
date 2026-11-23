@@ -279,13 +279,27 @@ use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
+// Total functions in release code (docs/c-abi-architecture.md, P6), as in the session core.
+#[cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 mod stage;
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
-pub use stage::{GroupLink, GroupTxPace, GroupTxStage};
+pub use stage::{GroupLink, GroupTxPace, GroupTxStage, LentPushRefused};
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic

@@ -139,6 +139,29 @@ impl crate::session_drive::MakeRouter<LentReassembly> for LentReassemblyMaker {
     }
 }
 
+/// The chain slots of a session's one Router, which its links share: one for each buffer of the
+/// session's chain table (`LENT_CHAINS`). A slot stages only into a buffer, so a slot past the
+/// buffers would be memory no chain can use; zenoh-pico keeps a reliable and a best-effort
+/// defragmentation buffer for each peer, taken when its first fragment comes
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`),
+/// and the session keeps the pair, reserved when it opens, for its links together.
+pub const SESSION_REASSEMBLY_SLOTS: usize = LENT_CHAINS;
+
+/// The staging of a session's one Router: the session's chain table.
+pub type SessionChains = LentStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
+
+/// A session's one Router, which every link of the session stages its chains in, each keyed by
+/// its peer ([`session_reassembly`]).
+pub type SessionReassembly =
+    ReassemblyDispatcher<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }, SessionChains>;
+
+/// The Router of a session whose snapshot is `policy`, staging into `chains`: one table of slots
+/// for the session and not one for each link. The session owns it and lends it to its links'
+/// receives for the length of each step (`wz_session_core::unicast_rx::RouterLend`).
+pub fn session_reassembly(policy: &SessionPolicy, chains: SessionChains) -> SessionReassembly {
+    SessionReassembly::with_staging(mcu_reassembly_config(policy), chains)
+}
+
 /// [`lent_reassembly`] built in `place` and lent back: the Router a session's pump holds, made in
 /// the pump's own field (`SessionPump::with_router_in`), so its kilobytes never pass through the
 /// stack of the call that opens the session.
@@ -793,6 +816,83 @@ mod tests {
         assert_eq!(r1, IngestOutcome::Reassembled);
         assert!(delivered, "completion delivered the reassembled message");
         assert_eq!(reasm.active_chains(), 0);
+    }
+
+    /// Two links' receives reach the session's one Router through its lend: two peers' chains,
+    /// their fragments interleaved, each rejoin whole in the one table, and the second handle
+    /// sees the first's chain. Once the lend ends the session holds the Router again: a link that
+    /// goes ends its peer's chains there, which frees their buffers for the next, and the other
+    /// peer's chain is untouched.
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
+    #[test]
+    fn the_links_of_a_session_share_one_router_keyed_by_peer() {
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::Arena;
+        use wz_session_core::unicast_rx::RouterLend;
+
+        #[repr(C, align(16))]
+        struct Memory([u8; 256]);
+
+        let mut memory = Memory([0; 256]);
+        // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by nothing
+        // else, and outlives the arena, the table and the Router, which are dropped before it.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), 256) };
+        let cells = arena
+            .lend_byte_cells(32, LENT_CHAINS)
+            .expect("the memory holds the table");
+        let mut router = session_reassembly(
+            &SessionPolicy::defaults(),
+            SessionChains::over(&cells, LENT_CHAINS),
+        );
+        let first = RouterLend::<SessionReassembly>::new();
+        let second = first.clone();
+        const OTHER: &[u8] = &[0x22; 16];
+        let of = |peer: &'static [u8], sn: u64, more: u8, payload: &'static [u8]| Fragment {
+            peer_key: peer,
+            ..frag(sn, more, payload)
+        };
+        let ingest = |handle: &RouterLend<SessionReassembly>, fragment: Fragment<'_>| {
+            let mut got = None;
+            let outcome = handle
+                .with(|router| {
+                    router.ingest(fragment, MASK, 0, |message| got = Some(message.to_vec()))
+                })
+                .expect("the Router is lent");
+            (outcome, got)
+        };
+        first.clone().lend_for(&mut router, || {
+            assert_eq!(
+                ingest(&first, of(ZID, 1, 1, b"one ")).0,
+                IngestOutcome::Begun
+            );
+            assert_eq!(
+                ingest(&second, of(OTHER, 7, 1, b"two ")).0,
+                IngestOutcome::Begun
+            );
+            assert_eq!(first.with(|router| router.active_chains()), Some(2));
+            assert_eq!(
+                ingest(&first, of(ZID, 2, 0, b"whole")),
+                (IngestOutcome::Reassembled, Some(b"one whole".to_vec()))
+            );
+            assert_eq!(
+                ingest(&first, of(ZID, 3, 1, b"again")).0,
+                IngestOutcome::Begun
+            );
+        });
+        assert_eq!(
+            second.with(|router| router.active_chains()),
+            None,
+            "the lend has ended"
+        );
+        assert_eq!(router.abort_peer(ZID), 1);
+        assert_eq!(router.staging_available(), 1);
+        first.clone().lend_for(&mut router, || {
+            assert_eq!(
+                ingest(&second, of(OTHER, 8, 0, b"whole")),
+                (IngestOutcome::Reassembled, Some(b"two whole".to_vec()))
+            );
+        });
+        assert_eq!(router.staging_available(), LENT_CHAINS);
     }
 
     /// A lent Router's ceiling is the build's `PICO_FRAG_MAX_BYTES`, and its chains are bounded by

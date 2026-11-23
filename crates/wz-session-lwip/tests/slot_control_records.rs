@@ -67,7 +67,7 @@ use wz_link_lwip::rx_sockets::SessionRxSocket;
 use wz_link_lwip::test_bind::session_rx as bind_session_rx;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionPump, SessionRole};
-use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
+use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
@@ -192,6 +192,7 @@ fn create(
     zid: u8,
 ) -> (
     Handle,
+    SessionEntropy,
     LwipSessionLink<Rc<LwipLink>>,
     SlotDriver<LwipUdpDriver>,
 ) {
@@ -207,8 +208,8 @@ fn create(
     };
     let sender = claim.driver_handle();
     let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-    let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
-    (actions, pump_link, sender)
+    let (actions, entropy) = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
+    (actions, entropy, pump_link, sender)
 }
 
 /// The `on_event` an end's pump is driven with.
@@ -222,21 +223,25 @@ fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserve
     {
         let mut observer = observer.borrow_mut();
         let seen = told.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_declared_sink(BoxedDeclSink::new(move |decl: &dyn DeclView| {
-                seen.declared.fetch_add(1, Ordering::SeqCst);
-                seen.declared_id.store(decl.id() as usize, Ordering::SeqCst);
-            }))
-            .expect("install the declaration observer");
+        observer.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_declared_sink(BoxedDeclSink::new(move |decl: &dyn DeclView| {
+                    seen.declared.fetch_add(1, Ordering::SeqCst);
+                    seen.declared_id.store(decl.id() as usize, Ordering::SeqCst);
+                }))
+                .expect("install the declaration observer")
+        });
         let seen = told.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_undeclared_sink(BoxedUndeclSink::new(move |id: u64| {
-                seen.undeclared.fetch_add(1, Ordering::SeqCst);
-                seen.undeclared_id.store(id as usize, Ordering::SeqCst);
-            }))
-            .expect("install the undeclaration observer");
+        observer.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_undeclared_sink(BoxedUndeclSink::new(move |id: u64| {
+                    seen.undeclared.fetch_add(1, Ordering::SeqCst);
+                    seen.undeclared_id.store(id as usize, Ordering::SeqCst);
+                }))
+                .expect("install the undeclaration observer")
+        });
     }
     (
         Box::new(app_layer::dispatch_to(observer.clone(), actions.clone())),
@@ -249,8 +254,9 @@ fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserve
 fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
     let acceptor_socket = bind_session_rx(link, port).expect("bind the acceptor");
     let initiator_socket = bind_session_rx(link, 0).expect("bind the initiator");
-    let (a_actions, a_link, a_sender) = create(link, runtime, acceptor_socket, None, 0xa1);
-    let (i_actions, i_link, i_sender) = create(
+    let (a_actions, a_entropy, a_link, a_sender) =
+        create(link, runtime, acceptor_socket, None, 0xa1);
+    let (i_actions, i_entropy, i_link, i_sender) = create(
         link,
         runtime,
         initiator_socket,
@@ -264,6 +270,7 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
             runtime.clone(),
             a_link,
             a_actions.clone(),
+            a_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Acceptor),
         ),
@@ -278,6 +285,7 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
             runtime.clone(),
             i_link,
             i_actions.clone(),
+            i_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Initiator),
         ),
@@ -536,7 +544,12 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     );
     check("a DeclKexpr", n);
     assert_eq!(
-        acceptor.observer.borrow().subscribers.peer().alias_count(),
+        acceptor
+            .observer
+            .borrow()
+            .face_ref()
+            .subscribers
+            .alias_count(),
         1,
         "the alias was bound"
     );
@@ -613,8 +626,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     let interests_before = acceptor
         .observer
         .borrow()
+        .face_ref()
         .subscribers
-        .peer()
         .interest_count();
     let n = one_record(
         &measure,
@@ -629,8 +642,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
         acceptor
             .observer
             .borrow()
+            .face_ref()
             .subscribers
-            .peer()
             .interest_count(),
         interests_before + 1,
         "the interest was kept"
@@ -648,8 +661,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
         acceptor
             .observer
             .borrow()
+            .face_ref()
             .subscribers
-            .peer()
             .interest_count(),
         interests_before,
         "the interest was retired"
@@ -887,9 +900,10 @@ fn what_the_owned_builders_of_the_control_sends_cost_is_bounded() {
     let mut costs: Vec<(&str, usize, usize)> = Vec::new();
 
     let (sent, n) = measure.count("send_declare_subscriber", || {
-        initiator
-            .actions
-            .send_declare_subscriber(41, 0, Some("tx/k"))
+        initiator.actions.send_declare_subscriber(
+            41,
+            wz_session_core::named_key::NamedKey::literal("tx/k").expect("a key"),
+        )
     });
     sent.expect("the declaration leaves");
     costs.push(("send_declare_subscriber", n, DECLARE_SUBSCRIBER));

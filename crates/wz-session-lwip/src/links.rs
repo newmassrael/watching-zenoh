@@ -140,9 +140,9 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     where
         L: 'static,
     {
-        let driver = Rc::new(driver);
+        let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver);
         Ok(OpenedLink {
-            sink: driver.clone(),
+            sink: driver.clone().into_sink(),
             pump: self.pump_over(driver),
         })
     }
@@ -169,6 +169,8 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
 #[cfg(not(feature = "session-slot"))]
 impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L> {
     type Pump = LwipSessionLink<L>;
+
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
     // The port's lwIP has no IPv6 (`Self::bind_driver` refuses that family).
     const IPV6: bool = false;
@@ -323,16 +325,13 @@ mod tests {
                 pump: acceptor_pump,
             } = links.open_acceptor(7541).expect("bind acceptor");
             let acceptor_link = acceptor_sink.clone();
-            let acceptor_actions = new_session_actions(
-                acceptor_sink,
-                params(0xa1),
-                CoopTime::new(&runtime),
-                Counting(1),
-            );
+            let acceptor_actions =
+                new_session_actions(acceptor_sink, params(0xa1), CoopTime::new(&runtime));
             let _acceptor = spawn_session(
                 &local,
                 acceptor_pump,
                 acceptor_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -348,7 +347,8 @@ mod tests {
             } = links
                 .open_initiator(Locator::udp(SocketAddr::from(([127, 0, 0, 1], 7541))))
                 .expect("open initiator");
-            let initiator_link: Rc<dyn BoxedLinkDriver> = initiator_sink.clone();
+            let initiator_link: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
+                initiator_sink.clone();
             let initiator_actions = SessionLinkActions::<
                 CoopRuntime<FrozenClock>,
                 CoopTime<FrozenClock>,
@@ -359,6 +359,7 @@ mod tests {
                 &local,
                 initiator_pump,
                 initiator_actions.clone(),
+                wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),

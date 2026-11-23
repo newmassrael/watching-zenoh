@@ -45,7 +45,7 @@ pub const fn mask_from_res(seq_num_res: u8) -> u64 {
 pub const fn narrowest_mask_covering(sn: u64) -> u64 {
     let mut res = 0u8;
     while res < 3 && mask_from_res(res) < sn {
-        res += 1;
+        res = res.saturating_add(1);
     }
     mask_from_res(res)
 }
@@ -207,7 +207,7 @@ impl RxSn {
                 *slot = Some(sn);
                 if distance > 1 {
                     RxAdmit::Gap {
-                        missing: u32::try_from(distance - 1).unwrap_or(u32::MAX),
+                        missing: u32::try_from(distance.saturating_sub(1)).unwrap_or(u32::MAX),
                     }
                 } else {
                     RxAdmit::Accept
@@ -303,7 +303,7 @@ impl RxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut RxSn {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -427,7 +427,7 @@ impl MulticastTxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -464,7 +464,7 @@ impl MulticastTxConduits {
     pub fn advertise_default(&self) -> TxSn {
         #[cfg(feature = "transport-qos")]
         {
-            self.conduits[crate::qos::Priority::DEFAULT as usize]
+            *crate::qos::Priority::DEFAULT.of(&self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {
@@ -532,7 +532,7 @@ impl MulticastRxConduits {
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut MulticastRxPair {
         #[cfg(feature = "transport-qos")]
         {
-            &mut self.conduits[_priority as usize]
+            _priority.of_mut(&mut self.conduits)
         }
         #[cfg(not(feature = "transport-qos"))]
         {

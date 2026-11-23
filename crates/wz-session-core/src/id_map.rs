@@ -181,7 +181,7 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
         if let Some((_, held)) = self.rows.iter_mut().find(|(k, _)| *k == id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.rows.len() + 1) {
+        if !admits(self.rows.len().saturating_add(1)) {
             self.refused = self.refused.saturating_add(1);
             return Err(CapacityFull(value));
         }
@@ -261,6 +261,17 @@ impl<V, const N: usize> PooledIdMap<V, N> {
     pub const fn capacity(&self) -> usize {
         N
     }
+
+    /// The ids the table holds, as a table of their own whose rows stay where they lie in the
+    /// pool, and this one left holding none and binding ids in rows of the same pool. `None`,
+    /// taking nothing, for a table whose rows lie in a span of its own
+    /// ([`PooledRows::split_off`](crate::row_pool::PooledRows::split_off)).
+    pub fn split_off(&mut self) -> Option<Self> {
+        self.rows.split_off().map(|rows| Self {
+            rows,
+            high: crate::pool_gauge::HighWater::new(),
+        })
+    }
 }
 
 impl<V, const N: usize> Default for PooledIdMap<V, N> {
@@ -303,7 +314,7 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
         if let Some(held) = self.find_mut(id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.rows.len() + 1) {
+        if !admits(self.rows.len().saturating_add(1)) {
             self.rows.count_refused();
             return Err(CapacityFull(value));
         }
@@ -401,7 +412,7 @@ impl<V> IdMap<V> for GrowableIdMap<V> {
         if let Some(held) = self.map.get_mut(&id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.map.len() + 1) {
+        if !admits(self.map.len().saturating_add(1)) {
             self.refused = self.refused.saturating_add(1);
             return Err(CapacityFull(value));
         }
@@ -723,6 +734,36 @@ mod tests {
             (1, 1),
             "and keeps the counts"
         );
+    }
+
+    /// A table split off a pooled one holds its ids in the order they were bound and keeps their
+    /// rows in the pool; the table it came from holds none and binds new ids in rows of the same
+    /// pool. A table of a span of its own is not split, and keeps what it holds.
+    #[test]
+    fn a_split_off_table_keeps_its_rows_in_the_pool() {
+        let pool = pool_of::<crate::row_pool::Keyed<u32>>(3);
+        let mut table: PooledIdMap<u32, 3> = PooledIdMap::new();
+        table.keep_rows_in(pool.space());
+        assert!(table.bind(2, 20).is_ok() && table.bind(1, 10).is_ok());
+        let mut owed = table.split_off().expect("a pooled table is split");
+        assert_eq!(
+            owed.entries().collect::<std::vec::Vec<_>>(),
+            [(2, &20), (1, &10)],
+            "in the order bound"
+        );
+        assert_eq!(table.count(), 0, "the table it came from holds none");
+        assert_eq!(pool.counts().used, 2, "the rows stay in the pool");
+        assert!(table.bind(5, 50).is_ok(), "and it binds in the same pool");
+        assert_eq!(pool.counts().used, 3);
+        assert_eq!(owed.unbind(1), Some(10));
+        owed.reset();
+        table.reset();
+        assert_eq!(pool.counts().used, 0, "each gives back its own rows");
+        let mut own: PooledIdMap<u32, 3> = PooledIdMap::new();
+        own.keep_rows_in(space_of(3, true));
+        assert!(own.bind(1, 10).is_ok());
+        assert!(own.split_off().is_none(), "a span of its own is not split");
+        assert_eq!(own.find(1), Some(&10), "and keeps what it holds");
     }
 
     /// A lent table made by `Default` holds no pool and refuses every new id, counted.

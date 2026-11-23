@@ -366,3 +366,134 @@ fn put_own(engine: &Engine, key: &str, payload: &[u8]) -> Result<usize, FanoutEr
     let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
     engine.publish_on_wire_all(key, &WireKey::literal(), payload, &opts)
 }
+
+/// Counts its own drop: what the callback of a subscriber holds, to tell when it was let go of.
+struct Dropped(Arc<AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// An undeclaration made on another thread while a put's call of the subscriber's callback runs
+/// returns only once that call has returned and the callback was let go of (P11), as zenoh-pico's
+/// undeclare waits for the entity's lock. The CONTROL is the undeclaration while the callback is
+/// held inside its call: not returned, and the callback standing.
+#[test]
+fn an_undeclare_on_another_thread_waits_for_the_running_call() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (entered, inside) = channel::<()>();
+    let (release, released) = channel::<()>();
+    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let guard = Dropped(dropped.clone());
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/wait/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                let _ = entered.lock().unwrap().send(());
+                let _ = released.lock().unwrap().recv();
+            }),
+        )
+        .expect("declared");
+    let putting = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || put_own(&engine, "demo/wait/a", b"v"))
+    };
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the put calls the callback");
+    let returned = Arc::new(AtomicBool::new(false));
+    let undeclaring = {
+        let (engine, returned, dropped) = (
+            Arc::clone(&engine),
+            Arc::clone(&returned),
+            Arc::clone(&dropped),
+        );
+        std::thread::spawn(move || {
+            engine.undeclare_subscriber(id);
+            returned.store(true, Ordering::SeqCst);
+            dropped.load(Ordering::SeqCst)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !returned.load(Ordering::SeqCst),
+        "CONTROL: the undeclaration waits while the call runs"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "CONTROL: the callback stands"
+    );
+    release
+        .send(())
+        .expect("the callback waits for its release");
+    let dropped_when_returned = undeclaring.join().expect("the undeclaration returns");
+    assert_eq!(
+        dropped_when_returned, 1,
+        "the callback was let go of before the undeclaration returned"
+    );
+    assert_eq!(
+        putting.join().expect("the put returns"),
+        Ok(1),
+        "the put reached the subscriber once"
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "let go of once");
+}
+
+/// A callback that undeclares its own subscriber from inside a put's call of it does not wait for
+/// itself: the undeclaration returns inside the call, and the row is let go of once the call has
+/// returned, before the put does. A put after it reaches nothing; the CONTROL is the first put,
+/// which reached the subscriber.
+#[test]
+fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let own: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let guard = Dropped(dropped.clone());
+    let session = Arc::downgrade(&engine);
+    let id = engine
+        .declare_subscriber_on_wire("demo/self/**", WireKey::literal(), Locality::Any, None, {
+            let (calls, own) = (Arc::clone(&calls), Arc::clone(&own));
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                calls.fetch_add(1, Ordering::SeqCst);
+                let id = own.lock().unwrap().take();
+                if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                    engine.undeclare_subscriber(id);
+                }
+            })
+        })
+        .expect("declared");
+    *own.lock().unwrap() = Some(id);
+    assert_eq!(
+        put_own(&engine, "demo/self/a", b"v"),
+        Ok(1),
+        "CONTROL: the put reached the subscriber"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "let go of once its own call returned, before the put did"
+    );
+    assert_eq!(
+        put_own(&engine, "demo/self/b", b"v"),
+        Ok(0),
+        "nothing is left to reach"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

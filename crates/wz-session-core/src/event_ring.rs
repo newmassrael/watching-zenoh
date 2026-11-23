@@ -164,7 +164,11 @@ pub struct EventRing<const SLOTS: usize, const ARGS: usize> {
 
 /// The lap a sequence number is on, as the word a `gen` is made of.
 const fn lap_of<const SLOTS: usize>(sequence: u64) -> u32 {
-    (sequence / SLOTS as u64) as u32
+    // A ring has one slot or more (`assert_ring_shape`), so the division is defined.
+    match sequence.checked_div(SLOTS as u64) {
+        Some(lap) => lap as u32,
+        None => 0,
+    }
 }
 
 /// The most slots a ring has: a `gen` is `2 * lap + 2` in 32 bits, compared modulo 2^32, so the
@@ -209,6 +213,12 @@ impl<const SLOTS: usize, const ARGS: usize> EventRing<SLOTS, ARGS> {
     /// How many records the ring holds at most.
     pub const fn capacity(&self) -> usize {
         SLOTS
+    }
+
+    /// The slot `sequence` is written to: its place in the ring, which has one slot or more.
+    fn slot_of(&self, sequence: u64) -> Option<&Slot<ARGS>> {
+        let index = sequence.checked_rem(SLOTS as u64)?;
+        self.slots.get(usize::try_from(index).ok()?)
     }
 
     /// What the ring does when it is full.
@@ -309,7 +319,8 @@ impl<const SLOTS: usize, const ARGS: usize> Producer<'_, SLOTS, ARGS> {
     pub fn push(&mut self, level: u8, source: u16, timestamp: u64, args: &[u64]) -> Pushed {
         if self.ring.policy == FullPolicy::DropNewest {
             let tail = pair(&self.ring.tail_lo, &self.ring.tail_hi);
-            if self.head - tail >= SLOTS as u64 {
+            // The tail is never past the head.
+            if self.head.saturating_sub(tail) >= SLOTS as u64 {
                 let dropped = self.ring.dropped.load(Ordering::Relaxed);
                 self.ring
                     .dropped
@@ -318,20 +329,21 @@ impl<const SLOTS: usize, const ARGS: usize> Producer<'_, SLOTS, ARGS> {
             }
         }
         let sequence = self.head;
-        let used = args.len().min(ARGS);
+        let args = args.get(..ARGS).unwrap_or(args);
         self.open(sequence);
-        self.fill(sequence, level, source, timestamp, &args[..used]);
+        self.fill(sequence, level, source, timestamp, args);
         self.close(sequence);
         Pushed::Stored(sequence)
     }
 
     /// The first half of a write: the slot is marked as being written.
     fn open(&self, sequence: u64) {
-        let slot = &self.ring.slots[(sequence % SLOTS as u64) as usize];
-        slot.gen.store(
-            lap_of::<SLOTS>(sequence).wrapping_mul(2).wrapping_add(1),
-            Ordering::Relaxed,
-        );
+        if let Some(slot) = self.ring.slot_of(sequence) {
+            slot.gen.store(
+                lap_of::<SLOTS>(sequence).wrapping_mul(2).wrapping_add(1),
+                Ordering::Relaxed,
+            );
+        }
         // The marker is ordered before every word of the record, so a reader that sees a word of
         // this record sees the marker (or a later one) when it looks again.
         fence(Ordering::Release);
@@ -339,7 +351,9 @@ impl<const SLOTS: usize, const ARGS: usize> Producer<'_, SLOTS, ARGS> {
 
     /// The record's words.
     fn fill(&self, sequence: u64, level: u8, source: u16, timestamp: u64, args: &[u64]) {
-        let slot = &self.ring.slots[(sequence % SLOTS as u64) as usize];
+        let Some(slot) = self.ring.slot_of(sequence) else {
+            return;
+        };
         slot.seq_lo.store(sequence as u32, Ordering::Relaxed);
         slot.seq_hi
             .store((sequence >> 32) as u32, Ordering::Relaxed);
@@ -350,21 +364,22 @@ impl<const SLOTS: usize, const ARGS: usize> Producer<'_, SLOTS, ARGS> {
         slot.ts_lo.store(timestamp as u32, Ordering::Relaxed);
         slot.ts_hi
             .store((timestamp >> 32) as u32, Ordering::Relaxed);
-        for index in 0..ARGS {
-            let value = args.get(index).copied().unwrap_or(0);
-            slot.args_lo[index].store(value as u32, Ordering::Relaxed);
-            slot.args_hi[index].store((value >> 32) as u32, Ordering::Relaxed);
+        let values = args.iter().copied().chain(core::iter::repeat(0));
+        for ((lo, hi), value) in slot.args_lo.iter().zip(&slot.args_hi).zip(values) {
+            lo.store(value as u32, Ordering::Relaxed);
+            hi.store((value >> 32) as u32, Ordering::Relaxed);
         }
     }
 
     /// The second half: the slot is complete, and the ring says it has one more.
     fn close(&mut self, sequence: u64) {
-        let slot = &self.ring.slots[(sequence % SLOTS as u64) as usize];
-        slot.gen.store(
-            lap_of::<SLOTS>(sequence).wrapping_mul(2).wrapping_add(2),
-            Ordering::Release,
-        );
-        self.head = sequence + 1;
+        if let Some(slot) = self.ring.slot_of(sequence) {
+            slot.gen.store(
+                lap_of::<SLOTS>(sequence).wrapping_mul(2).wrapping_add(2),
+                Ordering::Release,
+            );
+        }
+        self.head = sequence.saturating_add(1);
         store_pair(&self.ring.next_lo, &self.ring.next_hi, self.head);
     }
 
@@ -402,7 +417,9 @@ impl<const SLOTS: usize, const ARGS: usize> Reader<'_, SLOTS, ARGS> {
         if ahead <= 0 {
             return Read::Empty;
         }
-        let slot = &ring.slots[(cursor % SLOTS as u64) as usize];
+        let Some(slot) = ring.slot_of(cursor) else {
+            return Read::Empty;
+        };
         let complete = lap_of::<SLOTS>(cursor).wrapping_mul(2).wrapping_add(2);
         let before = slot.gen.load(Ordering::Acquire);
         let distance = before.wrapping_sub(complete) as i32;
@@ -416,7 +433,7 @@ impl<const SLOTS: usize, const ARGS: usize> Reader<'_, SLOTS, ARGS> {
             fence(Ordering::Acquire);
             let after = slot.gen.load(Ordering::Relaxed);
             if after == before && record.sequence == cursor {
-                self.cursor = Some(cursor + 1);
+                self.cursor = Some(cursor.saturating_add(1));
                 return Read::Record(record);
             }
         }
@@ -424,8 +441,8 @@ impl<const SLOTS: usize, const ARGS: usize> Reader<'_, SLOTS, ARGS> {
         // is at least the one after this.
         let next_lo = ring.next_lo.load(Ordering::Acquire);
         let ahead = next_lo.wrapping_sub(cursor as u32) as i32;
-        let skip = (ahead as i64 - SLOTS as i64).max(1) as u64;
-        self.cursor = Some(cursor + skip);
+        let skip = i64::from(ahead).saturating_sub(SLOTS as i64).max(1) as u64;
+        self.cursor = Some(cursor.saturating_add(skip));
         Read::Lost { missed: skip }
     }
 
@@ -439,9 +456,8 @@ impl<const SLOTS: usize, const ARGS: usize> Reader<'_, SLOTS, ARGS> {
 fn copy<const ARGS: usize>(slot: &Slot<ARGS>) -> Record<ARGS> {
     let meta = slot.meta.load(Ordering::Relaxed);
     let mut args = [0u64; ARGS];
-    for (index, out) in args.iter_mut().enumerate() {
-        *out = u64::from(slot.args_hi[index].load(Ordering::Relaxed)) << 32
-            | u64::from(slot.args_lo[index].load(Ordering::Relaxed));
+    for (out, (lo, hi)) in args.iter_mut().zip(slot.args_lo.iter().zip(&slot.args_hi)) {
+        *out = u64::from(hi.load(Ordering::Relaxed)) << 32 | u64::from(lo.load(Ordering::Relaxed));
     }
     Record {
         sequence: u64::from(slot.seq_hi.load(Ordering::Relaxed)) << 32

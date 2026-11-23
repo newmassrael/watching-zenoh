@@ -290,22 +290,16 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
         } else {
             PeerConnectionEvent::ManualRefused
         };
-        let at = match self.position(&key) {
-            Some(at) => at,
-            None => self.take_entry(key)?,
-        };
-        Ok(self.entries[at].drive(event))
+        Ok(self.entry_for(key)?.drive(event))
     }
 
     /// `open` in its passive form (decision D10, BGP's `ManualStart_with_PassiveTcpEstablishment`):
     /// the node holds the peer and waits for the peer's own session, and dials nothing. A peer the
     /// node already holds, or is working to hold, is unchanged: an active intent is the stronger.
     pub fn open_passive(&mut self, key: K) -> Result<PeerDuties, PeerTableRefusal> {
-        let at = match self.position(&key) {
-            Some(at) => at,
-            None => self.take_entry(key)?,
-        };
-        Ok(self.entries[at].drive(PeerConnectionEvent::ManualStartPassive))
+        Ok(self
+            .entry_for(key)?
+            .drive(PeerConnectionEvent::ManualStartPassive))
     }
 
     /// `close` for `key`: the node no longer holds the peer, and its session is
@@ -330,8 +324,8 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
     /// state has no transition for changes nothing, and a peer the table does
     /// not hold is not taken in by a report.
     pub fn report(&mut self, key: &K, event: PeerConnectionEvent) -> PeerDuties {
-        match self.position(key) {
-            Some(at) => self.entries[at].drive(event),
+        match self.position(key).and_then(|at| self.entries.get_mut(at)) {
+            Some(entry) => entry.drive(event),
             None => PeerDuties(Duties::default()),
         }
     }
@@ -340,7 +334,9 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
     /// hold. A refusal is read as its cause (`NoLocator`, `NoSlot`,
     /// `IdentityMismatch`, `AuthorityRefused`).
     pub fn state(&self, key: &K) -> Option<PeerConnectionState> {
-        self.position(key).map(|at| self.entries[at].state())
+        self.position(key)
+            .and_then(|at| self.entries.get(at))
+            .map(PeerEntry::state)
     }
 
     /// Every peer in the table and its state.
@@ -357,15 +353,25 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
         self.entries.iter().position(|entry| entry.key == *key)
     }
 
+    /// The entry of `key`: the one the table holds, or a new one ([`Self::take_entry`]).
+    fn entry_for(&mut self, key: K) -> Result<&mut PeerEntry<K>, PeerTableRefusal> {
+        match self.position(&key) {
+            // The row the search found is one the table holds; were it not, there would be no
+            // row to answer with, which is what a full table refuses.
+            Some(at) => self.entries.get_mut(at).ok_or(PeerTableRefusal::Full),
+            None => self.take_entry(key),
+        }
+    }
+
     /// An entry for a new peer: a free one, or one whose peer is in `Idle`.
-    fn take_entry(&mut self, key: K) -> Result<usize, PeerTableRefusal> {
+    fn take_entry(&mut self, key: K) -> Result<&mut PeerEntry<K>, PeerTableRefusal> {
         if self.entries.is_full() {
             let Some(at) = self
                 .entries
                 .iter()
                 .position(|entry| !entry.state().in_intent())
             else {
-                self.refused += 1;
+                self.refused = self.refused.saturating_add(1);
                 return Err(PeerTableRefusal::Full);
             };
             // The row of a peer the node is not working to hold is given up, and the new peer
@@ -373,16 +379,15 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
             // takes a row out the same way).
             drop(self.entries.swap_remove(at));
         }
-        Ok(self.push_new(key))
+        self.push_new(key)
     }
 
-    /// Build the entry of `key` in the row after the last one, where it stays, and return its
-    /// index. The table is not full.
-    fn push_new(&mut self, key: K) -> usize {
-        assert!(
-            !self.entries.is_full(),
-            "the caller made room for the entry"
-        );
+    /// Build the entry of `key` in the row after the last one, where it stays, and lend it.
+    /// Refused, building nothing, when the table is full.
+    fn push_new(&mut self, key: K) -> Result<&mut PeerEntry<K>, PeerTableRefusal> {
+        if self.entries.is_full() {
+            return Err(PeerTableRefusal::Full);
+        }
         let at = self.entries.len();
         // SAFETY: the table is not full, so row `at` is inside the vector's capacity and holds no
         // value; `init_in` writes the whole entry there, and the length moves over the row only
@@ -393,10 +398,11 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
                 .as_mut_ptr()
                 .add(at)
                 .cast::<MaybeUninit<PeerEntry<K>>>();
-            PeerEntry::init_in(slot, key);
-            self.entries.set_len(at + 1);
+            let entry = PeerEntry::init_in(slot, key);
+            // Below the capacity, checked above.
+            self.entries.set_len(at.wrapping_add(1));
+            Ok(entry)
         }
-        at
     }
 }
 

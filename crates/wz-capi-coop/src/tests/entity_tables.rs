@@ -180,13 +180,24 @@ fn the_plan_lends_each_declaration_table_its_limit() {
             .find(|row| row.part == part)
             .map(|row| row.count)
     };
-    assert_eq!(count("subscribers"), Some(2));
+    assert_eq!(plan.tables().subscribers, 2);
+    assert_eq!(
+        count("subscribers"),
+        None,
+        "a subscriber is a row of the session's one table set"
+    );
     assert_eq!(
         count("subscriber declarations"),
         None,
         "a subscriber is one row, the session core's"
     );
-    assert_eq!(count("key expressions"), Some(6));
+    assert_eq!(
+        count("key expressions"),
+        None,
+        "a key expression is one row, the session's table set's"
+    );
+    assert_eq!(count("session tables"), Some(1));
+    assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(count("write filters"), Some(7));
     assert_eq!(count("matching listeners"), Some(5));
     assert_eq!(count("interests"), Some(12));
