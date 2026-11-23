@@ -954,8 +954,6 @@ pub mod join_decode;
     feature = "alloc",
     any(feature = "codec-scout", feature = "codec-hello")
 ))]
-// Totality debt TD-122 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod scouting_message;
 
 // R311y846 — the scouting RESPONDER decision: one datagram in, at most one

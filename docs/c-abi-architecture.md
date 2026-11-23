@@ -332,7 +332,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
 | TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
 | TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
-| TD-122 | `wz-session-core` | `scouting_message` | `arithmetic_side_effects` | 2 | open |
 | TD-123 | `wz-session-core` | `session_slot` | `arithmetic_side_effects` | 2 | open |
 | TD-124 | `wz-session-core` | `sink` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
 | TD-125 | `wz-session-core` | `supervisor` | `indexing_slicing` | 2 | open |
