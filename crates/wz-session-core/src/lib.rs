@@ -1521,8 +1521,6 @@ pub mod lent_control;
 /// combination the stage can describe; the drain of a node with no allocator
 /// ([`slot_observer`]) sends through it.
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
-// Totality debt TD-016 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod lent_response;
 
 /// A `get` written as the codec's BORROWED `Request` from the caller's own text, where
