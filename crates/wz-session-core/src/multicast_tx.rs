@@ -731,7 +731,9 @@ pub fn multicast_tx_item_body<R>(
         MulticastTxItem::ResponseFinal { request_id, qos } => {
             let response_final =
                 crate::response_final_build::build_response_final(*request_id, *qos);
-            f(&crate::frame_encode::response_final_body(&response_final))
+            // Named, so the encoder that borrows the message is let go before the message is.
+            let body = crate::frame_encode::response_final_body(&response_final);
+            f(&body)
         }
         #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
         MulticastTxItem::DeclareReply { declare } => f(&crate::frame_encode::declare_body(declare)),
