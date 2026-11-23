@@ -2721,8 +2721,6 @@ pub mod app_transport;
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine
 /// is.
 #[cfg(feature = "session-unicast")]
-// Totality debt TD-084 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod peer_table;
 
 /// The host of the peer machines, written once for every profile (decision D5 of
