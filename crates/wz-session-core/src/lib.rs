@@ -775,8 +775,6 @@ pub mod link_admission;
 /// expiring unless confirmed again (decision D3 of
 /// `docs/session-lifecycle-intent.md`). Ungated: a fixed number of rows and no
 /// allocator, so the fixed-memory profile holds the same table.
-// Totality debt TD-070 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod locator_directory;
 
 /// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
