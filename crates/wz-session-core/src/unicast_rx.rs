@@ -281,10 +281,10 @@ impl<Router> UnicastRx<Router> {
     /// else has written no Router in this receive, which is answered `None`: `place` then holds
     /// no receive, and nothing in it is dropped. `place` is overwritten without dropping what it
     /// held.
-    pub fn init_in<'a>(
-        place: &'a mut MaybeUninit<Self>,
+    pub fn init_in(
+        place: &mut MaybeUninit<Self>,
         make_router: impl FnOnce(&mut MaybeUninit<Router>) -> &mut Router,
-    ) -> Option<&'a mut Self> {
+    ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`), and the Router's field is
         // lent as the uninitialised place `MaybeUninit<Router>` lays out as a `Router`.
