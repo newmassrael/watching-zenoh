@@ -1913,6 +1913,13 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * slot size, the kinds of one size together; a pool of slots larger than the
  * largest size is reported by none.
  *
+ * THE PAYLOADS' AREA. The bytes the owned payloads, strings and slices carry
+ * lie beside the pools, in one area of payload_bytes bytes: blocks of
+ * power-of-two sizes from 32 bytes, a payload taking the smallest that holds
+ * its bytes and a 16-byte head, a larger block split in halves for it and
+ * joined again when both halves are free. A payload larger than the area's
+ * largest block, or one no free block holds, is refused.
+ *
  * THE COUNTS. The program states how many of each object it holds at once.
  * The entity counts (publishers to liveliness_subscribers) are per session
  * and are multiplied by sessions; the rest are for all sessions together. A
@@ -1922,15 +1929,15 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * one of those left 0 takes its limit's bound, a count above the bound is
  * held to it, and a count left 0 whose limit holds no bound is refused. The
  * other counts are as stated, 0 being none, so a program that reserves its
- * own pools states the configs it opens from. A count of an object the build
- * has none of is not read.
+ * own pools states the configs it opens from and the bytes its payloads
+ * carry. A count of an object the build has none of is not read.
  *
  * RESERVING. With nothing reserved, the first object the program makes
  * reserves the build's pools: HELD_SESSIONS sessions, each with the entities
  * its limits admit, HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES and
- * HELD_PAYLOADS of the owned values, HELD_CONFIGS configs and HELD_HELLOS
- * kept hellos. A program that states counts of its own reserves them before
- * its first object instead.
+ * HELD_PAYLOADS of the owned values, HELD_CONFIGS configs, HELD_HELLOS kept
+ * hellos and HELD_PAYLOAD_BYTES of payload bytes. A program that states
+ * counts of its own reserves them before its first object instead.
  *
  * RUNNING. Nothing falls back to the heap. A pool with no free slot, or a
  * build's reservation the heap cannot give, refuses the object: the call that
@@ -1939,10 +1946,10 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * z_declare_publisher, z_declare_subscriber, z_declare_queryable,
  * z_liveliness_declare_token, z_liveliness_declare_subscriber, the clone and
  * take_from_loaned of a sample, reply, reply error or query, and the
- * constructors of a payload, which leave it null). An object let go frees
- * its slot. The bytes a payload carries, key expressions, strings,
- * encodings, closures and the handles of the other wz_ext doors are the
- * heap's in either build. */
+ * constructors and copies of a payload, a string or a slice, which leave it
+ * null). An object let go frees its slot. Key expressions, the handles of
+ * strings, slices, string arrays and encodings, closures and the handles of
+ * the other wz_ext doors are the heap's in either build. */
 #define WZ_EXT_OBJECT_POOL_CLASSES 11
 
 typedef struct wz_ext_object_pool_counts_t {
@@ -1958,6 +1965,7 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t bytes;
   size_t configs;
   size_t hellos;
+  size_t payload_bytes;
 } wz_ext_object_pool_counts_t;
 
 typedef struct wz_ext_object_pool_class_t {

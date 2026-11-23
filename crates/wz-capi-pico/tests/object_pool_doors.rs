@@ -20,12 +20,13 @@ use wz_capi_pico::object_pool::{
 };
 use wz_capi_pico::result::{Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_SYSTEM_OUT_OF_MEMORY};
 use wz_capi_pico::{
-    z_bytes_copy_from_str, z_bytes_drop, z_bytes_move, z_config_default, z_config_loan_mut,
-    z_config_move, z_declare_publisher, z_internal_bytes_check, z_internal_publisher_check,
-    z_internal_session_check, z_open, z_owned_bytes_t, z_owned_config_t, z_owned_publisher_t,
-    z_owned_session_t, z_publisher_drop, z_publisher_move, z_session_drop, z_session_loan,
-    z_session_move, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
-    zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_ERR_NULL, Z_OK,
+    z_bytes_copy_from_buf, z_bytes_copy_from_str, z_bytes_drop, z_bytes_move, z_config_default,
+    z_config_loan_mut, z_config_move, z_declare_publisher, z_internal_bytes_check,
+    z_internal_publisher_check, z_internal_session_check, z_open, z_owned_bytes_t,
+    z_owned_config_t, z_owned_publisher_t, z_owned_session_t, z_publisher_drop, z_publisher_move,
+    z_session_drop, z_session_loan, z_session_move, z_view_keyexpr_from_str, z_view_keyexpr_loan,
+    z_view_keyexpr_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_ERR_NULL,
+    Z_OK,
 };
 use wz_runtime_tokio_test_support::free_port;
 
@@ -146,8 +147,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         }
         assert_eq!(slots(), 0, "a refused plan reserves nothing");
 
-        // ARM 3: one of each entity for one session, two payloads, and the config each open of
-        // the arms below is made from, one at a time.
+        // ARM 3: one of each entity for one session, two payloads and the bytes of four short
+        // ones, and the config each open of the arms below is made from, one at a time.
         let counts = wz_ext_object_pool_counts_t {
             sessions: 1,
             publishers: 1,
@@ -157,10 +158,23 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             liveliness_subscribers: 1,
             bytes: 2,
             configs: 1,
+            payload_bytes: 128,
             ..Default::default()
         };
         let mut bytes = 0usize;
         assert_eq!(wz_ext_object_pool_bytes(&counts, &mut bytes), Z_OK);
+        // The payloads' area lies beside the slots, and no class reports it.
+        let without_area = wz_ext_object_pool_counts_t {
+            payload_bytes: 0,
+            ..counts
+        };
+        let mut slots_only = 0usize;
+        assert_eq!(
+            wz_ext_object_pool_bytes(&without_area, &mut slots_only),
+            Z_OK
+        );
+        let area = bytes - slots_only;
+        assert!(area >= 128, "the area and its marks: {area}");
         // A config's slot is its own size where the build's config is larger than the largest
         // class, and no class reports it then.
         let without_configs = wz_ext_object_pool_counts_t {
@@ -187,7 +201,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             .map(|class| class.slots * class.slot_bytes)
             .sum();
         assert_eq!(
-            laid + (1 - configs_reported) * config_slot,
+            laid + (1 - configs_reported) * config_slot + area,
             bytes,
             "the reservation is the bytes the door answered"
         );
@@ -201,6 +215,18 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert!(!z_internal_bytes_check(&third));
         assert_eq!((in_use(), refused()), (2, 1));
+
+        // ARM 4b: a payload whose bytes the area has no block for is refused before it takes a
+        // place, and left null; the program's buffer is its own still.
+        let source = [0x5Au8; 200];
+        let mut large: z_owned_bytes_t = std::mem::zeroed();
+        assert_eq!(
+            z_bytes_copy_from_buf(&mut large, source.as_ptr(), source.len()),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert!(!z_internal_bytes_check(&large));
+        assert_eq!((in_use(), refused()), (2, 1), "no place was taken for it");
+        assert!(source.iter().all(|&byte| byte == 0x5A));
 
         // ARM 5: the pools are kept while they hold an object.
         assert_eq!(wz_ext_object_pool_release(), Z_EINVAL);
@@ -293,6 +319,7 @@ unsafe fn region_arms() {
     let base = region.0.as_mut_ptr();
     let counts = wz_ext_object_pool_counts_t {
         bytes: 2,
+        payload_bytes: 64,
         ..Default::default()
     };
     let mut needed = 0usize;

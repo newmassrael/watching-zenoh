@@ -18,14 +18,15 @@
 //! answers. A reservation is all or nothing: a refused one leaves no pool and touches no memory.
 //! The counts are read as the pools' module says: the entity counts per session, bounded by the
 //! limits a session opens under; every other count as stated, zero being none, so a program that
-//! reserves its own pools states the configs it makes and the hellos it keeps as well.
+//! reserves its own pools states the configs it makes, the hellos it keeps and the bytes its
+//! payloads carry as well.
 //!
 //! # Reading
 //!
 //! The pools are reported by slot size (`wz_ext_object_pool_class`), the kinds of one size
 //! together: their slots, those in use, the most in use at once and the objects refused for want of
 //! a free slot. A pool whose slots are larger than the largest class (a config of the build's text)
-//! is reported by none.
+//! is reported by none, and neither is the payloads' area.
 //!
 //! # Releasing
 //!
@@ -82,6 +83,9 @@ pub struct wz_ext_object_pool_counts_t {
     pub configs: usize,
     /// Hellos the program keeps (`z_hello_clone`).
     pub hellos: usize,
+    /// The bytes the payloads, strings and slices the program holds carry together, in blocks of
+    /// power-of-two sizes from 32 bytes, each the smallest that holds its bytes and a 16-byte head.
+    pub payload_bytes: usize,
 }
 
 impl wz_ext_object_pool_counts_t {
@@ -100,6 +104,7 @@ impl wz_ext_object_pool_counts_t {
             bytes: self.bytes,
             configs: self.configs,
             hellos: self.hellos,
+            payload_bytes: self.payload_bytes,
         }
     }
 }
@@ -282,6 +287,7 @@ mod tests {
             bytes: 10,
             configs: 11,
             hellos: 12,
+            payload_bytes: 13,
         };
         assert_eq!(
             stated.counts(),
@@ -298,6 +304,7 @@ mod tests {
                 bytes: 10,
                 configs: 11,
                 hellos: 12,
+                payload_bytes: 13,
             }
         );
     }

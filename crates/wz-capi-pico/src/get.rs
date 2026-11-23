@@ -241,21 +241,26 @@ pub(crate) struct ReplyMarshal {
 
 impl ReplyMarshal {
     /// Build the marshal for one inbound reply, cached views still UNBOUND —
-    /// [`Self::bind`] must run at the final address (see [`SampleMarshal::bind`]).
-    fn new(view: &dyn ReplyView) -> Self {
+    /// [`Self::bind`] must run at the final address (see [`SampleMarshal::bind`]). Its payload and
+    /// attachment are read where the view holds them, as a subscriber's sample's are; what is
+    /// kept past the call is copied when it is kept ([`Self::deep_copy`]).
+    ///
+    /// # Safety
+    /// The marshal is dropped before the borrow of `view` ends.
+    unsafe fn new(view: &dyn ReplyView) -> Self {
         let kind = view.kind();
         let is_ok = !matches!(kind, ReplyKind::Err);
         // A Del reply carries no payload bytes; an Err's payload is the error
         // blob and belongs on the err arm, not the sample.
         let (sample_payload, err_payload) = match kind {
             ReplyKind::Put => (
-                crate::bytes::ByteBuf::from(view.payload()),
+                crate::bytes::ByteBuf::lent(view.payload()),
                 crate::bytes::ByteBuf::new(),
             ),
             ReplyKind::Del => (crate::bytes::ByteBuf::new(), crate::bytes::ByteBuf::new()),
             ReplyKind::Err => (
                 crate::bytes::ByteBuf::new(),
-                crate::bytes::ByteBuf::from(view.payload()),
+                crate::bytes::ByteBuf::lent(view.payload()),
             ),
         };
         let sample_kind = match kind {
@@ -314,17 +319,18 @@ impl ReplyMarshal {
 
     /// An INDEPENDENT copy, for `z_reply_take_from_loaned` to escape the
     /// callback with. Cached views stay UNBOUND until [`Self::bind`] runs at
-    /// the copy's final address — see [`SampleMarshal::deep_copy`].
-    fn deep_copy(&self) -> Self {
-        Self {
+    /// the copy's final address — see [`SampleMarshal::deep_copy`]. Refused when there is no
+    /// room for the bytes the view lent.
+    fn deep_copy(&self) -> Result<Self, crate::bytes::NoRoom> {
+        Ok(Self {
             is_ok: self.is_ok,
-            sample: self.sample.deep_copy(),
-            err_payload: self.err_payload.clone(),
+            sample: self.sample.deep_copy()?,
+            err_payload: self.err_payload.try_clone()?,
             loaned_err_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
                 _pad: [core::ptr::null_mut(); 3],
             },
-        }
+        })
     }
 }
 
@@ -351,7 +357,8 @@ unsafe fn clone_reply_marshal(src: *const z_loaned_reply_t) -> Result<*mut c_voi
     let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
-    let owned = slot.fill(marshal.deep_copy());
+    let copy = marshal.deep_copy().map_err(crate::bytes::NoRoom::code)?;
+    let owned = slot.fill(copy);
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -534,7 +541,8 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     ) {
         return;
     }
-    let mut marshal = ReplyMarshal::new(view);
+    // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+    let mut marshal = unsafe { ReplyMarshal::new(view) };
     // Bind AFTER the move out of `new` — final address only here.
     marshal.bind();
     let reply_ptr = &mut marshal as *mut ReplyMarshal as *mut z_loaned_reply_t;
@@ -1148,7 +1156,7 @@ pub(crate) unsafe fn get_inner(
     // (pico derefs the null callback and crashes); the standard is this
     // function's own consume-on-EVERY-path contract.
     let (payload, attachment, value_meta, token) = if options.is_null() {
-        (None, None, PicoQueryValueMeta::default(), None)
+        (Ok(None), Ok(None), PicoQueryValueMeta::default(), None)
     } else {
         (
             crate::pubsub::take_moved_bytes((*options).payload),
@@ -1177,6 +1185,12 @@ pub(crate) unsafe fn get_inner(
     // frees it — and, because the drop IS the completion signal, an early error
     // also correctly reports "this get is over".
     let cclosure = adopt_reply_closure(callback);
+    // A payload or an attachment the program moved out of a callback's sample is copied, and with
+    // no room for the copy the get is refused; the closure adopted above reports it over.
+    let (payload, attachment) = match (payload, attachment) {
+        (Ok(payload), Ok(attachment)) => (payload, attachment),
+        (Err(no_room), _) | (_, Err(no_room)) => return no_room.code(),
+    };
     // A refused target is answered before the session is read, as the zenoh-c
     // ABI's statement doors answer theirs; the closure adopted above runs its
     // drop, so the get is reported over with nothing sent.
@@ -1768,7 +1782,11 @@ pub unsafe extern "C" fn z_reply_err_clone(
         let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Reply) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let owned = slot.fill(marshal.deep_copy());
+        let copy = match marshal.deep_copy() {
+            Ok(copy) => copy,
+            Err(no_room) => return no_room.code(),
+        };
+        let owned = slot.fill(copy);
         (*owned).bind();
         (*dst).handle = owned as *mut c_void;
         Z_OK
@@ -2017,9 +2035,42 @@ mod tests {
         }
     }
 
+    /// A reply's payload is read where the view holds it, with nothing copied for the callback,
+    /// and a reply kept past it holds a copy of its own.
+    #[test]
+    fn a_reply_reads_its_payload_in_place_and_a_kept_one_copies_it() {
+        let view = Stamped { hint: None };
+        let read = |marshal: &ReplyMarshal| {
+            // SAFETY: the marshal is bound and alive while it is read.
+            unsafe {
+                crate::bytes::bytes_ref(crate::pubsub::z_sample_payload(marshal.sample.as_loaned()))
+                    .expect("a payload")
+                    .as_slice()
+                    .as_ptr()
+            }
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { ReplyMarshal::new(&view) };
+        marshal.bind();
+        assert_eq!(
+            read(&marshal),
+            view.payload().as_ptr(),
+            "read where the view holds it"
+        );
+        let mut kept = marshal.deep_copy().expect("room for the copy");
+        drop(marshal);
+        kept.bind();
+        assert_ne!(
+            read(&kept),
+            view.payload().as_ptr(),
+            "the kept reply owns its bytes"
+        );
+    }
+
     /// The time word the reply's sample answers `z_sample_timestamp` with.
     fn sample_time(view: &Stamped) -> Option<u64> {
-        let mut marshal = ReplyMarshal::new(view);
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { ReplyMarshal::new(view) };
         marshal.bind();
         // SAFETY: the sample is the marshal's, alive and bound for the call.
         let stamp = unsafe { crate::pubsub::z_sample_timestamp(marshal.sample.as_loaned()) };

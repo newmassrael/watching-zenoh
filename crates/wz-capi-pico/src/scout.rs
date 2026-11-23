@@ -731,7 +731,7 @@ pub unsafe extern "C" fn z_hello_take(dst: *mut z_owned_hello_t, src: *mut z_mov
 
 /// Clone a loaned hello into owned storage (pico `z_hello_clone`). `_Z_ERR_SYSTEM_OUT_OF_MEMORY`,
 /// `dst` null, when the pool of kept hellos has no free slot, or the hello has more locators, or
-/// longer ones together, than a kept hello holds ([`KeptHello`]).
+/// longer ones together, than a kept hello holds (`KeptHello`).
 ///
 /// # Safety
 /// `hello` must be a live loaned hello; `dst` must point to writable storage.

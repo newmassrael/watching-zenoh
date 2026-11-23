@@ -266,6 +266,11 @@ pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
 /// hellos, each holding [`SCOUT_HELLO_LOCATORS`] locators, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
 
+/// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
+/// once: the payloads' area of the process's pools, blocks of power-of-two sizes each the smallest
+/// that holds its bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
@@ -294,6 +299,11 @@ const _: () = assert!(
 const _: () = assert!(
     CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
     "a config holds at least one key, at most one row for each key but one, and some text"
+);
+
+const _: () = assert!(
+    HELD_PAYLOAD_BYTES <= 1 << 30,
+    "the payloads' area names its blocks by 32-bit offsets and its largest block is 1 GiB"
 );
 
 /// Maximum number of concurrently-outstanding pending liveliness GET

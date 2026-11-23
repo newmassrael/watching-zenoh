@@ -11,7 +11,10 @@
 //! owned handles (on the tokio engine its sessions, and the publishers, subscribers, queryables,
 //! liveliness tokens and liveliness subscribers, and the samples, replies, queries and payloads a
 //! program holds), and what a program makes before any session: its configs and the hellos it
-//! keeps. A session of the cooperative engine lies in its own arena, not here.
+//! keeps. Beside the pools lies the payloads' area: the bytes the owned payloads, strings and
+//! slices carry, in blocks of power-of-two sizes a payload takes the smallest of that holds it, of
+//! `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative engine lies in
+//! its own arena, not here.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -27,9 +30,9 @@
 //! sessions, each holding as many entities as the session limits the library opens under admit
 //! within the build's values (`MAX_PUBLISHERS`, `MAX_SUBSCRIPTIONS`, `MAX_QUERYABLES`,
 //! `MAX_LOCAL_TOKENS`, `MAX_LIVELINESS_SUBSCRIPTIONS`), `HELD_SAMPLES`, `HELD_REPLIES`,
-//! `HELD_QUERIES` and `HELD_PAYLOADS` of the values it holds, `HELD_CONFIGS` configs and
-//! `HELD_HELLOS` kept hellos. A program that states its own counts reserves them before its
-//! first object through the doors instead.
+//! `HELD_QUERIES` and `HELD_PAYLOADS` of the values it holds, `HELD_CONFIGS` configs,
+//! `HELD_HELLOS` kept hellos and `HELD_PAYLOAD_BYTES` bytes of payload. A program that states its
+//! own counts reserves them before its first object through the doors instead.
 //!
 //! # The counts and the limits of a session
 //!
@@ -93,6 +96,8 @@ pub(crate) struct Counts {
     pub(crate) configs: usize,
     /// Hellos a program keeps (`z_hello_clone`).
     pub(crate) hellos: usize,
+    /// The bytes the payloads, strings and slices carry, their blocks' heads included.
+    pub(crate) payload_bytes: usize,
 }
 
 /// The bytes of each slot of size class `class`.
@@ -219,6 +224,7 @@ pub(crate) fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplan
         } else {
             0
         },
+        payload_bytes: stated.payload_bytes,
     })
 }
 
@@ -226,11 +232,12 @@ pub(crate) fn resolve(stated: &Counts, bounds: &Bounds) -> Result<Counts, Unplan
 /// included, so each keeps its index in every build.
 const KINDS: usize = 12;
 
-/// Each kind's pool: its slots, and the bytes of each.
+/// Each kind's pool, its slots and the bytes of each, and the bytes of the payloads' area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
     slots: [usize; KINDS],
     sizes: [usize; KINDS],
+    area: usize,
 }
 
 impl Plan {
@@ -239,6 +246,7 @@ impl Plan {
         let mut plan = Self {
             slots: [0; KINDS],
             sizes: [0; KINDS],
+            area: Blocks::area_of(objects.payload_bytes)?,
         };
         // A session of the cooperative engine lies in its own arena; its pool is the program's to
         // reserve where the doors are.
@@ -264,7 +272,7 @@ impl Plan {
         plan.add::<crate::config::ConfigState>(Kind::Config, objects.configs);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         plan.add::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
-        if plan.slots.iter().all(|&slots| slots == 0) {
+        if plan.slots.iter().all(|&slots| slots == 0) && plan.area == 0 {
             return Err(Unplanned::Empty);
         }
         plan.bytes()?;
@@ -278,7 +286,7 @@ impl Plan {
     }
 
     /// The bytes every pool's slots take together.
-    pub(crate) fn bytes(&self) -> Result<usize, Unplanned> {
+    fn slot_bytes(&self) -> Result<usize, Unplanned> {
         let mut total: usize = 0;
         for (&slots, &size) in self.slots.iter().zip(self.sizes.iter()) {
             total = slots
@@ -287,6 +295,13 @@ impl Plan {
                 .ok_or(Unplanned::TooLarge)?;
         }
         Ok(total)
+    }
+
+    /// The bytes the pools take together: the slots, then the payloads' area and its marks.
+    pub(crate) fn bytes(&self) -> Result<usize, Unplanned> {
+        self.slot_bytes()?
+            .checked_add(self.area + Blocks::marks_bytes(self.area))
+            .ok_or(Unplanned::TooLarge)
     }
 }
 
@@ -345,13 +360,220 @@ pub(crate) struct ClassReport {
     pub(crate) refused: usize,
 }
 
-/// Every kind's pool, laid out over one memory: each pool's slots after the one before.
+/// The smallest block of the payloads' area: a block's head and 16 bytes after it. A free block
+/// holds its links in its first 12 bytes.
+const MIN_BLOCK: usize = 32;
+
+/// How many block sizes the payloads' area has, from `MIN_BLOCK` doubling up to 1 GiB.
+const ORDERS: usize = 26;
+
+/// The end of a list of free blocks.
+const NONE: u32 = u32::MAX;
+
+/// The bytes of a block of order `order`.
+const fn block_bytes(order: usize) -> usize {
+    MIN_BLOCK << order
+}
+
+/// The order of the smallest block of at least `bytes` bytes, or `None` past the largest.
+fn order_for(bytes: usize) -> Option<usize> {
+    (0..ORDERS).find(|&order| bytes <= block_bytes(order))
+}
+
+/// What a free block of the payloads' area holds where it starts: the free blocks of its order
+/// before and after it, as offsets into the area, and its order.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FreeBlock {
+    prev: u32,
+    next: u32,
+    order: u32,
+}
+
+/// The payloads' area: blocks of power-of-two sizes, from `MIN_BLOCK` up, which a payload takes the
+/// smallest of that holds it and its head. A block too large is split in two halves, buddies, and a
+/// block given back is joined again with its buddy while that is free whole (a buddy allocator), so
+/// the area serves payloads of every size up to its largest block, and what one size frees another
+/// takes. The area is laid as the largest blocks that fit it, each after the one larger, so a
+/// block's buddy lies inside the area exactly when it lies inside the block both were split from.
+///
+/// A free block is found by its mark, one bit for each `MIN_BLOCK` of the area kept after it, set
+/// where a free block starts: the bytes of a block that is held are its holder's, and no bit of
+/// them is read.
+struct Blocks {
+    /// The offset of the area from the start of the memory.
+    start: usize,
+    /// The bytes of the area, a multiple of `MIN_BLOCK`.
+    len: usize,
+    /// The offset of the marks from the start of the memory.
+    marks: usize,
+    /// The first free block of each order, as an offset into the area.
+    free: [u32; ORDERS],
+    /// The blocks held now.
+    held: usize,
+}
+
+impl Blocks {
+    /// The bytes of an area for `bytes` of payload: the multiple of `MIN_BLOCK` at or under it,
+    /// refused past the largest block's offset an area can name.
+    fn area_of(bytes: usize) -> Result<usize, Unplanned> {
+        let area = bytes - bytes % MIN_BLOCK;
+        if area > block_bytes(ORDERS - 1) {
+            return Err(Unplanned::TooLarge);
+        }
+        Ok(area)
+    }
+
+    /// The bytes of the marks of an area of `len` bytes.
+    const fn marks_bytes(len: usize) -> usize {
+        (len / MIN_BLOCK).div_ceil(8)
+    }
+
+    /// Lay an area of `len` bytes at `start` from `base`, its marks after it, every block free.
+    ///
+    /// # Safety
+    /// The `len` bytes at `start` and the marks after them are writable and the area's alone, and
+    /// `base + start` is aligned to 16.
+    unsafe fn lay(base: NonNull<u8>, start: usize, len: usize) -> Self {
+        let mut blocks = Self {
+            start,
+            len,
+            marks: start + len,
+            free: [NONE; ORDERS],
+            held: 0,
+        };
+        base.as_ptr()
+            .add(blocks.marks)
+            .write_bytes(0, Self::marks_bytes(len));
+        let mut at = 0;
+        for order in (0..ORDERS).rev() {
+            if len - at >= block_bytes(order) {
+                blocks.push(base, at, order);
+                at += block_bytes(order);
+            }
+        }
+        blocks
+    }
+
+    /// The free block at `offset`.
+    ///
+    /// # Safety
+    /// `offset` is within the area.
+    unsafe fn free_block(&self, base: NonNull<u8>, offset: usize) -> *mut FreeBlock {
+        base.as_ptr().add(self.start + offset).cast::<FreeBlock>()
+    }
+
+    /// The byte of the marks that holds the mark of `offset`, and the mark's bit in it.
+    ///
+    /// # Safety
+    /// `offset` is within the area.
+    unsafe fn mark_of(&self, base: NonNull<u8>, offset: usize) -> (*mut u8, u8) {
+        let index = offset / MIN_BLOCK;
+        (base.as_ptr().add(self.marks + index / 8), 1 << (index % 8))
+    }
+
+    /// Whether a free block starts at `offset`.
+    ///
+    /// # Safety
+    /// `offset` is within the area.
+    unsafe fn is_free(&self, base: NonNull<u8>, offset: usize) -> bool {
+        let (byte, bit) = self.mark_of(base, offset);
+        *byte & bit != 0
+    }
+
+    /// Put the block at `offset` of `order` first on its list of free blocks, marked.
+    ///
+    /// # Safety
+    /// The block lies in the area and nothing holds it.
+    unsafe fn push(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
+        let head = self.free[order];
+        self.free_block(base, offset).write(FreeBlock {
+            prev: NONE,
+            next: head,
+            order: order as u32,
+        });
+        if head != NONE {
+            (*self.free_block(base, head as usize)).prev = offset as u32;
+        }
+        self.free[order] = offset as u32;
+        let (byte, bit) = self.mark_of(base, offset);
+        *byte |= bit;
+    }
+
+    /// Take the free block at `offset` of `order` off its list, unmarked.
+    ///
+    /// # Safety
+    /// A free block of `order` starts at `offset`.
+    unsafe fn unlink(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
+        let FreeBlock { prev, next, .. } = self.free_block(base, offset).read();
+        if prev == NONE {
+            self.free[order] = next;
+        } else {
+            (*self.free_block(base, prev as usize)).next = next;
+        }
+        if next != NONE {
+            (*self.free_block(base, next as usize)).prev = prev;
+        }
+        let (byte, bit) = self.mark_of(base, offset);
+        *byte &= !bit;
+    }
+
+    /// The smallest free block of at least `bytes` bytes, split from a larger one when none of its
+    /// size is free, as its offset and its bytes; `None` when the area has none that large.
+    ///
+    /// # Safety
+    /// The area was laid at `base` ([`Self::lay`]).
+    unsafe fn take(&mut self, base: NonNull<u8>, bytes: usize) -> Option<(usize, usize)> {
+        let order = order_for(bytes.max(MIN_BLOCK))?;
+        let found = (order..ORDERS).find(|&order| self.free[order] != NONE)?;
+        let offset = self.free[found] as usize;
+        self.unlink(base, offset, found);
+        let mut split = found;
+        while split > order {
+            split -= 1;
+            self.push(base, offset + block_bytes(split), split);
+        }
+        self.held += 1;
+        Some((offset, block_bytes(order)))
+    }
+
+    /// Give back the block at `offset` of `bytes` bytes, joined with its buddy while that is free
+    /// whole.
+    ///
+    /// # Safety
+    /// The block is one [`Self::take`] handed out, given back once.
+    unsafe fn give_back(&mut self, base: NonNull<u8>, offset: usize, bytes: usize) {
+        debug_assert!(bytes.is_power_of_two() && bytes >= MIN_BLOCK);
+        let mut order = order_for(bytes).unwrap_or(0);
+        let mut offset = offset;
+        self.held -= 1;
+        while order + 1 < ORDERS {
+            let size = block_bytes(order);
+            let buddy = offset ^ size;
+            if buddy + size > self.len
+                || !self.is_free(base, buddy)
+                || (*self.free_block(base, buddy)).order as usize != order
+            {
+                break;
+            }
+            self.unlink(base, buddy, order);
+            offset = offset.min(buddy);
+            order += 1;
+        }
+        self.push(base, offset, order);
+    }
+}
+
+/// Every kind's pool, laid out over one memory: each pool's slots after the one before, then the
+/// payloads' area.
 pub(crate) struct Pools {
     base: NonNull<u8>,
+    /// The bytes of the slots, from `base`.
     bytes: usize,
     origin: Origin,
     pools: [Pool; KINDS],
     counts: [ClassCount; CLASSES + 1],
+    blocks: Blocks,
 }
 
 impl Pools {
@@ -386,6 +608,7 @@ impl Pools {
             origin,
             pools,
             counts: [ClassCount::default(); CLASSES + 1],
+            blocks: Blocks::lay(base, at, plan.area),
         }
     }
 
@@ -448,10 +671,10 @@ impl Pools {
         true
     }
 
-    /// How many objects the pools hold now.
+    /// How many objects the pools hold now, the payloads' blocks among them.
     #[cfg(any(test, feature = "object-pool"))]
     fn held(&self) -> usize {
-        self.counts.iter().map(|count| count.in_use).sum()
+        self.counts.iter().map(|count| count.in_use).sum::<usize>() + self.blocks.held
     }
 
     /// The pools of size class `class` together.
@@ -530,6 +753,7 @@ fn built_counts() -> Result<Counts, Unplanned> {
         bytes: caps::HELD_PAYLOADS,
         configs: caps::HELD_CONFIGS,
         hellos: caps::HELD_HELLOS,
+        payload_bytes: caps::HELD_PAYLOAD_BYTES,
     };
     resolve(&built, &bounds)
 }
@@ -570,6 +794,17 @@ pub(crate) fn lies_in_pools(place: NonNull<u8>) -> bool {
     })
 }
 
+/// Whether `place` lies in the payloads' area of the pools reserved now.
+#[cfg(test)]
+pub(crate) fn lies_in_area(place: NonNull<u8>) -> bool {
+    RESERVED.with(|reserved| {
+        reserved.0.as_ref().is_some_and(|pools| {
+            let at = (place.as_ptr() as usize).wrapping_sub(pools.base.as_ptr() as usize);
+            at.wrapping_sub(pools.blocks.start) < pools.blocks.len
+        })
+    })
+}
+
 /// Give `place` back to the pool it lies in; `false` when it lies in none, and is the heap's.
 pub(crate) fn give_back(place: NonNull<u8>) -> bool {
     RESERVED.with(|reserved| {
@@ -578,6 +813,41 @@ pub(crate) fn give_back(place: NonNull<u8>) -> bool {
             .as_mut()
             .is_some_and(|pools| pools.give_back(place))
     })
+}
+
+/// A block of the payloads' area of at least `bytes` bytes, aligned to 16, and the bytes it has;
+/// `None` when the area has no free block that large. The first block reserves the build's pools
+/// when none are, as the first object does ([`take`]).
+pub(crate) fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
+    RESERVED.with(|reserved| {
+        if reserved.0.is_none() {
+            reserved.0 = reserve_built();
+        }
+        let pools = reserved.0.as_mut()?;
+        let base = pools.base;
+        // SAFETY: the area was laid over the pools' memory, which this lock holds.
+        let (offset, bytes) = unsafe { pools.blocks.take(base, bytes) }?;
+        // SAFETY: the block lies in the pools' memory, at an offset aligned to 16 from `base`.
+        let at = unsafe { NonNull::new_unchecked(base.as_ptr().add(pools.blocks.start + offset)) };
+        Some((at, bytes))
+    })
+}
+
+/// Give back the block at `at` of `bytes` bytes.
+///
+/// # Safety
+/// `at` and `bytes` are a block [`take_block`] handed out, nothing holds it, and it is given back
+/// once.
+pub(crate) unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
+    RESERVED.with(|reserved| {
+        // A block is held only while the pools that lent it are: they are not given up while
+        // they hold one.
+        if let Some(pools) = reserved.0.as_mut() {
+            let base = pools.base;
+            let offset = at.as_ptr() as usize - (base.as_ptr() as usize + pools.blocks.start);
+            pools.blocks.give_back(base, offset, bytes);
+        }
+    });
 }
 
 /// The limits every session of this ABI opens under: the snapshot `z_open` hands its engine.
@@ -695,6 +965,7 @@ mod tests {
         let mut plan = Plan {
             slots: [0; KINDS],
             sizes: [0; KINDS],
+            area: 0,
         };
         for &(kind, slots, size) in kinds {
             plan.slots[kind as usize] = slots;
@@ -796,6 +1067,7 @@ mod tests {
             bytes: 8,
             configs: 9,
             hellos: 10,
+            payload_bytes: 11,
         };
         let objects = resolve(&stated, &UNBOUNDED).expect("every count is stated");
         assert_eq!(objects.publishers, 6);
@@ -812,6 +1084,7 @@ mod tests {
         );
         let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
         assert_eq!(objects.hellos, if scouts { 10 } else { 0 });
+        assert_eq!(objects.payload_bytes, 11);
     }
 
     /// A bounded count left at zero whose limit holds no bound is refused; with no session no
@@ -1011,6 +1284,7 @@ mod tests {
         );
         let scouts = cfg!(any(feature = "scout", feature = "scout-mcu"));
         assert_eq!(objects.hellos, if scouts { caps::HELD_HELLOS } else { 0 });
+        assert_eq!(objects.payload_bytes, caps::HELD_PAYLOAD_BYTES);
         let limits = session_limits();
         let per_session = |value: Quota, build: usize| {
             value
@@ -1108,5 +1382,172 @@ mod tests {
             bounds.liveliness_subscribers,
             limits.max_liveliness_subscriptions().most()
         );
+    }
+
+    /// The free blocks of `order`, by their offsets, first to last.
+    fn free_of(blocks: &Blocks, base: NonNull<u8>, order: usize) -> alloc::vec::Vec<usize> {
+        let mut offsets = alloc::vec::Vec::new();
+        let mut at = blocks.free[order];
+        while at != NONE {
+            offsets.push(at as usize);
+            // SAFETY: a free block of the list starts at `at`.
+            at = unsafe { (*blocks.free_block(base, at as usize)).next };
+        }
+        offsets
+    }
+
+    /// An area of `len` bytes laid over `memory`, which holds it and its marks.
+    fn area_over(memory: &mut Memory, len: usize) -> (Blocks, NonNull<u8>) {
+        assert!(len + Blocks::marks_bytes(len) <= memory.0.len());
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, holds the area and its marks, and is used by nothing else.
+        (unsafe { Blocks::lay(base, 0, len) }, base)
+    }
+
+    /// A payload's bytes are rounded down to whole blocks of the smallest size, and an area past
+    /// the largest block an offset can name is refused.
+    #[test]
+    fn an_area_is_whole_blocks_and_refused_past_the_largest() {
+        assert_eq!(Blocks::area_of(0), Ok(0));
+        assert_eq!(Blocks::area_of(MIN_BLOCK - 1), Ok(0));
+        assert_eq!(Blocks::area_of(3 * MIN_BLOCK + 5), Ok(3 * MIN_BLOCK));
+        assert_eq!(
+            Blocks::area_of(block_bytes(ORDERS - 1)),
+            Ok(block_bytes(ORDERS - 1))
+        );
+        assert_eq!(
+            Blocks::area_of(block_bytes(ORDERS - 1) + MIN_BLOCK),
+            Err(Unplanned::TooLarge)
+        );
+        assert_eq!(Blocks::marks_bytes(9 * MIN_BLOCK), 2);
+    }
+
+    /// The area is laid as the largest blocks that fit it, the larger first.
+    #[test]
+    fn the_area_is_laid_as_the_largest_blocks_that_fit_it() {
+        let mut memory = Memory([0xA5; 512]);
+        let (blocks, base) = area_over(&mut memory, 3 * MIN_BLOCK);
+        assert_eq!(free_of(&blocks, base, 1), [0]);
+        assert_eq!(free_of(&blocks, base, 0), [2 * MIN_BLOCK]);
+        for order in 2..ORDERS {
+            assert!(free_of(&blocks, base, order).is_empty(), "order {order}");
+        }
+        assert_eq!(blocks.held, 0);
+    }
+
+    /// A take is the smallest block that holds its bytes, split from a larger one, the halves it
+    /// leaves free; one larger than any free block, or than the area, is refused.
+    #[test]
+    fn a_block_is_the_smallest_that_holds_its_bytes() {
+        let mut memory = Memory([0; 512]);
+        let (mut blocks, base) = area_over(&mut memory, 8 * MIN_BLOCK);
+        // SAFETY: the area was laid over `memory` just above.
+        unsafe {
+            assert_eq!(blocks.take(base, 20), Some((0, MIN_BLOCK)));
+            assert_eq!(free_of(&blocks, base, 0), [MIN_BLOCK]);
+            assert_eq!(free_of(&blocks, base, 1), [2 * MIN_BLOCK]);
+            assert_eq!(free_of(&blocks, base, 2), [4 * MIN_BLOCK]);
+            assert_eq!(
+                blocks.take(base, MIN_BLOCK + 1),
+                Some((2 * MIN_BLOCK, 2 * MIN_BLOCK))
+            );
+            assert_eq!(
+                blocks.take(base, 4 * MIN_BLOCK),
+                Some((4 * MIN_BLOCK, 4 * MIN_BLOCK))
+            );
+            assert_eq!(
+                blocks.take(base, 2 * MIN_BLOCK),
+                None,
+                "no free block that large"
+            );
+            assert_eq!(blocks.take(base, 9 * MIN_BLOCK), None, "past the area");
+            assert_eq!(blocks.take(base, 1), Some((MIN_BLOCK, MIN_BLOCK)));
+            assert_eq!(blocks.take(base, 1), None, "the area is full");
+            assert_eq!(blocks.held, 4);
+        }
+    }
+
+    /// Blocks given back in any order join their buddies again into the area as it was laid, and
+    /// a buddy still held keeps its half apart.
+    #[test]
+    fn blocks_given_back_join_their_buddies() {
+        let mut memory = Memory([0; 512]);
+        let (mut blocks, base) = area_over(&mut memory, 8 * MIN_BLOCK);
+        // SAFETY: the area was laid over `memory` just above; each block is given back once.
+        unsafe {
+            let taken: alloc::vec::Vec<(usize, usize)> = (0..8)
+                .map(|_| blocks.take(base, MIN_BLOCK).expect("a block"))
+                .collect();
+            for &(offset, bytes) in [5, 0, 7, 2].iter().map(|&k| &taken[k]) {
+                blocks.give_back(base, offset, bytes);
+            }
+            assert!(free_of(&blocks, base, 3).is_empty(), "its buddies are held");
+            for &(offset, bytes) in [1, 6, 3].iter().map(|&k| &taken[k]) {
+                blocks.give_back(base, offset, bytes);
+            }
+            assert_eq!(free_of(&blocks, base, 2), [0], "the lower half joined");
+            let (offset, bytes) = taken[4];
+            blocks.give_back(base, offset, bytes);
+            assert_eq!(
+                free_of(&blocks, base, 3),
+                [0],
+                "the whole area is one block again"
+            );
+            for order in 0..3 {
+                assert!(free_of(&blocks, base, order).is_empty(), "order {order}");
+            }
+            assert_eq!(blocks.held, 0);
+        }
+    }
+
+    /// A block at the end of an area that is no power of two has no buddy past the area, and is
+    /// given back as it was laid.
+    #[test]
+    fn a_block_whose_buddy_is_past_the_area_stays_apart() {
+        let mut memory = Memory([0; 512]);
+        let (mut blocks, base) = area_over(&mut memory, 3 * MIN_BLOCK);
+        // SAFETY: the area was laid over `memory` just above; each block is given back once.
+        unsafe {
+            let last = blocks.take(base, MIN_BLOCK).expect("the last block");
+            assert_eq!(last, (2 * MIN_BLOCK, MIN_BLOCK));
+            let first = blocks.take(base, 2 * MIN_BLOCK).expect("the first block");
+            blocks.give_back(base, last.0, last.1);
+            blocks.give_back(base, first.0, first.1);
+        }
+        assert_eq!(free_of(&blocks, base, 1), [0]);
+        assert_eq!(free_of(&blocks, base, 0), [2 * MIN_BLOCK]);
+    }
+
+    /// The pools lay the payloads' area after their slots: a plan's bytes are the slots, the area
+    /// and its marks, a block lies past every slot, and the pools hold it until it is given back.
+    #[test]
+    fn the_payloads_area_lies_after_the_slots() {
+        let mut memory = Memory([0; 512]);
+        let mut plan = plan_of(&[(Kind::Bytes, 2, 64)]);
+        plan.area = 8 * MIN_BLOCK;
+        let bytes = plan.bytes().expect("small");
+        assert_eq!(bytes, 2 * 64 + 8 * MIN_BLOCK + 1);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        // SAFETY: the area was laid with the pools.
+        let (offset, got) = unsafe { pools.blocks.take(base, 40) }.expect("a block");
+        assert_eq!((offset, got), (0, 2 * MIN_BLOCK));
+        assert_eq!(pools.blocks.start, 2 * 64, "after the slots");
+        assert_eq!(pools.held(), 1, "a block held keeps the pools");
+        // SAFETY: the block taken just above, given back once.
+        unsafe { pools.blocks.give_back(base, offset, got) };
+        assert_eq!(pools.held(), 0);
+        let only_area = Plan {
+            area: MIN_BLOCK,
+            ..plan_of(&[])
+        };
+        assert_eq!(only_area.bytes(), Ok(MIN_BLOCK + 1));
+        assert_eq!(Plan::of(&Counts::default()), Err(Unplanned::Empty));
+        let payloads_only = Counts {
+            payload_bytes: MIN_BLOCK,
+            ..Counts::default()
+        };
+        assert!(Plan::of(&payloads_only).is_ok(), "an area alone is a plan");
     }
 }

@@ -10,13 +10,19 @@
 //! `z_string_len`).
 //!
 //! bytes and slice use the handle model (owned == loaned layout, `loan` is a
-//! cast; the accessor reads the heap `Vec<u8>`). string uses the borrowed-view
-//! model: an owned string holds a heap `StringState` and hands out a cached
+//! cast; the accessor reads the payload's block). string uses the borrowed-view
+//! model: an owned string holds a `StringState` and hands out a cached
 //! `{ start, len }` self-view on `loan`, so `z_loaned_string_t` is the same
 //! borrowed shape a view string (from `z_keyexpr_as_view_string`) produces.
+//!
+//! The bytes a payload, a string or a slice holds lie in a block (`Block`): in a library with
+//! the process pools, one of their payloads' area (`HELD_PAYLOAD_BYTES`), so making or copying one
+//! allocates nothing once the pools are reserved and is refused with
+//! `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when the area has no block for it; in one without, the heap's.
 
-use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
+use core::ptr::NonNull;
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use crate::prelude::*;
 
@@ -68,7 +74,20 @@ impl Drop for Release {
     }
 }
 
-/// Where a payload's bytes LIVE.
+/// No room for an owned value's bytes, or for its place: what a constructor or a copy of a payload,
+/// a string or a slice meets when the payloads' area of the process pools, or the pool of its
+/// kind, has none free; the call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and leaves its output null.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NoRoom;
+
+impl NoRoom {
+    /// The code a door answers for it.
+    pub(crate) const fn code(self) -> ZResult {
+        crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+    }
+}
+
+/// The head of a block of payload storage, which its contents follow.
 ///
 /// wz's payload model was an owning `Vec<u8>` with a deep-copying `Clone`, and
 /// that is not what zenoh-pico's is: its constructors that take a caller's
@@ -77,68 +96,227 @@ impl Drop for Release {
 /// last holder is dropped. All four are observable from C (pointer identity,
 /// mutation through the alias, the deleter's timing), and
 /// `pico_bytes_alias_twice_and_diff` measures each against the real library.
-/// The storage therefore has two shapes, and holders share it through an
-/// [`Arc`].
-pub(crate) enum Backing {
-    /// Bytes this crate allocated.
-    Owned(Vec<u8>),
-    /// The CALLER'S bytes, described and not copied, with the caller's promise
-    /// to release them (or not to, for a static buffer) through `_release`.
-    Aliased {
-        start: *const u8,
-        len: usize,
-        _release: Release,
-    },
+/// A block therefore holds one of two things, bytes of its own or the record of
+/// the caller's ([`Alias`]), and its holders share it by the count in its head,
+/// as zenoh-pico's arc-slices share theirs.
+#[repr(C, align(16))]
+struct BlockHead {
+    /// The holders of the block.
+    refs: AtomicUsize,
+    /// The bytes after the head, with [`ALIAS`] set when they hold an [`Alias`].
+    room: usize,
 }
 
-// SAFETY: the aliased pointer is the caller's, and pico's contract for every
-// constructor that takes one is that the buffer stays valid and unchanged until
-// the deleter runs. Nothing here writes through it, so sharing it between
-// threads is exactly as safe as the caller's promise.
-unsafe impl Send for Backing {}
-unsafe impl Sync for Backing {}
+/// The bytes of a block's head, after which its contents lie aligned to 16.
+const HEAD: usize = core::mem::size_of::<BlockHead>();
+
+/// Set in [`BlockHead::room`] when the block holds the record of the caller's bytes.
+const ALIAS: usize = 1 << (usize::BITS - 1);
+
+/// The CALLER'S bytes, described and not copied, with the caller's promise to
+/// release them (or not to, for a static buffer) through `_release`.
+struct Alias {
+    start: *const u8,
+    len: usize,
+    _release: Release,
+}
+
+/// A block of at least `bytes` bytes aligned to 16 from the payloads' area of the process pools,
+/// and the bytes it has; `None` when the area has no free block that large.
+#[cfg(wz_process_pools)]
+fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
+    crate::process_pool::take_block(bytes)
+}
+
+/// Give back a block [`take_block`] handed out.
+///
+/// # Safety
+/// `at` and `bytes` are a block [`take_block`] handed out, given back once.
+#[cfg(wz_process_pools)]
+unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
+    crate::process_pool::give_back_block(at, bytes);
+}
+
+/// A block of `bytes` bytes aligned to 16 from the heap: a library without the process pools keeps
+/// its payloads where its engine keeps its sessions.
+#[cfg(not(wz_process_pools))]
+fn take_block(bytes: usize) -> Option<(NonNull<u8>, usize)> {
+    let layout =
+        core::alloc::Layout::from_size_align(bytes, core::mem::align_of::<BlockHead>()).ok()?;
+    // SAFETY: a block is never of zero bytes: it has its head.
+    NonNull::new(unsafe { alloc::alloc::alloc(layout) }).map(|at| (at, bytes))
+}
+
+/// Give back a block [`take_block`] handed out.
+///
+/// # Safety
+/// `at` and `bytes` are a block [`take_block`] handed out, given back once.
+#[cfg(not(wz_process_pools))]
+unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
+    alloc::alloc::dealloc(
+        at.as_ptr(),
+        core::alloc::Layout::from_size_align_unchecked(bytes, core::mem::align_of::<BlockHead>()),
+    );
+}
+
+/// One holder's share of a block: a payload's storage, or a string's or a slice's that payloads
+/// made over it share. The last share let go runs the caller's release, for the record of an
+/// alias, and gives the block back.
+pub(crate) struct Block {
+    head: NonNull<BlockHead>,
+}
+
+// SAFETY: a block's own bytes are written only while it has one holder ([`Block::write`]), an
+// alias's are the caller's, which pico's contract keeps valid and unchanged until the release
+// runs, and the count of its holders is atomic.
+unsafe impl Send for Block {}
+unsafe impl Sync for Block {}
+
+impl Block {
+    /// A block with room for `room` bytes of its own after its head, this its one holder; `None`
+    /// when there is no such block.
+    fn with_room(room: usize) -> Option<Self> {
+        let (at, bytes) = take_block(HEAD.checked_add(room)?)?;
+        let head = at.cast::<BlockHead>();
+        // SAFETY: the block is `bytes` bytes aligned to 16, which nothing else holds.
+        unsafe {
+            head.as_ptr().write(BlockHead {
+                refs: AtomicUsize::new(1),
+                room: bytes - HEAD,
+            })
+        };
+        Some(Self { head })
+    }
+
+    /// A block holding a copy of `bytes`; `None` when there is no room for one.
+    fn copy_of(bytes: &[u8]) -> Option<Self> {
+        let mut block = Self::with_room(bytes.len())?;
+        // SAFETY: a new block, of one holder, with room for the bytes.
+        unsafe { block.write(0, bytes) };
+        Some(block)
+    }
+
+    /// A block holding the record of the caller's `len` bytes at `start`, which `release` lets
+    /// go when the last holder goes; with no room for one, the release is handed back.
+    ///
+    /// # Safety
+    /// As [`ByteBuf::aliased`].
+    unsafe fn alias(start: *const u8, len: usize, release: Release) -> Result<Self, Release> {
+        let Some(block) = Self::with_room(core::mem::size_of::<Alias>()) else {
+            return Err(release);
+        };
+        (*block.head.as_ptr()).room |= ALIAS;
+        block.contents().cast::<Alias>().write(Alias {
+            start,
+            len,
+            _release: release,
+        });
+        Ok(block)
+    }
+
+    fn head(&self) -> &BlockHead {
+        // SAFETY: the head lives as long as a holder does.
+        unsafe { self.head.as_ref() }
+    }
+
+    fn is_alias(&self) -> bool {
+        self.head().room & ALIAS != 0
+    }
+
+    /// The bytes of the block after its head.
+    fn room(&self) -> usize {
+        self.head().room & !ALIAS
+    }
+
+    /// Where the contents start.
+    fn contents(&self) -> *mut u8 {
+        // SAFETY: the contents follow the head inside the block.
+        unsafe { self.head.as_ptr().cast::<u8>().add(HEAD) }
+    }
+
+    /// Where the bytes the block holds start, and at most how many there are: its own room, or the
+    /// caller's bytes its record describes. Which of them are written is its holders' to know.
+    fn span(&self) -> (*const u8, usize) {
+        if self.is_alias() {
+            // SAFETY: an alias block holds its record from its making to its last holder.
+            let alias = unsafe { &*self.contents().cast::<Alias>() };
+            (alias.start, alias.len)
+        } else {
+            (self.contents().cast_const(), self.room())
+        }
+    }
+
+    /// Write `bytes` at `at` of the block's own room.
+    ///
+    /// # Safety
+    /// This is the block's one holder, the block holds bytes of its own, and `at + bytes.len()` is
+    /// within its room.
+    unsafe fn write(&mut self, at: usize, bytes: &[u8]) {
+        debug_assert!(!self.is_alias() && at + bytes.len() <= self.room());
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.contents().add(at), bytes.len());
+    }
+
+    /// Another holder of the block.
+    fn share(&self) -> Self {
+        let before = self.head().refs.fetch_add(1, Ordering::Relaxed);
+        // As `Arc` does: a count past half the address space is a share leaked in a loop.
+        assert!(
+            before <= isize::MAX as usize,
+            "a payload's block is shared past any count"
+        );
+        Self { head: self.head }
+    }
+
+    /// Whether this is the block's one holder.
+    fn is_unique(&self) -> bool {
+        self.head().refs.load(Ordering::Acquire) == 1
+    }
+}
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        if self.head().refs.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        fence(Ordering::Acquire);
+        let bytes = HEAD + self.room();
+        if self.is_alias() {
+            // SAFETY: the last holder lets the record go once, which runs the caller's release.
+            unsafe { core::ptr::drop_in_place(self.contents().cast::<Alias>()) };
+        }
+        // SAFETY: the block was taken with `bytes` bytes and no holder is left.
+        unsafe { give_back_block(self.head.cast::<u8>(), bytes) };
+    }
+}
 
 /// Where a payload's bytes are held.
 enum Store {
-    /// Storage its holders share.
-    Shared(Arc<Backing>),
+    /// Nowhere: an empty payload holds no block.
+    Empty,
+    /// A block its holders share.
+    Shared(Block),
     /// The start of bytes the payload only reads, for as long as their owner keeps them: a
-    /// sample's payload handed to a callback ([`ByteBuf::lent`]). Never shared, so a holder that
-    /// may outlive them is given a copy.
+    /// sample's, reply's or query's payload handed to a callback ([`ByteBuf::lent`]). Never shared,
+    /// so a holder that may outlive them is given a copy.
     Lent(*const u8),
 }
 
 // SAFETY: a lent payload's bytes are its lender's, valid and unchanged for as long as the payload
 // lives (`ByteBuf::lent`); nothing writes through the pointer, so it is shared between threads
-// exactly as the lender's own reference would be.
+// exactly as the lender's own reference would be. A block is `Send` and `Sync` on its own.
 unsafe impl Send for Store {}
 unsafe impl Sync for Store {}
 
-/// The `len` bytes a lent payload reads at `start`.
+/// The `len` bytes at `start`, none when `len` is zero.
 ///
 /// # Safety
-/// `start` is a lent payload's ([`ByteBuf::lent`]) and `len` its length, read while it lives.
+/// `start` is null only with `len` zero, and the `len` bytes there are written and live while
+/// they are read.
 unsafe fn lent_bytes<'a>(start: *const u8, len: usize) -> &'a [u8] {
     if len == 0 {
         &[]
     } else {
         core::slice::from_raw_parts(start, len)
-    }
-}
-
-impl Backing {
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Backing::Owned(bytes) => bytes,
-            Backing::Aliased { start, len, .. } => {
-                if *len == 0 || start.is_null() {
-                    &[]
-                } else {
-                    // SAFETY: the constructor's contract, above.
-                    unsafe { core::slice::from_raw_parts(*start, *len) }
-                }
-            }
-        }
     }
 }
 
@@ -161,15 +339,15 @@ impl Backing {
 /// (or none, when the data is empty), which is the state every inbound sample
 /// and every single-shot constructor is in; only the writer ever populates it.
 ///
-/// `Clone` SHARES the storage, as pico's `z_bytes_clone` does; a copy is asked
-/// for by name ([`ByteBuf::copied`]), and a writer that needs to change shared
-/// or aliased bytes copies them first ([`ByteBuf::owned_mut`]). A LENT payload
-/// ([`ByteBuf::lent`]) has no storage to share, so its clone is a copy.
+/// A clone SHARES the block ([`ByteBuf::try_clone`]), as pico's `z_bytes_clone`
+/// does; a copy is asked for by name ([`ByteBuf::copied`]), and a writer that
+/// needs to change shared or aliased bytes copies them first. A LENT payload
+/// ([`ByteBuf::lent`]) has no block to share, so its clone is a copy. Every
+/// one that takes a block can be refused one ([`NoRoom`]).
 pub(crate) struct ByteBuf {
     backing: Store,
-    /// How much of `backing` this payload is. Shorter than the backing only for
-    /// a string that was MOVED into a payload: its allocation carries a NUL the
-    /// payload does not.
+    /// How much of the block this payload is: shorter than the block's room for a payload made
+    /// over a string, whose terminator it does not carry, and for a writer's, which grows into it.
     len: usize,
     /// END offset of each segment. Either empty (the implicit single segment)
     /// or ending at `len`.
@@ -185,49 +363,56 @@ impl core::fmt::Debug for ByteBuf {
     }
 }
 
-impl Clone for ByteBuf {
-    fn clone(&self) -> Self {
-        let backing = match &self.backing {
-            Store::Shared(backing) => Store::Shared(Arc::clone(backing)),
-            // The lender's bytes are gone once its call returns, and a clone may outlive it.
-            Store::Lent(_) => Store::Shared(Arc::new(Backing::Owned(self.as_slice().to_vec()))),
-        };
-        Self {
-            backing,
-            len: self.len,
-            bounds: self.bounds.clone(),
-        }
-    }
-}
-
 impl Default for ByteBuf {
     fn default() -> Self {
-        Self::from(Vec::new())
+        Self::new()
     }
 }
 
 impl ByteBuf {
-    /// An empty payload with no segments.
+    /// An empty payload with no segments, which holds no block.
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            backing: Store::Empty,
+            len: 0,
+            bounds: Vec::new(),
+        }
+    }
+
+    /// A payload holding a copy of `bytes` in a block of its own.
+    pub(crate) fn copy_of(bytes: &[u8]) -> Result<Self, NoRoom> {
+        if bytes.is_empty() {
+            return Ok(Self::new());
+        }
+        let block = Block::copy_of(bytes).ok_or(NoRoom)?;
+        Ok(Self {
+            backing: Store::Shared(block),
+            len: bytes.len(),
+            bounds: Vec::new(),
+        })
     }
 
     /// A payload that DESCRIBES the caller's `len` bytes at `start` and lets
-    /// `release` return them when the last holder is dropped.
+    /// `release` return them when the last holder is dropped. Refused, the release runs at once,
+    /// as pico's transfer of the caller's buffer is unconditional once the call is made.
     ///
     /// # Safety
     /// `start` must be null with `len == 0`, or point at `len` readable bytes
     /// that stay valid and unchanged until `release` has run.
-    pub(crate) unsafe fn aliased(start: *const u8, len: usize, release: Release) -> Self {
-        Self {
-            backing: Store::Shared(Arc::new(Backing::Aliased {
-                start,
-                len,
-                _release: release,
-            })),
+    pub(crate) unsafe fn aliased(
+        start: *const u8,
+        len: usize,
+        release: Release,
+    ) -> Result<Self, NoRoom> {
+        let block = Block::alias(start, len, release).map_err(|release| {
+            drop(release);
+            NoRoom
+        })?;
+        Ok(Self {
+            backing: Store::Shared(block),
             len,
             bounds: Vec::new(),
-        }
+        })
     }
 
     /// A payload that READS `bytes` where they lie and allocates nothing: a sample's payload
@@ -247,55 +432,85 @@ impl ByteBuf {
     /// The payload's bytes.
     pub(crate) fn as_slice(&self) -> &[u8] {
         match &self.backing {
-            Store::Shared(backing) => &backing.as_slice()[..self.len],
+            Store::Empty => &[],
+            // SAFETY: the first `len` bytes of the block's span are this payload's, written when
+            // it was made, and the block lives as long as this holder.
+            Store::Shared(block) => unsafe { lent_bytes(block.span().0, self.len) },
             // SAFETY: a lent payload's bytes outlive it (`Self::lent`).
             Store::Lent(start) => unsafe { lent_bytes(*start, self.len) },
         }
     }
 
-    /// The storage, for a holder that keeps it: a lent payload's bytes are copied into storage
-    /// of their own first.
-    fn into_shared(self) -> Arc<Backing> {
-        match self.backing {
-            Store::Shared(backing) => backing,
-            // SAFETY: a lent payload's bytes outlive it (`Self::lent`), and it lives here.
-            Store::Lent(start) => Arc::new(Backing::Owned(
-                unsafe { lent_bytes(start, self.len) }.to_vec(),
-            )),
-        }
-    }
-
-    /// A payload with the same bytes in storage of its own: the copy an
-    /// extraction (`z_bytes_to_slice`) makes and a clone does not.
-    pub(crate) fn copied(&self) -> Self {
-        Self::from(self.as_slice().to_vec())
-    }
-
-    /// The bytes as an owned, unshared `Vec`, copying them first when the
-    /// storage is shared or the caller's.
-    fn owned_mut(&mut self) -> &mut Vec<u8> {
-        let private = match &mut self.backing {
-            Store::Shared(backing) => {
-                matches!(Arc::get_mut(backing), Some(Backing::Owned(v)) if v.len() == self.len)
-            }
-            Store::Lent(_) => false,
+    /// Another holder of the payload: one that SHARES its block, as pico's `z_bytes_clone` shares
+    /// the storage, or for a lent payload, whose lender's bytes a clone may outlive, a copy.
+    pub(crate) fn try_clone(&self) -> Result<Self, NoRoom> {
+        let backing = match &self.backing {
+            Store::Empty => Store::Empty,
+            Store::Shared(block) => Store::Shared(block.share()),
+            Store::Lent(_) => Self::copy_of(self.as_slice())?.backing,
         };
-        if !private {
-            self.backing = Store::Shared(Arc::new(Backing::Owned(self.as_slice().to_vec())));
+        Ok(Self {
+            backing,
+            len: self.len,
+            bounds: self.bounds.clone(),
+        })
+    }
+
+    /// The block, for a holder that keeps it: a lent payload's bytes are copied into one of their
+    /// own first; an empty payload has none.
+    fn into_block(self) -> Result<Option<Block>, NoRoom> {
+        match self.backing {
+            Store::Empty => Ok(None),
+            Store::Shared(block) => Ok(Some(block)),
+            Store::Lent(_) if self.len == 0 => Ok(None),
+            // SAFETY: a lent payload's bytes outlive it (`Self::lent`), and it lives here.
+            Store::Lent(start) => Block::copy_of(unsafe { lent_bytes(start, self.len) })
+                .map(Some)
+                .ok_or(NoRoom),
         }
-        match &mut self.backing {
-            Store::Shared(backing) => match Arc::get_mut(backing) {
-                Some(Backing::Owned(bytes)) => bytes,
-                _ => unreachable!("the storage was made private and owned just above"),
-            },
-            Store::Lent(_) => unreachable!("the storage was made private and owned just above"),
+    }
+
+    /// A payload with the same bytes in a block of its own: the copy an
+    /// extraction (`z_bytes_to_slice`) makes and a clone does not.
+    pub(crate) fn copied(&self) -> Result<Self, NoRoom> {
+        Self::copy_of(self.as_slice())
+    }
+
+    /// Make the payload's bytes a block of its own, of this one holder, with room for `extra` more
+    /// bytes after them: the block it has when that is so, else a new one the bytes are copied
+    /// into, twice as large as they are where there is such a block, so a writer's appends copy
+    /// the bytes a bounded number of times.
+    fn reserve(&mut self, extra: usize) -> Result<(), NoRoom> {
+        let need = self.len.checked_add(extra).ok_or(NoRoom)?;
+        if let Store::Shared(block) = &self.backing {
+            if block.is_unique() && !block.is_alias() && block.room() >= need {
+                return Ok(());
+            }
         }
+        let grown = need.max(self.len.saturating_mul(2));
+        let mut block = Block::with_room(grown)
+            .or_else(|| Block::with_room(need))
+            .ok_or(NoRoom)?;
+        // SAFETY: a new block, of one holder, with room for the payload's bytes.
+        unsafe { block.write(0, self.as_slice()) };
+        self.backing = Store::Shared(block);
+        Ok(())
+    }
+
+    /// Write `bytes` after the payload's bytes, into the room [`Self::reserve`] made for them.
+    fn put_after(&mut self, bytes: &[u8]) {
+        if let Store::Shared(block) = &mut self.backing {
+            // SAFETY: `reserve` left a block of the payload's own, of one holder, with room for
+            // these bytes after its own.
+            unsafe { block.write(self.len, bytes) };
+        }
+        self.len += bytes.len();
     }
 
     /// Whether the payload is ONE slice, which is what
     /// `z_bytes_get_contiguous_view` requires.
     ///
-    /// wz's storage is always one `Vec`, so a naive answer would be "always" —
+    /// wz's storage is always one block, so a naive answer would be "always" —
     /// and that would be WRONG against a real pico, whose `_z_bytes_t` is a
     /// vector of arc-slices and whose `z_bytes_get_contiguous_view` fails once
     /// there is more than one. The question the export asks is about the
@@ -325,41 +540,41 @@ impl ByteBuf {
     }
 
     /// Append another payload AS ITS OWN SEGMENTS (pico
-    /// `z_bytes_writer_append`, which moves the source's slice list in).
+    /// `z_bytes_writer_append`, which moves the source's slice list in). Refused, the payload is
+    /// as it was.
     ///
     /// The first append on a buffer that already holds unsegmented bytes has to
     /// close that implicit segment first, or the existing content would silently
     /// merge into the newly appended one.
-    pub(crate) fn append_segments(&mut self, other: &ByteBuf) {
+    pub(crate) fn append_segments(&mut self, other: &ByteBuf) -> Result<(), NoRoom> {
+        if other.len != 0 {
+            self.reserve(other.len)?;
+        }
         if self.bounds.is_empty() && self.len != 0 {
             self.bounds.push(self.len);
         }
         let mut idx = 0usize;
         while let Some(segment) = other.segment(idx) {
-            let end = {
-                let data = self.owned_mut();
-                data.extend_from_slice(segment);
-                data.len()
-            };
-            self.len = end;
-            self.bounds.push(end);
+            self.put_after(segment);
+            self.bounds.push(self.len);
             idx += 1;
         }
+        Ok(())
     }
 
     /// Append raw bytes to the CURRENT segment (pico
     /// `z_bytes_writer_write_all`, which writes into the buffer rather than
-    /// adding a slice).
-    pub(crate) fn write_all(&mut self, bytes: &[u8]) {
-        let end = {
-            let data = self.owned_mut();
-            data.extend_from_slice(bytes);
-            data.len()
-        };
-        self.len = end;
-        if let Some(last) = self.bounds.last_mut() {
-            *last = end;
+    /// adding a slice). Refused, the payload is as it was.
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<(), NoRoom> {
+        if bytes.is_empty() {
+            return Ok(());
         }
+        self.reserve(bytes.len())?;
+        self.put_after(bytes);
+        if let Some(last) = self.bounds.last_mut() {
+            *last = self.len;
+        }
+        Ok(())
     }
 }
 
@@ -370,46 +585,38 @@ impl core::ops::Deref for ByteBuf {
     }
 }
 
-impl From<Vec<u8>> for ByteBuf {
-    fn from(data: Vec<u8>) -> Self {
-        let len = data.len();
-        Self {
-            backing: Store::Shared(Arc::new(Backing::Owned(data))),
-            len,
-            bounds: Vec::new(),
-        }
-    }
-}
-
-impl From<&[u8]> for ByteBuf {
-    fn from(data: &[u8]) -> Self {
-        Self::from(data.to_vec())
-    }
-}
-
-/// A payload over the storage a slice or string state holds, SHARING it, so the
+/// A payload over the block a slice or string state holds, SHARING it, so the
 /// payload has the state's own address and the caller's deleter waits for both
 /// (pico's `z_bytes_from_slice` / `z_bytes_from_string` take over the
 /// allocation they are given).
 ///
-/// A state whose view no longer describes its storage — a caller emptied it, or
+/// A state whose view no longer describes its block — a caller emptied it, or
 /// moved it out through `take_from_loaned` — has nothing to share and reads as
-/// the bytes it now shows.
+/// a copy of the bytes it now shows.
 ///
 /// # Safety
-/// `start` / `len` must be a view a state made over `backing`, as the states'
-/// own `bytes` documents.
-unsafe fn payload_over(backing: &Arc<Backing>, start: *const u8, len: usize) -> ByteBuf {
-    let whole = backing.as_slice();
-    if start == whole.as_ptr() && len <= whole.len() {
-        return ByteBuf {
-            backing: Store::Shared(Arc::clone(backing)),
-            len,
-            bounds: Vec::new(),
-        };
+/// `start` / `len` must be a view a state made over `block`, of whose bytes `filled` are
+/// written, as the states' own `backing` documents.
+unsafe fn payload_over(
+    block: Option<&Block>,
+    filled: usize,
+    start: *const u8,
+    len: usize,
+) -> Result<ByteBuf, NoRoom> {
+    if let Some(block) = block {
+        if start == block.span().0 && len <= filled {
+            return Ok(ByteBuf {
+                backing: Store::Shared(block.share()),
+                len,
+                bounds: Vec::new(),
+            });
+        }
     }
-    ByteBuf::from(crate::abi::view_bytes(start, len).unwrap_or(&[]).to_vec())
+    ByteBuf::copy_of(crate::abi::view_bytes(start, len).unwrap_or(&[]))
 }
+
+/// The terminator an empty owned string's view points at, so its data is a C string with no block.
+static EMPTY_C_STRING: u8 = 0;
 
 /// Behind a `z_owned_string_t` handle. An OWNED string's `backing` is
 /// NUL-terminated so a C caller treating `z_string_data` as a C string is safe;
@@ -419,9 +626,11 @@ unsafe fn payload_over(backing: &Arc<Backing>, start: *const u8, len: usize) -> 
 /// (excluding the terminator) — stable, because it points at `backing`'s bytes,
 /// which do not move when the box does.
 pub(crate) struct StringState {
-    /// The storage `self_view` borrows, shared with any payload it was moved
-    /// into; released when the last of them goes.
-    backing: Arc<Backing>,
+    /// The block `self_view` borrows, shared with any payload it was moved
+    /// into; released when the last of them goes. None for an empty string.
+    backing: Option<Block>,
+    /// The bytes of `backing` written: the string's and its terminator, or the caller's.
+    filled: usize,
     self_view: z_loaned_string_t,
 }
 
@@ -433,49 +642,79 @@ pub(crate) struct StringState {
 /// No NUL terminator, unlike the string: a slice is binary and pico's
 /// `z_slice_data` is not a C-string contract.
 pub(crate) struct SliceState {
-    /// The storage `self_view` borrows, shared with any payload it was moved
-    /// into; released when the last of them goes.
-    backing: Arc<Backing>,
+    /// The block `self_view` borrows, shared with any payload it was moved
+    /// into; released when the last of them goes. None for an empty slice.
+    backing: Option<Block>,
+    /// The bytes of `backing` written.
+    filled: usize,
     self_view: z_loaned_slice_t,
 }
 
 impl SliceState {
-    fn boxed(buf: ByteBuf) -> Box<SliceState> {
+    /// A slice over `buf`'s block, which it keeps.
+    fn boxed(buf: ByteBuf) -> Result<Box<SliceState>, NoRoom> {
         let len = buf.len;
-        let backing = buf.into_shared();
-        let start = backing.as_slice().as_ptr();
-        Box::new(SliceState {
+        let backing = buf.into_block()?;
+        // An empty slice's data is a pointer all the same, as a slice of no bytes has.
+        let start = match backing.as_ref().map(|block| block.span().0) {
+            Some(start) if !start.is_null() => start,
+            _ => NonNull::<u8>::dangling().as_ptr().cast_const(),
+        };
+        Ok(Box::new(SliceState {
             backing,
+            filled: len,
             self_view: z_loaned_slice_t {
                 _start: start,
                 _len: len,
             },
-        })
+        }))
     }
 
-    /// This slice as a payload that SHARES its storage.
-    fn shared_payload(&self) -> ByteBuf {
+    /// This slice as a payload that SHARES its block.
+    fn shared_payload(&self) -> Result<ByteBuf, NoRoom> {
         // SAFETY: `self_view` is this state's own view.
-        unsafe { payload_over(&self.backing, self.self_view._start, self.self_view._len) }
+        unsafe {
+            payload_over(
+                self.backing.as_ref(),
+                self.filled,
+                self.self_view._start,
+                self.self_view._len,
+            )
+        }
     }
 }
 
 impl StringState {
-    /// A string in storage of its own: the bytes, then the NUL a C caller
-    /// treating `z_string_data` as a C string relies on.
-    fn boxed(bytes: &[u8]) -> Box<StringState> {
-        let mut data = Vec::with_capacity(bytes.len() + 1);
-        data.extend_from_slice(bytes);
-        data.push(0);
-        let len = bytes.len();
-        let start = data.as_ptr();
-        Box::new(StringState {
-            backing: Arc::new(Backing::Owned(data)),
+    /// A string in a block of its own: the bytes, then the NUL a C caller
+    /// treating `z_string_data` as a C string relies on. An empty one points at a terminator of
+    /// the library's and holds no block.
+    fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
+        if bytes.is_empty() {
+            return Ok(Box::new(StringState {
+                backing: None,
+                filled: 0,
+                self_view: z_loaned_string_t {
+                    _start: &EMPTY_C_STRING,
+                    _len: 0,
+                },
+            }));
+        }
+        let filled = bytes.len().checked_add(1).ok_or(NoRoom)?;
+        let mut block = Block::with_room(filled).ok_or(NoRoom)?;
+        // SAFETY: a new block, of one holder, with room for the bytes and their terminator.
+        unsafe {
+            block.write(0, bytes);
+            block.write(bytes.len(), &[0]);
+        }
+        let start = block.span().0;
+        Ok(Box::new(StringState {
+            backing: Some(block),
+            filled,
             self_view: z_loaned_string_t {
                 _start: start,
-                _len: len,
+                _len: bytes.len(),
             },
-        })
+        }))
     }
 
     /// A string that DESCRIBES the caller's `len` bytes at `start` (pico
@@ -483,21 +722,37 @@ impl StringState {
     ///
     /// # Safety
     /// As [`ByteBuf::aliased`].
-    unsafe fn aliased(start: *const u8, len: usize, release: Release) -> Box<StringState> {
-        let alias = ByteBuf::aliased(start, len, release);
-        Box::new(StringState {
+    unsafe fn aliased(
+        start: *const u8,
+        len: usize,
+        release: Release,
+    ) -> Result<Box<StringState>, NoRoom> {
+        let block = Block::alias(start, len, release).map_err(|release| {
+            drop(release);
+            NoRoom
+        })?;
+        let view_start = block.span().0;
+        Ok(Box::new(StringState {
+            backing: Some(block),
+            filled: len,
             self_view: z_loaned_string_t {
-                _start: alias.as_slice().as_ptr(),
+                _start: view_start,
                 _len: len,
             },
-            backing: alias.into_shared(),
-        })
+        }))
     }
 
-    /// This string as a payload that SHARES its storage, minus the terminator.
-    fn shared_payload(&self) -> ByteBuf {
+    /// This string as a payload that SHARES its block, minus the terminator.
+    fn shared_payload(&self) -> Result<ByteBuf, NoRoom> {
         // SAFETY: `self_view` is this state's own view.
-        unsafe { payload_over(&self.backing, self.self_view._start, self.self_view._len) }
+        unsafe {
+            payload_over(
+                self.backing.as_ref(),
+                self.filled,
+                self.self_view._start,
+                self.self_view._len,
+            )
+        }
     }
 }
 
@@ -705,7 +960,13 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
         if start.is_null() {
             return Z_ERR_NULL;
         }
-        store_slice(dst, ByteBuf::from(core::slice::from_raw_parts(start, len)));
+        let rc = store_slice(
+            dst,
+            ByteBuf::copy_of(core::slice::from_raw_parts(start, len)),
+        );
+        if rc != Z_OK {
+            return rc;
+        }
         (*src)._start = core::ptr::null();
         (*src)._len = 0;
         Z_OK
@@ -714,28 +975,40 @@ pub unsafe extern "C" fn z_slice_take_from_loaned(
 
 // --- helpers to box a payload into an owned value -------------------------
 
-/// Put `buf` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null and `buf` dropped,
-/// when the pool of payloads is full.
-unsafe fn store_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) -> ZResult {
-    match box_bytes(buf) {
-        Some(handle) => {
+/// Put the payload `made` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null and the
+/// payload dropped, when there was no room for its bytes or the pool of payloads is full.
+unsafe fn store_bytes(dst: *mut z_owned_bytes_t, made: Result<ByteBuf, NoRoom>) -> ZResult {
+    match made.and_then(|buf| box_bytes(buf).ok_or(NoRoom)) {
+        Ok(handle) => {
             *dst = z_owned_bytes_t {
                 handle: handle as *mut c_void,
                 _pad: [core::ptr::null_mut(); 3],
             };
             Z_OK
         }
-        None => {
+        Err(no_room) => {
             *dst = z_owned_bytes_t::null_value();
-            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
+            no_room.code()
         }
     }
 }
-unsafe fn store_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
-    *dst = z_owned_slice_t {
-        handle: Box::into_raw(SliceState::boxed(buf)) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 3],
-    };
+
+/// Put a slice over the payload `made` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst`
+/// null, when there was no room for its bytes.
+unsafe fn store_slice(dst: *mut z_owned_slice_t, made: Result<ByteBuf, NoRoom>) -> ZResult {
+    match made.and_then(SliceState::boxed) {
+        Ok(state) => {
+            *dst = z_owned_slice_t {
+                handle: Box::into_raw(state) as *mut c_void,
+                _pad: [core::ptr::null_mut(); 3],
+            };
+            Z_OK
+        }
+        Err(no_room) => {
+            *dst = z_owned_slice_t::null_value();
+            no_room.code()
+        }
+    }
 }
 /// Build an empty payload (pico `z_bytes_empty`).
 ///
@@ -748,7 +1021,7 @@ pub unsafe extern "C" fn z_bytes_empty(bytes: *mut z_owned_bytes_t) {
         return;
     }
     // A full pool leaves `bytes` null, the one answer a call with no result has.
-    let _ = store_bytes(bytes, ByteBuf::new());
+    let _ = store_bytes(bytes, Ok(ByteBuf::new()));
 }
 
 /// Adopt a caller-allocated C string into an owned string (pico
@@ -782,28 +1055,51 @@ pub unsafe extern "C" fn z_string_from_str(
         store_string(
             str_out,
             StringState::aliased(value as *const u8, len, release),
-        );
-        Z_OK
+        )
     })
 }
 
-pub(crate) unsafe fn store_owned_bytes(dst: *mut z_owned_bytes_t, buf: ByteBuf) -> ZResult {
-    store_bytes(dst, buf)
+/// Put the payload `made` in `dst` (see [`store_bytes`]).
+pub(crate) unsafe fn store_owned_bytes(
+    dst: *mut z_owned_bytes_t,
+    made: Result<ByteBuf, NoRoom>,
+) -> ZResult {
+    store_bytes(dst, made)
 }
 
-pub(crate) unsafe fn store_owned_slice(dst: *mut z_owned_slice_t, buf: ByteBuf) {
-    store_slice(dst, buf);
+/// Put a slice over the payload `made` in `dst` (see [`store_slice`]).
+pub(crate) unsafe fn store_owned_slice(
+    dst: *mut z_owned_slice_t,
+    made: Result<ByteBuf, NoRoom>,
+) -> ZResult {
+    store_slice(dst, made)
 }
 
-pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]) {
-    store_string(dst, StringState::boxed(bytes));
+/// Put a string holding a copy of `bytes` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst`
+/// null, when there was no room for its bytes.
+pub(crate) unsafe fn store_owned_string(dst: *mut z_owned_string_t, bytes: &[u8]) -> ZResult {
+    store_string(dst, StringState::boxed(bytes))
 }
 
-unsafe fn store_string(dst: *mut z_owned_string_t, s: Box<StringState>) {
-    *dst = z_owned_string_t {
-        handle: Box::into_raw(s) as *mut c_void,
-        _pad: [core::ptr::null_mut(); 3],
-    };
+/// Put the string `made` in `dst`. `Z_OK`; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, `dst` null, when
+/// there was no room for its bytes.
+unsafe fn store_string(
+    dst: *mut z_owned_string_t,
+    made: Result<Box<StringState>, NoRoom>,
+) -> ZResult {
+    match made {
+        Ok(state) => {
+            *dst = z_owned_string_t {
+                handle: Box::into_raw(state) as *mut c_void,
+                _pad: [core::ptr::null_mut(); 3],
+            };
+            Z_OK
+        }
+        Err(no_room) => {
+            *dst = z_owned_string_t::null_value();
+            no_room.code()
+        }
+    }
 }
 
 /// Read the raw bytes behind a loaned bytes/slice value (both wrap `ByteBuf`).
@@ -824,12 +1120,12 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
         if bytes.is_null() {
             return Z_ERR_NULL;
         }
-        let buf = if data.is_null() || len == 0 {
-            Vec::new()
+        let buf: &[u8] = if data.is_null() || len == 0 {
+            &[]
         } else {
-            core::slice::from_raw_parts(data, len).to_vec()
+            core::slice::from_raw_parts(data, len)
         };
-        store_bytes(bytes, ByteBuf::from(buf))
+        store_bytes(bytes, ByteBuf::copy_of(buf))
     })
 }
 
@@ -843,8 +1139,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
         if bytes.is_null() || value.is_null() {
             return Z_ERR_NULL;
         }
-        let buf = CStr::from_ptr(value).to_bytes().to_vec();
-        store_bytes(bytes, ByteBuf::from(buf))
+        store_bytes(bytes, ByteBuf::copy_of(CStr::from_ptr(value).to_bytes()))
     })
 }
 
@@ -853,7 +1148,8 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
 /// `_z_slice_from_buf_custom_deleter` behind every `z_bytes_from_*` that takes a
 /// buffer).
 ///
-/// A null `data` is an empty payload, as the copying constructors treat it.
+/// A null `data` is an empty payload, as the copying constructors treat it. With no room for the
+/// payload, `release` runs at once and `bytes` is left null.
 ///
 /// # Safety
 /// `bytes` must be null or valid and writable; `data` must be null or point at
@@ -917,12 +1213,9 @@ pub unsafe extern "C" fn z_bytes_to_slice(
             return Z_ERR_NULL;
         }
         match bytes_ref(bytes) {
-            Some(buf) => {
-                // A COPY, as pico's is: the slice this hands back owns storage
-                // of its own and outlives the payload it was read from.
-                store_slice(dst, buf.copied());
-                Z_OK
-            }
+            // A COPY, as pico's is: the slice this hands back owns storage
+            // of its own and outlives the payload it was read from.
+            Some(buf) => store_slice(dst, buf.copied()),
             None => Z_ERR_NULL,
         }
     })
@@ -939,10 +1232,7 @@ pub unsafe extern "C" fn z_bytes_to_string(
             return Z_ERR_NULL;
         }
         match bytes_ref(bytes) {
-            Some(buf) => {
-                store_string(dst, StringState::boxed(buf));
-                Z_OK
-            }
+            Some(buf) => store_string(dst, StringState::boxed(buf)),
             None => Z_ERR_NULL,
         }
     })
@@ -1090,7 +1380,10 @@ pub unsafe extern "C" fn z_string_take_from_loaned(
             return Z_ERR_NULL;
         }
         let bytes = core::slice::from_raw_parts(start, len);
-        store_string(dst, StringState::boxed(bytes));
+        let rc = store_string(dst, StringState::boxed(bytes));
+        if rc != Z_OK {
+            return rc;
+        }
         (*src)._start = core::ptr::null();
         (*src)._len = 0;
         Z_OK
@@ -1112,7 +1405,7 @@ pub unsafe extern "C" fn z_bytes_clone(
             return Z_ERR_NULL;
         }
         match bytes_ref(src) {
-            Some(buf) => store_bytes(dst, buf.clone()),
+            Some(buf) => store_bytes(dst, buf.try_clone()),
             None => Z_ERR_NULL,
         }
     })
@@ -1257,9 +1550,8 @@ pub unsafe extern "C" fn z_slice_clone(
         }
         store_slice(
             dst,
-            ByteBuf::from(core::slice::from_raw_parts((*src)._start, (*src)._len)),
-        );
-        Z_OK
+            ByteBuf::copy_of(core::slice::from_raw_parts((*src)._start, (*src)._len)),
+        )
     })
 }
 
@@ -1279,8 +1571,7 @@ pub unsafe extern "C" fn z_string_clone(
             return Z_ERR_NULL;
         }
         let bytes = core::slice::from_raw_parts(start, len);
-        store_string(dst, StringState::boxed(bytes));
-        Z_OK
+        store_string(dst, StringState::boxed(bytes))
     })
 }
 
@@ -1521,13 +1812,12 @@ pub unsafe extern "C" fn z_slice_copy_from_buf(
         if data.is_null() && len != 0 {
             return Z_ERR_NULL;
         }
-        let bytes = if len == 0 {
-            Vec::new()
+        let bytes: &[u8] = if len == 0 {
+            &[]
         } else {
-            core::slice::from_raw_parts(data, len).to_vec()
+            core::slice::from_raw_parts(data, len)
         };
-        store_slice(slice, ByteBuf::from(bytes));
-        Z_OK
+        store_slice(slice, ByteBuf::copy_of(bytes))
     })
 }
 
@@ -1559,8 +1849,7 @@ pub unsafe extern "C" fn z_slice_from_buf(
         if data.is_null() && len != 0 {
             return Z_ERR_NULL;
         }
-        store_slice(slice, ByteBuf::aliased(data, len, release));
-        Z_OK
+        store_slice(slice, ByteBuf::aliased(data, len, release))
     })
 }
 
@@ -1577,8 +1866,7 @@ pub unsafe extern "C" fn z_slice_empty(slice: *mut z_owned_slice_t) {
         if slice.is_null() {
             return Z_ERR_NULL;
         }
-        store_slice(slice, ByteBuf::new());
-        Z_OK
+        store_slice(slice, Ok(ByteBuf::new()))
     });
 }
 
@@ -1603,8 +1891,7 @@ pub unsafe extern "C" fn z_string_empty(str_out: *mut z_owned_string_t) {
         if str_out.is_null() {
             return Z_ERR_NULL;
         }
-        store_string(str_out, StringState::boxed(&[]));
-        Z_OK
+        store_string(str_out, StringState::boxed(&[]))
     });
 }
 
@@ -1661,8 +1948,7 @@ pub unsafe extern "C" fn z_string_copy_from_substr(
         } else {
             core::slice::from_raw_parts(value as *const u8, len)
         };
-        store_string(str_out, StringState::boxed(bytes));
-        Z_OK
+        store_string(str_out, StringState::boxed(bytes))
     })
 }
 
@@ -1787,14 +2073,16 @@ mod box_cache_tests {
     fn a_reused_box_holds_exactly_the_payload_put_in_it() {
         // SAFETY: every pointer below comes from `box_bytes` and is unboxed once.
         unsafe {
-            let first = box_bytes(ByteBuf::from(b"first".to_vec())).expect("the heap's");
+            let first =
+                box_bytes(ByteBuf::copy_of(b"first").expect("the heap's")).expect("the heap's");
             let first_at = first as usize;
             let got = unbox_bytes(first);
             assert_eq!(got.to_vec(), b"first");
             let after_first = kept();
             assert!(after_first >= 1, "the emptied box is kept");
 
-            let second = box_bytes(ByteBuf::from(b"second payload".to_vec())).expect("the heap's");
+            let second = box_bytes(ByteBuf::copy_of(b"second payload").expect("the heap's"))
+                .expect("the heap's");
             assert_eq!(
                 second as usize, first_at,
                 "the kept allocation is the next one used"
@@ -1809,7 +2097,10 @@ mod box_cache_tests {
 
             // Many at once: the list holds at most BOX_CACHE and the rest are freed.
             let many: Vec<*mut ByteBuf> = (0..BOX_CACHE * 3)
-                .map(|i| box_bytes(ByteBuf::from(vec![i as u8; i % 7])).expect("the heap's"))
+                .map(|i| {
+                    let buf = ByteBuf::copy_of(&vec![i as u8; i % 7]).expect("the heap's");
+                    box_bytes(buf).expect("the heap's")
+                })
                 .collect();
             for (i, ptr) in many.into_iter().enumerate() {
                 assert_eq!(
@@ -1828,7 +2119,8 @@ mod box_cache_tests {
     fn a_box_unboxed_on_another_thread_is_intact() {
         // SAFETY: the pointer is handed to the other thread whole and unboxed once.
         unsafe {
-            let ptr = box_bytes(ByteBuf::from(b"across".to_vec())).expect("the heap's") as usize;
+            let ptr = box_bytes(ByteBuf::copy_of(b"across").expect("the heap's"))
+                .expect("the heap's") as usize;
             let seen = std::thread::spawn(move || {
                 let before = kept();
                 let buf = unbox_bytes(ptr as *mut ByteBuf);
@@ -1853,5 +2145,149 @@ mod box_cache_tests {
             free_bytes(owned.handle);
             assert_eq!(kept(), (before + 1).min(BOX_CACHE));
         }
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    /// Counts the releases of a caller's buffer.
+    unsafe extern "C" fn count_release(_value: *mut c_void, context: *mut c_void) {
+        (*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Where a payload's bytes start.
+    fn start_of(buf: &ByteBuf) -> *const u8 {
+        buf.as_slice().as_ptr()
+    }
+
+    /// An empty payload holds no block, and neither does its clone.
+    #[test]
+    fn an_empty_payload_holds_no_block() {
+        let empty = ByteBuf::copy_of(&[]).expect("no room is asked for");
+        assert!(matches!(empty.backing, Store::Empty));
+        let clone = empty.try_clone().expect("no room is asked for");
+        assert!(matches!(clone.backing, Store::Empty));
+        assert!(clone.as_slice().is_empty());
+    }
+
+    /// A clone shares the block of the payload it was made from, which holds its bytes once, and
+    /// a copy has a block of its own.
+    #[test]
+    fn a_clone_shares_the_block_and_a_copy_has_its_own() {
+        let first = ByteBuf::copy_of(b"shared bytes").expect("room for a payload");
+        let clone = first.try_clone().expect("a share takes no room");
+        assert_eq!(start_of(&clone), start_of(&first), "the same block");
+        let copy = first.copied().expect("room for a copy");
+        assert_ne!(start_of(&copy), start_of(&first), "a block of its own");
+        assert_eq!(copy.as_slice(), b"shared bytes");
+        drop(first);
+        assert_eq!(
+            clone.as_slice(),
+            b"shared bytes",
+            "the block lives with its last holder"
+        );
+    }
+
+    /// A lent payload's clone is a copy, which outlives the lender's bytes.
+    #[test]
+    fn a_lent_payloads_clone_is_a_copy() {
+        let lender = b"lent".to_vec();
+        // SAFETY: `lender` outlives the lent payload, dropped first.
+        let lent = unsafe { ByteBuf::lent(&lender) };
+        let clone = lent.try_clone().expect("room for a copy");
+        assert_ne!(start_of(&clone), lender.as_ptr());
+        drop(lent);
+        drop(lender);
+        assert_eq!(clone.as_slice(), b"lent");
+    }
+
+    /// The caller's release runs once, when the last holder of its alias goes, and an alias reads
+    /// the caller's bytes where they lie.
+    #[test]
+    fn an_alias_is_released_once_by_its_last_holder() {
+        let released = AtomicUsize::new(0);
+        let bytes = *b"caller's";
+        let release = Release::new(
+            Some(count_release),
+            bytes.as_ptr().cast_mut().cast::<c_void>(),
+            (&released as *const AtomicUsize)
+                .cast_mut()
+                .cast::<c_void>(),
+        );
+        // SAFETY: `bytes` outlive the payload and its clone, both dropped below.
+        let alias = unsafe { ByteBuf::aliased(bytes.as_ptr(), bytes.len(), release) }
+            .expect("room for the record");
+        assert_eq!(start_of(&alias), bytes.as_ptr(), "the caller's own bytes");
+        let clone = alias.try_clone().expect("a share takes no room");
+        drop(alias);
+        assert_eq!(released.load(Ordering::SeqCst), 0, "a holder is left");
+        drop(clone);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            1,
+            "released once, by the last"
+        );
+    }
+
+    /// A write to a payload whose block is shared copies it first, so the other holder reads what
+    /// it held; a payload with a block of its own writes into it, growing it when it must.
+    #[test]
+    fn a_write_copies_a_shared_block_and_grows_its_own() {
+        let mut writer = ByteBuf::new();
+        writer.write_all(b"ab").expect("room");
+        let held = writer.try_clone().expect("a share takes no room");
+        writer.write_all(b"cd").expect("room");
+        assert_eq!(held.as_slice(), b"ab", "the shared block is not written");
+        assert_eq!(writer.as_slice(), b"abcd");
+        let long = [7u8; 300];
+        writer.write_all(&long).expect("room to grow");
+        assert_eq!(writer.len, 304);
+        assert_eq!(&writer.as_slice()[..4], b"abcd");
+        assert!(writer.as_slice()[4..].iter().all(|&byte| byte == 7));
+    }
+
+    /// Segments appended to a writer keep their bounds, and the appended payload is left whole.
+    #[test]
+    fn appended_payloads_are_segments_of_their_own() {
+        let mut writer = ByteBuf::copy_of(b"head").expect("room");
+        let tail = ByteBuf::copy_of(b"tail").expect("room");
+        writer.append_segments(&tail).expect("room");
+        writer.append_segments(&tail).expect("room");
+        assert_eq!(writer.as_slice(), b"headtailtail");
+        assert_eq!(writer.segment(0), Some(&b"head"[..]));
+        assert_eq!(writer.segment(1), Some(&b"tail"[..]));
+        assert_eq!(writer.segment(2), Some(&b"tail"[..]));
+        assert_eq!(writer.segment(3), None);
+        assert_eq!(tail.as_slice(), b"tail");
+    }
+
+    /// A string moved into a payload shares its block without its terminator; an empty string is
+    /// a C string with no block.
+    #[test]
+    fn a_string_shares_its_block_with_a_payload_without_its_terminator() {
+        let state = StringState::boxed(b"text").expect("room");
+        // SAFETY: the view is the state's own, over its block's written bytes.
+        let terminated = unsafe { lent_bytes(state.self_view._start, 5) };
+        assert_eq!(terminated, b"text\0");
+        let payload = state.shared_payload().expect("a share takes no room");
+        assert_eq!(start_of(&payload), state.self_view._start);
+        assert_eq!(payload.as_slice(), b"text");
+        let empty = StringState::boxed(&[]).expect("no room is asked for");
+        assert!(empty.backing.is_none());
+        // SAFETY: an empty string's view points at a terminator.
+        assert_eq!(unsafe { *empty.self_view._start }, 0);
+    }
+
+    /// With the process pools, a payload's bytes lie in their payloads' area, not on the heap.
+    #[cfg(wz_process_pools)]
+    #[test]
+    fn a_payloads_bytes_lie_in_the_process_pools() {
+        let payload = ByteBuf::copy_of(b"pooled bytes").expect("room in the area");
+        let Store::Shared(block) = &payload.backing else {
+            panic!("a payload of bytes holds a block");
+        };
+        assert!(crate::process_pool::lies_in_area(block.head.cast::<u8>()));
     }
 }

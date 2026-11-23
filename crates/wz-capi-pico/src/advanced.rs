@@ -709,8 +709,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let mut put_options = AdvancedPutOptions::default();
         if !options.is_null() {
             let embedded = &(*options).put_options;
-            if let Some(attachment) = crate::pubsub::take_moved_bytes(embedded.attachment) {
-                put_options = put_options.with_attachment(attachment.to_vec());
+            if let Some(attachment) = crate::pubsub::take_moved_bytes_to_vec(embedded.attachment) {
+                put_options = put_options.with_attachment(attachment);
             }
             if let Some(encoding) = crate::encoding::take_moved_encoding(embedded.encoding) {
                 put_options = put_options.with_encoding(encoding);
@@ -721,8 +721,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
             // `opt.put_options.timestamp = &timestamp;`), so a caller's value
             // never reaches the wire there and must not here.
         }
-        let Some(buf) = buf else {
-            return Z_ERR_NULL;
+        let buf = match buf {
+            Ok(Some(buf)) => buf,
+            Ok(None) => return Z_ERR_NULL,
+            Err(no_room) => return no_room.code(),
         };
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;

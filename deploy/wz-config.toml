@@ -2798,6 +2798,29 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the hellos a program keeps, and zenoh-pico allocates each clone on the heap with no constant; sixteen is MAX_SCOUT_HELLOS's default, a kept hello for each Hello one scouting window records."
 
 [[limit]]
+id = "HELD_PAYLOAD_BYTES"
+kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
+kind = "bound"
+driven = "local"
+default = 131072
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes the owned payloads, strings and slices a program of the pico C ABI
+holds carry at once: the payloads' area the library reserves at its first
+object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
+smallest that holds its bytes and a 16-byte head. A payload no free block
+holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+
+[[limit]]
 id = "CONFIG_ENTRIES"
 kconfig = "WZ_LIMIT_CONFIG_ENTRIES"
 kind = "parameter"
