@@ -179,6 +179,98 @@ where
     }
 }
 
+/// One reassembly Router the links of a session share, each link's receive holding a handle: the
+/// session keeps one table of chain slots and not one for each link, as its chains' buffers are
+/// one table already. A chain is keyed by its peer (`Fragment::peer_key`, the peer's zid on a
+/// unicast link) as well as its channel, so the links' chains never meet, and the per-peer quota
+/// keeps one peer from taking the others' slots. What a link sets on the Router before an ingest
+/// (its negotiated fragment markers, the session's message bound) is set in the same call, so a
+/// chain is read under its own link's rules.
+///
+/// Each call borrows the Router for its own length. One made while another holds it (a receive
+/// reached from inside another's delivery) is not reassembled: it is reported as a receive that
+/// rejoins no fragment does (`()`), which hands a fragment up unstaged, and nothing panics.
+#[cfg(feature = "alloc")]
+pub struct SharedReassembly<D>(alloc::rc::Rc<core::cell::RefCell<D>>);
+
+#[cfg(feature = "alloc")]
+impl<D> SharedReassembly<D> {
+    /// A handle on `router`, the first of the session's.
+    pub fn new(router: D) -> Self {
+        Self(alloc::rc::Rc::new(core::cell::RefCell::new(router)))
+    }
+
+    /// Run `f` on the Router (a sweep once a session step, a link's chains ended as it goes);
+    /// `None` while a call holds it.
+    pub fn with<T>(&self, f: impl FnOnce(&mut D) -> T) -> Option<T> {
+        self.0
+            .try_borrow_mut()
+            .ok()
+            .map(|mut router| f(&mut router))
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D> Clone for SharedReassembly<D> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<D: RxReassembly> RxReassembly for SharedReassembly<D> {
+    fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
+        if let Ok(mut router) = self.0.try_borrow_mut() {
+            router.sweep_chains(now_ms, on_event);
+        }
+    }
+
+    fn report_copied<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        outcome: &DriverLoopOutcome,
+        actions: &SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) {
+        match self.0.try_borrow_mut() {
+            Ok(mut router) => router.report_copied(outcome, actions, now_ms, on_event),
+            Err(_) => ().report_copied(outcome, actions, now_ms, on_event),
+        }
+    }
+
+    #[cfg(feature = "rx-in-place")]
+    fn report_parked<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        outcome: &DriverLoopOutcome,
+        actions: &SessionLinkActions<R, T>,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) {
+        match self.0.try_borrow_mut() {
+            Ok(mut router) => router.report_parked(outcome, actions, now_ms, on_event),
+            Err(_) => ().report_parked(outcome, actions, now_ms, on_event),
+        }
+    }
+
+    #[cfg(feature = "rx-in-place")]
+    fn dispatch_in_place<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        unit: &[u8],
+        actions: &SessionLinkActions<R, T>,
+        engine: &mut SessionEngine<R, T>,
+        record: &mut RecordBuf,
+        now_ms: u64,
+        on_event: &mut dyn EventSink,
+    ) -> DatagramPath {
+        match self.0.try_borrow_mut() {
+            Ok(mut router) => {
+                router.dispatch_in_place(unit, actions, engine, record, now_ms, on_event)
+            }
+            Err(_) => ().dispatch_in_place(unit, actions, engine, record, now_ms, on_event),
+        }
+    }
+}
+
 /// The units a receive in place dispatched, by the path they took
 /// (`crate::drive::dispatch_datagram`): read in place as a `Frame`, a `Fragment` or a lean
 /// batch, or not read as one, for one of the documented reasons. A unit of the second kind is not
