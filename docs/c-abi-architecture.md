@@ -188,7 +188,7 @@ family; every cell of the host performance matrix WIN, on Linux and on pc3-win.
 
 ## 7. Totality debt register
 
-The five crates deny the totality lints outside a test build, at their roots:
+The six crates deny the totality lints outside a test build, at their roots:
 
 ```rust
 #![cfg_attr(
@@ -211,10 +211,10 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-227) and holds the register's lint cells (187) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (189) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
-TD-227. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
+TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
 it also holds each row to its module's sites, both ways; indexing and arithmetic are held by the
 build's clippy alone.
 
@@ -233,7 +233,7 @@ doors of step 5, the group drive's stage in `wz-session-mcu`), converted as it l
 orders the payment (largest first) and is not a measurement of what clippy reports. The rows of
 `wz-session-mcu` count clippy's own reports instead, over the crate's default build, its build
 with every feature, and its build with every feature but `session-slot`, which takes three modules
-out.
+out; those of `wz-capi-port` over its default build and its build with every feature.
 
 | id | crate | module | lints | sites | class |
 |---|---|---|---|---:|---|
@@ -349,6 +349,8 @@ out.
 | TD-225 | `wz-session-mcu` | `slot_client` | `indexing_slicing` | 1 | open |
 | TD-226 | `wz-session-mcu` | `slot_querier` | `arithmetic_side_effects` | 1 | open |
 | TD-227 | `wz-session-mcu` | `slot_active` | `arithmetic_side_effects` | 1 | open |
+| TD-228 | `wz-capi-port` | `cancellation` | `arithmetic_side_effects` | 5 | open |
+| TD-229 | `wz-capi-port` | `listeners` | `arithmetic_side_effects` | 1 | open |
 
 TD-212 (`group_drive`) is in flight: six of its eleven sites are the stage
 (`group_drive/stage.rs`), which another branch is making total now; the drive loop's five are paid

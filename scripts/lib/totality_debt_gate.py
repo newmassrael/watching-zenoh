@@ -71,6 +71,7 @@ CRATES: tuple[str, ...] = (
     "wz-capi-pico",
     "wz-runtime-coop",
     "wz-session-mcu",
+    "wz-capi-port",
 )
 
 #: The register, relative to the root.
@@ -102,10 +103,10 @@ SITE_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 #: The last id the register gave. A row past it is debt added after the lints were switched on.
-LAST_ID = 227
+LAST_ID = 229
 
 #: The register's lint cells: every lint every row lists.
-CELLS = 187
+CELLS = 189
 
 ID_COMMENT = re.compile(r"^\s*// Totality debt (TD-\d{3}) \(docs/c-abi-architecture\.md section 7\)\.\s*$")
 ROW = re.compile(r"^\|\s*(TD-\d{3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|")
