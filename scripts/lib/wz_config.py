@@ -2781,10 +2781,13 @@ def camel_limit(lid: str) -> str:
     return "".join(part.capitalize() for part in lid.lower().split("_"))
 
 
-def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]:
+def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
+                        presets: dict[str, int] | None = None) -> list[str]:
     """The snapshot `snapshot` of `lims`: one field per limit, its build defaults, an accessor and a
     `select_*` per field, the `LimitField` impl of each limit's type, and the table a reader that
-    names a limit by its id dispatches on."""
+    names a limit by its id dispatches on. With `presets` (`limit_presets`), the snapshot of the pico
+    preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the build's
+    environment states."""
     table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
     count = f"{table[:-len('LIMITS')]}LIMIT_COUNT"
     out = rust_doc(f"The value of every limit {what}, as one snapshot: what a creator resolved and "
@@ -2818,6 +2821,27 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str) -> list[str]
             "    pub const fn defaults() -> Self {",
             "        Self::BUILD",
             "    }"]
+    if presets is not None and lims:
+        out += ["",
+                "    /// The pico preset: each limit `[limit.pico_preset]` states at the preset's value, where the",
+                "    /// build's domain holds it, and the rest at the build's. What an ABI that follows",
+                "    /// zenoh-pico opens a session under before its config states otherwise; laid out when the",
+                "    /// build is compiled, from the declaration and not from the build's environment.",
+                "    pub const PICO_PRESET: Self = Self {"]
+        for lim in lims:
+            field = lim["id"].lower()
+            value = presets.get(lim["id"])
+            if value is None:
+                out.append(f"        {field}: Limited::build_default(),")
+                continue
+            held = f"Quota::at_most({value})" if lim["kind"] == "bound" else f"{value}"
+            one = f"        {field}: Limited::preset_or_build({held}, LimitValue::Integer({value})),"
+            if len(one) <= RUST_MAX_WIDTH:
+                out.append(one)
+            else:
+                out += [f"        {field}: Limited::preset_or_build(", f"            {held},",
+                        f"            LimitValue::Integer({value}),", "        ),"]
+        out.append("    };")
     for lim in lims:
         field = lim["id"].lower()
         ty = "Quota" if lim["kind"] == "bound" else "usize"
@@ -2893,7 +2917,7 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         "",
         "use crate::caps;",
         "use crate::limit_binding::{",
-        "    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, Limited,",
+        "    limit_defaults_only, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue, Limited,",
         "    OutsideLimitDomain, Quota,",
         "};",
         "use crate::policy_binding::Driven;",
@@ -2929,7 +2953,8 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         ]
     for lim in lims:
         out += [""] + limit_spec_rust(lim)
-    out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds")
+    out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds",
+                                      limit_presets(decl["limits"]))
     out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
     out += [""] + capacity_limits_rust(decl)
     return "\n".join(out) + "\n"

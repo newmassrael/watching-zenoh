@@ -279,16 +279,46 @@ fn pico_group(
 /// The policies and the session limits a session [`z_open`] opens from a config runs under: the
 /// one place this ABI decides them, resolved once and handed to the engine and to the session's
 /// handle. `policies` is what the config's doors stated (`ConfigState::policies`), written over
-/// the build defaults ([`PolicyStatements::compose_into`]); `Z_ERR_CONFIG_INVALID_VALUE` when the
-/// build refuses any of it. The doors check a change through this before they keep it, so they
-/// and the open cannot judge a config differently.
+/// the build's policies and the limits a session opens under ([`opening_limits`],
+/// [`PolicyStatements::compose_into`]); `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of
+/// it. The doors check a change through this before they keep it, so they and the open cannot
+/// judge a config differently.
 pub(crate) fn resolve_snapshots(
     policies: &PolicyStatements,
 ) -> Result<(SessionPolicy, SessionLimits), ZResult> {
     let mut policy = SessionPolicy::defaults();
-    let mut limits = SessionLimits::defaults();
+    let mut limits = opening_limits();
     policies.compose_into(&mut policy, &mut limits)?;
     Ok((policy, limits))
+}
+
+/// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
+/// each ABI opens under its upstream's (`SessionLimits::PICO_PRESET`, each value with its reason in
+/// the declaration's `[limit.pico_preset]`, `deploy/wz-config.toml`), so a listener holds the ten
+/// peers zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB` admits and not a router's thousand. A config
+/// states more, or less, over them. The process pools are sized by the same
+/// (`crate::process_pool`).
+pub(crate) const fn opening_limits() -> SessionLimits {
+    SessionLimits::PICO_PRESET
+}
+
+#[cfg(test)]
+mod opening_limits_tests {
+    use super::opening_limits;
+    use wz_session_core::limit_binding::Quota;
+    use wz_session_core::limits::SessionLimits;
+
+    /// A session of this ABI opens under zenoh-pico's limits: a listener holds the ten peers
+    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten.
+    /// Turned red by an open under the build's defaults.
+    #[test]
+    fn a_session_opens_under_picos_limits() {
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_faces(Quota::at_most(10)).is_ok() {
+            assert_eq!(opening_limits().max_faces(), Quota::at_most(10));
+        }
+    }
 }
 
 /// [`resolve_snapshots`] with where each value came from, which no door of this ABI reports: what

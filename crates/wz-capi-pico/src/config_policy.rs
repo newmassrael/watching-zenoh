@@ -105,10 +105,13 @@ impl PolicyStatements {
         Ok(())
     }
 
-    /// `base` with no layer over it, every value from the build defaults.
+    /// `base` with no layer over it, and the limits a session opens under
+    /// (`crate::session::opening_limits`).
     #[cfg(test)]
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
-        Ok(Resolved::unchanged(base))
+        let mut resolved = Resolved::unchanged(base);
+        resolved.limits.session = crate::session::opening_limits();
+        Ok(resolved)
     }
 
     /// No key ids: a config handed no document states none, and only `config-document`, which
@@ -178,14 +181,18 @@ impl PolicyStatements {
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
-    /// `base` with the layers over it, and the limits the document states over the build defaults
-    /// of a session's limits ([`policy_document::Base::session`]), or `Z_ERR_CONFIG_INVALID_VALUE`
+    /// `base` with the layers over it, and the limits the document states over the limits a session
+    /// opens under (`crate::session::opening_limits`), or `Z_ERR_CONFIG_INVALID_VALUE`
     /// when any statement of any layer is refused, a document whose shape is refused, a profile
     /// the build does not have and a limit of a runtime among them. Where each value came from is
     /// read by the tests alone: the open and the doors resolve through [`Self::compose_into`].
     #[cfg(test)]
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
-        let base = policy_document::Base::session(base);
+        let base = policy_document::Base {
+            policy: base,
+            session_limits: crate::session::opening_limits(),
+            runtime_limits: None,
+        };
         let overrides = Overrides {
             profile: self.profile,
             statements: Stated::Set(&self.api),
@@ -880,7 +887,7 @@ mod tests {
     fn the_open_resolves_the_snapshots_the_record_of_origins_resolves() {
         assert_eq!(
             resolve_snapshots(&PolicyStatements::none()),
-            Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
+            Ok((SessionPolicy::defaults(), crate::session::opening_limits()))
         );
         let (entry, value) = one_allowed();
         let mut config = Config::new();
@@ -1603,17 +1610,16 @@ mod tests {
 #[cfg(test)]
 mod build_default_tests {
     use super::PolicyStatements;
-    use wz_session_core::limits::SessionLimits;
     use wz_session_core::policy::SessionPolicy;
 
-    /// A config that states nothing opens under the build's policies and limits: through the
-    /// resolver in a build with the doors, and with no resolver in one without them, so the two
-    /// builds open such a config alike.
+    /// A config that states nothing opens under the build's policies and the limits a session of
+    /// this ABI opens under: through the resolver in a build with the doors, and with no resolver
+    /// in one without them, so the two builds open such a config alike.
     #[test]
     fn a_config_that_states_nothing_opens_under_the_builds_policies_and_limits() {
         assert_eq!(
             crate::session::resolve_snapshots(&PolicyStatements::none()),
-            Ok((SessionPolicy::defaults(), SessionLimits::defaults()))
+            Ok((SessionPolicy::defaults(), crate::session::opening_limits()))
         );
     }
 

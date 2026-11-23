@@ -992,9 +992,10 @@ pub(crate) unsafe fn give_back_block(at: NonNull<u8>, bytes: usize) {
     });
 }
 
-/// The limits every session of this ABI opens under: the snapshot `z_open` hands its engine.
+/// The limits every session of this ABI opens under before its config states any: the snapshot
+/// `z_open` starts from (`crate::session::opening_limits`).
 const fn session_limits() -> SessionLimits {
-    SessionLimits::defaults()
+    crate::session::opening_limits()
 }
 
 // --- what the doors of `object-pool` ask of the pools ------------------------------------------

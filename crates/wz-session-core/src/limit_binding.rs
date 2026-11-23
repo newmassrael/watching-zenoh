@@ -678,6 +678,18 @@ impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {
             value: [L::DEFAULT; HELD],
         }
     }
+
+    /// `value`, which a statement names `stated`, where the build's domain holds it, and the
+    /// build's value where it does not: a preset laid out when the build is compiled, which a build
+    /// whose domain is narrower keeps to its own. Read by the generated snapshots' presets.
+    pub(crate) const fn preset_or_build(value: L::Value, stated: LimitValue) -> Self {
+        match L::DOMAIN.check(stated) {
+            Ok(()) => Self {
+                value: [value; HELD],
+            },
+            Err(_) => Self::build_default(),
+        }
+    }
 }
 
 impl<L: LimitSpec<Value = Quota>, const HELD: usize> Limited<L, HELD> {
@@ -927,6 +939,27 @@ mod tests {
         fn held_in(snapshot: &Snapshot) -> Quota {
             snapshot.sized.get()
         }
+    }
+
+    /// A preset is taken where the build's domain holds it, and the build's value kept where the
+    /// domain leaves it out. Turned red by a preset taken past the domain, or one never taken.
+    #[test]
+    fn a_preset_is_taken_where_the_domain_holds_it() {
+        const THREE: Limited<Sized8, { Sized8::HELD }> =
+            Limited::preset_or_build(Quota::at_most(3), LimitValue::Integer(3));
+        assert_eq!(THREE.get(), Quota::at_most(3), "inside the eight rows");
+        let past = Limited::<Sized8, { Sized8::HELD }>::preset_or_build(
+            Quota::at_most(9),
+            LimitValue::Integer(9),
+        );
+        assert_eq!(past.get(), Sized8::DEFAULT, "past the rows: the build's");
+        let pinned =
+            Limited::<Pinned4, { Pinned4::HELD }>::preset_or_build(5, LimitValue::Integer(5));
+        assert_eq!(
+            pinned.get(),
+            4,
+            "a domain of the build's value alone keeps it"
+        );
     }
 
     #[test]
