@@ -674,8 +674,6 @@ pub mod query;
 pub mod replay_publisher;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-175 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub mod reply_keyexpr;
