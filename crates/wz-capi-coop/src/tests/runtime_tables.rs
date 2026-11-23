@@ -29,17 +29,18 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
 }
 
-/// A listener reserves a cell for the dial role's link, each face it admits and each handshake it
-/// holds, as its arena lays out a link for each.
+/// A listener reserves a cell for the dial role's link and each face it admits, a link in its
+/// handshake among them; a link past them is closed before it has a task, so a handshake it holds
+/// takes no cell of its own.
 #[test]
-fn a_listener_reserves_a_cell_for_each_link_it_admits() {
+fn a_listener_reserves_a_cell_for_each_face_it_admits() {
     let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
         accept_pending: 2,
         ..client_config()
     });
-    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3 + 2));
+    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3));
 }
 
 /// The cells are held to the build's `MAX_TASKS` whatever the config admits, a count past the

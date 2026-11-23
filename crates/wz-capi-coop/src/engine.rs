@@ -1970,9 +1970,10 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
 /// limits and the faces its config admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeTables {
-    /// Reserved at once: a task cell for each link the session may hold at once (the dial role's,
-    /// each face `max_faces` admits, each handshake `accept_pending` admits), in the bytes a
-    /// link's session task takes (`link_task_bytes`), and `MAX_TIMERS` deadlines.
+    /// Reserved at once: a task cell for each face the session may hold at once (the dial role's
+    /// and each `max_faces` admits, a link in its handshake among them: a link taken off a port
+    /// past them is closed before it has a task), in the bytes a link's session task takes
+    /// (`link_task_bytes`), and `MAX_TIMERS` deadlines.
     pub(crate) rows: RuntimeRows,
     /// The cells the open may add, one for each group it joins: a group's task is a future no
     /// type names, so its cell takes the bytes the task has when the open spawns it.
@@ -1985,8 +1986,8 @@ impl RuntimeTables {
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
-        let links = crate::arena::links_of(config)
-            .unwrap_or(usize::MAX)
+        let links = 1usize
+            .saturating_add(config.max_faces)
             .min(caps::MAX_TASKS - groups);
         Self {
             rows: RuntimeRows {
