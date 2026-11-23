@@ -505,8 +505,10 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
 }
 
 /// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
-/// session that states none, the replies and `Final`s none in a build without `queryable`; a limit
-/// lowered at the open lowers the row.
+/// session that states none, the `Final`s none in a build without `queryable`; a limit lowered at
+/// the open lowers the row. The reply stage is lent no row in any build: the engine's queryable
+/// answers into a stage of its own, and a reply limit over the build's still refuses the open by
+/// its name.
 #[test]
 fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     let built =
@@ -516,16 +518,27 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     let answers = cfg!(feature = "queryable");
     assert_eq!(
         (rows.replies, rows.reply_bytes, rows.finals),
-        if answers {
-            (
-                caps::MAX_PENDING_REPLIES,
-                caps::REPLY_STAGE_BYTES,
-                caps::MAX_PENDING_FINALS,
-            )
-        } else {
-            (0, 0, 0)
-        }
+        (0, 0, if answers { caps::MAX_PENDING_FINALS } else { 0 })
     );
+    let mut over = SessionLimits::defaults();
+    // A build that sizes the stage by the limit has no value over it in its domain.
+    if answers
+        && over
+            .select_max_pending_replies(Quota::at_most(caps::MAX_PENDING_REPLIES + 1))
+            .is_ok()
+    {
+        assert_eq!(
+            ArenaPlan::of(&client_config(), &over),
+            Err(ArenaRefused::Limit {
+                limit: "MAX_PENDING_REPLIES",
+                why: UnlentRows::OverCeiling {
+                    value: caps::MAX_PENDING_REPLIES + 1,
+                    ceiling: caps::MAX_PENDING_REPLIES,
+                },
+            }),
+            "a reply limit over the build's refuses the open"
+        );
+    }
     let lowered = lowered(|l| l.select_max_pending_declares(Quota::at_most(1)));
     let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     assert_eq!(at_one.peers().rows.pending_declares, 1);

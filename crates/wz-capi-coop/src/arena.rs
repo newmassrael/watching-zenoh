@@ -19,10 +19,9 @@
 //!   `query` a row for the end of each get those tables hold, waiting for its delivery;
 //! - one table of what a face's peer is owed for each face the session may hold at once, taken
 //!   and given back as the face's gets are ([`FacePeers`]): the answers staged back to its
-//!   interests and to its liveliness interests (`MAX_PENDING_DECLARES`), the replies staged for
-//!   its queries (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
-//!   `MAX_REPLY_PAYLOAD_BYTES`) and the `Final`s owed after them (`MAX_PENDING_FINALS`), the
-//!   replies and `Final`s none in a build without `queryable`;
+//!   interests and to its liveliness interests (`MAX_PENDING_DECLARES`) and the `Final`s owed to
+//!   its queries (`MAX_PENDING_FINALS`, none in a build without `queryable`). Its reply stage is
+//!   lent no row: the engine's queryable answers into a stage of its own (`peer_rows`);
 //! - one pool of each kind of row a peer writes by its own choice, which every face's tables share
 //!   ([`PeerPoolRows`]): its aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`), its subscribers,
 //!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and its subscriber
@@ -103,7 +102,6 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerPools, PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
-use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::sink::BoxedSink;
 use wz_session_core::slot_observer::{RequesterRows, Requesters};
 
@@ -453,7 +451,7 @@ impl ArenaPlan {
         };
         plan.put(
             "peer tables",
-            "MAX_PENDING_DECLARES + MAX_PENDING_REPLIES + MAX_PENDING_FINALS",
+            "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
         );
@@ -722,35 +720,29 @@ fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, Arena
     })
 }
 
-/// The rows of each table of what one face's peer is owed, under `limits`. The replies' area holds
-/// as many replies as the stage has rows, each of the longest key and payload the session admits,
-/// as the build's stage holds them at the build's values.
+/// The rows of each table of what one face's peer is owed, under `limits`.
+///
+/// The face's reply stage is lent no row. This engine's queryable answers outside the session's
+/// lock into a stage of its own, held to the same limits (the engine's `answer`): the sink it
+/// registers copies the query out and leaves the responder the dispatch hands it over the face's
+/// stage unwritten, so rows lent there would be memory nothing reads. A reply staged there anyway
+/// is refused and counted as one past a full stage is. The reply limits are still held to the
+/// build's here, so a value over it refuses the open by its name as before.
 fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
-    let replies = if cfg!(feature = "queryable") {
-        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?
-    } else {
-        0
-    };
-    let reply_bytes = if replies == 0 {
-        0
-    } else {
-        ReplyStage::<Lent>::area_bytes(
-            replies,
-            lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
-                "MAX_REPLY_PAYLOAD_BYTES",
-                limits.max_reply_payload_bytes(),
-            )?,
-            lent::<{ caps::MAX_KEYEXPR_BYTES }>("MAX_KEYEXPR_BYTES", limits.max_keyexpr_bytes())?,
-        )
-        .ok_or(ArenaRefused::TooLarge)?
-    };
+    if cfg!(feature = "queryable") {
+        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?;
+        lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
+            "MAX_REPLY_PAYLOAD_BYTES",
+            limits.max_reply_payload_bytes(),
+        )?;
+    }
     Ok(PeerRows {
         pending_declares: lent::<{ caps::MAX_PENDING_DECLARES }>(
             "MAX_PENDING_DECLARES",
             limits.max_pending_declares(),
         )?,
-        replies,
-        reply_bytes,
+        replies: 0,
+        reply_bytes: 0,
         finals: if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
