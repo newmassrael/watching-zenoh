@@ -609,17 +609,31 @@ struct Queryable<C, P: Storage = Profile> {
     sink: C,
 }
 
-impl<C, P: Storage> Queryable<C, P> {
-    /// R311gb (Track 2) — the shared match SSOT for both the wire fire
-    /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
-    /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
-    /// does this queryable's pattern match `keyexpr` under the
-    /// `is_remote` locality predicate AND the query `target`? A pattern and a
-    /// keyexpr with no wildcard are compared as text; otherwise the bounded
-    /// pattern is split into a stack chunk view (no heap), and a pattern whose
-    /// canonical form exceeds [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS)
-    /// chunks (cannot happen for a pattern admitted at register time) is
-    /// treated as a non-match rather than a truncated match.
+/// A queryable's row as the matcher reads it: its id, its pattern and what [`KeyFacts`] read of
+/// the pattern when it was declared, the origins it answers and whether it declared itself
+/// complete.
+///
+/// [`KeyFacts`]: crate::keyexpr_match::KeyFacts
+#[derive(Clone, Copy)]
+pub(crate) struct QueryableRef<'a> {
+    /// Read only by the answer to an Interest, which only a heap build stages.
+    #[cfg(feature = "alloc")]
+    pub(crate) id: u64,
+    pub(crate) pattern: &'a str,
+    pub(crate) facts: crate::keyexpr_match::KeyFacts,
+    pub(crate) origin: crate::locality::Locality,
+    pub(crate) complete: bool,
+}
+
+impl QueryableRef<'_> {
+    /// R311gb (Track 2) — the shared match SSOT for every fire of a queryable table (the wire
+    /// fan-out, the no-heap borrowed fire): does this queryable's pattern match `keyexpr` under
+    /// the `is_remote` locality predicate AND the query `target`? A pattern and a keyexpr with no
+    /// wildcard are compared as text; otherwise the bounded pattern is split into a stack chunk
+    /// view (no heap), and a pattern whose canonical form exceeds
+    /// [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS) chunks (cannot happen for
+    /// a pattern admitted at register time) is treated as a non-match rather than a truncated
+    /// match.
     ///
     /// The three conjuncts mirror zenoh's local `handle_query` filter
     /// (`zenoh/src/api/session.rs:2427-2431`): locality
@@ -629,7 +643,7 @@ impl<C, P: Storage> Queryable<C, P> {
     /// default (and for `All`); only a `Some(AllComplete)` query is filtered
     /// down to the complete queryables — matching zenoh, where BestMatching /
     /// All reach every locally-matching queryable regardless of completeness.
-    fn matches(
+    fn reaches(
         &self,
         keyexpr: &str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -637,37 +651,260 @@ impl<C, P: Storage> Queryable<C, P> {
         target: Option<QueryTarget>,
     ) -> bool {
         let allowed = if is_remote {
-            self.allowed_origin.allows_remote()
+            self.origin.allows_remote()
         } else {
-            self.allowed_origin.allows_local()
+            self.origin.allows_local()
         };
         if !allowed {
             return false;
         }
         // zenoh session.rs:2430 — `queryable.complete || target != AllComplete`.
-        // An `AllComplete` query reaches ONLY queryables that declared complete;
-        // every other target (All, or the absent BestMatching default) reaches
-        // all matching queryables, so `complete` is consulted iff the query
-        // demands authoritative (complete) responders.
         if !self.complete && target == Some(QueryTarget::AllComplete) {
             return false;
         }
-        // A query reaches a queryable iff their keyexprs INTERSECT (zenoh query
-        // routing). The query SELECTOR may itself carry wildcards — e.g. a
-        // replication aligner's initial-alignment `@zid/*/<fp>/aligner`
-        // Discovery, which must reach a queryable declared on the concrete
-        // `@zid/<zid>/<fp>/aligner` — so the inbound `keyexpr` cannot be treated
-        // as a concrete literal (a one-sided `keyexpr_matches(pattern, query)`
-        // would match the query's `*` character-literally and miss it). Intersect the
-        // query with this queryable's pattern, the same question
-        // `declare::declared_intersects` asks; the query is split only when a
-        // wildcard makes the walk necessary. For a concrete query this is
-        // identical to the prior pattern match.
+        // A query reaches a queryable iff their keyexprs INTERSECT (zenoh query routing): the
+        // query selector may carry wildcards itself, so it cannot be read as a literal key.
         crate::keyexpr_match::keyexpr_intersects_text_with(
-            &self.pattern,
-            self.pattern_facts,
+            self.pattern,
+            self.facts,
             keyexpr,
             keyexpr_facts,
+        )
+    }
+}
+
+/// The rows of a table of the session's queryables, as a query is matched against them: the
+/// registry's list and the table set's slot map both implement it, so both deliver through the
+/// same functions, each compiled for its own rows (`docs/c-abi-l3-tables.md`).
+pub(crate) trait QueryableRows {
+    /// What a matched queryable is asked through.
+    type Sink;
+
+    /// Hand `f` each row with its sink, in the table's order.
+    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut Self::Sink)>(&mut self, f: F);
+
+    /// Whether `f` holds for any row, asked in the table's order until it does.
+    #[cfg(feature = "storage-profile")]
+    fn any_row<F: FnMut(QueryableRef<'_>) -> bool>(&self, f: F) -> bool;
+}
+
+impl<C, P: Storage> QueryableRows for BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P> {
+    type Sink = C;
+
+    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut C)>(&mut self, mut f: F) {
+        for queryable in self.iter_mut() {
+            let row = QueryableRef {
+                #[cfg(feature = "alloc")]
+                id: queryable.id.as_u64(),
+                pattern: &queryable.pattern,
+                facts: queryable.pattern_facts,
+                origin: queryable.allowed_origin,
+                complete: queryable.complete,
+            };
+            f(row, &mut queryable.sink);
+        }
+    }
+
+    #[cfg(feature = "storage-profile")]
+    fn any_row<F: FnMut(QueryableRef<'_>) -> bool>(&self, mut f: F) -> bool {
+        self.iter().any(|queryable| {
+            f(QueryableRef {
+                #[cfg(feature = "alloc")]
+                id: queryable.id.as_u64(),
+                pattern: &queryable.pattern,
+                facts: queryable.pattern_facts,
+                origin: queryable.allowed_origin,
+                complete: queryable.complete,
+            })
+        })
+    }
+}
+
+/// Hand `deliver` the sink of each row of `rows` a query on `keyexpr` reaches
+/// ([`QueryableRef::reaches`]), in the table's order: how many.
+pub(crate) fn fire_queryables<R: QueryableRows, D: FnMut(&mut R::Sink)>(
+    rows: &mut R,
+    keyexpr: &str,
+    keyexpr_facts: crate::keyexpr_match::KeyFacts,
+    is_remote: bool,
+    target: Option<QueryTarget>,
+    mut deliver: D,
+) -> usize {
+    let mut fired: usize = 0;
+    rows.each_row_mut(|row, sink| {
+        if row.reaches(keyexpr, keyexpr_facts, is_remote, target) {
+            deliver(sink);
+            fired = fired.saturating_add(1);
+        }
+    });
+    fired
+}
+
+/// Whether a row of `rows` a query of the session itself on `query_keyexpr` would reach: the
+/// session-local half of a querier's matching verdict ([`QueryableRegistry::has_local_matching`]
+/// says which rows count).
+#[cfg(feature = "storage-profile")]
+pub(crate) fn any_local_queryable<R: QueryableRows>(
+    rows: &R,
+    query_keyexpr: &str,
+    require_complete: bool,
+) -> bool {
+    // On the fixed backing a keyexpr or a pattern deeper than the chunk
+    // bound matches nothing — the same conservative answer the sibling
+    // registries give an over-deep target; the matcher applies it.
+    rows.any_row(|queryable| {
+        if !queryable.origin.allows_local() {
+            return false;
+        }
+        if require_complete && !queryable.complete {
+            return false;
+        }
+        if require_complete {
+            #[cfg(feature = "keyexpr-includes")]
+            {
+                crate::keyexpr_match::keyexpr_includes(queryable.pattern, query_keyexpr)
+            }
+            // Unreachable in any build that can ask: `session-matching`
+            // forwards `keyexpr-includes`, and only a matching poll
+            // passes `require_complete`. See the sibling note in
+            // `declare::queryable::declared_answers`.
+            #[cfg(not(feature = "keyexpr-includes"))]
+            {
+                false
+            }
+        } else {
+            crate::keyexpr_match::keyexpr_intersects(queryable.pattern, query_keyexpr)
+        }
+    })
+}
+
+/// Stage into `staged` the interest-response chain a peer's QUERYABLE `Interest` is owed out of
+/// `rows` ([`QueryableRegistry::respond_to_queryable_interest`] says what it is): how many
+/// `Declared` items.
+#[cfg(feature = "alloc")]
+pub(crate) fn stage_queryable_interest<R: QueryableRows>(
+    rows: &R,
+    interest_id: u64,
+    pattern: Option<&str>,
+    aggregate: bool,
+    staged: &mut Vec<QueryableInterestReply>,
+) -> usize {
+    let interest_key = pattern.unwrap_or("**");
+    let mut declared = 0usize;
+    let mut merged: Option<(u64, bool)> = None;
+    rows.any_row(|queryable| {
+        if !queryable.origin.allows_remote()
+            || !crate::keyexpr_match::keyexpr_intersects(queryable.pattern, interest_key)
+        {
+            return false;
+        }
+        if aggregate {
+            merged = Some(match merged {
+                Some((id, complete)) => (id, complete || queryable.complete),
+                None => (queryable.id, queryable.complete),
+            });
+        } else {
+            staged.push(QueryableInterestReply::Declared {
+                interest_id,
+                queryable_id: queryable.id,
+                keyexpr: String::from(queryable.pattern),
+                complete: queryable.complete,
+            });
+            declared += 1;
+        }
+        false
+    });
+    if let Some((queryable_id, complete)) = merged {
+        staged.push(QueryableInterestReply::Declared {
+            interest_id,
+            queryable_id,
+            keyexpr: String::from(interest_key),
+            complete,
+        });
+        declared += 1;
+    }
+    staged.push(QueryableInterestReply::Final { interest_id });
+    declared
+}
+
+/// The session's own queryables, as the paths that ask them and answer for them read them: the
+/// session-local half of a querier's matching verdict, the answer to a peer's queryable Interest,
+/// and the sinks a query on a key reaches. Implemented by the queryable registry
+/// ([`QueryableRegistry`]) and by the session's one table set
+/// ([`crate::session_tables::SessionTables`]), over the same functions, so the fan-out a query
+/// is delivered by serves either.
+pub trait LocalQueryables {
+    /// What a matched queryable is asked through.
+    type Sink;
+
+    /// Whether a queryable a query of the session itself on `query_keyexpr` would reach is held,
+    /// under the querier's `require_complete`
+    /// ([`QueryableRegistry::has_local_matching`] says which count).
+    #[cfg(feature = "storage-profile")]
+    fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool;
+
+    /// Stage the interest-response chain a peer's QUERYABLE `Interest` is owed
+    /// ([`QueryableRegistry::respond_to_queryable_interest`]): how many `Declared` items.
+    #[cfg(feature = "alloc")]
+    fn respond_to_queryable_interest(
+        &self,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        staged: &mut Vec<QueryableInterestReply>,
+    ) -> usize;
+
+    /// Hand `deliver` the sink of each queryable a query on `keyexpr` (whose [`KeyFacts`] are
+    /// `keyexpr_facts`) reaches from a peer (`is_remote`) or the session itself, under the
+    /// query's `target`, in the table's order: how many.
+    ///
+    /// [`KeyFacts`]: crate::keyexpr_match::KeyFacts
+    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+        &mut self,
+        keyexpr: &str,
+        keyexpr_facts: crate::keyexpr_match::KeyFacts,
+        is_remote: bool,
+        target: Option<QueryTarget>,
+        deliver: D,
+    ) -> usize
+    where
+        Self: Sized;
+}
+
+impl<C, P: Storage> LocalQueryables for QueryableRegistry<C, P> {
+    type Sink = C;
+
+    #[cfg(feature = "storage-profile")]
+    fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
+        any_local_queryable(&self.queryables, query_keyexpr, require_complete)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn respond_to_queryable_interest(
+        &self,
+        interest_id: u64,
+        pattern: Option<&str>,
+        aggregate: bool,
+        staged: &mut Vec<QueryableInterestReply>,
+    ) -> usize {
+        stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
+    }
+
+    fn fire_matching<D: FnMut(&mut C)>(
+        &mut self,
+        keyexpr: &str,
+        keyexpr_facts: crate::keyexpr_match::KeyFacts,
+        is_remote: bool,
+        target: Option<QueryTarget>,
+        deliver: D,
+    ) -> usize {
+        fire_queryables(
+            &mut self.queryables,
+            keyexpr,
+            keyexpr_facts,
+            is_remote,
+            target,
+            deliver,
         )
     }
 }
@@ -2568,33 +2805,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     /// reports `true` for the dispatch would also fire.
     #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
-        // On the fixed backing a keyexpr or a pattern deeper than the chunk
-        // bound matches nothing — the same conservative answer the sibling
-        // registries give an over-deep target; the matcher applies it.
-        self.queryables.iter().any(|queryable| {
-            if !queryable.allowed_origin.allows_local() {
-                return false;
-            }
-            if require_complete && !queryable.complete {
-                return false;
-            }
-            if require_complete {
-                #[cfg(feature = "keyexpr-includes")]
-                {
-                    crate::keyexpr_match::keyexpr_includes(&queryable.pattern, query_keyexpr)
-                }
-                // Unreachable in any build that can ask: `session-matching`
-                // forwards `keyexpr-includes`, and only a matching poll
-                // passes `require_complete`. See the sibling note in
-                // `declare::queryable::declared_answers`.
-                #[cfg(not(feature = "keyexpr-includes"))]
-                {
-                    false
-                }
-            } else {
-                crate::keyexpr_match::keyexpr_intersects(&queryable.pattern, query_keyexpr)
-            }
-        })
+        any_local_queryable(&self.queryables, query_keyexpr, require_complete)
     }
 
     /// Stage the interest-response chain a peer's QUERYABLE `Interest` is owed:
@@ -2633,42 +2844,7 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
         aggregate: bool,
         staged: &mut Vec<QueryableInterestReply>,
     ) -> usize {
-        let interest_key = pattern.unwrap_or("**");
-        let reaches = |queryable_pattern: &str| -> bool {
-            crate::keyexpr_match::keyexpr_intersects(queryable_pattern, interest_key)
-        };
-        let mut declared = 0usize;
-        let mut merged: Option<(u64, bool)> = None;
-        for queryable in self.queryables.iter() {
-            if !queryable.allowed_origin.allows_remote() || !reaches(&queryable.pattern) {
-                continue;
-            }
-            if aggregate {
-                merged = Some(match merged {
-                    Some((id, complete)) => (id, complete || queryable.complete),
-                    None => (queryable.id.as_u64(), queryable.complete),
-                });
-            } else {
-                staged.push(QueryableInterestReply::Declared {
-                    interest_id,
-                    queryable_id: queryable.id.as_u64(),
-                    keyexpr: String::from(&*queryable.pattern),
-                    complete: queryable.complete,
-                });
-                declared += 1;
-            }
-        }
-        if let Some((queryable_id, complete)) = merged {
-            staged.push(QueryableInterestReply::Declared {
-                interest_id,
-                queryable_id,
-                keyexpr: String::from(interest_key),
-                complete,
-            });
-            declared += 1;
-        }
-        staged.push(QueryableInterestReply::Final { interest_id });
-        declared
+        stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
     }
 }
 
@@ -2701,16 +2877,16 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         is_remote: bool,
         target: Option<QueryTarget>,
     ) -> usize {
-        let mut fired: usize = 0;
         let keyexpr = view.keyexpr();
         let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
-        for queryable in self.queryables.iter_mut() {
-            if queryable.matches(keyexpr, keyexpr_facts, is_remote, target) {
-                queryable.sink.handle(view, reply_out);
-                fired = fired.saturating_add(1);
-            }
-        }
-        fired
+        fire_queryables(
+            &mut self.queryables,
+            keyexpr,
+            keyexpr_facts,
+            is_remote,
+            target,
+            |sink| sink.handle(view, reply_out),
+        )
     }
 }
 
@@ -3295,12 +3471,10 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         }
     }
 
-    /// The fan-out itself, over a query already projected into what a
-    /// queryable is shown ([`QueryProjection`]): the owned query's projection
-    /// ([`Self::fire_matching_queryables`]) and the one a Request read where its
-    /// frame lies makes (`dispatch_request_in_place`) are fired through this
-    /// one body, so the match, the responder and the view a handler gets cannot
-    /// differ between the two.
+    /// [`fire_query`] for a query this registry's own session asks (`is_remote` false), or one a
+    /// peer asks, which a query longer than the session allows reaches no queryable of: it is
+    /// still a query that was routed (the caller owes its final, as for one that matched
+    /// nobody), so the asker's query ends with no reply and does not wait out its timeout.
     fn fire_projection<S: Storage>(
         &mut self,
         envelope: QueryEnvelope,
@@ -3309,41 +3483,11 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         replies: &mut ReplyStage<S>,
         is_remote: bool,
     ) -> usize {
-        let QueryEnvelope { rid, target, qos } = envelope;
-        // Who the link proved the sender to be (decision D12), read once for every queryable.
-        let requester = self.requester;
-        let QueryProjection {
-            parameters: parameters_view,
-            attachment: attachment_view,
-            source_info: source_info_view,
-            #[cfg(feature = "alloc")]
-            plain_value,
-            #[cfg(feature = "alloc")]
-                shared_value: unswapped_value,
-            #[cfg(feature = "alloc")]
-            attachment_shared,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack,
-        } = projection;
-        #[cfg(all(feature = "alloc", feature = "query-value"))]
-        let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
-            Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
-            None => plain_value,
-        };
-        #[cfg(all(feature = "alloc", not(feature = "query-value")))]
-        let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
-            let _ = plain_value;
-            None
-        };
-        // A query from a peer that is longer than the session allows runs nowhere. It is still a
-        // query that was routed (the caller owes its final, as for one that matched nobody), so
-        // the asker's query ends with no reply and does not wait out its timeout. The one body
-        // both receive paths fire through is the one place the bound is read.
         let (max_parameters, max_attachment) = self.query_size_bounds();
         if is_remote
             && request_past_bounds(
-                parameters_view,
-                attachment_view,
+                projection.parameters,
+                projection.attachment,
                 max_parameters,
                 max_attachment,
             )
@@ -3351,105 +3495,11 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             self.oversize_refused = self.oversize_refused.saturating_add(1);
             return 0;
         }
-        // R311y834 — resolved ONCE per inbound query beside the other
-        // projections, because it is a property of the query rather than of any
-        // matched queryable.
-        let accept_mode = ReplyKeyExpr::from_parameter_bytes(parameters_view);
-        let mut matched = 0;
-        // The query's key is read once for every queryable it is matched against.
-        let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
-        for queryable in self.queryables.iter_mut() {
-            // R311gb (Track 2) — shared match SSOT with the no-heap
-            // `dispatch_borrowed` path: locality predicate + target
-            // completeness filter + bounded pattern split happen in
-            // `Queryable::matches`.
-            if queryable.matches(keyexpr, keyexpr_facts, is_remote, target) {
-                matched += 1;
-                // R311y834 — the acceptance mode comes from the QUERY's own
-                // selector parameters, the same token the requester's gate
-                // reads (R311y833). `parameters_view` is already the
-                // `query-selector-parameters`-gated projection, so a build that
-                // cannot see parameters reads `MatchingQuery` — the guarantee,
-                // never the opt-out — which is the safe direction.
-                let mut responder =
-                    QueryResponder::over(rid, keyexpr, keyexpr_facts, accept_mode, qos, replies);
-                // R311gb-3b-cleanup — dispatch through the QuerySink seam
-                // with no intermediate wrapper: `QueryResponder` impls
-                // `ReplyOut` directly, and the inbound view is a
-                // `BorrowedQuery` (the seam's own loose `QueryView`). Both
-                // unsize at the call (`handle` names the trait objects),
-                // so there is no projection and no third sample/query
-                // struct. The borrow of `replies` lives in `responder`
-                // and ends when it drops at the end of this block, so the
-                // loop can re-borrow for the next match.
-                let query_view = BorrowedQuery {
-                    keyexpr,
-                    parameters: parameters_view,
-                    attachment: attachment_view,
-                    source_info: source_info_view.as_ref(),
-                    #[cfg(feature = "alloc")]
-                    payload: value_view.as_ref().map(|(_, p)| *p),
-                    #[cfg(not(feature = "alloc"))]
-                    payload: None,
-                    #[cfg(feature = "alloc")]
-                    encoding: value_view.as_ref().map(|(e, _)| e),
-                    rid,
-                    // R311li — loopback origin marker (pico _is_local
-                    // parity); the deferred Session-tier sink routes
-                    // its replies by this.
-                    is_local: !is_remote,
-                    qos,
-                };
-                // R3061 -- a value held as a shareable buffer is lent as one, and so is
-                // an attachment. A build with no heap holds neither.
-                #[cfg(feature = "alloc")]
-                {
-                    let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
-                    #[cfg(feature = "pubsub-ts-stack")]
-                    let carries_stack = ts_stack.is_some();
-                    #[cfg(not(feature = "pubsub-ts-stack"))]
-                    let carries_stack = false;
-                    if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
-                        let shared = crate::query_sink::SharedQuery {
-                            base: query_view,
-                            value: lent_value,
-                            attachment: attachment_shared.as_ref(),
-                            #[cfg(feature = "pubsub-ts-stack")]
-                            ts_stack,
-                        };
-                        crate::query_sink::QuerySinkOf::handle_typed(
-                            &mut queryable.sink,
-                            &crate::query_sink::ProvenQuery {
-                                inner: &shared,
-                                peer: requester,
-                            },
-                            &mut responder,
-                        )
-                    } else {
-                        crate::query_sink::QuerySinkOf::handle_typed(
-                            &mut queryable.sink,
-                            &crate::query_sink::ProvenQuery {
-                                inner: &query_view,
-                                peer: requester,
-                            },
-                            &mut responder,
-                        )
-                    }
-                }
-                // The view and the responder are handed over as their own types: a sink of one
-                // closed type is called without a vtable (`ResponderSink`).
-                #[cfg(not(feature = "alloc"))]
-                crate::query_sink::QuerySinkOf::handle_typed(
-                    &mut queryable.sink,
-                    &crate::query_sink::ProvenQuery {
-                        inner: &query_view,
-                        peer: requester,
-                    },
-                    &mut responder,
-                )
-            }
-        }
-        matched
+        // Who the link proved the sender to be (decision D12).
+        let requester = self.requester;
+        fire_query(
+            self, requester, envelope, keyexpr, projection, replies, is_remote,
+        )
     }
 
     /// R121j-5c — drain a `Vec<NetworkMessage>` (typically the
@@ -3604,6 +3654,140 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             _ => {}
         }
     }
+}
+
+/// The fan-out itself, over a query already projected into what a queryable is shown
+/// ([`QueryProjection`]): the owned query's projection and the one a Request read where its frame
+/// lies makes are fired through this one body, over the queryables of either table, so the match,
+/// the responder and the view a handler gets cannot differ between them. `requester` is who the
+/// link proved the asker to be (decision D12), `None` for the session's own query.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+fn fire_query<L: LocalQueryables, S: Storage>(
+    queryables: &mut L,
+    requester: Option<[u8; 16]>,
+    envelope: QueryEnvelope,
+    keyexpr: &str,
+    projection: QueryProjection<'_>,
+    replies: &mut ReplyStage<S>,
+    is_remote: bool,
+) -> usize
+where
+    L::Sink: ResponderSink,
+{
+    let QueryEnvelope { rid, target, qos } = envelope;
+    let QueryProjection {
+        parameters: parameters_view,
+        attachment: attachment_view,
+        source_info: source_info_view,
+        #[cfg(feature = "alloc")]
+        plain_value,
+        #[cfg(feature = "alloc")]
+            shared_value: unswapped_value,
+        #[cfg(feature = "alloc")]
+        attachment_shared,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack,
+    } = projection;
+    #[cfg(all(feature = "alloc", feature = "query-value"))]
+    let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
+        Some((encoding, bytes)) => Some((encoding.clone(), bytes.as_slice())),
+        None => plain_value,
+    };
+    #[cfg(all(feature = "alloc", not(feature = "query-value")))]
+    let value_view: Option<(crate::sample::EncodingHint, &[u8])> = {
+        let _ = plain_value;
+        None
+    };
+    // R311y834 — resolved ONCE per inbound query beside the other
+    // projections, because it is a property of the query rather than of any
+    // matched queryable.
+    let accept_mode = ReplyKeyExpr::from_parameter_bytes(parameters_view);
+    // The query's key is read once for every queryable it is matched against.
+    let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
+    queryables.fire_matching(keyexpr, keyexpr_facts, is_remote, target, |sink| {
+        // R311y834 — the acceptance mode comes from the QUERY's own
+        // selector parameters, the same token the requester's gate
+        // reads (R311y833). `parameters_view` is already the
+        // `query-selector-parameters`-gated projection, so a build that
+        // cannot see parameters reads `MatchingQuery` — the guarantee,
+        // never the opt-out — which is the safe direction.
+        let mut responder =
+            QueryResponder::over(rid, keyexpr, keyexpr_facts, accept_mode, qos, replies);
+        // R311gb-3b-cleanup — dispatch through the QuerySink seam
+        // with no intermediate wrapper: `QueryResponder` impls
+        // `ReplyOut` directly, and the inbound view is a
+        // `BorrowedQuery` (the seam's own loose `QueryView`). Both
+        // unsize at the call (`handle` names the trait objects),
+        // so there is no projection and no third sample/query
+        // struct. The borrow of `replies` lives in `responder`
+        // and ends when it drops at the end of this block, so the
+        // loop can re-borrow for the next match.
+        let query_view = BorrowedQuery {
+            keyexpr,
+            parameters: parameters_view,
+            attachment: attachment_view,
+            source_info: source_info_view.as_ref(),
+            #[cfg(feature = "alloc")]
+            payload: value_view.as_ref().map(|(_, p)| *p),
+            #[cfg(not(feature = "alloc"))]
+            payload: None,
+            #[cfg(feature = "alloc")]
+            encoding: value_view.as_ref().map(|(e, _)| e),
+            rid,
+            // R311li — loopback origin marker (pico _is_local
+            // parity); the deferred Session-tier sink routes
+            // its replies by this.
+            is_local: !is_remote,
+            qos,
+        };
+        // R3061 -- a value held as a shareable buffer is lent as one, and so is
+        // an attachment. A build with no heap holds neither.
+        #[cfg(feature = "alloc")]
+        {
+            let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
+            #[cfg(feature = "pubsub-ts-stack")]
+            let carries_stack = ts_stack.is_some();
+            #[cfg(not(feature = "pubsub-ts-stack"))]
+            let carries_stack = false;
+            if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
+                let shared = crate::query_sink::SharedQuery {
+                    base: query_view,
+                    value: lent_value,
+                    attachment: attachment_shared.as_ref(),
+                    #[cfg(feature = "pubsub-ts-stack")]
+                    ts_stack,
+                };
+                crate::query_sink::QuerySinkOf::handle_typed(
+                    sink,
+                    &crate::query_sink::ProvenQuery {
+                        inner: &shared,
+                        peer: requester,
+                    },
+                    &mut responder,
+                )
+            } else {
+                crate::query_sink::QuerySinkOf::handle_typed(
+                    sink,
+                    &crate::query_sink::ProvenQuery {
+                        inner: &query_view,
+                        peer: requester,
+                    },
+                    &mut responder,
+                )
+            }
+        }
+        // The view and the responder are handed over as their own types: a sink of one
+        // closed type is called without a vtable (`ResponderSink`).
+        #[cfg(not(feature = "alloc"))]
+        crate::query_sink::QuerySinkOf::handle_typed(
+            sink,
+            &crate::query_sink::ProvenQuery {
+                inner: &query_view,
+                peer: requester,
+            },
+            &mut responder,
+        )
+    })
 }
 
 /// R311gb-3b — AP / `alloc`-profile convenience constructors. The

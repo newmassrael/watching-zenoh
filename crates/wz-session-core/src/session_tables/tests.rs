@@ -1060,3 +1060,44 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
         None
     );
 }
+
+/// The table set's queryables are matched by the functions the queryable registry's are: a remote
+/// query reaches the queryables that answer peers, in declaration order; an `AllComplete` query
+/// only the complete one; a session-local one only those that answer the session; and the
+/// session-local half of a querier's verdict reads the same rows.
+#[test]
+fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
+    use crate::query::LocalQueryables;
+    use crate::query_mode::QueryTarget;
+    let mut tables = Tables::new();
+    for (key, origin, complete, callback) in [
+        ("q/**", Locality::Any, false, 1),
+        ("q/a", Locality::Remote, true, 2),
+        ("q/a", Locality::SessionLocal, true, 3),
+        ("other", Locality::Any, true, 4),
+    ] {
+        tables
+            .declare_queryable(key, origin, complete, KeyForm::default(), callback)
+            .unwrap();
+    }
+    let fire = |tables: &mut Tables, remote: bool, target: Option<QueryTarget>| {
+        let mut asked = Vec::new();
+        let fired = tables.fire_matching(
+            "q/a",
+            KeyFacts::of("q/a"),
+            remote,
+            target,
+            |callback: &mut u32| asked.push(*callback),
+        );
+        assert_eq!(fired, asked.len());
+        asked
+    };
+    assert_eq!(fire(&mut tables, true, None), [1, 2]);
+    assert_eq!(fire(&mut tables, true, Some(QueryTarget::AllComplete)), [2]);
+    assert_eq!(fire(&mut tables, false, None), [1, 3]);
+    #[cfg(feature = "storage-profile")]
+    {
+        assert!(tables.has_local_matching("q/a", false));
+        assert!(!tables.has_local_matching("elsewhere", false));
+    }
+}
