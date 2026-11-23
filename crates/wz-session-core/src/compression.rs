@@ -48,32 +48,59 @@ pub const BATCH_HEADER_BYTES: usize = 1;
 
 /// Wrap a serialized batch payload for a compression-negotiated session: prepend
 /// the 1-byte `BatchHeader` and lz4-compress the payload, keeping the compressed
-/// form ONLY when it is strictly smaller than the original (zenoh
-/// `batch.rs:347-351` — incompressible data ships raw with the COMPRESSION bit
-/// clear, never growing). The returned `[BatchHeader][payload]` is what the link
-/// layer then length-frames.
+/// form ONLY when it is strictly smaller than the original and within the batch's
+/// bound. Otherwise the original payload ships uncompressed, the COMPRESSION bit
+/// clear, which is what zenoh 1.10.2 does: it compresses into a support buffer and
+/// keeps the original batch with the bit cleared when the result is not smaller
+/// (`io/zenoh-transport/src/common/batch.rs:339` writes nothing on a failed
+/// compression, `:346-354` compares and falls back). The returned
+/// `[BatchHeader][payload]` is what the link layer then length-frames.
 ///
 /// The header and the payload are written by the batch's document
 /// (`sources/codecs/compressed_batch.scxml`); the LZ4 block is the transform this
-/// function owns. Panics on a payload past the batch size, which a batch of this
-/// session never is.
+/// function owns. Every batch is answered, so each sender (a session's send, a
+/// multicast group's datagram, its beacon) takes this one fallback.
 pub fn compress_batch(payload: &[u8]) -> Vec<u8> {
-    let max = lz4_flex::block::get_maximum_output_size(payload.len());
-    let mut scratch = vec![0u8; max];
-    let n = lz4_flex::block::compress_into(payload, &mut scratch).unwrap_or(0);
-    // Incompressible (or the compressor declined): ship raw, the flag clear.
-    let (header, body) = if n > 0 && n < payload.len() {
-        (BATCH_HEADER_COMPRESSION, &scratch[..n])
-    } else {
-        (0x00, payload)
-    };
+    match compressed(payload) {
+        Some(batch) => batch,
+        None => uncompressed(payload),
+    }
+}
+
+/// The batch of `payload` lz4-compressed, when that is strictly smaller than
+/// `payload` and within the batch's bound; `None` when the compressor declines or
+/// the compressed form is not smaller.
+fn compressed(payload: &[u8]) -> Option<Vec<u8>> {
+    let mut scratch = vec![0u8; lz4_flex::block::get_maximum_output_size(payload.len())];
+    let n = lz4_flex::block::compress_into(payload, &mut scratch).ok()?;
+    let body = scratch
+        .get(..n)
+        .filter(|body| !body.is_empty() && body.len() < payload.len())?;
+    encoded(BATCH_HEADER_COMPRESSION, body)
+}
+
+/// The batch of `payload` as it is, the COMPRESSION bit clear. A payload past the
+/// document's bound is still the header byte followed by the payload: the
+/// uncompressed batch is the payload with no transform, whatever its length.
+fn uncompressed(payload: &[u8]) -> Vec<u8> {
+    encoded(0x00, payload).unwrap_or_else(|| {
+        let mut out = Vec::with_capacity(payload.len().saturating_add(BATCH_HEADER_BYTES));
+        out.push(0x00);
+        out.extend_from_slice(payload);
+        out
+    })
+}
+
+/// The batch `[header][body]` as its document writes it; `None` for a body past
+/// the document's bound.
+fn encoded(header: u8, body: &[u8]) -> Option<Vec<u8>> {
     let batch = CompressedBatchParts {
         header,
-        payload: Bounded::new(body).expect("a batch's payload is within its batch size"),
+        payload: Bounded::new(body)?,
     };
     let mut out = Vec::with_capacity(CompressedBatchWire::measure(&batch).len());
     let Ok(()) = CompressedBatchWire::encode_source(&batch, &mut VecSink::new(&mut out));
-    out
+    Some(out)
 }
 
 /// Un-wrap a `[BatchHeader][payload]` batch from a compression-negotiated
@@ -148,6 +175,35 @@ mod tests {
             assert_eq!(decompress_batch(&wire, 65536), Some(payload));
         }
         assert_eq!(compressed, 1, "one batch of the three is kept compressed");
+    }
+
+    /// A payload lz4 would grow ships uncompressed, the bit clear, past the
+    /// document's bound as within it; a compressible one past the bound is kept
+    /// compressed where its compressed form fits.
+    #[test]
+    fn a_payload_compression_would_grow_ships_uncompressed() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<u8> = (0..70_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let wire = compress_batch(&noise);
+        assert_eq!(wire[0], 0x00, "the original batch, the bit clear");
+        assert_eq!(&wire[1..], &noise[..], "its payload as it is");
+
+        let small: Vec<u8> = (0u8..=63).collect();
+        let wire = compress_batch(&small);
+        assert_eq!(wire[0], 0x00);
+        assert_eq!(decompress_batch(&wire, 65536), Some(small));
+
+        let zeros = vec![0u8; 70_000];
+        let wire = compress_batch(&zeros);
+        assert_eq!(wire[0] & BATCH_HEADER_COMPRESSION, BATCH_HEADER_COMPRESSION);
+        assert_eq!(decompress_batch(&wire, 70_000), Some(zeros));
     }
 
     /// An empty wire (no header byte) is rejected as malformed.

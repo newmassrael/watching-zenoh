@@ -1854,8 +1854,6 @@ pub mod extqos;
 // `decompress_batch` wrap the `[BatchHeader][payload]` the link layer length-
 // frames, applied at the `send_wire` / `dispatch_link_event` seams.
 #[cfg(feature = "transport-compression")]
-// Totality debt TD-113 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::expect_used)]
 pub mod compression;
 
 /// R311y9 — per-session transport byte/message counters (`transport-stats`) —
