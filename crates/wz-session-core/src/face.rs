@@ -165,7 +165,7 @@ impl FaceSnapshot {
         let whatami = actions.peer_whatami_wire()?;
         let mut zid = [0u8; 16];
         // The first sixteen bytes at most, as many as the peer's zid has.
-        for (into, byte) in zid.iter_mut().zip(peer) {
+        for (into, byte) in zid.iter_mut().zip(&peer) {
             *into = *byte;
         }
         let subject = actions.link_subject().cloned();
