@@ -818,6 +818,74 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert!(!tables.has_local_matching("a/c"));
 }
 
+/// The table set is the session's own id space: a peer's `M=0` key that names a key expression
+/// the session declared is read from the set's own table and reaches the subscriber on that key,
+/// with no space installed on the peer's side, and one that names an id the session never declared
+/// reaches nothing. The CONTROL is the peer's side alone, which holds no own space.
+#[cfg(all(
+    feature = "alloc",
+    feature = "storage-profile",
+    feature = "codec-push",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+#[test]
+fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
+    use crate::network_message::NetworkMessage;
+    use crate::pubsub::SubscriberPeer;
+    use crate::reliability::Reliability;
+    use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
+
+    let push_naming_ours = |id: ExprId| {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .unwrap()
+    };
+    let mut tables = SessionTables::<Sinks>::new();
+    let declared = tables.declare_keyexpr("ours/temp").unwrap();
+    let subscriber = tables
+        .declare_subscriber(
+            "ours/temp",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut peer = SubscriberPeer::<crate::bounded::Heap>::default();
+    assert!(
+        !peer.mapping_spaces().has_own(),
+        "CONTROL: the peer's side holds no own space"
+    );
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "read from the set's own table"
+    );
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id + 1))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        heard(&tables, subscriber.handle),
+        1,
+        "an id never declared reaches nothing"
+    );
+}
+
 /// How many samples the subscriber `handle` names was handed.
 fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
     tables.subscribers().get(handle).unwrap().callback().0

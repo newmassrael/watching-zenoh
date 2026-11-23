@@ -936,7 +936,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             feature = "codec-response",
             feature = "codec-response-final",
         ))]
-        let peer_table = peers.subscribers.mapping_spaces();
+        let peer_table = peers
+            .subscribers
+            .mapping_spaces_over(self.subscribers.own_space());
 
         #[cfg(feature = "query-queryable")]
         self.queryables.dispatch_iteration_event(
@@ -1108,7 +1110,9 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
     ) -> usize {
         self.switchboard.dispatch_iteration_event(
             event,
-            peers.subscribers.mapping_spaces(),
+            peers
+                .subscribers
+                .mapping_spaces_over(self.subscribers.own_space()),
             injector,
         )
     }

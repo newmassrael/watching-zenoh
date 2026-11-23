@@ -176,6 +176,16 @@ pub trait Storage {
     ) -> crate::wireexpr_resolve::PeerSpace<'_>
     where
         Self: Sized;
+
+    /// The session's table of the key expressions it declared, of this policy, as the own id
+    /// space a [`MappingSpaces`](crate::wireexpr_resolve::MappingSpaces) reads: what an `M=0`
+    /// key of a peer's message names, read where the table keeps it.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_>
+    where
+        Self: Sized;
 }
 
 /// The counter of a table's changes; see [`Storage::Epoch`].
@@ -405,6 +415,13 @@ impl Storage for Heap {
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_map(aliases.as_map())
     }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_heap_keyexprs(keyexprs)
+    }
 }
 
 /// The static policy: a capacity fixed in the type and no allocator. A push past
@@ -429,6 +446,13 @@ impl Storage for Static {
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_table(aliases)
+    }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_static_keyexprs(keyexprs)
     }
 }
 
@@ -478,6 +502,13 @@ impl Storage for Lent {
         aliases: &crate::id_map::PeerAliases<Self>,
     ) -> crate::wireexpr_resolve::PeerSpace<'_> {
         crate::wireexpr_resolve::PeerSpace::of_lent_table(aliases)
+    }
+
+    #[cfg(feature = "storage-profile")]
+    fn own_space(
+        keyexprs: &crate::session_tables::Keyexprs<Self>,
+    ) -> crate::wireexpr_resolve::OwnSpace<'_> {
+        crate::wireexpr_resolve::OwnSpace::of_lent_keyexprs(keyexprs)
     }
 }
 

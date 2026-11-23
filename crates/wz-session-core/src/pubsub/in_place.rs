@@ -10,7 +10,7 @@
 //! instead of projecting it into
 //! a boxed owned message. This module is the subscriber side of that: the
 //! keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_view`]), the payload, attachment and every
+//! ([`resolve_wireexpr_view_over`]), the payload, attachment and every
 //! extension are read where they lie, and the subscribers are handed a
 //! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
@@ -48,7 +48,9 @@ use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
 use crate::sink::{SampleSink, SampleView};
-use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound};
+use crate::wireexpr_resolve::{
+    resolve_plain_parts_over, resolve_wireexpr_view_over, KeyexprBuf, KeyexprPastBound,
+};
 
 /// The sample a Push read in place is delivered as: every field a range of the
 /// frame or a value read off it, valid for the delivery call.
@@ -304,7 +306,14 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // the growable one.
         let spaces = self.mapping_spaces();
         let mut composed = KeyexprBuf::new();
-        let keyexpr = match resolve_wireexpr_view(&push.keyexpr.body, spaces, &mut composed) {
+        // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
+        // of it into `composed` before the delivery writes it.
+        let keyexpr = match resolve_wireexpr_view_over(
+            &push.keyexpr.body,
+            spaces,
+            subs.own_space(),
+            &mut composed,
+        ) {
             Ok(Some(keyexpr)) => keyexpr,
             // The empty keyexpr, or an id the space does not hold: dropped, as
             // the owned path drops it. A sliced Put never reaches here, so
@@ -434,11 +443,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     None => None,
                 };
                 let mut composed = KeyexprBuf::new();
-                let keyexpr = match crate::wireexpr_resolve::resolve_plain_parts(
+                let keyexpr = match resolve_plain_parts_over(
                     put.sender_mapping,
                     put.id,
                     suffix,
                     spaces,
+                    subs.own_space(),
                     &mut composed,
                 ) {
                     Ok(Some(keyexpr)) => keyexpr,

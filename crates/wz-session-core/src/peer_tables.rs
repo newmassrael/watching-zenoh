@@ -764,11 +764,10 @@ mod tests {
         for round in 0..2 {
             for id in 1..=3u64 {
                 let key = std::format!("bound/{id}");
-                tables
-                    .subscribers
-                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                        id, &key,
-                    )));
+                tables.subscribers.absorb_declare(
+                    &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, &key)),
+                    None,
+                );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
                     &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
@@ -831,11 +830,10 @@ mod tests {
         let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
         for round in 0..2u32 {
             for (id, key) in [(1u64, "abc"), (2, "ab")] {
-                tables
-                    .subscribers
-                    .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                        id, key,
-                    )));
+                tables.subscribers.absorb_declare(
+                    &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
+                    None,
+                );
                 subscribers.dispatch_declare(
                     &mut tables.remote_subscribers,
                     &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
@@ -1292,11 +1290,10 @@ mod lent_tests {
         use crate::transport_profile::owned::DeclareOwnedVariant;
         use wz_session_core_test_support as fx;
 
-        tables
-            .subscribers
-            .absorb_declare(&DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(
-                id, key,
-            )));
+        tables.subscribers.absorb_declare(
+            &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(id, key)),
+            None,
+        );
     }
 
     /// What a peer declares is kept in the session's key arena, a block of each key's length,

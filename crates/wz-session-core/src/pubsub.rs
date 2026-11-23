@@ -135,12 +135,12 @@ use crate::row_pool::RowList;
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_in;
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
-use crate::wireexpr_resolve::resolve_wireexpr_into;
+use crate::wireexpr_resolve::resolve_wireexpr_into_over;
 // R2385 — the DECLARED keyexpr's own scope has a rule of its own (the D_KEXPR
 // header has no mapping bit), and `absorb_declare` is its only caller here, so
 // this import carries that arm's gate rather than the wider `any(..)` above.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-use crate::wireexpr_resolve::resolve_declared_keyexpr_into;
+use crate::wireexpr_resolve::resolve_declared_keyexpr_into_over;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 use crate::wireexpr_resolve::KeyexprBuf;
 // R311y739 — the two-space PAIR is `alloc`-gated only: the `own_mapping_space`
@@ -1519,8 +1519,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // WE declared and is answered out of the installed own space, never out
         // of the peer's (both sides number from 1, so the wrong space would very
         // likely FIND an entry and fire the wrong subscriber).
-        let resolved: String = match resolve_wireexpr_in(&push.keyexpr.body, self.mapping_spaces())
-        {
+        let resolved: String = match resolve_wireexpr_in(
+            &push.keyexpr.body,
+            self.mapping_spaces_over(subs.own_space()),
+        ) {
             Some(r) => r,
             None => {
                 // R3041 -- a Put that cannot be routed has still ARRIVED, and
@@ -1881,7 +1883,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ) {
         #[cfg(feature = "codec-declare")]
         if let Some(declare) = record.declare() {
-            self.absorb_declare_view(&declare.body);
+            self.absorb_declare_view(&declare.body, subs.own_space());
         }
         #[cfg(feature = "declare-subscriber")]
         if let Some(interest) = record.interest() {
@@ -1941,7 +1943,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
             NetworkMessage::Push(push) => self.dispatch_push(subs, push, reliability, true),
             #[cfg(feature = "codec-declare")]
-            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
+            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
             // from this session's OWN subscriptions; see
             // [`Self::respond_to_subscriber_interest`].
@@ -1968,7 +1970,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// firing).
     ///
     /// S9a — the keyexpr is resolved into a bounded buffer
-    /// ([`resolve_wireexpr_into`]), not a `String`, so on the fixed backing the
+    /// ([`resolve_wireexpr_into_over`]), not a `String`, so on the fixed backing the
     /// whole absorb of an interest allocates nothing; one longer than
     /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
     /// terminating `Final` alone, as an over-long one always was.
@@ -2000,7 +2002,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         let mut composed = KeyexprBuf::new();
         let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match resolve_wireexpr_into(&w.body, naming.spaces(), &mut composed) {
+            Some(w) => match resolve_wireexpr_into_over(
+                &w.body,
+                naming.spaces(),
+                subs.own_space(),
+                &mut composed,
+            ) {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
@@ -2046,9 +2053,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         let mut composed = KeyexprBuf::new();
         let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view_over(
                 &w.body,
                 naming.spaces(),
+                subs.own_space(),
                 &mut composed,
             ) {
                 Ok(Some(p)) => Some(p),
@@ -3049,6 +3057,21 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.spaces()
     }
 
+    /// [`Self::mapping_spaces`] with `own`, when given, as our own space: the session's table set
+    /// of the subscriptions the peer's messages are delivered to, read in place of any space
+    /// installed here ([`LocalSubscribers::own_space`]).
+    #[cfg(feature = "storage-profile")]
+    pub fn mapping_spaces_over<'a>(
+        &'a self,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'a>>,
+    ) -> MappingSpaces<'a> {
+        let spaces = self.naming.spaces();
+        match own {
+            Some(own) => spaces.over_own(own),
+            None => spaces,
+        }
+    }
+
     /// R237 — single-id resolver mirroring R234
     /// `SessionLinkActions::resolve_outbound_mapping` (wz-runtime-tokio).
     /// Returns the literal keyexpr the peer declared for `id`, or
@@ -3212,7 +3235,11 @@ impl<P: Storage> SubscriberPeer<P> {
     /// has always been. A peer that re-declares an id it holds is replacing, and
     /// needs no room.
     #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    pub(crate) fn absorb_declare(&mut self, body: &DeclareOwnedVariant) {
+    pub(crate) fn absorb_declare(
+        &mut self,
+        body: &DeclareOwnedVariant,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+    ) {
         match body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // Resolve the declared keyexpr to a literal string,
@@ -3238,9 +3265,10 @@ impl<P: Storage> SubscriberPeer<P> {
                 // S9a — resolved into a bounded buffer and bound from it, so
                 // the fixed backing does the whole absorb without the heap.
                 let mut composed = KeyexprBuf::new();
-                let literal = match resolve_declared_keyexpr_into(
+                let literal = match resolve_declared_keyexpr_into_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
+                    own,
                     &mut composed,
                 ) {
                     Ok(Some(literal)) => literal,
@@ -3319,14 +3347,19 @@ impl<P: Storage> SubscriberPeer<P> {
         feature = "storage-profile",
         feature = "rx-lent-control"
     ))]
-    pub(crate) fn absorb_declare_view(&mut self, body: &wz_codecs::lent::DeclareVariant<'_>) {
+    pub(crate) fn absorb_declare_view(
+        &mut self,
+        body: &wz_codecs::lent::DeclareVariant<'_>,
+        own: Option<crate::wireexpr_resolve::OwnSpace<'_>>,
+    ) {
         use wz_codecs::lent::DeclareVariant;
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
                 let mut composed = KeyexprBuf::new();
-                let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view(
+                let literal = match crate::wireexpr_resolve::resolve_declared_keyexpr_view_over(
                     &d.keyexpr.body,
                     self.naming.spaces(),
+                    own,
                     &mut composed,
                 ) {
                     Ok(Some(literal)) => literal,
@@ -4083,6 +4116,15 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 pub trait LocalSubscribers {
     /// The sink a matching subscription is handed a sample through.
     type Sink: SampleSink;
+
+    /// Our own id space, when the subscriptions are kept in the session's one table set, which
+    /// holds the key expressions the session declared: what an `M=0` key of a peer's message is
+    /// read against, in place of any space installed on the peer's side. `None` for a table of
+    /// subscriptions alone.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+        None
+    }
 
     /// A count that moves after every registration and retirement: an answer read off the
     /// subscriptions while this read the same still holds.
@@ -6829,7 +6871,7 @@ mod tests {
             let body = body
                 .try_into_owned_in::<crate::transport_profile::TransportStorage>()
                 .unwrap();
-            registry.peer.absorb_declare(&body);
+            registry.peer.absorb_declare(&body, None);
             assert!(
                 registry.mapping_spaces().peer().is_empty(),
                 "{name} arm must not mutate the peer keyexpr table"

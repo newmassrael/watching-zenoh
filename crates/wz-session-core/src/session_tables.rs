@@ -1828,6 +1828,13 @@ where
 {
     type Sink = F::Subscriber;
 
+    // The table set holds the key expressions the session declared: a peer's `M=0` key is read
+    // from them where they lie.
+    #[cfg(feature = "storage-profile")]
+    fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {
+        Some(P::own_space(&self.keyexprs))
+    }
+
     fn epoch(&self) -> u64 {
         self.subscriber_epoch
     }
