@@ -509,6 +509,22 @@ pub const MAX_FACES: usize = generated::MAX_FACES;
 /// a link past either bound is taken off its port and closed rather than left waiting there.
 pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
 
+/// Maximum number of key expressions all the peers of a session hold declared to it at once,
+/// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'
+/// peers declare in one pool the faces share lends the fewer of this and what its faces could
+/// hold, so the build's value is the ceiling a session's own value is held under.
+pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: usize = generated::SESSION_MAX_PEER_KEYEXPR_ALIASES;
+
+/// Maximum number of declarations of one kind (subscribers, queryables, tokens) all the peers of
+/// a session hold open to it at once, each peer also held to [`MAX_REMOTE_DECLS`]. Lent as
+/// [`SESSION_MAX_PEER_KEYEXPR_ALIASES`] is, one pool of each kind.
+pub const SESSION_MAX_REMOTE_DECLS: usize = generated::SESSION_MAX_REMOTE_DECLS;
+
+/// Maximum number of interests in the session's subscribers all its peers have it remember at
+/// once, each peer also held to [`MAX_INBOUND_SUB_INTERESTS`]. Lent as
+/// [`SESSION_MAX_PEER_KEYEXPR_ALIASES`] is.
+pub const SESSION_MAX_INBOUND_SUB_INTERESTS: usize = generated::SESSION_MAX_INBOUND_SUB_INTERESTS;
+
 /// Maximum number of queries ONE declared querier has in flight at once, as a
 /// [`crate::quota::Quota`] states it: a query past it is refused, and a place comes back
 /// when the pending query ends (its final arrives, its deadline passes, or it is
