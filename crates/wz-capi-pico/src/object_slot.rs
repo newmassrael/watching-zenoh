@@ -290,12 +290,10 @@ const QUERIER: Option<Kind> = Some(Kind::Querier);
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "query")))]
 const QUERIER: Option<Kind> = None;
 
-/// The places a session of the cooperative engine holds in its arena for what this ABI keeps of
-/// it: its handle's, of `handle`, and one for each entity of each kind the build has, as many as
-/// the session's limit of the kind admits, so an entity's object takes no memory of the process's
-/// and no other session's.
+/// Each kind of entity the build has, as the arena knows it, and the layout of its place: the one
+/// list the open's places ([`held_places`]) are laid out from.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::HeldPlaces {
+fn entity_places() -> impl Iterator<Item = (wz_capi_port::EntityKind, core::alloc::Layout)> {
     let [token, liveliness_subscriber] = LIVELINESS;
     [
         Some(Kind::Publisher),
@@ -308,7 +306,15 @@ pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::H
     .into_iter()
     .flatten()
     .filter_map(entity_place)
-    .fold(
+}
+
+/// The places a session of the cooperative engine holds in its arena for what this ABI keeps of
+/// it: its handle's, of `handle`, and one for each entity of each kind the build has, as many as
+/// the session's limit of the kind admits, so an entity's object takes no memory of the process's
+/// and no other session's.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::arena::HeldPlaces {
+    entity_places().fold(
         wz_capi_coop::arena::HeldPlaces::handle(handle),
         |held, (entity, layout)| held.with_entity(entity, layout),
     )
@@ -591,6 +597,26 @@ mod tests {
         unsafe {
             z_session_drop(z_session_move(&mut one));
             z_session_drop(z_session_move(&mut other));
+        }
+    }
+
+    /// What one entity of each kind takes of its session's arena for the ABI's object, printed for
+    /// reading beside the engine's own rows of the kind: the place, the object and the session that
+    /// lent it, and the flag that says it is lent. Run with `cargo test -p wz-capi-pico --lib
+    /// print_the_place_bytes_of_each_entity_kind -- --ignored --nocapture` under the features of
+    /// the build to read.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn print_the_place_bytes_of_each_entity_kind() {
+        let flag = wz_session_core::byte_cells::LentByteCells::FLAG_BYTES;
+        for (kind, layout) in entity_places() {
+            std::println!(
+                "place-row: {kind:?} place_bytes={} align={} flag_bytes={flag} per_entity={}",
+                layout.size(),
+                layout.align(),
+                layout.size() + flag
+            );
         }
     }
 }
