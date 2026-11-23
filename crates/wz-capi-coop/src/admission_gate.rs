@@ -115,6 +115,10 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static> SessionDatagramLink for A
         self.pump.owes_write()
     }
 
+    fn write_owed_now(&self) {
+        self.pump.write_owed_now()
+    }
+
     /// The rest of a datagram already read is held back with the link's next one.
     fn takes_input(&self) -> bool {
         !self.shut() && self.pump.takes_input()

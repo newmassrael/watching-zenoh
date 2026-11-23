@@ -153,6 +153,18 @@ impl ArenaRow {
 /// handle ([`ArenaPlan::holding`]).
 pub const ARENA_ROWS: usize = 30;
 
+/// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
+/// that only dials, whose every link has a buffer of its own.
+#[cfg(feature = "listen")]
+const RX_BASIS: &str = "RX_POOL_BUFFERS";
+#[cfg(not(feature = "listen"))]
+const RX_BASIS: &str = "PICO_UNICAST_BATCH_BYTES";
+/// What sizes the links' transmit rows, as [`RX_BASIS`] for the receive rows.
+#[cfg(feature = "listen")]
+const TX_BASIS: &str = "TX_POOL_SLOTS";
+#[cfg(not(feature = "listen"))]
+const TX_BASIS: &str = "PICO_UNICAST_BATCH_BYTES";
+
 /// The slots each link holds at once to encode its frames into, from the pool its session's links
 /// share (`TX_POOL_SLOTS`): one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -337,19 +349,27 @@ impl ArenaPlan {
         // The links read into a pool they share, a buffer held by a link only while it holds part
         // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
         // a pool of more buffers than links would hold one no link can take.
+        #[cfg(feature = "listen")]
         let rx_buffers = lent::<{ caps::RX_POOL_BUFFERS }>(
             "RX_POOL_BUFFERS",
             Quota::at_most(limits.rx_pool_buffers()),
         )?
         .min(links);
+        // A build that only dials holds its dial and the faces it attaches, and lends each link
+        // buffers of its own: no pool's bookkeeping for a session of one link.
+        #[cfg(not(feature = "listen"))]
+        let rx_buffers = links;
         // The links encode their frames into a pool of slots they share as well, a slot held by a
         // link from its grant to its send, or until a frame its stream took in part is written
         // (`wz_runtime_coop::link_storage::PooledTx`).
+        #[cfg(feature = "listen")]
         let tx_slots = lent::<{ caps::TX_POOL_SLOTS }>(
             "TX_POOL_SLOTS",
             Quota::at_most(limits.tx_pool_slots()),
         )?
         .min(links);
+        #[cfg(not(feature = "listen"))]
+        let tx_slots = links;
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
@@ -377,25 +397,21 @@ impl ArenaPlan {
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
         plan.put(
             "link receive flags",
-            "RX_POOL_BUFFERS",
+            RX_BASIS,
             rx_buffers,
             LentByteCells::FLAG_BYTES,
         )?;
-        plan.put(
-            "link receive buffers",
-            "RX_POOL_BUFFERS",
-            rx_buffers,
-            link_bytes,
-        )?;
+        plan.put("link receive buffers", RX_BASIS, rx_buffers, link_bytes)?;
         plan.put(
             "link transmit flags",
-            "TX_POOL_SLOTS",
+            TX_BASIS,
             tx_slots,
             LentByteCells::FLAG_BYTES,
         )?;
-        plan.put("link transmit slots", "TX_POOL_SLOTS", tx_slots, link_bytes)?;
-        // A place for each link, which bounds the links that open: the flags of a table of
-        // buffers of no bytes.
+        plan.put("link transmit slots", TX_BASIS, tx_slots, link_bytes)?;
+        // A place for each link, which bounds the links that open where the slots are a pool:
+        // the flags of a table of buffers of no bytes.
+        #[cfg(feature = "listen")]
         plan.put(
             "link places",
             "MAX_FACES + MAX_ACCEPT_PENDING",
@@ -608,6 +624,13 @@ impl ArenaPlan {
             KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
         )?;
         Ok(())
+    }
+
+    /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
+    /// that a link may find every slot held.
+    #[cfg(feature = "listen")]
+    pub fn tx_pool_short(&self) -> bool {
+        self.tx_slots < self.links
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
@@ -1120,11 +1143,16 @@ impl SessionArena {
             .arena
             .lend_byte_cells(plan.link_bytes, plan.tx_slots)
             .map_err(ArenaRefused::Lend)?;
-        let places = self
-            .arena
-            .lend_byte_cells(0, plan.links)
-            .map_err(ArenaRefused::Lend)?;
-        Ok(LinkTables::pooled(rx, tx, places))
+        #[cfg(feature = "listen")]
+        {
+            let places = self
+                .arena
+                .lend_byte_cells(0, plan.links)
+                .map_err(ArenaRefused::Lend)?;
+            Ok(LinkTables::pooled(rx, tx, places))
+        }
+        #[cfg(not(feature = "listen"))]
+        Ok(LinkTables::new(rx, tx, plan.link_bytes))
     }
 
     /// Lend the delivery lane's area `plan` lays out, next after the links' buffers: one buffer of

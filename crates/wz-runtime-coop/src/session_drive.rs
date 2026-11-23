@@ -189,7 +189,8 @@ pub trait SessionDatagramLink {
     /// that follows would read nothing, so its owner leaves it out of the wait; the step that
     /// gives a buffer back is woken by the holder's own input, and the link is waited on again
     /// once a buffer is free. The provided form answers `false`: a link that receives into a
-    /// buffer of its own always can.
+    /// buffer of its own always can. Only a build that accepts links has pools.
+    #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
         false
     }
@@ -203,6 +204,14 @@ pub trait SessionDatagramLink {
     fn owes_write(&self) -> bool {
         false
     }
+
+    /// Write what the link owes its stack, as far as the stack takes it now, without waiting: what
+    /// [`Self::service`] writes before it waits. A publish that finds every slot of its session's
+    /// pool held asks it of every link, so a link whose stack has room by now gives its slot back
+    /// without a step of its own. The provided form owes nothing. Only a build that accepts links
+    /// has pools.
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {}
 
     /// Whether the session may be handed input now. A link whose owner holds its input back (the
     /// delivery lane of a session that cannot take another message) answers `false`, and the loop
@@ -632,12 +641,18 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
         (**self).holds_input()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
         (**self).waits_for_buffer()
     }
 
     fn owes_write(&self) -> bool {
         (**self).owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        (**self).write_owed_now()
     }
 
     fn takes_input(&self) -> bool {

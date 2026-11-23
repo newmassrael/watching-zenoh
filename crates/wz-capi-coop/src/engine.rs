@@ -77,8 +77,10 @@ use wz_runtime_coop::faces::{
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
+#[cfg(feature = "listen")]
+use wz_runtime_coop::session_drive::wait_any;
 use wz_runtime_coop::session_drive::LinkOpenError;
-#[cfg(feature = "time-base")]
+#[cfg(any(feature = "time-base", feature = "listen"))]
 use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
@@ -109,6 +111,8 @@ use wz_session_core::push_build;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
+#[cfg(feature = "listen")]
+use wz_session_core::session_actions::Probed;
 use wz_session_core::session_init_params::{
     HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf, ZidError,
 };
@@ -871,6 +875,51 @@ pub(crate) enum Room {
     Held(FaceId),
 }
 
+/// Where a fan-out begins and whether its sends wait for no slot ([`CoopEngine::fan_out_in`]): a
+/// build that listens holds many links over pools of buffers they share, whose blocking publish
+/// may wait for a slot and go on where it stopped.
+#[cfg(feature = "listen")]
+#[derive(Clone, Copy)]
+struct Pass {
+    /// The order of the first face sent to ([`order_key`]).
+    from: u64,
+    /// Whether a send that finds no slot of its pool is left unsent and the fan-out stops there.
+    probe: bool,
+}
+
+/// A fan-out in a build that only dials: to every face, each send as the caller's own.
+#[cfg(not(feature = "listen"))]
+#[derive(Clone, Copy)]
+struct Pass;
+
+/// The pass of a fan-out to every face, each send as the caller's own.
+#[cfg(feature = "listen")]
+const EVERY_FACE: Pass = Pass {
+    from: FIRST_FACE,
+    probe: false,
+};
+/// The pass of a fan-out to every face, each send as the caller's own.
+#[cfg(not(feature = "listen"))]
+const EVERY_FACE: Pass = Pass;
+
+/// The order of the first of a session's faces ([`order_key`]): a fan-out from it reaches every
+/// face.
+#[cfg(feature = "listen")]
+const FIRST_FACE: u64 = 0;
+
+/// Where a face stands in the order a fan-out sends in, which is the order of the session's faces:
+/// the dial role's first, then the others by id, as each takes the next id when it comes
+/// (`LinkSupervisor::next_face_id`). A fan-out that stopped at a face goes on from it by this,
+/// whatever faces went meanwhile.
+#[cfg(feature = "listen")]
+fn order_key(face: FaceId) -> u64 {
+    if face == DIAL_FACE {
+        0
+    } else {
+        face
+    }
+}
+
 /// What [`CoopEngine`]'s `sending_on` holds while no publish sends: no face has the id 0, since
 /// the session numbers its faces from 1 (`LinkSupervisor::next_face_id`).
 const NOT_SENDING: FaceId = 0;
@@ -1329,6 +1378,12 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// What the application holds and what the peer declared. It is the session's, so it
     /// outlives each link: a new link is dispatched to the same registry.
     registry: Rc<RefCell<Registry>>,
+    /// Whether the links' pool of outbound slots is smaller than the links (`TX_POOL_SLOTS`), so
+    /// that a link may find every slot held by another link's frame its stream has not finished:
+    /// a publish that may not be dropped then waits for a slot with nothing of the session held
+    /// ([`CoopEngine::publish_to_link`]).
+    #[cfg(feature = "listen")]
+    tx_pool_short: bool,
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]).
     rooms: Arc<LinkRooms>,
@@ -3544,6 +3599,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             runtime,
             clock,
             registry: Rc::new(RefCell::new(registry)),
+            #[cfg(feature = "listen")]
+            tx_pool_short: plan.tx_pool_short(),
             rooms: Arc::new(LinkRooms::default()),
             #[cfg(feature = "connectivity")]
             watchers: Arc::new(FacePlane::default()),
@@ -3821,6 +3878,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.0
                 .ups()
                 .filter(|actions| actions.is_established())
+                .count()
+        })
+    }
+
+    /// How many of the session's links owe their stack the rest of a frame it took only in part,
+    /// each holding an outbound slot for it. Compiled where its readers are (`tests::tx_pool`).
+    #[cfg(all(test, feature = "std", feature = "listen"))]
+    pub(crate) fn links_owing(&self) -> usize {
+        self.live().map_or(0, |core| {
+            core.0
+                .links
+                .faces()
+                .iter()
+                .filter(|face| match &face.link {
+                    Link::Up(wire) | Link::Opening { wire, .. } => wire.owes_write(),
+                    _ => false,
+                })
                 .count()
         })
     }
@@ -4379,24 +4453,104 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // What was handed to the session before this publish leaves before it, and what was
         // handed while this publish held the session leaves after it.
         let before = self.send_handed(&core.0);
-        let outcome = self.fan_out(
-            &core.0,
-            &Publication {
-                keyexpr,
-                wire,
-                payload,
-                opts,
-                meta: &meta,
-            },
-            &[],
-        );
+        let put = Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta: &meta,
+        };
+        // A publish that may not be dropped, on a session whose links share fewer outbound slots
+        // than they are, may find every slot held by another link's frame its stream has not
+        // finished. It then waits for one with nothing of the session held, as zenoh-pico's
+        // blocking put waits for its transmit lock, within its `wait_before_close`
+        // (`Self::wait_for_slots`).
+        #[cfg(feature = "listen")]
+        let pass = Pass {
+            from: FIRST_FACE,
+            probe: !droppable && core.0.tx_pool_short,
+        };
+        #[cfg(not(feature = "listen"))]
+        let pass = EVERY_FACE;
+        let (outcome, stuck) = self.fan_out_in(&core.0, &put, &[], pass);
+        #[cfg(feature = "listen")]
+        let waiting = stuck.map(|face| {
+            let wait_us = core.0.config.tx_queue.wait_before_close_us;
+            let deadline_us = core.0.now_us().saturating_add(wait_us);
+            (face, deadline_us, wait_us, core.0.links.owing_waits())
+        });
+        #[cfg(not(feature = "listen"))]
+        let _ = stuck;
         let after = self.send_handed(&core.0);
         drop(publishing);
         drop(core);
         // Let go of with nothing of the session held: a key a leg names may keep a declaration
         // that is retracted as it drops, which takes the session (`WireKey`).
         drop((before, after));
+        #[cfg(feature = "listen")]
+        if let Some(waiting) = waiting {
+            return self.wait_for_slots(&put, waiting, outcome);
+        }
         outcome
+    }
+
+    /// Send `put` on from the face whose link found every outbound slot of the session held, and
+    /// the faces after it, waiting each time with nothing of the session held until a link that
+    /// holds a slot for a frame its stream has not finished has room or input
+    /// (`LinkSupervisor::owing_waits`, the wait its own step makes for its room): its stack then
+    /// takes what it owes, written by its step or by this publish, which has every link write what
+    /// it owes before it tries again, so the slot is back. The faces before were sent it already, and are not again. Past the
+    /// deadline, or with no link whose room can be waited on, the put is sent as any blocking send
+    /// past its wait is.
+    #[cfg(feature = "listen")]
+    fn wait_for_slots(
+        &self,
+        put: &Publication<'_>,
+        (mut stuck, deadline_us, mut left_us, mut waits): (
+            FaceId,
+            u64,
+            u64,
+            Vec<Arc<dyn LinkReadiness>>,
+        ),
+        mut outcome: Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        loop {
+            let waited = !waits.is_empty();
+            if waited {
+                wait_any(
+                    &waits,
+                    u32::try_from(left_us.div_ceil(1_000)).unwrap_or(u32::MAX),
+                );
+            }
+            drop(waits);
+            let Some(core) = self.live() else {
+                return outcome;
+            };
+            let publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+            let now_us = core.0.now_us();
+            core.0.links.write_owed_now();
+            let pass = Pass {
+                from: order_key(stuck),
+                probe: waited && now_us < deadline_us,
+            };
+            let (more, again) = self.fan_out_in(&core.0, put, &[], pass);
+            if more.is_err() {
+                outcome = more;
+            }
+            waits = match again {
+                Some(_) => core.0.links.owing_waits(),
+                None => Vec::new(),
+            };
+            let handed = self.send_handed(&core.0);
+            drop(publishing);
+            drop(core);
+            drop(handed);
+            match again {
+                Some(face) => stuck = face,
+                None => return outcome,
+            }
+            left_us = deadline_us.saturating_sub(now_us);
+        }
     }
 
     /// Send `put` to each face whose link is up and to each group the session joined, but the
@@ -4410,6 +4564,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         put: &Publication<'_>,
         skip: &[FaceId],
     ) -> Result<usize, FanoutError> {
+        self.fan_out_in(core, put, skip, EVERY_FACE).0
+    }
+
+    /// [`Self::fan_out`] by `pass`: with `listen`, to the faces from the one whose order is
+    /// `pass.from` on ([`order_key`]), with a send that does not wait for a slot when
+    /// `pass.probe`. The faces are sent the put in order until one's link finds no outbound slot
+    /// for it, which is answered beside the outcome and is sent nothing, nor are the faces after
+    /// it, nor the groups.
+    fn fan_out_in(
+        &self,
+        core: &Core<L, C>,
+        put: &Publication<'_>,
+        skip: &[FaceId],
+        pass: Pass,
+    ) -> (Result<usize, FanoutError>, Option<FaceId>) {
         let Publication {
             keyexpr,
             wire,
@@ -4421,8 +4590,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let express = meta.is_express();
         let priority = opts.priority_band();
         let mut outcome = Ok(0);
+        #[cfg(not(feature = "listen"))]
+        let _ = pass;
         for (face, actions) in core.ups_by_id() {
             if skip.contains(&face) {
+                continue;
+            }
+            #[cfg(feature = "listen")]
+            if order_key(face) < pass.from {
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, face);
@@ -4437,7 +4612,48 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             } else {
                 (wire.mapping_id, suffix)
             };
-            let lent = if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+            let plain = opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos();
+            // A send that may not wait is told apart from one whose link has room: one with none
+            // ends the fan-out at this face, and a chain of fragments, which such a send does not
+            // begin, is sent as the caller's own send.
+            #[cfg(feature = "listen")]
+            if pass.probe {
+                let probed = if plain {
+                    actions.try_send_plain_put_qos(
+                        mapping_id,
+                        lent_suffix,
+                        payload,
+                        meta.qos,
+                        reliable,
+                        express,
+                        priority,
+                    )
+                } else {
+                    actions.try_send_publication_qos(
+                        mapping_id,
+                        lent_suffix,
+                        opts.kind,
+                        payload,
+                        meta,
+                        reliable,
+                        express,
+                        priority,
+                    )
+                };
+                match probed {
+                    Some(Ok(Probed::NoRoom)) => return (outcome, Some(face)),
+                    Some(Ok(Probed::Sent)) => continue,
+                    Some(Err(error)) => {
+                        let sent = leg(Err(error));
+                        if sent.is_err() {
+                            outcome = sent;
+                        }
+                        continue;
+                    }
+                    Some(Ok(Probed::Chain)) | None => {}
+                }
+            }
+            let lent = if plain {
                 actions.send_plain_put_qos(
                     mapping_id,
                     lent_suffix,
@@ -4513,7 +4729,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 outcome = sent;
             }
         }
-        outcome
+        (outcome, None)
     }
 
     /// Owe `leg` to the session's faces it was not dropped on: it is sent by whoever next holds

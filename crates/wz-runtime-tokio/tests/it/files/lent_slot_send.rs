@@ -821,7 +821,7 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
 /// says it cannot keep it (`tx_slot_spare`): each message of the window leaves at once in a slot
 /// of its own, every slot is back when the window closes, and nothing crosses the byte door. The
 /// CONTROL is the same window on a link that may keep its slot, which leaves as one frame.
-#[cfg(feature = "transport-batching")]
+#[cfg(all(feature = "transport-batching", feature = "session-unicast-accept"))]
 #[test]
 fn a_window_on_a_link_with_no_slot_to_spare_sends_each_message_at_once() {
     let payloads: [&[u8]; 3] = [b"one", b"two", b"three"];

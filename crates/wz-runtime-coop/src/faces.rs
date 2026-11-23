@@ -87,6 +87,21 @@ pub struct Wire<S> {
     writability: Option<Arc<dyn LinkWritability>>,
 }
 
+/// Whether `link` has input in its stack it cannot read until another link gives a receive buffer
+/// back (`SessionDatagramLink::waits_for_buffer`): never in a build that only dials, whose links
+/// read into buffers of their own.
+fn waits_for_buffer(link: &Rc<dyn SessionDatagramLink>) -> bool {
+    #[cfg(feature = "session-unicast-accept")]
+    {
+        link.waits_for_buffer()
+    }
+    #[cfg(not(feature = "session-unicast-accept"))]
+    {
+        let _ = link;
+        false
+    }
+}
+
 impl<S> Wire<S> {
     /// The link whose session half is `session`, run by `task`: `link` is what the session's
     /// step reads, behind whatever gates the session put on it, and `ungated` the same link
@@ -122,6 +137,11 @@ impl<S> Wire<S> {
     /// Whether the link holds input it has already taken from its stack.
     pub fn holds_input(&self) -> bool {
         self.link.holds_input()
+    }
+
+    /// Whether the link owes its stack the rest of a frame it was handed.
+    pub fn owes_write(&self) -> bool {
+        self.link.owes_write()
     }
 
     /// The wait for room on the link, when its stack gives one.
@@ -519,6 +539,29 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
             .any(|face| face.link().wire().is_some_and(Wire::holds_input))
     }
 
+    /// Have every face's link write what it owes its stack, as far as the stack takes it now, so
+    /// a link whose stack has room by now gives back the outbound slot its frame held.
+    #[cfg(feature = "session-unicast-accept")]
+    pub fn write_owed_now(&self) {
+        for wire in self.faces.iter().filter_map(|face| face.link().wire()) {
+            wire.link.write_owed_now();
+        }
+    }
+
+    /// What a publish that waits for an outbound slot waits on: the wait of each face's link that
+    /// owes its stack the rest of a frame, ending on its room and its input (`AndRoom`). A link
+    /// whose stack gives no wait is not in it.
+    #[cfg(feature = "session-unicast-accept")]
+    pub fn owing_waits(&self) -> Vec<Arc<dyn LinkReadiness>> {
+        self.faces
+            .iter()
+            .filter_map(|face| face.link().wire())
+            .filter(|wire| wire.owes_write())
+            .filter_map(|wire| wire.readiness.as_ref())
+            .map(|ready| AndRoom::of(ready.clone()))
+            .collect()
+    }
+
     /// What a read waits for, for at most `most` milliseconds: the input of every link that
     /// holds none already and gives a wait, a connection on every port that gives one, and
     /// `others` after them; no wait at all when a link holds input. A link that owes its stack the
@@ -544,7 +587,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervi
                 Link::Up(wire) | Link::Opening { wire, .. } => {
                     if wire.link.holds_input() {
                         holds = true;
-                    } else if wire.link.waits_for_buffer() {
+                    } else if waits_for_buffer(&wire.link) {
                         // Its input waits in the stack until another link gives a receive
                         // buffer back, which that link's own input wakes the read for.
                     } else if let Some(ready) = &wire.readiness {

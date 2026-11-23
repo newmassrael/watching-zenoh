@@ -188,8 +188,10 @@ where
 /// chain is read under its own link's rules.
 ///
 /// Each call borrows the Router for its own length. One made while another holds it (a receive
-/// reached from inside another's delivery) is not reassembled: it is reported as a receive that
-/// rejoins no fragment does (`()`), which hands a fragment up unstaged, and nothing panics.
+/// reached from inside another's delivery, which a session's one task never makes) does nothing
+/// with the Router and nothing panics: what it reports is reported as a receive that rejoins no
+/// fragment reports it (`()`), and a unit it was to dispatch in place is not read at all
+/// (`DatagramPath::RouterHeld`), so the copying path's owned decode is never linked by it.
 ///
 /// A handle sweeps nothing: the session that holds the Router sweeps it once a step
 /// ([`Self::with`]), so a chain past its deadline is ended whichever link's task is stepped, and
@@ -266,7 +268,15 @@ impl<D: RxReassembly> RxReassembly for SharedReassembly<D> {
             Ok(mut router) => {
                 router.dispatch_in_place(unit, actions, engine, record, now_ms, on_event)
             }
-            Err(_) => ().dispatch_in_place(unit, actions, engine, record, now_ms, on_event),
+            // Never `()`'s dispatch: a receive that rejoins no fragment hands a fragment up through
+            // the copying path's owned decode (`crate::drive::dispatch_datagram`), which a build
+            // whose receive reassembles in place does not link. A unit that finds the Router held
+            // came from inside another receive's delivery, which a session's one task never makes;
+            // it is not read, and is counted as such.
+            Err(_) => {
+                let _ = (unit, actions, engine, record, now_ms, on_event);
+                DatagramPath::RouterHeld
+            }
         }
     }
 }
@@ -300,6 +310,9 @@ pub struct RxPathCounts {
     pub frame_ext_refused: u32,
     /// `Frame`s whose head does not decode.
     pub frame_head_undecodable: u32,
+    /// Units not read at all, the Router the session's links share being held by another receive
+    /// (`DatagramPath::RouterHeld`), which a session's one task never makes.
+    pub router_held: u32,
 }
 
 #[cfg(feature = "rx-in-place")]
@@ -321,6 +334,7 @@ impl RxPathCounts {
             DatagramPath::Copied(CopyReason::FrameHeadUndecodable) => {
                 &mut self.frame_head_undecodable
             }
+            DatagramPath::RouterHeld => &mut self.router_held,
         };
         *slot = slot.saturating_add(1);
     }
@@ -631,6 +645,7 @@ mod tests {
         counts.count(DatagramPath::Copied(CopyReason::NotAFrame));
         counts.count(DatagramPath::Copied(CopyReason::Compressed));
         counts.count(DatagramPath::Copied(CopyReason::FrameHeadUndecodable));
+        counts.count(DatagramPath::RouterHeld);
         assert_eq!(counts.in_place, 2);
         assert_eq!(counts.fragment_in_place, 1);
         assert_eq!(counts.low_latency_in_place, 1);
@@ -638,7 +653,11 @@ mod tests {
         assert_eq!(counts.compressed, 1);
         assert_eq!(counts.frame_head_undecodable, 1);
         assert_eq!(counts.fragment, 0);
-        assert_eq!(counts.copied(), 3);
+        assert_eq!(
+            counts.router_held, 1,
+            "a unit no Router could take is its own count"
+        );
+        assert_eq!(counts.copied(), 3, "and is not one the copying path took");
         let full = RxPathCounts {
             in_place: u32::MAX,
             ..RxPathCounts::default()
