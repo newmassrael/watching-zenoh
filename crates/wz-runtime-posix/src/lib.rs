@@ -78,6 +78,20 @@ pub mod interfaces;
 pub mod multicast;
 #[cfg(feature = "host-multicast")]
 pub mod scouting;
+
+// The waits over several links of the heap profile (`net::FdReadiness`, `windows::SocketReadiness`).
+wz_runtime_coop::with_heap_link_seams! {
+    /// How many sockets one wait over several links names to the system. The set lies on the
+    /// waiting thread's stack, so a wait allocates nothing, as zenoh-pico's wait over its sockets is
+    /// an `fd_set` there, of `FD_SETSIZE` sockets on Windows, 64
+    /// (`vendor/zenoh-pico/src/system/windows/network.c` @ `fd_set read_fds;`). A wait over more
+    /// is the bounded look the runtime gives a wait it cannot name to the system
+    /// (`LinkReadiness::wait_readable_among`): it ends within a millisecond, and the step after it
+    /// reads every link.
+    #[cfg(feature = "alloc")]
+    pub(crate) const WAIT_SET_SOCKETS: usize = 64;
+}
+
 // Written over the runtime's heap link layer, so compiled where the runtime declares it.
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(all(unix, feature = "alloc"))]
