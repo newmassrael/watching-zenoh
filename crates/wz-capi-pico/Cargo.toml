@@ -752,6 +752,13 @@ required-features = ["app-transport", "peer", "query", "queryable", "multi-threa
 name = "no_heap_after_open"
 required-features = ["engine-coop", "app-transport", "peer", "query", "queryable", "multi-thread"]
 
+# What a session's open allocates, phase by phase, on the cooperative engine: the reservations a
+# measurement of the library's memory against zenoh-pico's is read from. An executable of its own
+# because its `#[global_allocator]` records them; its test is `#[ignore]`d.
+[[test]]
+name = "open_heap"
+required-features = ["engine-coop", "peer", "multi-thread"]
+
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]
