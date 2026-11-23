@@ -719,11 +719,11 @@ impl TxQueueShape {
     /// the last frame.
     pub fn lane_bytes(&self, priority: crate::qos::Priority) -> usize {
         let lane = if self.qos {
-            priority.wire_byte()
+            priority
         } else {
-            crate::qos::Priority::DEFAULT.wire_byte()
+            crate::qos::Priority::DEFAULT
         };
-        self.sizes[lane as usize].saturating_mul(self.queue_unit_bytes)
+        lane.of(&self.sizes).saturating_mul(self.queue_unit_bytes)
     }
 }
 
@@ -2057,9 +2057,11 @@ impl RxBytes {
                 storage,
                 start,
                 end,
-            } => &storage.as_slice()[*start..*end],
+            } => storage.as_slice().get(*start..*end).unwrap_or_default(),
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Leased { lease, start, end } => &lease.bytes()[*start..*end],
+            RxRepr::Leased { lease, start, end } => {
+                lease.bytes().get(*start..*end).unwrap_or_default()
+            }
         }
     }
 
@@ -2179,18 +2181,18 @@ impl RxBytes {
             return None;
         }
         Some(match &self.0 {
-            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes[range].to_vec())),
+            RxRepr::Owned(bytes) => Self(RxRepr::Owned(bytes.get(range)?.to_vec())),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Shared { storage, start, .. } => Self(RxRepr::Shared {
                 storage: storage.clone(),
-                start: start + range.start,
-                end: start + range.end,
+                start: start.checked_add(range.start)?,
+                end: start.checked_add(range.end)?,
             }),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Leased { lease, start, .. } => Self(RxRepr::Leased {
                 lease: lease.clone(),
-                start: start + range.start,
-                end: start + range.end,
+                start: start.checked_add(range.start)?,
+                end: start.checked_add(range.end)?,
             }),
         })
     }
@@ -2248,13 +2250,13 @@ impl RxBytes {
         match &self.0 {
             RxRepr::Owned(bytes) => Some(bytes.len()),
             #[cfg(feature = "rx-shared-bytes")]
-            RxRepr::Leased { start, end, .. } => Some(end - start),
+            RxRepr::Leased { start, end, .. } => Some(end.saturating_sub(*start)),
             #[cfg(feature = "rx-shared-bytes")]
             RxRepr::Shared { start, end, .. } => {
                 if *start == 0 && self.whole_parts().is_some() {
                     None
                 } else {
-                    Some(end - start)
+                    Some(end.saturating_sub(*start))
                 }
             }
         }

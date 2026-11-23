@@ -662,7 +662,8 @@ impl QueryOptions {
     /// Gated on `query-get`, the capability its callers have.
     #[cfg(feature = "query-get")]
     pub fn expected_finals(&self, remote_targets: u32) -> u32 {
-        self.remote_finals(remote_targets) + u32::from(self.allowed_destination.allows_local())
+        self.remote_finals(remote_targets)
+            .saturating_add(u32::from(self.allowed_destination.allows_local()))
     }
 
     /// The Finals the peers' branch of the query owes: `remote_targets` when its destination
@@ -944,7 +945,7 @@ impl QueryOptions {
     /// dispatch beside it (`QueryEnvelope`), the consolidation is applied at the requester's sink
     /// on both origins, and the timeout arms the pending entry's deadline.
     ///
-    /// The wire builder's `rid = 0` / literal-key envelope is discarded: the loopback's request id
+    /// Only the body is built ([`crate::request_build::QueryBuilder`]): the loopback's request id
     /// and key ride the dispatch's arguments. Its caller-error asserts are the wire's too, so a
     /// selector longer than the wire's bound panics here as it would on the link: a selector that
     /// no wire queryable could receive is not one a local queryable should.
@@ -965,12 +966,9 @@ impl QueryOptions {
             value: full.value,
             ..Default::default()
         };
-        let request = crate::request_build::build_request_query_with_meta(0, 0, None, &meta)
-            .expect("a loopback Query body builds on the heap profile");
-        match request.body {
-            wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
-            _ => unreachable!("build_request_query_with_meta always produces a Query body"),
-        }
+        crate::request_build::QueryBuilder::from_meta(&meta)
+            .build()
+            .expect("a loopback Query body builds on the heap profile")
     }
 }
 

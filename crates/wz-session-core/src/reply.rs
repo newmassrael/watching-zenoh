@@ -2419,9 +2419,13 @@ mod tests {
         use wz_codecs_test_support::TestWire;
 
         const BODY: &[u8] = b"a reply the querier keeps";
-        let wire = crate::response_build::build_response_reply_literal(42, "home/temp", BODY)
-            .expect("build a literal reply")
-            .wire();
+        let wire = crate::response_build::build_response_reply(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            BODY,
+        )
+        .expect("build a literal reply")
+        .wire();
 
         /// Dispatch the decoded batch through a registry whose callback keeps the
         /// reply, and return what it kept.
@@ -2747,9 +2751,12 @@ mod tests {
         use crate::network_message::{parse_frame_payload, NetworkMessage};
         use wz_codecs_test_support::TestWire;
 
-        let mut response =
-            crate::response_build::build_response_err_literal(42, "home/temp", b"boom")
-                .expect("build a literal err");
+        let mut response = crate::response_build::build_response_err(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"boom",
+        )
+        .expect("build a literal err");
         let ResponseOwnedVariant::CodecZenohErr(err) = &mut response.body else {
             panic!("an err builder builds an Err body");
         };
@@ -2899,10 +2906,14 @@ mod tests {
             time: 0x0102_0304_0506_0708,
             zid: alloc::vec![0xaa, 0xbb, 0xcc, 0xdd],
         };
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"stored-value")
-            .timestamp(&ts)
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"stored-value",
+        )
+        .timestamp(&ts)
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snapshot = captured.lock().unwrap();
@@ -2948,11 +2959,15 @@ mod tests {
             packed_id: 13,
             schema: None,
         };
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"stored-value")
-            .attachment(b"align-reply")
-            .encoding(&enc)
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"stored-value",
+        )
+        .attachment(b"align-reply")
+        .encoding(&enc)
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snapshot = captured.lock().unwrap();
@@ -3015,11 +3030,15 @@ mod tests {
         )
         .expect("no quota is stated on this table");
 
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"")
-            .reply_del()
-            .attachment(b"tombstone-meta")
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"",
+        )
+        .reply_del()
+        .attachment(b"tombstone-meta")
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snapshot = captured.lock().unwrap();
@@ -3077,10 +3096,14 @@ mod tests {
         )
         .expect("no quota is stated on this table");
 
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"")
-            .reply_del()
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"",
+        )
+        .reply_del()
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snapshot = captured.lock().unwrap();
@@ -3118,10 +3141,14 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let si = SourceInfo::new(&[0xAA; 4], 11, 17);
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), b"v")
-            .source_info(&si)
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"v",
+        )
+        .source_info(&si)
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snap = captured.lock().unwrap();
@@ -3198,11 +3225,15 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let si = SourceInfo::new(&[0xBB; 2], 7, 9);
-        let resp = ResponseReplyBuilder::new(42, 0, Some("demo/a"), &[])
-            .reply_del()
-            .source_info(&si)
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            &[],
+        )
+        .reply_del()
+        .source_info(&si)
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snap = captured.lock().unwrap();
@@ -3278,10 +3309,14 @@ mod tests {
 
         // Metadata-only reply: empty payload + the big attachment (Put arm —
         // the attachment is Put-only, so even a value-less reply is a Put).
-        let resp = ResponseReplyBuilder::new(7, 0, Some("demo/a"), b"")
-            .attachment(&big)
-            .build()
-            .unwrap();
+        let resp = ResponseReplyBuilder::new(
+            7,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"",
+        )
+        .attachment(&big)
+        .build()
+        .unwrap();
         reg.dispatch_response(&resp, &HashMap::new());
 
         let snap = captured.lock().unwrap();
@@ -3427,10 +3462,14 @@ mod tests {
         )
         .expect("no quota is stated on this table");
 
-        let response = crate::response_build::ResponseReplyBuilder::new(9, 0, Some("a/b"), b"v")
-            .ts_stack(&stack)
-            .build()
-            .unwrap();
+        let response = crate::response_build::ResponseReplyBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("a/b").expect("a literal key"),
+            b"v",
+        )
+        .ts_stack(&stack)
+        .build()
+        .unwrap();
         reg.dispatch_response(&response, &HashMap::new());
         let plain = response_reply_del(9, "clear/me");
         reg.dispatch_response(&plain, &HashMap::new());
@@ -5274,10 +5313,13 @@ mod reply_timestamp_decode_isolation_tests {
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
         .unwrap();
-        let mut resp =
-            crate::response_build::ResponseReplyBuilder::new(rid, 0, Some(keyexpr), b"v")
-                .build()
-                .unwrap();
+        let mut resp = crate::response_build::ResponseReplyBuilder::new(
+            rid,
+            crate::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+            b"v",
+        )
+        .build()
+        .unwrap();
         if let wz_codecs::response::ResponseOwnedVariant::CodecZenohReply(reply) = &mut resp.body {
             reply.body = wz_codecs::reply::ReplyOwnedVariant::CodecZenohMsgPut(put);
         }

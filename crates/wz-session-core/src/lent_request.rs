@@ -156,20 +156,21 @@ impl<'a> RequestWriter<'a> {
             value: parts.timeout_ms,
         };
         let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); CHAIN_ENTRIES];
-        let mut count = 0;
-        if parts.qos != QosLevel::DEFAULT {
-            chain[count] = zint_entry(QOS_EXT_HEADER, &qos);
-            count += 1;
+        let wanted = [
+            (parts.qos != QosLevel::DEFAULT).then(|| zint_entry(QOS_EXT_HEADER, &qos)),
+            parts
+                .target
+                .is_some()
+                .then(|| zint_entry(ENC_ZINT | FLAG_EXT_M | TARGET_EXT_ID, &target)),
+            (parts.timeout_ms != 0).then(|| zint_entry(ENC_ZINT | TIMEOUT_EXT_ID, &timeout)),
+        ];
+        // At most the three entries the chain has room for.
+        let mut count = 0usize;
+        for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+            *slot = entry;
+            count = count.saturating_add(1);
         }
-        if parts.target.is_some() {
-            chain[count] = zint_entry(ENC_ZINT | FLAG_EXT_M | TARGET_EXT_ID, &target);
-            count += 1;
-        }
-        if parts.timeout_ms != 0 {
-            chain[count] = zint_entry(ENC_ZINT | TIMEOUT_EXT_ID, &timeout);
-            count += 1;
-        }
-        let chain = &mut chain[..count];
+        let chain = chain.get_mut(..count).unwrap_or_default();
         link_chain(chain);
 
         let suffix = WireexprLocalParts {
@@ -233,8 +234,12 @@ mod tests {
             qos: Some(parts.qos),
             ..QueryMetadata::default()
         };
-        let request = build_request_query_with_meta(parts.rid, 0, Some(parts.keyexpr), &meta)
-            .expect("the owned request is built");
+        let request = build_request_query_with_meta(
+            parts.rid,
+            crate::wire_key::WireKey::literal(parts.keyexpr).expect("a literal key"),
+            &meta,
+        )
+        .expect("the owned request is built");
         let view = request.try_as_borrowed().expect("a view");
         view.encode_to_vec()
     }

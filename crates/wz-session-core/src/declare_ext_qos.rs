@@ -517,7 +517,11 @@ mod overwrite_tests {
 
     #[test]
     fn a_request_carries_the_qos_it_was_set_to_and_loses_it_on_the_default() {
-        let mut request = build_request_query(7, 0, Some("demo/k")).expect("build");
+        let mut request = build_request_query(
+            7,
+            crate::wire_key::WireKey::literal("demo/k").expect("a literal key"),
+        )
+        .expect("build");
         set_request_qos(&mut request, express_real_time()).unwrap();
         assert_eq!(read_request_qos(&request), express_real_time());
         set_request_qos(&mut request, QosLevel::DEFAULT).unwrap();

@@ -163,14 +163,47 @@ impl RefusedReason {
     }
 }
 
-/// The text of a word spelled once as a C string. Every word of this module is ASCII, so the
-/// conversion cannot fail; it runs at compile time where the caller is `const`.
+/// The text of a word spelled once as a C string. Every word of this module is ASCII, which the
+/// assertion below holds when the build is compiled, so the empty text is never the answer.
 const fn utf8(word: &'static CStr) -> &'static str {
     match word.to_str() {
         Ok(text) => text,
-        Err(_) => panic!("a lifecycle word is ASCII"),
+        Err(_) => "",
     }
 }
+
+// Every word this module spells as a C string is text, or the build does not compile.
+const _: () = {
+    let mut refused: &[RefusedReason] = &RefusedReason::ALL;
+    while let [reason, rest @ ..] = refused {
+        assert!(
+            reason.c_words().to_str().is_ok(),
+            "a lifecycle word is ASCII"
+        );
+        refused = rest;
+    }
+    let mut errors: &[ControlError] = &ControlError::ALL;
+    while let [error, rest @ ..] = errors {
+        assert!(
+            error.c_words().to_str().is_ok(),
+            "a lifecycle word is ASCII"
+        );
+        errors = rest;
+    }
+    let mut keys: &[KeyRefusal] = &KeyRefusal::ALL;
+    while let [refusal, rest @ ..] = keys {
+        assert!(
+            refusal.c_words().to_str().is_ok(),
+            "a lifecycle word is ASCII"
+        );
+        keys = rest;
+    }
+    let mut verdicts: &[&CStr] = &VERDICT_C_WORDS;
+    while let [word, rest @ ..] = verdicts {
+        assert!(word.to_str().is_ok(), "a lifecycle word is ASCII");
+        verdicts = rest;
+    }
+};
 
 /// The answer to an open query (decision D6): the peer joins the node's intent and
 /// its machine connects. A second open of a held peer changes nothing, and says
@@ -234,15 +267,16 @@ pub const VERBS: [&str; 4] = [CLOSE_VERB, RESET_VERB, STATUS_VERB, OPEN_VERB];
 /// `"open"` after them when `open_bound`.
 pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W, open_bound: bool) {
     let mut bound: [&str; VERBS.len()] = [""; VERBS.len()];
-    let mut count = 0;
-    for verb in VERBS {
-        if verb == OPEN_VERB && !open_bound {
-            continue;
-        }
-        bound[count] = verb;
-        count += 1;
+    let listed = VERBS
+        .into_iter()
+        .filter(|verb| *verb != OPEN_VERB || open_bound);
+    // As many slots as verbs, so every verb listed has its slot.
+    let mut count = 0usize;
+    for (slot, verb) in bound.iter_mut().zip(listed) {
+        *slot = verb;
+        count = count.saturating_add(1);
     }
-    write_verb_list(out, &bound[..count]);
+    write_verb_list(out, bound.get(..count).unwrap_or_default());
 }
 
 /// `{"verdict":"refused","reason":"..."}`: the one spelling of a refusal, which
@@ -622,13 +656,17 @@ impl<'a> VerbKey<'a> {
 /// Every `verdict` word a reply of any verb carries, each once, in the order the verbs' own lists
 /// give them ([`verdict_words_of`]).
 pub const VERDICT_WORDS: [&str; 8] = {
-    let mut words = [""; 8];
-    let mut i = 0;
-    while i < words.len() {
-        words[i] = utf8(VERDICT_C_WORDS[i]);
-        i += 1;
-    }
-    words
+    let [w0, w1, w2, w3, w4, w5, w6, w7] = VERDICT_C_WORDS;
+    [
+        utf8(w0),
+        utf8(w1),
+        utf8(w2),
+        utf8(w3),
+        utf8(w4),
+        utf8(w5),
+        utf8(w6),
+        utf8(w7),
+    ]
 };
 
 /// [`VERDICT_WORDS`] as C strings, in the same order: the one spelling of each verdict word.
@@ -928,8 +966,9 @@ impl AnswerReading {
                 read.kind = READING_VERDICT;
                 read.verdict = VERDICT_WORDS
                     .iter()
-                    .position(|w| *w == verdict.verdict)
-                    .map_or(core::ptr::null(), |i| VERDICT_C_WORDS[i].as_ptr());
+                    .zip(VERDICT_C_WORDS)
+                    .find(|(word, _)| **word == verdict.verdict)
+                    .map_or(core::ptr::null(), |(_, c_word)| c_word.as_ptr());
                 read.reason = verdict
                     .reason
                     .map_or(core::ptr::null(), |r| r.c_words().as_ptr());
@@ -954,10 +993,13 @@ impl AnswerReading {
                 // field to its last byte with no NUL. The spelling is at most 32 digits.
                 if let Some(id) = zid_from_key_text(zid) {
                     let id = u128::from_le_bytes(id);
-                    let digits = (128 - id.leading_zeros()).div_ceil(4) as usize;
-                    for (i, slot) in read.zid[..digits].iter_mut().enumerate() {
-                        let nibble = (id >> (4 * (digits - 1 - i))) & 0xf;
-                        *slot = b"0123456789abcdef"[nibble as usize] as c_char;
+                    let digits = u128::BITS.saturating_sub(id.leading_zeros()).div_ceil(4) as usize;
+                    for (i, slot) in read.zid.iter_mut().take(digits).enumerate() {
+                        // The digits from the most significant, so the shift is below 128.
+                        let shift = digits.saturating_sub(1).saturating_sub(i).saturating_mul(4);
+                        let nibble = (id >> shift) & 0xf;
+                        let digit = b"0123456789abcdef".get(nibble as usize).copied();
+                        *slot = digit.unwrap_or(b'0') as c_char;
                     }
                 }
             }
@@ -1120,16 +1162,18 @@ impl VerbWords<'_> {
 /// `n` in decimal, in `buf`.
 fn decimal_text(mut n: u64, buf: &mut [u8; 20]) -> &str {
     let mut at = buf.len();
-    loop {
-        at -= 1;
-        buf[at] = b'0' + (n % 10) as u8;
+    // Twenty places hold every `u64`, written from the last.
+    for slot in buf.iter_mut().rev() {
+        // A digit is below 10, so it sets only the low bits `b'0'` leaves clear.
+        *slot = b'0' | (n % 10) as u8;
+        at = at.saturating_sub(1);
         n /= 10;
         if n == 0 {
             break;
         }
     }
     // Only ASCII digits were written.
-    core::str::from_utf8(&buf[at..]).unwrap_or("")
+    core::str::from_utf8(buf.get(at..).unwrap_or_default()).unwrap_or("")
 }
 
 /// A number as the writers here spell it: decimal digits and nothing else.

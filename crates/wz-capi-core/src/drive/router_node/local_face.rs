@@ -940,9 +940,12 @@ mod tests {
             on_reply: Box::new(move |_view| replied.lock().unwrap().push("reply".to_owned())),
             on_final: Box::new(move || finished.lock().unwrap().push("final".to_owned())),
         });
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(7, "demo/q", b"hi")
-                .expect("build a response");
+        let response = wz_session_core::response_build::build_response_reply(
+            7,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"hi",
+        )
+        .expect("build a response");
         sink(LocalFaceEvent::Reply(Box::new(response.clone())));
         sink(LocalFaceEvent::ReplyFinal { request_id: 7 });
         settle(&face);

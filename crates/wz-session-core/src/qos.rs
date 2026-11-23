@@ -69,6 +69,39 @@ impl Priority {
     /// a pre-QoS Frame).
     pub const DEFAULT: Priority = Priority::Data;
 
+    /// This priority's entry of an array of one per priority: every priority names one of the
+    /// eight, so none is out of range.
+    pub fn of<T>(self, per_priority: &[T; Self::NUM]) -> &T {
+        let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
+            per_priority;
+        match self {
+            Priority::Control => control,
+            Priority::RealTime => real_time,
+            Priority::InteractiveHigh => interactive_high,
+            Priority::InteractiveLow => interactive_low,
+            Priority::DataHigh => data_high,
+            Priority::Data => data,
+            Priority::DataLow => data_low,
+            Priority::Background => background,
+        }
+    }
+
+    /// [`Self::of`], to write.
+    pub fn of_mut<T>(self, per_priority: &mut [T; Self::NUM]) -> &mut T {
+        let [control, real_time, interactive_high, interactive_low, data_high, data, data_low, background] =
+            per_priority;
+        match self {
+            Priority::Control => control,
+            Priority::RealTime => real_time,
+            Priority::InteractiveHigh => interactive_high,
+            Priority::InteractiveLow => interactive_low,
+            Priority::DataHigh => data_high,
+            Priority::Data => data,
+            Priority::DataLow => data_low,
+            Priority::Background => background,
+        }
+    }
+
     /// The band's NAME, as the upstream constant spells it.
     ///
     /// R311y898 — added for the dissect surface's `qos` reading, and put HERE

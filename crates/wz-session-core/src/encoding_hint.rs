@@ -105,7 +105,7 @@ pub fn hint_from_bytes(s: &[u8]) -> EncodingHint {
     if let Some(pos) = s.windows(sep.len()).position(|w| w == sep) {
         let (prefix, rest) = s.split_at(pos);
         if let Some(id) = core::str::from_utf8(prefix).ok().and_then(lookup_id) {
-            return hint_from_schema_bytes(id, &rest[sep.len()..]);
+            return hint_from_schema_bytes(id, rest.get(sep.len()..).unwrap_or_default());
         }
     }
     hint_from_schema_bytes(ENCODING_ID_DEFAULT, s)

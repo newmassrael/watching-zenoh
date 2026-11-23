@@ -170,7 +170,8 @@ pub struct ScoutFrame {
 impl ScoutFrame {
     /// The datagram's bytes.
     pub fn as_slice(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        // `len` is where the encoder's sink over `bytes` stopped.
+        self.bytes.get(..self.len).unwrap_or_default()
     }
 }
 
@@ -418,7 +419,9 @@ impl HelloRow {
     fn copy_from(&mut self, source: &HelloRow) {
         self.reset(source.version, source.whatami, source.zid);
         let used = source.start_of(source.kept);
-        self.text[..used].copy_from_slice(&source.text[..used]);
+        if let (Some(into), Some(from)) = (self.text.get_mut(..used), source.text.get(..used)) {
+            into.copy_from_slice(from);
+        }
         self.ends = source.ends;
         self.kept = source.kept;
         self.skipped = source.skipped;
@@ -428,27 +431,28 @@ impl HelloRow {
     /// it is longer than `locator_len` admits, or the row's text has no room for it (a build that
     /// fixes `MAX_LOCATOR_LEN` leaves its bound to that room).
     fn keep(&mut self, locator: &str, locator_len: MaxLocatorLenHeld) {
-        if self.kept == caps::SCOUT_HELLO_LOCATORS || !locator_len.admits(locator.len()) {
-            self.skipped += 1;
-            return;
-        }
         let start = self.start_of(self.kept);
-        if locator.len() > HELLO_LOCATOR_TEXT - start {
-            self.skipped += 1;
+        let end = start.saturating_add(locator.len());
+        // No end left for one more locator, or no room in the text for this one: skipped.
+        let room = (self.text.get_mut(start..end), self.ends.get_mut(self.kept));
+        let (Some(into), Some(slot)) = room else {
+            self.skipped = self.skipped.saturating_add(1);
+            return;
+        };
+        if !locator_len.admits(locator.len()) {
+            self.skipped = self.skipped.saturating_add(1);
             return;
         }
-        let end = start + locator.len();
-        self.text[start..end].copy_from_slice(locator.as_bytes());
-        self.ends[self.kept] = end;
-        self.kept += 1;
+        into.copy_from_slice(locator.as_bytes());
+        *slot = end;
+        self.kept = self.kept.saturating_add(1);
     }
 
     fn start_of(&self, k: usize) -> usize {
-        if k == 0 {
-            0
-        } else {
-            self.ends[k - 1]
-        }
+        k.checked_sub(1)
+            .and_then(|last| self.ends.get(last))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The row of `hello`, its locators kept as a window whose runtime limits state no
@@ -475,7 +479,7 @@ impl HelloRow {
 
     /// How many locators the Hello advertised, kept or skipped.
     pub fn advertised_locators(&self) -> usize {
-        self.kept + self.skipped
+        self.kept.saturating_add(self.skipped)
     }
 
     /// The Hello as a host keeps it, its kept locators copied.
@@ -506,7 +510,8 @@ impl HelloFacts for HelloRow {
         if k >= self.kept {
             return None;
         }
-        core::str::from_utf8(&self.text[self.start_of(k)..self.ends[k]]).ok()
+        let end = *self.ends.get(k)?;
+        core::str::from_utf8(self.text.get(self.start_of(k)..end)?).ok()
     }
 }
 
@@ -555,25 +560,27 @@ impl HelloTable {
         self.refused = 0;
     }
 
-    /// The row the next Hello is decoded into.
-    fn staged(&mut self) -> &mut HelloRow {
-        &mut self.rows[self.held]
+    /// The row the next Hello is decoded into: the one past those held, of which the table keeps
+    /// one more than it records, so it is always there.
+    fn staged(&mut self) -> Option<&mut HelloRow> {
+        self.rows.get_mut(self.held)
     }
 
     /// `bytes` decoded into the staged row: whether it is a Hello the window advances on.
     fn stage(&mut self, bytes: &[u8], exit_on_first: bool) -> bool {
         let locator_len = self.locator_len;
-        let row = self.staged();
-        row.decode_into(bytes, locator_len)
-            && hello_advances_window(exit_on_first, row.advertised_locators())
+        self.staged().is_some_and(|row| {
+            row.decode_into(bytes, locator_len)
+                && hello_advances_window(exit_on_first, row.advertised_locators())
+        })
     }
 
     /// The staged row recorded after the others, or counted when the rows are full.
     fn record_staged(&mut self) {
         if self.held < caps::MAX_SCOUT_HELLOS {
-            self.held += 1;
+            self.held = self.held.saturating_add(1);
         } else {
-            self.refused += 1;
+            self.refused = self.refused.saturating_add(1);
         }
     }
 
@@ -581,14 +588,16 @@ impl HelloTable {
     /// full.
     pub fn push(&mut self, row: &HelloRow) -> bool {
         let recorded = self.held < caps::MAX_SCOUT_HELLOS;
-        self.staged().copy_from(row);
+        if let Some(staged) = self.staged() {
+            staged.copy_from(row);
+        }
         self.record_staged();
         recorded
     }
 
     /// The rows, in arrival order.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &HelloRow> + '_ {
-        self.rows[..self.held].iter()
+        self.rows.iter().take(self.held)
     }
 
     /// How many Hellos are recorded.
@@ -805,7 +814,9 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
     /// `scout.c`, except the send itself is the host's job.
     fn scout_emit(&mut self) {
         let a = self.actions();
-        R::with_mutex_mut(&a.trace, |trace| trace.scout_emit += 1);
+        R::with_mutex_mut(&a.trace, |trace| {
+            trace.scout_emit = trace.scout_emit.saturating_add(1)
+        });
         let zid = a.params.zid;
         // `what` in the flags byte's low three bits; the I flag and the zid's length
         // above them are the document's, from whether a zid is presented. No zid
@@ -852,7 +863,9 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
     /// is recorded.
     fn record_hello_and_emit(&mut self) {
         let a = self.actions();
-        R::with_mutex_mut(&a.trace, |trace| trace.record_hello += 1);
+        R::with_mutex_mut(&a.trace, |trace| {
+            trace.record_hello = trace.record_hello.saturating_add(1)
+        });
         // FIRST-WINS, which the survey arm turned from a tautology into a decision: `discovered`
         // is the DIAL TARGET read, and a plain assignment would let the LAST peer to answer
         // silently re-point a target the caller may already have acted on, while a locator-less
@@ -881,12 +894,16 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
     /// AwaitingHello -> Idle on scout.timer.elapsed: the window expired with no Hello.
     /// Observability only; `discovered` stays `None`.
     fn emit_scout_timeout(&mut self) {
-        R::with_mutex_mut(&self.actions().trace, |trace| trace.scout_timeout += 1);
+        R::with_mutex_mut(&self.actions().trace, |trace| {
+            trace.scout_timeout = trace.scout_timeout.saturating_add(1)
+        });
     }
 
     /// Sending -> Idle on link.tx_failed: the multicast Scout transmit errored.
     fn diag_scout_tx_failed(&mut self) {
-        R::with_mutex_mut(&self.actions().trace, |trace| trace.tx_failed += 1);
+        R::with_mutex_mut(&self.actions().trace, |trace| {
+            trace.tx_failed = trace.tx_failed.saturating_add(1)
+        });
     }
 }
 

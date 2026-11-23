@@ -297,7 +297,7 @@ pub fn matching<'t>(root: &'t Field, segments: &[&str]) -> Vec<&'t Field> {
     }
     let mut trail: Vec<&str> = Vec::new();
     walk(Child::Node(root), &mut trail, &mut |trail, field, _| {
-        if trail.len() >= segments.len() && trail[trail.len() - segments.len()..] == *segments {
+        if trail.ends_with(segments) {
             found.push(field);
         }
     });
@@ -595,7 +595,9 @@ const EXT_LEVEL: &[SchemaNode] = &[group(
 /// wire chose ([`name_in`]).
 const ANY_VALUE: &[SchemaNode] = &[leaf(Z64, U), leaf("value_len", U), leaf(ZBUF, BY)];
 /// An entry whose carrier declares no name for its id: any encoding.
-const UNNAMED: &[SchemaNode] = &[group("ext", &[EXT_HEAD, ANY_VALUE])];
+/// An extension no schema names: its header and whatever value it carries.
+const UNNAMED_EXT: SchemaNode = group("ext", &[EXT_HEAD, ANY_VALUE]);
+const UNNAMED: &[SchemaNode] = &[UNNAMED_EXT];
 const Z64_VALUE: &[SchemaNode] = &[leaf("value", U)];
 const ZBUF_VALUE: &[SchemaNode] = &[leaf("value_len", U), leaf("value", BY)];
 
@@ -736,7 +738,7 @@ const W_USRPWD: &[SchemaNode] = &[
 const W_AUTH: &[SchemaNode] = &[
     group("pubkey", &[EXT_LEVEL, ZBUF_VALUE, W_PUBKEY]),
     group("usrpwd", &[EXT_LEVEL, ANY_VALUE, W_USRPWD]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 
 // Extension sets, per carrier.
@@ -757,8 +759,8 @@ const fn marker(name: &'static str) -> SchemaNode {
     group(name, &[EXT_LEVEL])
 }
 
-const EXTS_NET_COMMON: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, UNNAMED[0]];
-const EXTS_PUSH: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, X_TS_STACK, UNNAMED[0]];
+const EXTS_NET_COMMON: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, UNNAMED_EXT];
+const EXTS_PUSH: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, X_NODE_ID, X_TS_STACK, UNNAMED_EXT];
 const EXTS_REQUEST: &[SchemaNode] = &[
     X_QOS_NET,
     X_TIMESTAMP,
@@ -767,14 +769,14 @@ const EXTS_REQUEST: &[SchemaNode] = &[
     group("budget", &[EXT_LEVEL, Z64_VALUE, R_NARROW]),
     group("timeout", &[EXT_LEVEL, Z64_VALUE]),
     X_TS_STACK,
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 const EXTS_RESPONSE: &[SchemaNode] = &[
     X_QOS_NET,
     X_TIMESTAMP,
     X_RESPONDER_ID,
     X_TS_STACK,
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 /// `ResponseFinal` carries `ext_qos` and `ext_tstamp` only.
 const EXTS_RESPONSE_FINAL: &[SchemaNode] = &[
@@ -784,19 +786,19 @@ const EXTS_RESPONSE_FINAL: &[SchemaNode] = &[
     // the timestamp (`commons/zenoh-protocol/src/network/response.rs` @ `pub ext_tstamp: Option<ext::TimestampType>,`),
     // so no walk names one. Declared only because the path was published.
     X_RESPONDER_ID,
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
-const EXTS_NET_OAM: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, UNNAMED[0]];
+const EXTS_NET_OAM: &[SchemaNode] = &[X_QOS_NET, X_TIMESTAMP, UNNAMED_EXT];
 const EXTS_DECLARE_COMMON: &[SchemaNode] = &[
     group("wire_expr", &[EXT_LEVEL, ZBUF_VALUE, W_WIRE_EXPR]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 const EXTS_DECLARE_QUERYABLE: &[SchemaNode] = &[
     group("queryable_info", &[EXT_LEVEL, Z64_VALUE, R_QINFO]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
-const EXTS_PUT: &[SchemaNode] = &[X_SOURCE_INFO, marker("shm"), X_ATTACHMENT, UNNAMED[0]];
-const EXTS_DEL: &[SchemaNode] = &[X_SOURCE_INFO, X_ATTACHMENT, UNNAMED[0]];
+const EXTS_PUT: &[SchemaNode] = &[X_SOURCE_INFO, marker("shm"), X_ATTACHMENT, UNNAMED_EXT];
+const EXTS_DEL: &[SchemaNode] = &[X_SOURCE_INFO, X_ATTACHMENT, UNNAMED_EXT];
 const EXTS_QUERY: &[SchemaNode] = &[
     group(
         "source_info",
@@ -816,7 +818,7 @@ const EXTS_QUERY: &[SchemaNode] = &[
     group("attachment", &[EXT_LEVEL, ZBUF_VALUE, W_QUERY_SLICED]),
     group("ext", &[EXT_HEAD, ANY_VALUE, W_QUERY_SLICED]),
 ];
-const EXTS_ERR: &[SchemaNode] = &[X_SOURCE_INFO, marker("shm"), UNNAMED[0]];
+const EXTS_ERR: &[SchemaNode] = &[X_SOURCE_INFO, marker("shm"), UNNAMED_EXT];
 const EXTS_INIT: &[SchemaNode] = &[
     marker("qos"),
     group("qos_link", &[EXT_LEVEL, Z64_VALUE]),
@@ -827,7 +829,7 @@ const EXTS_INIT: &[SchemaNode] = &[
     marker("compression"),
     group("patch", &[EXT_LEVEL, Z64_VALUE, R_NARROW]),
     group("region_name", &[EXT_LEVEL, ZBUF_VALUE]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 const EXTS_OPEN: &[SchemaNode] = &[
     marker("qos"),
@@ -842,17 +844,17 @@ const EXTS_OPEN: &[SchemaNode] = &[
     marker("low_latency"),
     marker("compression"),
     group("remote_bound", &[EXT_LEVEL, Z64_VALUE]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
 const EXTS_JOIN: &[SchemaNode] = &[
     group("qos", &[EXT_LEVEL, ZBUF_VALUE, W_JOIN_QOS]),
     group("shm", &[EXT_LEVEL, ZBUF_VALUE]),
     group("patch", &[EXT_LEVEL, Z64_VALUE, R_NARROW]),
-    UNNAMED[0],
+    UNNAMED_EXT,
 ];
-const EXTS_FRAME: &[SchemaNode] = &[X_QOS_T, UNNAMED[0]];
-const EXTS_FRAGMENT: &[SchemaNode] = &[X_QOS_T, marker("first"), marker("drop"), UNNAMED[0]];
-const EXTS_T_OAM: &[SchemaNode] = &[X_QOS_T, UNNAMED[0]];
+const EXTS_FRAME: &[SchemaNode] = &[X_QOS_T, UNNAMED_EXT];
+const EXTS_FRAGMENT: &[SchemaNode] = &[X_QOS_T, marker("first"), marker("drop"), UNNAMED_EXT];
+const EXTS_T_OAM: &[SchemaNode] = &[X_QOS_T, UNNAMED_EXT];
 
 // Zenoh-layer bodies.
 const PUT: SchemaNode = group(

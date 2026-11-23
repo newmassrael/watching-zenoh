@@ -179,7 +179,9 @@ impl OfferedRegion {
     pub fn of(name: &crate::extregion::RegionName) -> Self {
         let text = name.as_str().as_bytes();
         let mut bytes = [0u8; crate::extregion::MAX_REGION_NAME_LEN];
-        bytes[..text.len()].copy_from_slice(text);
+        for (into, byte) in bytes.iter_mut().zip(text) {
+            *into = *byte;
+        }
         // `RegionName` holds at most `MAX_REGION_NAME_LEN` (32) bytes, so the length fits a byte.
         Self {
             len: text.len() as u8,
@@ -190,7 +192,7 @@ impl OfferedRegion {
     /// The name offered. `None` only for a value that was not made by [`Self::of`].
     #[must_use]
     pub fn name(&self) -> Option<crate::extregion::RegionName> {
-        let text = core::str::from_utf8(&self.bytes[..usize::from(self.len)]).ok()?;
+        let text = core::str::from_utf8(self.bytes.get(..usize::from(self.len))?).ok()?;
         crate::extregion::RegionName::new(text).ok()
     }
 }

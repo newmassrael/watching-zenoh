@@ -145,7 +145,11 @@ mod tests {
     /// A routed Query Request (rid 42, literal keyexpr via mapping id 0) — the
     /// minimal builder emits no Request-level extensions (Z clear).
     fn request() -> RequestOwned {
-        build_request_query(42, 0, Some("demo/q")).expect("build request query")
+        build_request_query(
+            42,
+            crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+        )
+        .expect("build request query")
     }
 
     /// A non-nodeid ext (id 0x1, Z64) to exercise chain coexistence — a stand-in
@@ -203,7 +207,12 @@ mod tests {
         );
         // An explicit All / AllComplete survives the build and reads back.
         for t in [QueryTarget::All, QueryTarget::AllComplete] {
-            let r = build_request_query_with_target(42, 0, Some("demo/q"), t).expect("build");
+            let r = build_request_query_with_target(
+                42,
+                crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                t,
+            )
+            .expect("build");
             assert_eq!(
                 read_request_target(&r),
                 Some(t),
@@ -223,7 +232,12 @@ mod tests {
         );
         // An explicit timeout survives the build and reads back — the value a
         // relay hop feeds its pending-entry deadline (zenoh queries.rs:514).
-        let r = build_request_query_with_timeout_ms(42, 0, Some("demo/q"), 5_000).expect("build");
+        let r = build_request_query_with_timeout_ms(
+            42,
+            crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            5_000,
+        )
+        .expect("build");
         assert_eq!(read_request_timeout_ms(&r), Some(5_000));
     }
 
@@ -234,9 +248,12 @@ mod tests {
         // chain position, so a routed Query carrying BOTH reads each independently.
         use crate::query_mode::QueryTarget;
         use crate::request_build::build_request_query_with_target;
-        let mut r =
-            build_request_query_with_target(42, 0, Some("demo/q"), QueryTarget::AllComplete)
-                .expect("build");
+        let mut r = build_request_query_with_target(
+            42,
+            crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            QueryTarget::AllComplete,
+        )
+        .expect("build");
         set_request_source(&mut r, 7).unwrap(); // add the nodeid ext alongside the target ext
         assert_eq!(read_request_source(&r), 7, "the nodeid still reads");
         assert_eq!(

@@ -241,14 +241,14 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
     /// the pair-local observer id for [`uninstall_decl`](Self::uninstall_decl);
     /// the id is consumed only on a successful install.
     pub fn install_decl(&mut self, sink: D) -> Result<u64, RegisterError> {
-        if !self.quota.admits(self.on_decl.len() + 1) {
+        if !self.quota.admits(self.on_decl.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         let id = self.next_id;
         self.on_decl
             .push(KeyedSink { id, sink })
             .map_err(|_| RegisterError::TableFull)?;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         Ok(id)
     }
 
@@ -256,14 +256,14 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> DeclObserverPair<D, U, P> {
     /// [`install_decl`](Self::install_decl); the returned id feeds
     /// [`uninstall_undecl`](Self::uninstall_undecl).
     pub fn install_undecl(&mut self, sink: U) -> Result<u64, RegisterError> {
-        if !self.quota.admits(self.on_undecl.len() + 1) {
+        if !self.quota.admits(self.on_undecl.len().saturating_add(1)) {
             return Err(RegisterError::TableFull);
         }
         let id = self.next_id;
         self.on_undecl
             .push(KeyedSink { id, sink })
             .map_err(|_| RegisterError::TableFull)?;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         Ok(id)
     }
 
@@ -407,7 +407,7 @@ impl SyncedSinks {
     /// Install an observer; the id removes it again.
     pub fn install(&mut self, sink: impl FnMut() + Send + 'static) -> u64 {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         self.sinks.push((id, Box::new(sink)));
         id
     }

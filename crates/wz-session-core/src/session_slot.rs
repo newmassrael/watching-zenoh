@@ -101,12 +101,12 @@ struct SlotHead {
 impl SlotHead {
     /// Count one more handle.
     fn retain(&'static self) {
-        self.refs.set(self.refs.get() + 1);
+        self.refs.set(self.refs.get().saturating_add(1));
     }
 
     /// Count one handle fewer, freeing the slot when it was the last.
     fn drop_one(&'static self) {
-        let left = self.refs.get() - 1;
+        let left = self.refs.get().saturating_sub(1);
         self.refs.set(left);
         if left == 0 {
             // `claim` set it before the first handle existed, so a handle that

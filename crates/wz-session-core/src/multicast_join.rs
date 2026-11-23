@@ -232,7 +232,7 @@ where
             wire_const::T_MID_JOIN
         },
         body: &body,
-        extensions: Bounded::new(&chain[..entries]),
+        extensions: chain.get(..entries).and_then(Bounded::new),
     };
     Ok(TransportJoinWire::encode_source(&message, out)?)
 }
@@ -274,15 +274,12 @@ fn qos_sns<'b>(
     body: &'b mut [u8; QOS_EXT_BODY_BYTES],
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
 ) -> Result<&'b [u8], CodecError> {
-    let len = {
-        let mut sns = SliceSink::new(&mut body[..]);
-        for c in conduits.iter() {
-            sns.write_vle_u64(c.next_reliable)?;
-            sns.write_vle_u64(c.next_best_effort)?;
-        }
-        sns.position()
-    };
-    Ok(&body[..len])
+    let mut sns = SliceSink::new(body);
+    for c in conduits.iter() {
+        sns.write_vle_u64(c.next_reliable)?;
+        sns.write_vle_u64(c.next_best_effort)?;
+    }
+    Ok(sns.into_written())
 }
 
 /// The extensions a Join carries at most: the QoS SNs and the patch level.
@@ -314,20 +311,21 @@ fn join_chain<'e>(
         header: 0,
         body: ExtEntryPartsBody::CodecZenohExtUnit(&NO_ENTRY_BODY),
     }; JOIN_EXT_ENTRIES];
-    let mut entries = 0;
-    if let Some(body) = qos {
-        chain[entries] = ExtEntryParts {
+    let wanted = [
+        qos.map(|body| ExtEntryParts {
             header: JOIN_QOS_EXT_HEADER,
             body: ExtEntryPartsBody::CodecZenohExtZbuf(body),
-        };
-        entries += 1;
-    }
-    if let Some(body) = patch {
-        chain[entries] = ExtEntryParts {
+        }),
+        patch.map(|body| ExtEntryParts {
             header: JOIN_PATCH_EXT_HEADER,
             body: ExtEntryPartsBody::CodecZenohExtZint(body),
-        };
-        entries += 1;
+        }),
+    ];
+    // One slot for each entry a beacon can carry, so every entry wanted has its slot.
+    let mut entries = 0usize;
+    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+        *slot = entry;
+        entries = entries.saturating_add(1);
     }
     (chain, entries)
 }
