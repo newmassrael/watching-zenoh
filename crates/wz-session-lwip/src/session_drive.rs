@@ -230,6 +230,7 @@ mod tests {
     use alloc::rc::Rc;
     use alloc::vec;
     use core::cell::RefCell;
+    use wz_runtime_coop::link_cells::CellRc;
 
     use wz_link_lwip::ipv4_addr_loopback;
     // Round 3277 -- see `driver`'s tests: one body on both profiles.
@@ -327,11 +328,11 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = Rc::new(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
+            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
 
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+            let driver_sink = driver.clone().into_sink();
             // R311ja — `R = CoopRuntime<FrozenClock>` annotated: `new_generic`
             // returns the non-injective `R::ActionsHandle<T>` (lwIP `Rc`), so
             // the `Rc<dyn _>` driver arg cannot back-infer `R`.
@@ -372,7 +373,7 @@ mod tests {
         let socket: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, session_port).expect("bind session rx"),
         ));
-        let driver = Rc::new(LwipUdpDriver::accepting(socket));
+        let driver = CellRc::boxed(LwipUdpDriver::accepting(socket));
         let session_link = LwipSessionLink::new(&link, driver.clone());
         std::assert_eq!(driver.peer(), None);
 
@@ -465,10 +466,10 @@ mod tests {
             let socket: SharedSessionSocket = Rc::new(RefCell::new(
                 bind_session_rx(&link, port).expect("bind session rx"),
             ));
-            let driver = Rc::new(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
+            let driver = CellRc::boxed(LwipUdpDriver::new(socket, ipv4_addr_loopback(), port));
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
-            let driver_sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+            let driver_sink = driver.clone().into_sink();
             let actions =
                 SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                     driver_sink,
@@ -593,7 +594,7 @@ mod tests {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let payload: &[u8] = b"joined at both ends";
 
-        let push_through = |driver_sink: Rc<dyn BoxedLinkDriver>| {
+        let push_through = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
             let actions =
@@ -665,12 +666,12 @@ mod tests {
             ipv4_addr_loopback(),
             7490,
         ));
-        let doors = Rc::new(Doors {
+        let doors = CellRc::boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
         });
-        push_through(doors.clone());
+        push_through(doors.clone().into_sink());
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
             (1, 0),
@@ -685,7 +686,7 @@ mod tests {
             ipv4_addr_loopback(),
             7491,
         ));
-        push_through(Rc::new(NoLend(copying.clone())));
+        push_through(CellRc::boxed(NoLend(copying.clone())).into_sink());
         let copied = delivered(&copying);
 
         std::assert_eq!(lent.len(), 1, "one push is one datagram");
@@ -780,7 +781,7 @@ mod tests {
         let _pool = InstalledPool;
         let payloads: [&[u8]; 4] = [b"one", b"two", b"three", b"four"];
 
-        let window = |driver_sink: Rc<dyn BoxedLinkDriver>| {
+        let window = |driver_sink: CellRc<dyn BoxedLinkDriver>| {
             let runtime = CoopRuntime::new(FrozenClock);
             let clock = CoopTime::new(&runtime);
             let actions =
@@ -815,13 +816,13 @@ mod tests {
             ipv4_addr_loopback(),
             7492,
         ));
-        let doors = Rc::new(Doors {
+        let doors = CellRc::boxed(Doors {
             inner: lending.clone(),
             by_slot: Default::default(),
             by_bytes: Default::default(),
         });
         let before = tx_pool::stats().expect("installed");
-        let counts = window(doors.clone());
+        let counts = window(doors.clone().into_sink());
         let after = tx_pool::stats().expect("installed");
         std::assert_eq!(
             (doors.by_slot.get(), doors.by_bytes.get()),
@@ -843,7 +844,7 @@ mod tests {
             ipv4_addr_loopback(),
             7493,
         ));
-        let control = window(Rc::new(NoLend(copying.clone())));
+        let control = window(CellRc::boxed(NoLend(copying.clone())).into_sink());
         std::assert_eq!(control.heap_no_slot, 1, "CONTROL: the heap stage, counted");
         let copied = delivered(&copying);
 

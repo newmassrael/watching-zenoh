@@ -4,8 +4,8 @@
 //! A platform's datagram and stream sockets as ONE network stack: a dial to `udp/...` opens the
 //! datagram link (`udp_link`), a dial to `tcp/...` the stream link (`stream_link`), a dial to
 //! `tls/...` the stream link over the secure channel the stack was given (`with_tls`; without one
-//! it is unsupported), and each is an [`IpDriver`], so whatever holds a session's link holds one
-//! type for all.
+//! it is unsupported). On the slot profile each is an [`IpDriver`], so a session slot holds one type
+//! for all; on the heap profile each is the driver itself behind its own table (`HeapLink`).
 //!
 //! On the slot profile the stack is `IpStack`, whose links claim their buffers from the image's
 //! tables and live in the session slots. On the heap profile it is `IpLinks`, the session shell's
@@ -32,7 +32,7 @@ use wz_session_core::link::{
     TxSlotGrant,
 };
 #[cfg(feature = "alloc")]
-use wz_session_core::link::{LinkKind, LinkSubject, RxFrame};
+use wz_session_core::link::{LinkSubject, RxFrame};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 #[cfg(feature = "session-slot")]
@@ -71,21 +71,21 @@ use crate::stream_link::StreamListen;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::stream_link::STREAM_RX_CAPACITY;
 use crate::stream_link::{NoStream, StreamSocket};
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+use crate::udp_link::UdpPort;
 #[cfg(feature = "session-slot")]
 use crate::udp_link::UdpStack;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::udp_link::{bind_refused, dial_bind, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
-#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-use crate::udp_link::{PortPeer, UdpPort};
 
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
 /// A stream link is the one its stream names ([`StreamSocket::Link`]), so on a stack that carries
 /// no secure channel, whose `L` is [`NoStream`], the `tls/` case holds nothing. `B` holds its
-/// receive buffer and `X` the memory it encodes its frames into: the image's byte tables on the
-/// slot profile (the defaults), an `RxBuffer` and a `TxBuffer` on the heap profile
-/// (`HeapIpDriver`, which a slot build has not).
+/// receive buffer and `X` the memory it encodes its frames into, the image's byte tables by
+/// default. The slot profile's link, a value in a session slot; the heap profile holds each driver
+/// behind its own table instead ([`HeapLink`]).
 // On a stack with no stream the `tcp/` and `tls/` cases are values of no size that cannot be
 // made, so the enum is its `udp/` case alone; clippy weighs the variants by size and calls that a
 // large difference. Boxing the datagram case would put the one live link on a heap the slot
@@ -95,7 +95,7 @@ pub enum IpDriver<
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static = NoStream,
-    B: AsMut<[u8]> + 'static = ByteBuf,
+    B: crate::link_storage::RxStore + 'static = ByteBuf,
     X: TxStore + 'static = ByteBuf,
 > {
     /// A `udp/` link.
@@ -104,15 +104,29 @@ pub enum IpDriver<
     Tcp(T::Link<B, X>),
     /// A `tls/` link: the stream link over a secure channel.
     Tls(L::Link<B, X>),
-    /// A `udp/` link a listener took: its peer's share of the listener's one socket.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-    UdpListened(UdpDriver<PortPeer<U>, B, X>),
 }
 
-/// The heap profile's [`IpDriver`]: each link allocates its buffers when it opens, or claims them
-/// from its session's tables when the session lent the stack some ([`LinkTables`]).
+/// A link of the heap profile's stack ([`IpLinks`]), as the session shell holds it: the datagram
+/// or stream driver the dial named, behind one pointer, each call going through the driver's own
+/// table and nothing else. The heap profile's sessions already reach their link through a table
+/// (`Rc<dyn BoxedLinkDriver>`), so the slot profile's one type for every link, [`IpDriver`], would
+/// be a second dispatch under the first there.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub type HeapIpDriver<U, T, L = NoStream> = IpDriver<U, T, L, RxBuffer, TxBuffer>;
+pub type HeapLink = crate::link_cells::CellRc<dyn SessionDatagramLink>;
+
+/// `driver` opened as the session shell holds a link: the session's actions send through it and
+/// its loop pumps it, the one object behind both.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub(crate) fn heap_link<K>(driver: K) -> OpenedLink<HeapLink>
+where
+    K: BoxedLinkDriver + SessionDatagramLink + 'static,
+{
+    let driver = crate::link_cells::CellRc::boxed(driver);
+    OpenedLink {
+        sink: driver.clone().into_sink(),
+        pump: driver.into_link(),
+    }
+}
 
 /// Every method of the three links, answered by the one this driver is.
 macro_rules! either {
@@ -121,8 +135,6 @@ macro_rules! either {
             IpDriver::Udp($link) => $body,
             IpDriver::Tcp($link) => $body,
             IpDriver::Tls($link) => $body,
-            #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-            IpDriver::UdpListened($link) => $body,
         }
     };
 }
@@ -132,7 +144,7 @@ where
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: crate::link_storage::RxStore + 'static,
     X: TxStore + 'static,
 {
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -167,6 +179,16 @@ where
         either!(self, link => link.tx_slot_abort(slot))
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_spare(&self) -> bool {
+        either!(self, link => link.tx_slot_spare())
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_claimable(&self) -> bool {
+        either!(self, link => link.tx_slot_claimable())
+    }
+
     fn open_blocking(&self) {
         either!(self, link => link.open_blocking())
     }
@@ -184,25 +206,7 @@ where
     /// undetermined and not as none: an answer a link that does not ask the platform cannot give.
     #[cfg(feature = "alloc")]
     fn link_subject(&self) -> Option<&LinkSubject> {
-        static UDP: LinkSubject = LinkSubject {
-            kind: Some(LinkKind::Udp),
-            ..LinkSubject::UNKNOWN
-        };
-        static TCP: LinkSubject = LinkSubject {
-            kind: Some(LinkKind::Tcp),
-            ..LinkSubject::UNKNOWN
-        };
-        static TLS: LinkSubject = LinkSubject {
-            kind: Some(LinkKind::Tls),
-            ..LinkSubject::UNKNOWN
-        };
-        Some(match self {
-            IpDriver::Udp(_) => &UDP,
-            IpDriver::Tcp(_) => &TCP,
-            IpDriver::Tls(_) => &TLS,
-            #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-            IpDriver::UdpListened(_) => &UDP,
-        })
+        either!(self, link => link.link_subject())
     }
 
     fn peer_credential_zid(
@@ -229,7 +233,7 @@ where
     U: DatagramSocket + 'static,
     T: StreamSocket + 'static,
     L: StreamSocket + 'static,
-    B: AsMut<[u8]> + 'static,
+    B: crate::link_storage::RxStore + 'static,
     X: TxStore + 'static,
 {
     fn service(&self) {
@@ -261,8 +265,18 @@ where
         either!(self, link => link.holds_input())
     }
 
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        either!(self, link => link.waits_for_buffer())
+    }
+
     fn owes_write(&self) -> bool {
         either!(self, link => link.owes_write())
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        either!(self, link => link.write_owed_now())
     }
 
     fn takes_input(&self) -> bool {
@@ -497,17 +511,14 @@ where
     /// the other end does not take is [`LinkOpenError::Refused`]; a protocol the links do not
     /// carry (a `tls/` dial on links given no secure channel) is [`LinkOpenError::Unsupported`],
     /// before any buffer is claimed; buffers claimed before a refusal go back with it.
-    pub fn dial(
-        &self,
-        to: Locator,
-    ) -> Result<HeapIpDriver<U, D::Stream, L::Stream>, LinkOpenError> {
+    pub fn dial(&self, to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
         match to.proto {
             LinkProto::Udp if !U::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Udp => {
                 let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(dial_bind(self.local, to.at)).map_err(bind_refused::<U>)?;
-                Ok(IpDriver::Udp(
+                Ok(heap_link(
                     self.shape
                         .datagram(UdpDriver::initiator_in(socket, to.at, rx, tx)),
                 ))
@@ -516,13 +527,13 @@ where
             LinkProto::Tcp => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let socket = self.dial.dial(to.at)?;
-                Ok(IpDriver::Tcp(self.shape.stream(socket, rx, tx)))
+                Ok(heap_link(self.shape.stream(socket, rx, tx)))
             }
             LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let channel = self.tls.dial(to.at)?;
-                Ok(IpDriver::Tls(self.shape.stream(channel, rx, tx)))
+                Ok(heap_link(self.shape.stream(channel, rx, tx)))
             }
         }
     }
@@ -546,7 +557,9 @@ where
     L::Stream: 'static,
     G: GroupJoiner,
 {
-    type Pump = Rc<HeapIpDriver<U, D::Stream, L::Stream>>;
+    type Pump = HeapLink;
+
+    type Dial = IpDial<D::Stream, L::Stream>;
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
@@ -554,21 +567,13 @@ where
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
-        let driver = Rc::new(IpDriver::Udp(
+        Ok(heap_link(
             self.shape.datagram(UdpDriver::acceptor_in(socket, rx, tx)),
-        ));
-        Ok(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        })
+        ))
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        let driver = Rc::new(self.dial(to)?);
-        Ok(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        })
+        self.dial(to)
     }
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
@@ -582,37 +587,27 @@ where
     /// datagram link has no connection to wait for. A stream link's buffers are claimed as a
     /// dial's are, before the connection is begun, and held by the dial until its link is made: a
     /// refused or abandoned dial gives them back.
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
         match to.proto {
             LinkProto::Tcp if D::CARRIED => {
                 let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let socket = self.dial.dial_started(to.at)?;
-                let made: MakeLink<U, D::Stream, L::Stream, D::Stream> = IpDriver::Tcp;
-                Ok(Box::new(PendingStream {
+                Ok(IpDial(IpDialing::Tcp(PendingStream {
                     socket: Some(socket),
                     buffers: Some(buffers),
                     shape: self.shape,
-                    made,
-                }))
+                })))
             }
             LinkProto::Tls if L::CARRIED => {
                 let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let channel = self.tls.dial_started(to.at)?;
-                let made: MakeLink<U, D::Stream, L::Stream, L::Stream> = IpDriver::Tls;
-                Ok(Box::new(PendingStream {
+                Ok(IpDial(IpDialing::Tls(PendingStream {
                     socket: Some(channel),
                     buffers: Some(buffers),
                     shape: self.shape,
-                    made,
-                }))
+                })))
             }
-            _ => {
-                let opened = self.open_initiator(to)?;
-                Ok(Box::new(Dialled::new(opened)))
-            }
+            _ => self.open_initiator(to).map(IpDial::from),
         }
     }
 
@@ -628,26 +623,23 @@ where
             #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
             LinkProto::Udp if U::CARRIED => {
                 let socket = U::bind(at.at).map_err(bind_refused::<U>)?;
-                Ok(Box::new(IpUdpListener::<U, D::Stream, L::Stream> {
+                Ok(Box::new(IpUdpListener {
                     port: Rc::new(UdpPort::new(socket, self.shape.datagram_rx)),
                     shape: self.shape,
-                    stack: core::marker::PhantomData,
                 }))
             }
             LinkProto::Tcp if D::CARRIED => {
                 let listener = self.dial.listen(at.at)?;
-                Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
+                Ok(Box::new(IpListener {
                     listener,
                     shape: self.shape,
-                    stack: core::marker::PhantomData,
                 }))
             }
             LinkProto::Tls if L::CARRIED => {
                 let listener = self.tls.listen(at.at)?;
-                Ok(Box::new(IpTlsListener::<U, D::Stream, L::Stream> {
+                Ok(Box::new(IpTlsListener {
                     listener,
                     shape: self.shape,
-                    stack: core::marker::PhantomData,
                 }))
             }
             _ => Err(LinkOpenError::Unsupported),
@@ -659,40 +651,76 @@ where
     fn open_group(&self, endpoint: &str) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.groups.join(endpoint)
     }
+
+    /// A link of these is shared already: the pump is the handle the sink is a clone of.
+    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
+        pump
+    }
+}
+
+/// A dial of [`IpLinks`] ([`SessionLinks::begin_initiator`]): a link made when it was begun, or a
+/// `tcp/` (`S`) or `tls/` (`T`) stream still being made.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub struct IpDial<S, T>(IpDialing<S, T>)
+where
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static;
+
+/// Where an [`IpDial`] stands: its link made, or a stream of either protocol being made.
+// A dial is held by value in its face's link, a place the session's face table reserved, so a
+// stream being made is not boxed to bring the made link's variant to its size: that would be an
+// allocation for each dial.
+#[allow(clippy::large_enum_variant)]
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+enum IpDialing<S, T>
+where
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    Made(Dialled<HeapLink>),
+    Tcp(PendingStream<S>),
+    Tls(PendingStream<T>),
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<S, T> PendingDial<HeapLink> for IpDial<S, T>
+where
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
+        match &mut self.0 {
+            IpDialing::Made(made) => made.poll(),
+            IpDialing::Tcp(stream) => stream.poll(),
+            IpDialing::Tls(stream) => stream.poll(),
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<S, T> From<OpenedLink<HeapLink>> for IpDial<S, T>
+where
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn from(opened: OpenedLink<HeapLink>) -> Self {
+        Self(IpDialing::Made(Dialled::new(opened)))
+    }
 }
 
 /// A stream dial whose stream `P` is being made (a `tcp/` connection, or a `tls/` channel's
 /// connection and handshake): the link is made over the stream and the buffers claimed for it once
-/// the stream says it is, shaped as the stack's links are, and `made` names which of the stack's
-/// links it is.
+/// the stream says it is, shaped as the stack's links are.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct PendingStream<U, S, T, P>
-where
-    U: DatagramSocket + 'static,
-    S: StreamSocket + 'static,
-    T: StreamSocket + 'static,
-    P: StreamSocket + 'static,
-{
+struct PendingStream<P: StreamSocket + 'static> {
     socket: Option<P>,
     buffers: Option<(RxBuffer, TxBuffer)>,
     shape: LinkShape,
-    made: MakeLink<U, S, T, P>,
 }
 
-/// How a stream once made becomes one of a stack's links: `IpDriver::Tcp` or `IpDriver::Tls`.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-type MakeLink<U, S, T, P> =
-    fn(<P as StreamSocket>::Link<RxBuffer, TxBuffer>) -> HeapIpDriver<U, S, T>;
-
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, S, T, P> PendingDial<Rc<HeapIpDriver<U, S, T>>> for PendingStream<U, S, T, P>
-where
-    U: DatagramSocket + 'static,
-    S: StreamSocket + 'static,
-    T: StreamSocket + 'static,
-    P: StreamSocket + 'static,
-{
-    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<HeapIpDriver<U, S, T>>>, LinkOpenError>> {
+impl<P: StreamSocket + 'static> PendingDial<HeapLink> for PendingStream<P> {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
         match self.socket.as_mut()?.connected() {
             Ok(false) => None,
             // The stack's own answer to the connect, or the channel's to its handshake: the other
@@ -705,11 +733,7 @@ where
             Ok(true) => {
                 let socket = self.socket.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                let driver = Rc::new((self.made)(self.shape.stream(socket, rx, tx)));
-                Some(Ok(OpenedLink {
-                    sink: driver.clone(),
-                    pump: driver,
-                }))
+                Some(Ok(heap_link(self.shape.stream(socket, rx, tx))))
             }
         }
     }
@@ -723,19 +747,13 @@ where
 /// tables when it lent the stack some; the port's own read buffer and the datagrams it sorts for
 /// each peer are the heap's either way.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-struct IpUdpListener<U: DatagramSocket, S, T> {
+struct IpUdpListener<U: DatagramSocket> {
     port: Rc<UdpPort<U>>,
     shape: LinkShape,
-    stack: core::marker::PhantomData<fn() -> (S, T)>,
 }
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpUdpListener<U, S, T>
-where
-    U: DatagramSocket + 'static,
-    S: StreamSocket + 'static,
-    T: StreamSocket + 'static,
-{
+impl<U: DatagramSocket + 'static> LinkListener<HeapLink> for IpUdpListener<U> {
     fn local(&self) -> Locator {
         Locator::udp(self.port.local())
     }
@@ -743,7 +761,7 @@ where
     /// A socket that failed to read is looked at again on the next call, as a stack with no
     /// buffer for a connection is: UDP has no connection to lose, and a datagram the next read
     /// takes is sorted as any other.
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let Some(share) = UdpPort::take_fresh(&self.port).map_err(|_| LinkOpenError::Exhausted)?
         else {
             return Ok(None);
@@ -754,14 +772,10 @@ where
         // As the `tcp/` listener's: the source is off the port before the buffers are claimed, so
         // one the session's tables have none left for is let go of, not left waiting.
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
-        let driver = Rc::new(IpDriver::UdpListened(
+        Ok(Some(heap_link(
             self.shape
                 .datagram(UdpDriver::initiator_in(share, peer, rx, tx)),
-        ));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        )))
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -770,38 +784,28 @@ where
 }
 
 /// The accepting end of the `tls/` port a stack listens on: what [`IpListener`] is for `tcp/`,
-/// over the secure channel's streams. A connection it yields has completed its handshake, so the
-/// link above runs the session's own handshake over a stream whose peer the channel accepted.
+/// over the secure channel's streams `T`. A connection it yields has completed its handshake, so
+/// the link above runs the session's own handshake over a stream whose peer the channel accepted.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct IpTlsListener<U, S, T: StreamSocket> {
+struct IpTlsListener<T: StreamSocket> {
     listener: Box<dyn StreamListen<Stream = T>>,
     shape: LinkShape,
-    stack: core::marker::PhantomData<fn() -> (U, S)>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpTlsListener<U, S, T>
-where
-    U: DatagramSocket + 'static,
-    S: StreamSocket + 'static,
-    T: StreamSocket + 'static,
-{
+impl<T: StreamSocket + 'static> LinkListener<HeapLink> for IpTlsListener<T> {
     fn local(&self) -> Locator {
         Locator::tls(self.listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let Some(channel) = self.listener.accept()? else {
             return Ok(None);
         };
         // As the `tcp/` listener's: the connection is off the port before the buffers are claimed,
         // so one the session's tables have none left for is closed, not left queued.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        let driver = Rc::new(IpDriver::Tls(self.shape.stream(channel, rx, tx)));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        Ok(Some(heap_link(self.shape.stream(channel, rx, tx))))
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -809,39 +813,29 @@ where
     }
 }
 
-/// The accepting end of the `tcp/` port a stack listens on: the connections it takes yield the
-/// same [`HeapIpDriver`] a dial does, shaped as the stack's links are, so a session opened over
-/// one is run as one over a dialled link, and the acceptor's role is the handshake's alone.
+/// The accepting end of the `tcp/` port a stack listens on: the connections on its streams `S`
+/// yield the same link a dial does, shaped as the stack's links are, so a session opened over one
+/// is run as one over a dialled link, and the acceptor's role is the handshake's alone.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct IpListener<U, S: StreamSocket, T> {
+struct IpListener<S: StreamSocket> {
     listener: Box<dyn StreamListen<Stream = S>>,
     shape: LinkShape,
-    stack: core::marker::PhantomData<fn() -> (U, T)>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpListener<U, S, T>
-where
-    U: DatagramSocket + 'static,
-    S: StreamSocket + 'static,
-    T: StreamSocket + 'static,
-{
+impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
     fn local(&self) -> Locator {
         Locator::tcp(self.listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
         // The connection is off the port before the buffers are claimed, so one the session's
         // tables have none left for is closed, not left queued, as `IpAcceptor` closes it.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        let driver = Rc::new(IpDriver::Tcp(self.shape.stream(stream, rx, tx)));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        Ok(Some(heap_link(self.shape.stream(stream, rx, tx))))
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -1248,7 +1242,10 @@ mod tests {
     impl StreamSocket for Stream {
         type Error = ();
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<
+            B: crate::link_storage::RxStore + 'static,
+            X: crate::link_storage::TxStore + 'static,
+        >
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1291,7 +1288,10 @@ mod tests {
     impl StreamSocket for Channel {
         type Error = ();
 
-        type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+        type Link<
+            B: crate::link_storage::RxStore + 'static,
+            X: crate::link_storage::TxStore + 'static,
+        >
             = crate::stream_link::StreamDriver<Self, B, X>
         where
             Self: 'static;
@@ -1754,6 +1754,14 @@ mod tests {
         assert_eq!(acceptor.refused(), 0);
     }
 
+    /// The kind of link a heap stack opened, as the link names it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn kind(
+        link: &crate::link_cells::CellRc<dyn BoxedLinkDriver>,
+    ) -> Option<wz_session_core::link::LinkKind> {
+        link.link_subject().and_then(|subject| subject.kind)
+    }
+
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_dial_opens_the_link_of_the_protocol_it_names() {
@@ -1761,8 +1769,8 @@ mod tests {
         let udp = links
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link")
-            .pump;
-        assert!(matches!(*udp, IpDriver::Udp(_)));
+            .sink;
+        assert_eq!(kind(&udp), Some(wz_session_core::link::LinkKind::Udp));
         assert!(!udp.batch_length_prefixed());
         assert_eq!(
             udp.link_endpoints().map(|ends| ends.dst.as_str()),
@@ -1771,8 +1779,8 @@ mod tests {
         let tcp = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link")
-            .pump;
-        assert!(matches!(*tcp, IpDriver::Tcp(_)));
+            .sink;
+        assert_eq!(kind(&tcp), Some(wz_session_core::link::LinkKind::Tcp));
         assert!(tcp.batch_length_prefixed(), "a stream frames its batches");
         assert_eq!(
             tcp.link_endpoints().map(|ends| ends.dst.as_str()),
@@ -1879,7 +1887,7 @@ mod tests {
         let udp = links
             .open_initiator(Locator::udp(ROUTER_V6))
             .expect("a datagram link")
-            .pump;
+            .sink;
         let ends = udp
             .link_endpoints()
             .expect("a dialled link knows both ends");
@@ -1888,7 +1896,7 @@ mod tests {
         let tcp = links
             .open_initiator(Locator::tcp(ROUTER_V6))
             .expect("a stream link")
-            .pump;
+            .sink;
         assert_eq!(
             tcp.link_endpoints().map(|ends| ends.dst.as_str()),
             Some("tcp/[fd00::1]:7447")
@@ -1917,8 +1925,8 @@ mod tests {
         let tls = secure
             .open_initiator(Locator::tls(ROUTER))
             .expect("a secure stream link")
-            .pump;
-        assert!(matches!(*tls, IpDriver::Tls(_)));
+            .sink;
+        assert_eq!(kind(&tls), Some(wz_session_core::link::LinkKind::Tls));
         assert_eq!(
             tls.link_endpoints().map(|ends| ends.dst.as_str()),
             Some("tls/10.0.0.1:7447")
@@ -1946,7 +1954,10 @@ mod tests {
         impl StreamSocket for Handshaking {
             type Error = ();
 
-            type Link<B: AsMut<[u8]> + 'static, X: crate::link_storage::TxStore + 'static>
+            type Link<
+                B: crate::link_storage::RxStore + 'static,
+                X: crate::link_storage::TxStore + 'static,
+            >
                 = crate::stream_link::StreamDriver<Self, B, X>
             where
                 Self: 'static;
@@ -2044,8 +2055,8 @@ mod tests {
             .poll()
             .expect("the dial answered")
             .expect("the channel is made")
-            .pump;
-        assert!(matches!(*tls, IpDriver::Tls(_)));
+            .sink;
+        assert_eq!(kind(&tls), Some(wz_session_core::link::LinkKind::Tls));
         assert_eq!(
             tls.link_endpoints().map(|ends| ends.dst.as_str()),
             Some("tls/10.0.0.1:7447")
@@ -2073,21 +2084,21 @@ mod tests {
         let dialled = whole
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link")
-            .pump;
+            .sink;
         assert_eq!(dialled.link_rx_capacity(), UDP_RX_CAPACITY);
 
         let sized = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_rx_capacity(2048);
         let dialled = sized
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link")
-            .pump;
+            .sink;
         assert_eq!(dialled.link_rx_capacity(), 2048);
-        let accepting = sized.open_acceptor(7447).expect("an accepting link").pump;
+        let accepting = sized.open_acceptor(7447).expect("an accepting link").sink;
         assert_eq!(accepting.link_rx_capacity(), 2048);
         let stream = sized
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link")
-            .pump;
+            .sink;
         assert_ne!(
             stream.link_rx_capacity(),
             2048,
@@ -2146,7 +2157,7 @@ mod tests {
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link over the tables' buffers")
-            .pump;
+            .sink;
         assert_eq!(stream.link_rx_capacity(), rx_len);
         assert_eq!(
             stream.link_mtu(),
@@ -2174,7 +2185,7 @@ mod tests {
         let datagram = links
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link once the buffers are back")
-            .pump;
+            .sink;
         assert_eq!(datagram.link_rx_capacity(), rx_len);
     }
 
@@ -2182,8 +2193,8 @@ mod tests {
     #[test]
     fn a_heap_acceptor_is_a_datagram_link_with_no_peer_yet() {
         let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
-        let accepting = links.open_acceptor(7447).expect("an accepting link").pump;
-        assert!(matches!(*accepting, IpDriver::Udp(_)));
+        let accepting = links.open_acceptor(7447).expect("an accepting link").sink;
+        assert_eq!(kind(&accepting), Some(wz_session_core::link::LinkKind::Udp));
         assert!(
             accepting.link_endpoints().is_none(),
             "no peer until an InitSyn names one"
@@ -2245,7 +2256,7 @@ mod tests {
         const SYN: &[u8] = &[0x01, 0x09];
 
         /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent.
-        fn listener() -> (IpUdpListener<Inbox, Stream, Stream>, Queue, Sent) {
+        fn listener() -> (IpUdpListener<Inbox>, Queue, Sent) {
             let queued = Queue::default();
             let sent = Sent::default();
             let socket = Inbox {
@@ -2255,13 +2266,12 @@ mod tests {
             let listener = IpUdpListener {
                 port: Rc::new(UdpPort::new(socket, 2048)),
                 shape: LinkShape::default(),
-                stack: core::marker::PhantomData,
             };
             (listener, queued, sent)
         }
 
         /// Everything `link` reads now, a datagram at a time.
-        fn read_all(link: &OpenedLink<Rc<HeapIpDriver<Inbox, Stream, Stream>>>) -> Vec<Vec<u8>> {
+        fn read_all(link: &OpenedLink<HeapLink>) -> Vec<Vec<u8>> {
             let mut got = Vec::new();
             while link.pump.recv_with(&mut |bytes| got.push(bytes.to_vec())) {}
             got
@@ -2296,7 +2306,7 @@ mod tests {
                 listener.accept().expect("a readable port").is_none(),
                 "two sources, two links"
             );
-            assert!(matches!(*a.pump, IpDriver::UdpListened(_)));
+            assert_eq!(kind(&a.sink), Some(wz_session_core::link::LinkKind::Udp));
             assert!(
                 b.pump.holds_input(),
                 "what the listener took for B waits as B's input"
@@ -2412,7 +2422,7 @@ mod tests {
                 .accept()
                 .expect("a readable port")
                 .expect("A's link");
-            assert_eq!(a.pump.link_rx_capacity(), rx_len, "the tables' buffer");
+            assert_eq!(a.sink.link_rx_capacity(), rx_len, "the tables' buffer");
             assert_eq!(tables.in_use(), 1);
             assert!(matches!(listener.accept(), Err(LinkOpenError::Exhausted)));
             drop(a);
@@ -2422,7 +2432,7 @@ mod tests {
                 .accept()
                 .expect("a readable port")
                 .expect("B's link once the buffers are back");
-            assert_eq!(b.pump.link_rx_capacity(), rx_len);
+            assert_eq!(b.sink.link_rx_capacity(), rx_len);
             assert_eq!(tables.in_use(), 1);
         }
 

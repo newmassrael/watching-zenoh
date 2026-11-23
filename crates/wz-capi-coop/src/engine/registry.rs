@@ -344,8 +344,9 @@ impl Registry {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
     /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
     /// of each, the pools of what the peers write `peers` counts lent from it next, and the tables
-    /// of each face `gets` and `peers` count lent from it too: the dial face's, the session's own
-    /// gets where it answers its own, and the rest kept for the faces to come. What the peers
+    /// of each face `gets` and `peers` count lent from it too: the dial face's (one of no rows for
+    /// a session that dials nothing, `FacePeers::dial`), the session's own gets where it answers
+    /// its own, and the rest kept for the faces to come. What the peers
     /// declare keeps its keys in `keys`, the session's key arena, as the session's own
     /// declarations do. Refused when the arena has not the rows, which one reserved by the plan
     /// that counts them always has.
@@ -363,19 +364,25 @@ impl Registry {
         // lends one set; a build without pools keeps each set's rows inline.
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
-        // gets, then the faces to come.
-        let mut sets = Vec::with_capacity(peers.tables.max(1));
+        // gets, then the faces to come. A session that dials nothing lent its dial face no set:
+        // that face holds one of no rows, first, and every lent set is for the faces to come.
+        let dial = usize::from(peers.dial);
+        let mut sets = Vec::with_capacity((peers.tables + 1 - dial).max(1));
         let mut held = Vec::with_capacity(sets.capacity());
-        lend_set(
-            &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-        )?;
+        if peers.dial {
+            lend_set(
+                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+            )?;
+        } else {
+            push_unpeered(&mut sets, keys, limits);
+        }
         held.push(HeldSet {
             at: 0,
             id: DIAL_FACE,
         });
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
-        for _ in 1..peers.tables {
+        for _ in dial..peers.tables {
             lend_set(
                 &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
             )?;
@@ -956,6 +963,19 @@ fn push_rowless<'s>(
     pools: &mut PeerPools,
     limits: &SessionLimits,
 ) -> &'s mut FaceTables {
+    let set = push_unpeered(sets, keys, limits);
+    set.peer.keep_rows_in(pools);
+    set
+}
+
+/// Write a set of no rows at the end of `sets` that takes nothing of the session's pools: the dial
+/// face's of a session that dials nothing, which never has a peer to write into them. With one
+/// face's own spans, taking them here would leave the one face that comes none.
+fn push_unpeered<'s>(
+    sets: &'s mut Vec<FaceTables>,
+    keys: KeySpace,
+    limits: &SessionLimits,
+) -> &'s mut FaceTables {
     sets.reserve(1);
     let at = sets.len();
     // SAFETY: `reserve` left room for at least one set past the length, which is the first cell of
@@ -967,7 +987,6 @@ fn push_rowless<'s>(
     }
     let set = &mut sets[at];
     set.peer.keep_keys_in(LentKeys::from(keys));
-    set.peer.keep_rows_in(pools);
     set
 }
 
@@ -1024,6 +1043,12 @@ mod tests {
     /// A registry whose arena lends the tables of `faces` faces, one row of each table, and the
     /// pools `pools` states, which a registry of more than one face shares.
     fn held_with(faces: usize, pools: PeerPoolRows) -> Held {
+        held_as(faces, pools, true)
+    }
+
+    /// [`held_with`], the first of the faces' tables the dial face's when `dial`, and with no
+    /// dial every one of them kept for the faces to come.
+    fn held_as(faces: usize, pools: PeerPoolRows, dial: bool) -> Held {
         let mut arena =
             SessionArena::of_bytes(1 << 20, &AllocatorMemory).expect("the host has the memory");
         let gets = GetTables {
@@ -1042,6 +1067,7 @@ mod tests {
             },
             tables: faces,
             pools,
+            dial,
         };
         let keys = arena
             .arena_mut()
@@ -1161,6 +1187,79 @@ mod tests {
                 "face {id}: its key is a block of the session's key arena"
             );
         }
+    }
+
+    /// A session that dials nothing gives its dial face a set of no rows, which takes nothing of the
+    /// arena and nothing of the pools: the one set it lent, with one face's own spans, is the first
+    /// accepted face's, whose peer's subscriber is held there. The CONTROL is the same plan with
+    /// the dial face's set lent, where the first accepted face is past the plan and holds nothing.
+    #[test]
+    fn a_session_that_dials_nothing_keeps_its_one_set_for_the_face_that_comes() {
+        use wz_session_core::declare_build::build_declare_subscriber;
+
+        let own_spans = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
+            shared: false,
+        };
+        let declared = |held: &mut Held, id: FaceId| {
+            let key = "demo/declared/one";
+            let at = held
+                .registry
+                .held_at(id)
+                .expect("the registry holds the face");
+            let Registry { app, sets, .. } = &mut held.registry;
+            let peer = &mut sets[at].peer;
+            let declare = build_declare_subscriber(1, 0, Some(key)).expect("a declaration");
+            app.remote_subscribers.dispatch_declare(
+                &mut peer.remote_subscribers,
+                &declare.body,
+                peer.subscribers.mapping_spaces(),
+            );
+            (
+                peer.remote_subscribers.has_matching(key),
+                peer.finals.has_room(),
+            )
+        };
+
+        let mut dialling = held_as(1, own_spans, true);
+        dialling.registry.add_face(5);
+        assert_eq!(
+            declared(&mut dialling, 5),
+            (false, false),
+            "CONTROL: the one set is the dial face's, so the face that comes holds nothing"
+        );
+
+        let mut listening = held_as(1, own_spans, false);
+        let lent = listening.arena.arena_mut().high_water();
+        assert_eq!(listening.registry.held_at(DIAL_FACE), Some(0));
+        assert!(
+            !face(&mut listening.registry, DIAL_FACE)
+                .peer
+                .finals
+                .has_room(),
+            "the dial face's set has no rows"
+        );
+        listening.registry.add_face(5);
+        assert_eq!(listening.registry.held_at(5), Some(1));
+        assert_eq!(
+            declared(&mut listening, 5),
+            (true, true),
+            "the face that comes takes the lent set and the one face's spans"
+        );
+        assert_eq!(
+            listening.arena.arena_mut().high_water(),
+            lent,
+            "nothing more is lent as the face comes"
+        );
+        assert_eq!(listening.registry.sets.len(), 2);
+        listening.registry.remove_face(DIAL_FACE);
+        assert_eq!(
+            face_ids(&listening.registry),
+            vec![DIAL_FACE, 5],
+            "the dial face stays"
+        );
     }
 
     /// An interest a face's peer asks is kept with its key in the session's key arena, on the

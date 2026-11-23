@@ -169,7 +169,10 @@ fn poll_in(fd: c_int, timeout_ms: c_int) -> Result<bool, ZephyrNetError> {
 impl StreamSocket for ZephyrTcpSocket {
     type Error = ZephyrNetError;
 
-    type Link<B: AsMut<[u8]> + 'static, X: wz_runtime_coop::link_storage::TxStore + 'static>
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
         = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
     where
         Self: 'static;

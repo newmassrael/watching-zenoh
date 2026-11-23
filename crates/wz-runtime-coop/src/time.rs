@@ -113,6 +113,14 @@ impl<C: ClockSource> CoopTime<C> {
             epoch_us,
         }
     }
+
+    /// What [`TimeSource::now_monotonic_ms`] reads at the clock's reading `now_us`: for a caller
+    /// that has read the clock once and measures on this instance's epoch by that reading.
+    pub fn ms_at(&self, now_us: u64) -> u64 {
+        // Saturating, so a clock that momentarily reports a past time does not wrap into a huge
+        // millisecond value.
+        now_us.saturating_sub(self.epoch_us) / 1000
+    }
 }
 
 impl<C: ClockSource> Clone for CoopTime<C> {
@@ -126,10 +134,7 @@ impl<C: ClockSource> Clone for CoopTime<C> {
 
 impl<C: ClockSource> TimeSource for CoopTime<C> {
     fn now_monotonic_ms(&self) -> u64 {
-        // Saturating subtraction so a buggy ClockSource that
-        // momentarily reports a past time does not wrap into a
-        // huge ms value.
-        self.inner.clock.now_us().saturating_sub(self.epoch_us) / 1000
+        self.ms_at(self.inner.clock.now_us())
     }
 
     fn now_monotonic_us(&self) -> u64 {

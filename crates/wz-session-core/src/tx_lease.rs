@@ -169,6 +169,9 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
     /// every slot is in flight, or the grant did not describe usable memory. A
     /// grant that does not (a null pointer, or headroom past the slot) is handed
     /// straight back, so a misbehaving driver costs a heap frame and not a slot.
+    // Out of line: every lend path asks here, and a copy inlined into each of them cost more
+    // than the call.
+    #[inline(never)]
     pub fn acquire(driver: &'a D, want: usize, priority: Priority) -> Option<Self> {
         let grant = driver.tx_slot_acquire(want, priority)?;
         let (base, total) = driver.tx_slot_storage(grant.slot);

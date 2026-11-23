@@ -3379,10 +3379,21 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.holds_input()
     }
 
+    #[cfg(feature = "listen")]
+    fn waits_for_buffer(&self) -> bool {
+        self.pump.waits_for_buffer()
+    }
+
     // The gate holds back input only: what the session owes the stack is written whatever it
     // holds, and the owner's wait wakes for it.
     fn owes_write(&self) -> bool {
         self.pump.owes_write()
+    }
+
+    // What the session owes the stack is written whatever the lane holds, as `owes_write` says.
+    #[cfg(feature = "listen")]
+    fn write_owed_now(&self) {
+        self.pump.write_owed_now()
     }
 
     /// The rest of a datagram already read is held back with the link's next one while the lane

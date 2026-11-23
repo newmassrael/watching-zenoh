@@ -439,14 +439,16 @@ config WZ_LIMIT_MAX_MULTICAST_REPLIES
 
 config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
-	default 8
+	default 11 if WZ_LIMITS_ZENOH_PICO
+	default 16
 	help
 	  The most tasks a runtime holds: a ceiling on the task table a fixed-memory
 	  image declares, which the image is checked against when it compiles, and on
 	  the task cells a session of the C ABI's cooperative engine reserves when it
-	  opens, one for each link and group its configuration admits. A link or a
-	  group past them is refused, at the open as out of memory and after it as a
-	  link past the faces the session admits.
+	  opens, one for each face and group its configuration admits (the dial role's
+	  and MAX_FACES besides). A face or a group past them is refused, at the open
+	  as out of memory and after it as a link past the faces the session admits,
+	  so a preset that admits faces admits a task for each.
 
 config WZ_LIMIT_MAX_TIMERS
 	int "MAX_TIMERS"
@@ -519,6 +521,38 @@ config WZ_LIMIT_MAX_ACCEPT_PENDING
 	  cooperative engine lends each the buffers of one more link from the session's
 	  memory when it opens, so that a link past either bound can be taken off its
 	  port and closed, and a session may lower this and never raise it.
+
+config WZ_LIMIT_RX_POOL_BUFFERS
+	int "RX_POOL_BUFFERS"
+	range 1 4294967295
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  How many receive buffers, each of the batch a session advertises, the links of a
+	  session share when its engine lends their buffers from the session's memory at
+	  open. A link holds one only while it holds part of a batch the stream has not
+	  finished, or a batch or datagram it was asked to keep; it reads into a free one
+	  otherwise. A link that finds none free reads nothing until one is: what its peer
+	  sent waits in the network stack, and nothing is lost. A pool larger than the
+	  links a session may hold is held to them. At least 1; a session may lower it and
+	  never raise it.
+
+config WZ_LIMIT_TX_POOL_SLOTS
+	int "TX_POOL_SLOTS"
+	range 1 4294967295
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  How many outbound slots, each of the batch a session advertises, the links of a
+	  session share when its engine lends their buffers from the session's memory at
+	  open. A link holds one from the moment it encodes a frame until the frame is
+	  written; a frame the stream took in part keeps it until the link's later steps
+	  have written the rest. A batch frame left open for later messages keeps one only
+	  while the pool keeps another free, and is sent with the messages it holds
+	  otherwise. A link that finds every slot held is congested, as one whose stream
+	  takes nothing is: a droppable message is dropped. A pool as large as the links a
+	  session may hold keeps every link's slot its own, and is held to them. At least
+	  1; a session may lower it and never raise it.
 
 config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
 	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
@@ -640,13 +674,12 @@ config WZ_LIMIT_QUERY_ATTACHMENT_MAX_BYTES
 
 config WZ_LIMIT_HANDSHAKE_COOKIE_BYTES
 	int "HANDSHAKE_COOKIE_BYTES"
-	default 128
+	default 176
 	help
-	  How many bytes of a peer's cookie a session keeps on the fixed-memory profile:
+	  How many bytes of a peer's cookie a session keeps on a fixed-memory profile:
 	  the cookie in the peer's INIT acknowledgement, which the node echoes in its
 	  OPEN, and the cookie a peer echoes in its OPEN, which an accepting node checks
-	  against the one it issued. A longer cookie is not kept, so the node echoes none
-	  and the peer refuses its OPEN. At most 65535, the INIT cookie field's capacity, and for a
+	  against the one it issued. A longer cookie is refused where the message is read. At most 65535, the INIT cookie field's capacity, and for a
 	  node that accepts sessions at least the widest cookie it issues itself: a build
 	  with a smaller value does not compile. Each session holds buffers of this size,
 	  so the value is memory. The growable profile keeps a cookie of any length and

@@ -5,20 +5,18 @@
 //!
 //! [`PosixLinks`] is `wz_runtime_coop::ip_stack`'s `IpLinks` at [`PosixUdpSocket`] and
 //! [`PosixTcpDial`]: a dial to `udp/...` opens the datagram link, a dial to `tcp/...` the stream
-//! link over a [`PosixTcpSocket`], and an accepting link is a datagram link. Each link allocates
+//! link over a [`PosixTcpSocket`](crate::stream::PosixTcpSocket), and an accepting link is a
+//! datagram link. Each link allocates
 //! its buffers when it opens. It is the heap profile's twin of the slot profile's `PosixStack`,
 //! and what a program with an allocator (the pico C ABI over the cooperative engine) gives the
 //! session shell.
 
 use crate::net::PosixUdpSocket;
-use crate::stream::{PosixTcpDial, PosixTcpSocket};
+use crate::stream::PosixTcpDial;
 
 /// The host's sockets as the session shell's links, on the heap profile, made with
 /// `PosixLinks::new(local, PosixTcpDial)`.
 pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;
-
-/// The driver [`PosixLinks`] opens: a datagram or a stream link, as the dial named.
-pub type PosixHeapDriver = wz_runtime_coop::ip_stack::HeapIpDriver<PosixUdpSocket, PosixTcpSocket>;
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +25,6 @@ mod tests {
     use std::net::{TcpListener, UdpSocket};
 
     use wz_runtime_coop::session_drive::{Locator, SessionLinks};
-    use wz_session_core::link::BoxedLinkDriver;
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -39,7 +36,7 @@ mod tests {
         let tcp = links
             .open_initiator(Locator::tcp(SocketAddr::new(LOOPBACK, port)))
             .expect("a connection")
-            .pump;
+            .sink;
         assert!(tcp.batch_length_prefixed());
         let ends = tcp.link_endpoints().expect("a connection knows both ends");
         assert_eq!(ends.dst.as_str(), std::format!("tcp/127.0.0.1:{port}"));
@@ -47,7 +44,7 @@ mod tests {
         let udp = links
             .open_initiator(Locator::udp(SocketAddr::new(LOOPBACK, port)))
             .expect("a datagram socket")
-            .pump;
+            .sink;
         assert!(!udp.batch_length_prefixed());
     }
 
@@ -62,7 +59,7 @@ mod tests {
         let tcp = links
             .open_initiator(Locator::tcp(SocketAddr::from((Ipv6Addr::LOCALHOST, port))))
             .expect("a connection")
-            .pump;
+            .sink;
         let ends = tcp.link_endpoints().expect("a connection knows both ends");
         assert_eq!(ends.dst.as_str(), std::format!("tcp/[::1]:{port}"));
         assert!(ends.src.as_str().starts_with("tcp/[::1]:"), "{}", ends.src);
@@ -75,7 +72,7 @@ mod tests {
                 udp_port,
             ))))
             .expect("a datagram socket of the peer's family")
-            .pump;
+            .sink;
         let ends = udp
             .link_endpoints()
             .expect("a dialled link knows both ends");

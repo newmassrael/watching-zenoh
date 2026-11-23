@@ -908,6 +908,18 @@ DEFERRED: dict[str, dict[str, str]] = {
             "twin, so the feature swaps an implementation rather than removing "
             "a path; there is no resolution error for rustc to annotate"
         ),
+        # Its simple-cfg public items with no twin (`SIGNING_KEY_MAX`, the fixed `SessionBytes`)
+        # went to `session-fixed-storage`, which it turns on. What it gates under a simple cfg
+        # now is a storage form with a `cfg(not(..))` twin of the same name (`ExtChainOwned`,
+        # `HandshakeStorage`, `CookieEntropy`, `LocatorText`, the bundle's `core` and `link`
+        # fields), and what disappears without it, `pub mod session_slot`, is behind
+        # `all(session-unicast, session-slot)` (`lib.rs`), for which rustc's note names no
+        # feature.
+        "session-slot": (
+            "@defer cfg-not-twin -- every public path it gates under a simple cfg has a "
+            "`cfg(not(...))` twin, so the feature swaps a storage form rather than removing a "
+            "path, and the module that does disappear (`session_slot`) is behind an `all(..)`"
+        ),
     },
     # Moved here from the core's list with `StorageState::collect_garbage`, the method
     # it gates (server-layer split, step 4).

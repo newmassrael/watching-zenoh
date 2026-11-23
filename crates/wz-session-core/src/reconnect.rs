@@ -790,6 +790,16 @@ where
         R::link_driver(&sink).tx_slot_abort(inner)
     }
 
+    fn tx_slot_spare(&self) -> bool {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).tx_slot_spare()
+    }
+
+    fn tx_slot_claimable(&self) -> bool {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).tx_slot_claimable()
+    }
+
     // The keepalive emitter measures the line from the live link's last write, so a
     // reconnecting session must pass the question on, as the writes themselves are.
     fn reports_wire_writes(&self) -> bool {
@@ -1058,6 +1068,16 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn tx_slot_abort(&self, slot: TxSlot) {
         let (sink, inner) = self.lent.borrow_mut().settle(slot);
         R::link_driver(&sink).tx_slot_abort(inner)
+    }
+
+    fn tx_slot_spare(&self) -> bool {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).tx_slot_spare()
+    }
+
+    fn tx_slot_claimable(&self) -> bool {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).tx_slot_claimable()
     }
 
     fn reports_wire_writes(&self) -> bool {

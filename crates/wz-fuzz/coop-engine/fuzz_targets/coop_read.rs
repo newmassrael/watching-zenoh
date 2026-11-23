@@ -91,13 +91,15 @@ struct Links(Queue);
 impl SessionLinks for Links {
     type Pump = Feed;
 
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
     }
 
     fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Ok(OpenedLink {
-            sink: Rc::new(Nowhere),
+            sink: wz_runtime_coop::link_cells::heap_sink(Nowhere),
             pump: Feed(self.0.clone()),
         })
     }
