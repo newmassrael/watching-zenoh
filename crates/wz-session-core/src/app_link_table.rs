@@ -755,6 +755,16 @@ fn keep(slot: &mut Option<Waker>, waker: Option<&Waker>) {
     }
 }
 
+/// What a wait on a link is for ([`AppLinkTable::wait_link`]): input to read, room to write, or
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkInterest {
+    /// Bytes or a datagram to read, a link waiting on a listener, or the link's end.
+    pub input: bool,
+    /// Room to write, or the link's end.
+    pub room: bool,
+}
+
 /// A row of the table: a link and its storage. A row whose link has gone keeps the storage and
 /// is free (handle 0) for the next link that fits it.
 struct Row {
@@ -1155,6 +1165,32 @@ impl AppLinkTable {
         false
     }
 
+    /// Whether what `interest` asks of `handle` is there now: input to read ([`Self::poll_readable`])
+    /// or room to write ([`Self::poll_writable`]). A handle that names no link any more answers
+    /// `true` at once and keeps nothing: a handle is never reused, so its waiter finds the link gone
+    /// when it looks again, and the link that took its row never wakes it. Otherwise `waker` is
+    /// kept for each side asked and woken when that side would answer, and the answer is `false`.
+    /// A wait that asks for neither side answers `true`.
+    ///
+    /// The answer is a hint, as every wake is: the waiter looks again under its own lock.
+    pub fn wait_link(&mut self, handle: LinkHandle, interest: LinkInterest, waker: &Waker) -> bool {
+        if self.at(handle).is_none() || !(interest.input || interest.room) {
+            return true;
+        }
+        if (interest.input && self.poll_readable(handle, None))
+            || (interest.room && self.poll_writable(handle, None))
+        {
+            return true;
+        }
+        if interest.input {
+            let _ = self.poll_readable(handle, Some(waker));
+        }
+        if interest.room {
+            let _ = self.poll_writable(handle, Some(waker));
+        }
+        false
+    }
+
     /// The next datagram queued on `handle`, lent to `take` where the queue holds it and let go
     /// of once `take` returns: what `take` made of it.
     pub fn read_datagram<T>(
@@ -1529,6 +1565,67 @@ mod tests {
             assert_eq!(kind_for_locator(locator, false), None, "{locator}");
             assert_eq!(kind_for_locator(locator, true), None, "{locator}");
         }
+    }
+
+    /// A wait on a handle that names no link any more answers at once and keeps nothing: the link
+    /// that took its row later wakes no waiter of the old handle. Turned red by a wait that finds a
+    /// row by its storage and not by its handle, or one that keeps a waker for a stale handle.
+    #[test]
+    fn a_wait_on_a_stale_handle_answers_at_once_and_the_rows_next_link_wakes_no_one() {
+        let mut table = AppLinkTable::new();
+        let old = open_stream(&mut table);
+        let _ = table.release(old);
+        let _ = table.close_done(old);
+        assert_eq!(table.state(old), None, "the old link is gone");
+        let (count, waker) = counter();
+        let both = LinkInterest {
+            input: true,
+            room: true,
+        };
+        assert!(
+            table.wait_link(old, both, &waker),
+            "a stale handle answers at once"
+        );
+        let new = open_stream(&mut table);
+        assert_ne!(new, old);
+        assert_eq!(table.rows.len(), 1, "the new link took the old link's row");
+        let _ = wakes(&mut table, |table| {
+            table.received(new, b"data", None).expect("taken")
+        });
+        assert_eq!(
+            count.0.load(Ordering::SeqCst),
+            0,
+            "the old handle's waiter is not woken"
+        );
+    }
+
+    /// A wait on a live link answers at once when its side is there, and otherwise keeps the waker
+    /// and wakes it when that side comes: input when the program hands bytes in. A wait for
+    /// nothing answers at once. Turned red by a wait that keeps no waker, or answers `true` with
+    /// nothing to read.
+    #[test]
+    fn a_wait_on_a_live_link_is_woken_when_its_side_comes() {
+        let mut table = AppLinkTable::new();
+        let link = open_stream(&mut table);
+        let (count, waker) = counter();
+        let input = LinkInterest {
+            input: true,
+            room: false,
+        };
+        assert!(!table.wait_link(link, input, &waker), "nothing to read yet");
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .received(link, b"data", None)
+                .expect("taken")),
+            1
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert!(table.wait_link(link, input, &waker), "input is there now");
+        let nothing = LinkInterest {
+            input: false,
+            room: false,
+        };
+        assert!(table.wait_link(link, nothing, &waker));
     }
 
     #[test]

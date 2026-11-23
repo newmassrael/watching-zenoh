@@ -25,9 +25,11 @@ use alloc::boxed::Box;
 #[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
 
+use core::task::Waker;
+
 use crate::app_link_table::{
-    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
-    ProgramSend,
+    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, LinkInterest,
+    ProgramEvent, ProgramOpen, ProgramSend,
 };
 use crate::limit_binding::Quota;
 #[cfg(target_has_atomic = "ptr")]
@@ -106,6 +108,13 @@ impl AppTransport {
                 Due::Wake(waker) => waker.wake(),
             }
         }
+    }
+
+    /// Whether what `interest` asks of `link` is there now, under the table's lock alone and never
+    /// the session's: [`AppLinkTable::wait_link`], whose waker is woken by the call of the program's
+    /// that brings it, outside the lock ([`Self::perform`]). A stale `link` answers `true` at once.
+    pub fn wait_link(&self, link: LinkHandle, interest: LinkInterest, waker: &Waker) -> bool {
+        self.with(|table| table.wait_link(link, interest, waker))
     }
 
     /// How many links the transport holds.
