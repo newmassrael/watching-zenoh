@@ -14,6 +14,7 @@
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
+  <sce:feature name="action-trace"/>
   <sce:feature name="alloc" requires="storage-profile"/>
   <sce:feature name="app-link" requires="alloc"/>
   <sce:feature name="attachment-bytes"/>
@@ -62,8 +63,10 @@
   <sce:feature name="liveliness-get" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-subscriber" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-token" requires="codec-declare declare-final rx-control"/>
+  <sce:feature name="log"/>
   <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
   <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
+  <sce:feature name="peer-row-pools"/>
   <sce:feature name="pool-monitor"/>
   <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
   <sce:feature name="pubsub-congestion-control" requires="pubsub-qos"/>
@@ -89,6 +92,7 @@
   <sce:feature name="query-value"/>
   <sce:feature name="reassembly" requires="codec-frame"/>
   <sce:feature name="replay-cache"/>
+  <sce:feature name="reply-egress-gate" requires="alloc"/>
   <sce:feature name="reply-source-info"/>
   <sce:feature name="request-put-del"/>
   <sce:feature name="resource-snapshot"/>
@@ -115,6 +119,7 @@
   <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
   <sce:feature name="shared-key-ids" requires="alloc"/>
+  <sce:feature name="south-subregions" requires="alloc"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>
