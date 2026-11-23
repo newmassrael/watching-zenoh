@@ -3928,6 +3928,100 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     }
 }
 
+/// The session's own subscribers, as the paths that deliver to them and answer for them read
+/// them: the subscriptions and their patterns, the count that moves when one comes or goes, and
+/// the sinks a sample on a key reaches (`docs/c-abi-l3-tables.md`, section 6). Implemented by the
+/// subscriber table of both storage profiles ([`SubscriberTable`]) and by the session's one table
+/// set ([`crate::session_tables::SessionTables`]), so a path written over it serves either.
+pub trait LocalSubscribers {
+    /// A count that moves after every registration and retirement: an answer read off the
+    /// subscriptions while this read the same still holds.
+    fn epoch(&self) -> u64;
+
+    /// The id the next subscription takes: every subscription registered from here on has an id
+    /// at least this one.
+    fn next_subscription_id(&self) -> u64;
+
+    /// Hand `f` each subscription: its id, its pattern and the origins it hears.
+    fn for_each_subscription(&self, f: &mut dyn FnMut(u64, &str, crate::locality::Locality));
+
+    /// The pattern of subscription `id`.
+    fn pattern_of(&self, id: u64) -> Option<&str>;
+
+    /// Whether a subscription that hears what the session itself publishes intersects `key`.
+    fn has_local_matching(&self, key: &str) -> bool;
+
+    /// Hand `f` the id and the sink of each subscription whose pattern intersects `key` and whose
+    /// origins admit a sample from the session itself (`local`) or from a peer: how many.
+    fn for_each_matching(
+        &mut self,
+        key: &str,
+        local: bool,
+        f: &mut dyn FnMut(u64, &mut dyn SampleSink),
+    ) -> usize;
+}
+
+/// Whether a subscription that hears `origin` hears a sample from the session itself (`local`)
+/// or from a peer.
+fn hears(origin: crate::locality::Locality, local: bool) -> bool {
+    if local {
+        origin.allows_local()
+    } else {
+        origin.allows_remote()
+    }
+}
+
+impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn next_subscription_id(&self) -> u64 {
+        self.next_id
+    }
+
+    fn for_each_subscription(&self, f: &mut dyn FnMut(u64, &str, crate::locality::Locality)) {
+        for subscriber in self.subscribers.iter() {
+            f(
+                subscriber.id.as_u64(),
+                &subscriber.pattern,
+                subscriber.allowed_origin,
+            );
+        }
+    }
+
+    fn pattern_of(&self, id: u64) -> Option<&str> {
+        self.subscribers
+            .iter()
+            .find(|subscriber| subscriber.id.as_u64() == id)
+            .map(|subscriber| &*subscriber.pattern)
+    }
+
+    fn has_local_matching(&self, key: &str) -> bool {
+        self.subscribers.iter().any(|subscriber| {
+            subscriber.allowed_origin.allows_local() && keyexpr_intersects(&subscriber.pattern, key)
+        })
+    }
+
+    fn for_each_matching(
+        &mut self,
+        key: &str,
+        local: bool,
+        f: &mut dyn FnMut(u64, &mut dyn SampleSink),
+    ) -> usize {
+        let mut reached = 0usize;
+        for subscriber in self.subscribers.iter_mut() {
+            if hears(subscriber.allowed_origin, local)
+                && keyexpr_intersects(&subscriber.pattern, key)
+            {
+                f(subscriber.id.as_u64(), &mut subscriber.sink);
+                reached = reached.saturating_add(1);
+            }
+        }
+        reached
+    }
+}
+
 impl<C: SampleSink> SubscriberRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`, of this build's storage
     /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
@@ -8893,5 +8987,49 @@ mod heap_table_interest_staging_tests {
         assert!(staged
             .iter()
             .all(|item| matches!(item, SubInterestReply::AggregateRetract { .. })));
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod local_subscribers_tests {
+    use super::*;
+    use crate::locality::Locality;
+
+    /// The subscriber table reads as the session's local subscribers: its ids, patterns and
+    /// origins, the count that moves with them, and the sinks a key reaches from each origin.
+    #[test]
+    fn the_table_reads_as_the_sessions_local_subscribers() {
+        let mut table = SubscriberTable::<BoxedSink>::new();
+        let epoch = LocalSubscribers::epoch(&table);
+        let next = table.next_subscription_id();
+        let any = table.register("a/*", |_| {}).unwrap();
+        let remote = table
+            .register_with_locality("a/b", Locality::Remote, |_| {})
+            .unwrap();
+        assert_eq!(any.as_u64(), next);
+        assert_ne!(LocalSubscribers::epoch(&table), epoch);
+        assert!(table.next_subscription_id() > remote.as_u64());
+        assert_eq!(table.pattern_of(remote.as_u64()), Some("a/b"));
+        let mut seen = std::vec::Vec::new();
+        table.for_each_subscription(&mut |id, _pattern, origin| seen.push((id, origin)));
+        assert_eq!(
+            seen,
+            std::vec![
+                (any.as_u64(), Locality::Any),
+                (remote.as_u64(), Locality::Remote)
+            ]
+        );
+        assert!(LocalSubscribers::has_local_matching(&table, "a/c"));
+        let mut reached = std::vec::Vec::new();
+        assert_eq!(
+            table.for_each_matching("a/b", false, &mut |id, _sink| reached.push(id)),
+            2
+        );
+        reached.clear();
+        assert_eq!(
+            table.for_each_matching("a/b", true, &mut |id, _sink| reached.push(id)),
+            1
+        );
+        assert_eq!(reached, std::vec![any.as_u64()]);
     }
 }

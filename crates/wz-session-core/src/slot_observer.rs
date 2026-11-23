@@ -56,6 +56,9 @@ use crate::driver_loop::IterationEvent;
 use crate::key_arena::KeySpace;
 use crate::limit_binding::{Quota, UnlentRows};
 use crate::peer_tables::PeerTables;
+/// The session's own subscribers as the observer's paths read them, from the table of either
+/// storage profile or the session's one table set.
+pub use crate::pubsub::LocalSubscribers;
 use crate::pubsub::SubscriberTable;
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;

@@ -718,3 +718,89 @@ fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
     assert_eq!(tables.take_entity_id(), None);
     assert_eq!(tables.next_entity_id(), None);
 }
+
+/// A sink that counts what it is handed.
+#[derive(Default)]
+struct Counted(usize);
+
+impl crate::sink::SampleSink for Counted {
+    fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {
+        self.0 += 1;
+    }
+}
+
+/// Callbacks a delivery can be handed: a counting sink for the subscribers.
+enum Sinks {}
+
+impl RowCallbacks for Sinks {
+    type Subscriber = Counted;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+}
+
+#[test]
+fn the_tables_read_as_the_sessions_local_subscribers() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = SessionTables::<Sinks>::new();
+    assert_eq!(tables.epoch(), 0);
+    assert_eq!(tables.next_subscription_id(), 1);
+    let any = tables
+        .declare_subscriber("a/*", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let remote = tables
+        .declare_subscriber(
+            "a/b",
+            Locality::Remote,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    assert_eq!(tables.epoch(), 2);
+    assert_eq!(tables.next_subscription_id(), 3);
+    assert_eq!(tables.pattern_of(u64::from(remote.id)), Some("a/b"));
+    assert_eq!(tables.pattern_of(99), None);
+    let mut seen = std::vec::Vec::new();
+    tables.for_each_subscription(&mut |id, pattern, origin| {
+        seen.push((id, std::string::String::from(pattern), origin))
+    });
+    assert_eq!(
+        seen,
+        std::vec![
+            (u64::from(any.id), "a/*".into(), Locality::Any),
+            (u64::from(remote.id), "a/b".into(), Locality::Remote),
+        ]
+    );
+    assert!(tables.has_local_matching("a/c"));
+    assert!(!tables.has_local_matching("b"));
+    let mut reached = std::vec::Vec::new();
+    assert_eq!(
+        tables.for_each_matching("a/b", false, &mut |id, _sink| reached.push(id)),
+        2
+    );
+    assert_eq!(reached, std::vec![u64::from(any.id), u64::from(remote.id)]);
+    reached.clear();
+    assert_eq!(
+        tables.for_each_matching("a/b", true, &mut |id, _sink| reached.push(id)),
+        1
+    );
+    assert_eq!(reached, std::vec![u64::from(any.id)]);
+    let _ = tables.undeclare_subscriber(any.handle);
+    assert_eq!(tables.epoch(), 3);
+    assert!(!tables.has_local_matching("a/c"));
+}
+
+#[test]
+fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = SessionTables::<Sinks>::new();
+    tables.limit_to(&TableRows {
+        subscribers: 0,
+        ..rows()
+    });
+    assert!(tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), Counted::default())
+        .is_err());
+    assert_eq!(tables.epoch(), 0);
+}
