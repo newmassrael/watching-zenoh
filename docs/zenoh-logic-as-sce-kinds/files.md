@@ -320,6 +320,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/decl_watch.rs` | S7 | |
 | `crates/wz-capi-port/src/drive.rs` | S7 | |
 | `crates/wz-capi-port/src/engine.rs` | S7 | |
+| `crates/wz-capi-port/src/entity_place.rs` | S7 | |
 | `crates/wz-capi-port/src/group.rs` | S7 | |
 | `crates/wz-capi-port/src/held_key.rs` | S7 | |
 | `crates/wz-capi-port/src/lib.rs` | S7 | |
