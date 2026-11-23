@@ -10,7 +10,8 @@
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, SubscriberSink, WireKey,
+    FilterPlane, FilteredPut, QueryCallback, QueryHolder, ReplyCallback, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -386,6 +387,54 @@ fn a_link_left_to_the_shared_session_names_its_keys_by_the_dictionary() {
         ["lab/mark"],
         "CONTROL: the shared form sent the dictionary's id, which a client without it drops"
     );
+}
+
+/// A plain put a write filter lets through names its key as the link's key-wire form says, as the
+/// general publish does: a link stated `literal` is sent the whole key though the put names it by
+/// the dictionary's id, which the client at the other end, holding no dictionary, cannot read. The
+/// CONTROL is the put on a key no entry covers, which every form sends whole.
+#[test]
+fn a_filtered_plain_put_names_its_key_as_the_links_form_says() {
+    let at_open = KeyIdsAtOpen {
+        ids: Some(dictionary()),
+        links: vec![(LISTEN.to_owned(), KeyWireForm::Literal)],
+    };
+    let (listener, endpoint) = listener_with(OpenKeyIds::new(at_open), KeyWireForm::Shared);
+    let client = dialler_with(
+        &listener,
+        &endpoint,
+        OpenKeyIds::none(),
+        KeyWireForm::Declared,
+    );
+    let heard = hear(&client, "lab/**", WireKey::literal());
+    let filter = listener
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "lab/**",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a session with ids left declares");
+    eventually("the client's subscriber to open the filter", || {
+        !listener.write_filter_active(filter)
+    });
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    for (key, mapping) in [("lab/rig/alpha", 41), ("lab/mark", 0)] {
+        assert!(
+            matches!(
+                listener.put_plain_filtered(filter, key, mapping, b"value", &params),
+                FilteredPut::Sent(Ok(_))
+            ),
+            "{key} goes plain"
+        );
+    }
+    eventually("the client to hear the literal put", || {
+        heard.lock().unwrap().iter().any(|key| key == "lab/mark")
+    });
+    assert_eq!(*heard.lock().unwrap(), ["lab/rig/alpha", "lab/mark"]);
 }
 
 #[test]
