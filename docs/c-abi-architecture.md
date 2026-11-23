@@ -59,9 +59,11 @@ non-generic core plus thin typed wrappers.
 P6. **Total functions in release paths.** No panic is reachable from input: indexing is checked by
 construction (`get`, iterators, views of known length), arithmetic is checked or saturating,
 every refusal is a value. Enforced by lints on the core crates
-(`clippy::indexing_slicing`, `unwrap_used`, `expect_used`, `panic`, `arithmetic_side_effects`
-in non-test code) and by the size gate (the formatting machinery a panic path drags in is a
-symbol the gate forbids).
+(`clippy::indexing_slicing`, `unwrap_used`, `expect_used`, `panic`, `arithmetic_side_effects`,
+and the other panicking macros `unreachable`, `todo` and `unimplemented`, in non-test code;
+section 7) and by the size gate (the formatting machinery a panic path drags in is a symbol the
+gate forbids). An `assert!` outside a test is a panic no lint names; it is converted with the
+module that holds it.
 
 P7. **The C ABI is a façade.** A door validates its arguments once, maps the C handle to a slot
 handle, calls the session core, and maps the result to the C code. It owns no state but the
@@ -135,6 +137,8 @@ Each phase keeps every test green, is measured against the ledger, and lands on 
    Layer C1cs beside the total.
 2. **Totality lints (P6)** on `wz-session-core`, `wz-capi-coop`, `wz-capi-pico`,
    `wz-runtime-coop` in non-test code, debt rows for the sites that remain, paid largest first.
+   The lints are denied at each crate root; the modules that remain are the register of
+   section 7, held by `scripts/lib/totality_debt_gate.py`.
 3. **Transport views (L2).** Landed on size-handshake; the remaining owned paths (OAM with zbuf
    extensions, JOIN) move to views.
 4. **One table set (L3).** The cooperative engine's registry, targets and key table fold into
@@ -155,3 +159,262 @@ family; every cell of the host performance matrix WIN, on Linux and on pc3-win.
   is one L2/L3 with several drivers.
 - **nightly `build-std` with `panic_immediate_abort`.** It removes the panic machinery's bytes
   without removing the panics; P6 removes the panics. It stays a possible addition, not the design.
+
+## 7. Totality debt register
+
+The four crates deny the totality lints outside a test build, at their roots:
+
+```rust
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
+```
+
+A module not yet converted is allowed the lints it still needs by name, at its declaration in the
+crate root, under the line that names its row here (`// Totality debt TD-NNN
+(docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
+item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
+so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
+given (TD-206) and holds the register's lint cells (379) to its ratchet, which a paid row
+lowers in its own commit. For the lints a text read decides (`unwrap_used`, `expect_used` and the
+panicking macros) it also holds each row to its module's sites, both ways; indexing and arithmetic
+are held by the build's clippy alone.
+
+A module leaves the register when its sites are total functions: `get`, iterators and views of a
+known length for indexing; checked or saturating arithmetic where the operands are not bounded by
+construction; a refusal returned as a value where the old code panicked. Paid in the change that
+switched the lints on, on the release library's path (`pico-client-coop-nostd`): in
+`wz-runtime-coop` the critical sections, the timer table, the link storage, the task table, the
+in-place reassembly and the datagram link; in `wz-capi-coop` the arena plan and the datagram
+scout. A module the text read found no site in is not in the register.
+
+The classes: **open**, hand-written code not converted yet; **in flight**, a module another branch
+is restructuring now (the cooperative engine of step 4, the session core's entity modules, the pico
+doors of step 5), converted as it lands; **generated**, SCE output, whose totality is the
+generator's (step 7). `sites` is the text count of candidate sites when the row was made, which
+orders the payment (largest first) and is not a measurement of what clippy reports.
+
+| id | crate | module | lints | sites | class |
+|---|---|---|---|---:|---|
+| TD-001 | `wz-session-core` | `passive` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 167 | open |
+| TD-002 | `wz-session-core` | `passive_messages` | `indexing_slicing`, `expect_used`, `panic`, `unreachable`, `arithmetic_side_effects` | 158 | open |
+| TD-003 | `wz-session-core` | `keyexpr_match` | `indexing_slicing`, `arithmetic_side_effects` | 86 | open |
+| TD-004 | `wz-session-core` | `session_actions` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 85 | open |
+| TD-005 | `wz-session-core` | `column_log` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 84 | open |
+| TD-006 | `wz-session-core` | `time_range` | `indexing_slicing`, `arithmetic_side_effects` | 77 | open |
+| TD-007 | `wz-session-core` | `doc_out` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 75 | open |
+| TD-008 | `wz-session-core` | `replay_publisher` | `indexing_slicing`, `arithmetic_side_effects` | 74 | open |
+| TD-009 | `wz-session-core` | `json5_lex` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 62 | open |
+| TD-010 | `wz-session-core` | `delivery_lane` | `indexing_slicing`, `arithmetic_side_effects` | 54 | open |
+| TD-011 | `wz-session-core` | `raweth_link` | `indexing_slicing`, `arithmetic_side_effects` | 47 | open |
+| TD-012 | `wz-session-core` | `keyexpr_prefix` | `indexing_slicing`, `arithmetic_side_effects` | 41 | open |
+| TD-013 | `wz-session-core` | `plain_push` | `indexing_slicing`, `unwrap_used`, `arithmetic_side_effects` | 40 | open |
+| TD-014 | `wz-session-core` | `key_catalogue` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 39 | open |
+| TD-015 | `wz-session-core` | `key_arena` | `panic`, `arithmetic_side_effects` | 38 | open |
+| TD-016 | `wz-session-core` | `lent_response` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
+| TD-017 | `wz-session-core` | `frame_encode` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 37 | open |
+| TD-018 | `wz-session-core` | `shared_key_ids` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 36 | open |
+| TD-019 | `wz-session-core` | `bounded` | `indexing_slicing`, `arithmetic_side_effects` | 34 | open |
+| TD-020 | `wz-session-core` | `replay_subscriber` | `indexing_slicing`, `arithmetic_side_effects` | 31 | open |
+| TD-021 | `wz-session-core` | `stats_registry` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 31 | open |
+| TD-022 | `wz-session-core` | `resource_snapshot` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 30 | open |
+| TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 29 | open |
+| TD-024 | `wz-session-core` | `keyexpr_canon` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 28 | open |
+| TD-025 | `wz-session-core` | `accept_cookie` | `indexing_slicing`, `arithmetic_side_effects` | 27 | open |
+| TD-026 | `wz-session-core` | `row_pool` | `panic`, `arithmetic_side_effects` | 27 | open |
+| TD-027 | `wz-session-core` | `sorted_chunks` | `indexing_slicing`, `arithmetic_side_effects` | 27 | open |
+| TD-028 | `wz-session-core` | `dissect` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 26 | open |
+| TD-029 | `wz-session-core` | `multicast_dispatch` | `indexing_slicing`, `arithmetic_side_effects` | 26 | open |
+| TD-030 | `wz-session-core` | `chunk_log` | `indexing_slicing`, `arithmetic_side_effects` | 25 | open |
+| TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
+| TD-032 | `wz-session-core` | `scouting_host` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
+| TD-033 | `wz-session-core` | `stream_window` | `indexing_slicing`, `arithmetic_side_effects` | 25 | open |
+| TD-034 | `wz-session-core` | `zid_derivation` | `indexing_slicing` | 25 | open |
+| TD-035 | `wz-session-core` | `accept_state` | `indexing_slicing`, `arithmetic_side_effects` | 23 | open |
+| TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
+| TD-037 | `wz-session-core` | `network_message` | `indexing_slicing`, `arithmetic_side_effects` | 23 | open |
+| TD-038 | `wz-session-core` | `lifecycle_wire` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 22 | open |
+| TD-039 | `wz-session-core` | `dissect_schema` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |
+| TD-040 | `wz-session-core` | `event_ring` | `indexing_slicing`, `arithmetic_side_effects` | 20 | open |
+| TD-041 | `wz-session-core` | `key_allowance` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 20 | open |
+| TD-042 | `wz-session-core` | `serial_link` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 20 | open |
+| TD-043 | `wz-session-core` | `chain_staging` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
+| TD-044 | `wz-session-core` | `encoded_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | open |
+| TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
+| TD-046 | `wz-session-core` | `stats` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
+| TD-047 | `wz-session-core` | `stream_supervisor` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
+| TD-048 | `wz-session-core` | `policy_document` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
+| TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
+| TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |
+| TD-051 | `wz-session-core` | `ext_chain` | `expect_used`, `panic`, `arithmetic_side_effects` | 16 | open |
+| TD-052 | `wz-session-core` | `sample` | `indexing_slicing`, `arithmetic_side_effects` | 16 | open |
+| TD-053 | `wz-session-core` | `multicast_tx` | `indexing_slicing`, `arithmetic_side_effects` | 15 | open |
+| TD-054 | `wz-session-core` | `reassembly_dispatch` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
+| TD-055 | `wz-session-core` | `text_out` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
+| TD-056 | `wz-session-core` | `app_link_table` | `indexing_slicing`, `arithmetic_side_effects` | 13 | open |
+| TD-057 | `wz-session-core` | `transport_compose` | `expect_used`, `arithmetic_side_effects` | 13 | open |
+| TD-058 | `wz-session-core` | `declare` | `expect_used`, `arithmetic_side_effects` | 12 | in flight |
+| TD-059 | `wz-session-core` | `extshm` | `indexing_slicing`, `arithmetic_side_effects` | 12 | open |
+| TD-060 | `wz-session-core` | `json5` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 12 | open |
+| TD-061 | `wz-session-core` | `byte_log` | `unreachable`, `arithmetic_side_effects` | 11 | open |
+| TD-062 | `wz-session-core` | `capacity` | `indexing_slicing`, `arithmetic_side_effects` | 11 | open |
+| TD-063 | `wz-session-core` | `multicast_join` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 11 | open |
+| TD-064 | `wz-session-core` | `reply_stage` | `indexing_slicing`, `arithmetic_side_effects` | 11 | open |
+| TD-065 | `wz-session-core` | `tx_lease` | `arithmetic_side_effects` | 11 | open |
+| TD-066 | `wz-session-core` | `inbound` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
+| TD-067 | `wz-session-core` | `link` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
+| TD-068 | `wz-session-core` | `tx_buf` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
+| TD-069 | `wz-session-core` | `deferred_fire` | `expect_used`, `arithmetic_side_effects` | 9 | open |
+| TD-070 | `wz-session-core` | `locator_directory` | `indexing_slicing`, `arithmetic_side_effects` | 9 | open |
+| TD-071 | `wz-session-core` | `multicast_rx` | `indexing_slicing`, `arithmetic_side_effects` | 9 | open |
+| TD-072 | `wz-session-core` | `oldest_instant` | `arithmetic_side_effects` | 9 | open |
+| TD-073 | `wz-session-core` | `signing_key` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 9 | open |
+| TD-074 | `wz-session-core` | `caps` | `indexing_slicing`, `arithmetic_side_effects` | 8 | open |
+| TD-075 | `wz-session-core` | `policy_binding` | `indexing_slicing`, `arithmetic_side_effects` | 8 | open |
+| TD-076 | `wz-session-core` | `reconnect` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 8 | open |
+| TD-077 | `wz-session-core` | `request_build` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 8 | open |
+| TD-078 | `wz-session-core` | `ts_stack` | `indexing_slicing`, `arithmetic_side_effects` | 8 | open |
+| TD-079 | `wz-session-core` | `lent_request` | `indexing_slicing`, `arithmetic_side_effects` | 7 | open |
+| TD-080 | `wz-session-core` | `locator` | `indexing_slicing`, `arithmetic_side_effects` | 7 | open |
+| TD-081 | `wz-session-core` | `response_build` | `panic`, `unreachable`, `arithmetic_side_effects` | 7 | open |
+| TD-082 | `wz-session-core` | `limit_binding` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 6 | open |
+| TD-083 | `wz-session-core` | `multicast_peer_rows` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 6 | open |
+| TD-084 | `wz-session-core` | `peer_table` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-085 | `wz-session-core` | `query` | `expect_used`, `arithmetic_side_effects` | 6 | in flight |
+| TD-086 | `wz-session-core` | `session_init_params` | `expect_used`, `panic`, `arithmetic_side_effects` | 6 | open |
+| TD-087 | `wz-session-core` | `session_memory` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-088 | `wz-session-core` | `session_zid` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 6 | open |
+| TD-089 | `wz-session-core` | `sn` | `indexing_slicing`, `arithmetic_side_effects` | 6 | open |
+| TD-090 | `wz-session-core` | `decl_sink` | `arithmetic_side_effects` | 5 | open |
+| TD-091 | `wz-session-core` | `initial_sn` | `indexing_slicing`, `arithmetic_side_effects` | 5 | open |
+| TD-092 | `wz-session-core` | `ntp64` | `arithmetic_side_effects` | 5 | open |
+| TD-093 | `wz-session-core` | `replay_cursor` | `arithmetic_side_effects` | 5 | open |
+| TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
+| TD-095 | `wz-session-core` | `slot_observer` | `panic`, `arithmetic_side_effects` | 5 | open |
+| TD-096 | `wz-session-core` | `credential_identity` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-097 | `wz-session-core` | `face` | `indexing_slicing` | 4 | open |
+| TD-098 | `wz-session-core` | `handshake_encode` | `expect_used`, `arithmetic_side_effects` | 4 | open |
+| TD-099 | `wz-session-core` | `lent_control` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 4 | open |
+| TD-100 | `wz-session-core` | `peer_tables` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-101 | `wz-session-core` | `serde_codec` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
+| TD-103 | `wz-session-core` | `id_map` | `arithmetic_side_effects` | 3 | open |
+| TD-104 | `wz-session-core` | `lifecycle_contract` | `indexing_slicing` | 3 | open |
+| TD-105 | `wz-session-core` | `multicast_peer_lost` | `indexing_slicing` | 3 | open |
+| TD-106 | `wz-session-core` | `observer` | `arithmetic_side_effects` | 3 | open |
+| TD-107 | `wz-session-core` | `peer_planner` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
+| TD-108 | `wz-session-core` | `query_options` | `expect_used`, `unreachable`, `arithmetic_side_effects` | 3 | open |
+| TD-109 | `wz-session-core` | `reset_generations` | `indexing_slicing`, `unreachable` | 3 | open |
+| TD-110 | `wz-session-core` | `source_info_ext` | `arithmetic_side_effects` | 3 | open |
+| TD-111 | `wz-session-core` | `auth_dispatch` | `indexing_slicing` | 2 | open |
+| TD-112 | `wz-session-core` | `chain_loss` | `arithmetic_side_effects` | 2 | open |
+| TD-113 | `wz-session-core` | `compression` | `indexing_slicing`, `expect_used` | 2 | open |
+| TD-114 | `wz-session-core` | `declare_ext_keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-115 | `wz-session-core` | `encoding` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-116 | `wz-session-core` | `encoding_hint` | `indexing_slicing` | 2 | open |
+| TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
+| TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
+| TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
+| TD-120 | `wz-session-core` | `heap_account` | `arithmetic_side_effects` | 2 | open |
+| TD-121 | `wz-session-core` | `hlc` | `arithmetic_side_effects` | 2 | open |
+| TD-122 | `wz-session-core` | `scouting_message` | `arithmetic_side_effects` | 2 | open |
+| TD-123 | `wz-session-core` | `session_slot` | `arithmetic_side_effects` | 2 | open |
+| TD-124 | `wz-session-core` | `sink` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-125 | `wz-session-core` | `supervisor` | `indexing_slicing` | 2 | open |
+| TD-126 | `wz-session-core` | `transport_mode` | `indexing_slicing` | 2 | open |
+| TD-127 | `wz-session-core` | `tx_deadline` | `arithmetic_side_effects` | 2 | open |
+| TD-128 | `wz-session-core` | `vle` | `expect_used`, `arithmetic_side_effects` | 2 | open |
+| TD-129 | `wz-session-core` | `wire_bincode` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-130 | `wz-session-core` | `zid_hex` | `indexing_slicing` | 2 | open |
+| TD-131 | `wz-session-core` | `admission_retry` | `arithmetic_side_effects` | 1 | open |
+| TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
+| TD-133 | `wz-session-core` | `byte_cells` | `arithmetic_side_effects` | 1 | open |
+| TD-134 | `wz-session-core` | `declaration_sync` | `arithmetic_side_effects` | 1 | open |
+| TD-135 | `wz-session-core` | `driver_loop` | `indexing_slicing` | 1 | open |
+| TD-136 | `wz-session-core` | `group_view` | `arithmetic_side_effects` | 1 | open |
+| TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
+| TD-138 | `wz-session-core` | `interval_meter` | `indexing_slicing` | 1 | open |
+| TD-139 | `wz-session-core` | `join_decode` | `arithmetic_side_effects` | 1 | open |
+| TD-140 | `wz-session-core` | `json` | `arithmetic_side_effects` | 1 | open |
+| TD-141 | `wz-session-core` | `limit_corpus` | `panic` | 1 | open |
+| TD-142 | `wz-session-core` | `multicast_member_scope` | `arithmetic_side_effects` | 1 | open |
+| TD-143 | `wz-session-core` | `passive_keyexpr` | `arithmetic_side_effects` | 1 | open |
+| TD-144 | `wz-session-core` | `process_limits` | `panic` | 1 | open |
+| TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
+| TD-146 | `wz-session-core` | `put_payload` | `arithmetic_side_effects` | 1 | open |
+| TD-147 | `wz-session-core` | `quota` | `arithmetic_side_effects` | 1 | open |
+| TD-148 | `wz-session-core` | `rx_profile` | `arithmetic_side_effects` | 1 | open |
+| TD-149 | `wz-session-core` | `scout_responder` | `expect_used` | 1 | open |
+| TD-150 | `wz-session-core` | `scout_static` | `indexing_slicing` | 1 | open |
+| TD-151 | `wz-session-core` | `wire_id` | `arithmetic_side_effects` | 1 | open |
+| TD-152 | `wz-session-core` | `wire_noise` | `arithmetic_side_effects` | 1 | open |
+| TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
+| TD-154 | `wz-capi-coop` | `lane` | `indexing_slicing`, `arithmetic_side_effects` | 76 | open |
+| TD-155 | `wz-capi-pico` | `os` | `indexing_slicing`, `arithmetic_side_effects` | 59 | in flight |
+| TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
+| TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |
+| TD-158 | `wz-capi-pico` | `config` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |
+| TD-159 | `wz-capi-pico` | `replay_publisher` | `indexing_slicing`, `arithmetic_side_effects` | 20 | in flight |
+| TD-160 | `wz-capi-pico` | `serde` | `indexing_slicing`, `arithmetic_side_effects` | 15 | in flight |
+| TD-161 | `wz-capi-pico` | `zid` | `indexing_slicing`, `arithmetic_side_effects` | 14 | in flight |
+| TD-162 | `wz-capi-pico` | `advanced` | `indexing_slicing`, `arithmetic_side_effects` | 12 | in flight |
+| TD-163 | `wz-capi-pico` | `config_policy` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 10 | in flight |
+| TD-164 | `wz-capi-pico` | `keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 10 | in flight |
+| TD-165 | `wz-capi-pico` | `pubsub` | `arithmetic_side_effects` | 10 | in flight |
+| TD-166 | `wz-capi-pico` | `scout` | `indexing_slicing`, `arithmetic_side_effects` | 9 | in flight |
+| TD-167 | `wz-capi-pico` | `session` | `indexing_slicing`, `arithmetic_side_effects` | 9 | in flight |
+| TD-168 | `wz-capi-pico` | `connectivity` | `indexing_slicing`, `arithmetic_side_effects` | 8 | in flight |
+| TD-169 | `wz-capi-pico` | `get` | `arithmetic_side_effects` | 8 | in flight |
+| TD-170 | `wz-capi-pico` | `querier` | `arithmetic_side_effects` | 8 | in flight |
+| TD-171 | `wz-capi-pico` | `session_memory` | `expect_used`, `arithmetic_side_effects` | 8 | in flight |
+| TD-172 | `wz-capi-pico` | `encoding` | `indexing_slicing`, `arithmetic_side_effects` | 7 | in flight |
+| TD-173 | `wz-capi-pico` | `reply_keyexpr` | `indexing_slicing`, `arithmetic_side_effects` | 7 | in flight |
+| TD-174 | `wz-capi-pico` | `instance_key` | `arithmetic_side_effects` | 6 | in flight |
+| TD-175 | `wz-capi-pico` | `replay_subscriber` | `indexing_slicing`, `arithmetic_side_effects` | 6 | in flight |
+| TD-176 | `wz-capi-pico` | `handlers` | `unreachable`, `arithmetic_side_effects` | 5 | in flight |
+| TD-177 | `wz-capi-pico` | `message_catalog` | `arithmetic_side_effects` | 5 | in flight |
+| TD-178 | `wz-capi-pico` | `abi` | `indexing_slicing`, `arithmetic_side_effects` | 4 | in flight |
+| TD-179 | `wz-capi-pico` | `cancellation` | `arithmetic_side_effects` | 3 | in flight |
+| TD-180 | `wz-capi-pico` | `ffi` | `arithmetic_side_effects` | 3 | in flight |
+| TD-181 | `wz-capi-pico` | `matching` | `arithmetic_side_effects` | 3 | in flight |
+| TD-182 | `wz-capi-pico` | `message_payload` | `arithmetic_side_effects` | 3 | in flight |
+| TD-183 | `wz-capi-pico` | `query` | `arithmetic_side_effects` | 3 | in flight |
+| TD-184 | `wz-capi-pico` | `advanced_forms` | `indexing_slicing` | 2 | in flight |
+| TD-185 | `wz-capi-pico` | `app_transport` | `arithmetic_side_effects` | 2 | in flight |
+| TD-186 | `wz-capi-pico` | `ext_interface` | `arithmetic_side_effects` | 2 | in flight |
+| TD-187 | `wz-capi-pico` | `get_to_peer` | `indexing_slicing`, `arithmetic_side_effects` | 2 | in flight |
+| TD-188 | `wz-capi-pico` | `object_pool` | `arithmetic_side_effects` | 2 | in flight |
+| TD-189 | `wz-capi-pico` | `segment_sender` | `arithmetic_side_effects` | 2 | in flight |
+| TD-190 | `wz-capi-pico` | `string_array` | `arithmetic_side_effects` | 2 | in flight |
+| TD-191 | `wz-capi-pico` | `sync` | `arithmetic_side_effects` | 2 | in flight |
+| TD-192 | `wz-capi-pico` | `whatami` | `indexing_slicing` | 2 | in flight |
+| TD-193 | `wz-capi-pico` | `admin_space` | `indexing_slicing` | 1 | in flight |
+| TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
+| TD-195 | `wz-capi-pico` | `e2e_receiver` | `arithmetic_side_effects` | 1 | in flight |
+| TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
+| TD-197 | `wz-capi-pico` | `platform` | `indexing_slicing` | 1 | in flight |
+| TD-198 | `wz-capi-pico` | `stream_supervision` | `arithmetic_side_effects` | 1 | in flight |
+| TD-199 | `wz-capi-pico` | `time_base` | `arithmetic_side_effects` | 1 | in flight |
+| TD-200 | `wz-runtime-coop` | `stream_link` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
+| TD-201 | `wz-runtime-coop` | `reassembly_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 18 | generated |
+| TD-202 | `wz-runtime-coop` | `app_link` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
+| TD-203 | `wz-runtime-coop` | `session_drive` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
+| TD-204 | `wz-runtime-coop` | `local` | `panic` | 1 | open |
+| TD-205 | `wz-runtime-coop` | `runtime_impl` | `panic` | 1 | open |
+| TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
+
+Three rows of `wz-runtime-coop` are one panic each, held for a contract outside the module:
+TD-204 and TD-205 are the stall of a `block_on` (a future nothing can wake),
+whose refusal is a `RuntimeError` of its own and `block_on` answering a `Result`, which moves its
+callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
+to give, and whose refusal belongs in that trait of `wz-session-core`.

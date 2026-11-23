@@ -55,6 +55,22 @@
 //! zenoh-pico scouts where it has no interface iterator, needs no host at all (`scout-datagram`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 
 extern crate alloc;
 
@@ -98,10 +114,14 @@ compile_error!(
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
+// Totality debt TD-153 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::expect_used, clippy::arithmetic_side_effects)]
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What the session hands its subscribers' callbacks after its lock, in a ring of its arena.
+// Totality debt TD-154 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod lane;
 #[cfg(feature = "scout")]
 pub mod scout;

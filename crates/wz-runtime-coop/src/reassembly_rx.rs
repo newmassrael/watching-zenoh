@@ -351,11 +351,13 @@ mod in_place {
             let pool = self.storage.pool();
             let start = pool as *const ReassemblyPoolMcu as usize;
             let offset = (addr as usize).checked_sub(start)?;
-            let idx = offset / SLOT_SIZE;
+            let idx = offset.checked_div(SLOT_SIZE)?;
             if idx >= SLOT_COUNT {
                 return None;
             }
-            let base = (start + idx * SLOT_SIZE) as *const u8;
+            let base = idx
+                .checked_mul(SLOT_SIZE)
+                .and_then(|at| start.checked_add(at))? as *const u8;
             (pool.slot_index_of_ptr(base) == Some(idx)).then_some(idx)
         }
     }
@@ -382,13 +384,22 @@ mod in_place {
                 .checked_add(payload.len())
                 .filter(|end| *end <= MCU_REASSEMBLY_SLOT_SIZE)
                 .ok_or(StagingError::ChainCapExceeded)?;
-            chain.slot.write(self.storage.pool_mut())[chain.len..end].copy_from_slice(payload);
+            chain
+                .slot
+                .write(self.storage.pool_mut())
+                .get_mut(chain.len..end)
+                .ok_or(StagingError::ChainCapExceeded)?
+                .copy_from_slice(payload);
             chain.len = end;
             Ok(())
         }
 
         fn bytes<'a>(&'a self, chain: &'a ArenaChain) -> &'a [u8] {
-            &chain.slot.read(self.storage.pool())[..chain.len]
+            chain
+                .slot
+                .read(self.storage.pool())
+                .get(..chain.len)
+                .unwrap_or(&[])
         }
 
         fn buf<'a>(
@@ -402,7 +413,11 @@ mod in_place {
                 .filter(|end| *end <= MCU_REASSEMBLY_SLOT_SIZE)
                 .ok_or(StagingError::ChainCapExceeded)?;
             chain.reserved = want;
-            Ok(&mut chain.slot.write(self.storage.pool_mut())[start..end])
+            chain
+                .slot
+                .write(self.storage.pool_mut())
+                .get_mut(start..end)
+                .ok_or(StagingError::ChainCapExceeded)
         }
 
         fn commit(&mut self, chain: &mut ArenaChain, filled: usize) -> Result<(), StagingError> {

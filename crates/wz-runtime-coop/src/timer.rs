@@ -205,7 +205,7 @@ impl TimerQueue {
             let due = crate::cs::with(|cs| {
                 self.with_slots(cs, |slots| {
                     let (index, _) = earliest(slots, now_us)?;
-                    slots[index].0.take()
+                    slots.get_mut(index)?.0.take()
                 })
             });
             match due {

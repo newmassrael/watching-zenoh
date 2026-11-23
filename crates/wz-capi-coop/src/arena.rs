@@ -342,33 +342,33 @@ impl ArenaPlan {
             "PICO_UNICAST_BATCH_BYTES",
             links,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "link receive buffers",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             link_bytes,
-        );
+        )?;
         plan.put(
             "link transmit flags",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "link transmit slots",
             "PICO_UNICAST_BATCH_BYTES",
             links,
             times(LINK_TX_SLOTS, link_bytes)?,
-        );
+        )?;
         // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
         plan.put(
             "delivery lane flag",
             "DELIVERY_LANE_BYTES",
             1,
             LentByteCells::FLAG_BYTES,
-        );
-        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes);
+        )?;
+        plan.put("delivery lane", "DELIVERY_LANE_BYTES", 1, plan.lane_bytes)?;
         // The session's reassembly buffers, which its links share, lent next
         // (`SessionArena::lend_reassembly`).
         plan.put(
@@ -376,19 +376,19 @@ impl ArenaPlan {
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             LentByteCells::FLAG_BYTES,
-        );
+        )?;
         plan.put(
             "reassembly buffers",
             "PICO_FRAG_MAX_BYTES",
             plan.reassembly_chains,
             plan.reassembly_bytes,
-        );
+        )?;
         plan.put(
             "subscribers",
             "MAX_SUBSCRIPTIONS",
             lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
             SubscriberTable::<BoxedSink, Lent>::ROW_BYTES,
-        );
+        )?;
         #[cfg(feature = "queryable")]
         plan.put(
             "queryables",
@@ -398,7 +398,7 @@ impl ArenaPlan {
                 wz_session_core::query_sink::BoxedQuerySink,
                 Lent,
             >::ROW_BYTES,
-        );
+        )?;
         #[cfg(feature = "liveliness")]
         {
             plan.put(
@@ -406,7 +406,7 @@ impl ArenaPlan {
                 "MAX_LOCAL_TOKENS",
                 lent::<{ caps::MAX_LOCAL_TOKENS }>("MAX_LOCAL_TOKENS", limits.max_local_tokens())?,
                 wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-            );
+            )?;
             plan.put(
                 "liveliness subscribers",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
@@ -418,7 +418,7 @@ impl ArenaPlan {
                     wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
                     Lent,
                 >::ROW_BYTES,
-            );
+            )?;
         }
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
@@ -432,7 +432,7 @@ impl ArenaPlan {
             1,
             SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(watchers)
                 .ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         plan.gets = GetTables {
             rows: RequesterRows {
                 queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
@@ -458,7 +458,7 @@ impl ArenaPlan {
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.tables,
             FaceGets::arena_bytes(plan.gets.rows).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         // The ends of the legs, a row for each get every table holds (`GetTables::legs`).
         #[cfg(feature = "query")]
         plan.put(
@@ -466,7 +466,7 @@ impl ArenaPlan {
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
             core::mem::size_of::<u64>(),
-        );
+        )?;
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.
         plan.peers = FacePeers {
@@ -479,7 +479,7 @@ impl ArenaPlan {
             "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
         if SHARES_ROWS {
@@ -493,7 +493,7 @@ impl ArenaPlan {
                     pools.interest_bytes(),
                 ),
             ] {
-                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?)?;
             }
         }
         plan.held_queries = if cfg!(feature = "queryable") {
@@ -515,14 +515,14 @@ impl ArenaPlan {
             "MAX_SUBSCRIPTIONS",
             rows.subscribers,
             EntryBytes::SUBSCRIBER,
-        );
+        )?;
         #[cfg(feature = "queryable")]
         self.put(
             "queryable declarations",
             "MAX_QUERYABLES",
             rows.queryables,
             EntryBytes::QUERYABLE,
-        );
+        )?;
         #[cfg(feature = "liveliness")]
         {
             self.put(
@@ -530,38 +530,38 @@ impl ArenaPlan {
                 "MAX_LOCAL_TOKENS",
                 rows.tokens,
                 EntryBytes::TOKEN,
-            );
+            )?;
             self.put(
                 "liveliness subscriber declarations",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
                 rows.liveliness_subscribers,
                 EntryBytes::LIVELINESS_SUBSCRIBER,
-            );
+            )?;
         }
         self.put(
             "key expressions",
             "MAX_DECLARED_KEYEXPRS",
             rows.keyexprs,
             EntryBytes::KEYEXPR,
-        );
+        )?;
         self.put(
             "write filters",
             "MAX_PUBLISHERS + MAX_QUERIERS",
             rows.filters().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::FILTER,
-        );
+        )?;
         self.put(
             "matching listeners",
             "MAX_MATCHING_LISTENERS",
             rows.matching_listeners,
             EntryBytes::MATCH,
-        );
+        )?;
         self.put(
             "interests",
             "MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS",
             rows.interests().ok_or(ArenaRefused::TooLarge)?,
             EntryBytes::INTEREST,
-        );
+        )?;
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`SessionArena::lend_keys`), not a row of
         // each.
@@ -570,7 +570,7 @@ impl ArenaPlan {
             "KEY_ARENA_BYTES",
             1,
             KeySpace::span_bytes(self.key_bytes).ok_or(ArenaRefused::TooLarge)?,
-        );
+        )?;
         Ok(())
     }
 
@@ -610,15 +610,24 @@ impl ArenaPlan {
         self.held_queries
     }
 
-    /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
-    fn put(&mut self, part: &'static str, basis: &'static str, count: usize, entry_bytes: usize) {
-        self.rows[self.len] = ArenaRow {
+    /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`);
+    /// a row past them is refused as an arena past what the plan can lay out.
+    fn put(
+        &mut self,
+        part: &'static str,
+        basis: &'static str,
+        count: usize,
+        entry_bytes: usize,
+    ) -> Result<(), ArenaRefused> {
+        let row = self.rows.get_mut(self.len).ok_or(ArenaRefused::TooLarge)?;
+        *row = ArenaRow {
             part,
             basis,
             count,
             entry_bytes,
         };
-        self.len += 1;
+        self.len = self.len.saturating_add(1);
+        Ok(())
     }
 
     /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
@@ -634,8 +643,8 @@ impl ArenaPlan {
             return Ok(self);
         }
         self.handle_bytes = handle.size();
-        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES);
-        self.put("session handle", "", 1, handle.size());
+        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
+        self.put("session handle", "", 1, handle.size())?;
         self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(self)
     }
@@ -647,7 +656,7 @@ impl ArenaPlan {
 
     /// The rows, in the order they are lent.
     pub fn rows(&self) -> &[ArenaRow] {
-        &self.rows[..self.len]
+        self.rows.get(..self.len).unwrap_or(&[])
     }
 
     /// The bytes the arena reserves: the sum of the rows' spans. `None` past the address space.
@@ -1175,5 +1184,42 @@ impl Drop for SessionArena {
         // SAFETY: `base` is what the memory gave for `layout`, given back here once, and the
         // session that held the arena dropped every table lent from it first.
         unsafe { self.memory.release(self.base, self.layout) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_plan() -> ArenaPlan {
+        ArenaPlan {
+            rows: [NO_ROW; ARENA_ROWS],
+            len: 0,
+            links: 0,
+            link_bytes: 0,
+            lane_bytes: 0,
+            reassembly_bytes: 0,
+            reassembly_chains: 0,
+            entities: EntityRows::default(),
+            gets: GetTables::default(),
+            peers: FacePeers::default(),
+            held_queries: 0,
+            key_bytes: 0,
+            handle_bytes: 0,
+        }
+    }
+
+    /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
+    #[test]
+    fn a_row_past_the_plan_is_refused_and_the_rows_it_holds_stay() {
+        let mut plan = empty_plan();
+        for _ in 0..ARENA_ROWS {
+            assert_eq!(plan.put("part", "BASIS", 1, 8), Ok(()));
+        }
+        assert_eq!(
+            plan.put("one more", "BASIS", 1, 8),
+            Err(ArenaRefused::TooLarge)
+        );
+        assert_eq!(plan.rows().len(), ARENA_ROWS);
     }
 }

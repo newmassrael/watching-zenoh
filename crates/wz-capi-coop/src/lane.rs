@@ -1817,13 +1817,14 @@ impl SharedLane {
     ) -> Arc<Self> {
         // `Arc::new_uninit` is newer than this crate's minimum Rust; an uninitialised value put in
         // an `Arc` is the same allocation, and the optimiser writes nothing into it.
-        let mut shared = Arc::new(MaybeUninit::<Self>::uninit());
-        let place = Arc::get_mut(&mut shared).expect("a new allocation has one handle");
-        // SAFETY: the caller's, which are `SampleLane::over_in`'s.
-        unsafe { Self::new_in(place, area, area_bytes, limits) };
+        let raw = Arc::into_raw(Arc::new(MaybeUninit::<Self>::uninit())).cast_mut();
+        // SAFETY: `raw` is the one handle of an allocation made on the line above, so the place
+        // is valid and nothing else reads or writes it while it is written; the rest is the
+        // caller's, which are `SampleLane::over_in`'s.
+        unsafe { Self::new_in(&mut *raw, area, area_bytes, limits) };
         // SAFETY: `new_in` wrote every field into the allocation, and a `MaybeUninit<T>` has the
         // size and alignment of `T`, which is what `Arc::from_raw` asks of the pointer's type.
-        unsafe { Arc::from_raw(Arc::into_raw(shared).cast::<Self>()) }
+        unsafe { Arc::from_raw(raw.cast::<Self>().cast_const()) }
     }
 
     /// The lane written field by field into `place`, the lane itself where its cell keeps it
