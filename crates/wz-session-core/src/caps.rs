@@ -258,6 +258,19 @@ pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
 /// payloads, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
 
+/// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
+/// the config object. A new key past them is refused at its insert.
+pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
+
+/// The bytes of value text one config of the pico C ABI holds, each value with its terminator, in
+/// one text fixed in the config object. A value that finds no room is refused at its insert.
+pub const CONFIG_TEXT_BYTES: usize = generated::CONFIG_TEXT_BYTES;
+
+const _: () = assert!(
+    CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
+    "a config holds at least one key, at most one row for each key but one, and some text"
+);
+
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the

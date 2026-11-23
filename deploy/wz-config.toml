@@ -2746,6 +2746,59 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
 
 [[limit]]
+id = "CONFIG_ENTRIES"
+kconfig = "WZ_LIMIT_CONFIG_ENTRIES"
+kind = "parameter"
+range = [1, 255]
+default = 32
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The numbered keys one config of the pico C ABI holds at once (z_config_default,
+zp_config_insert): the rows of its table, part of the config object. A new key
+past them is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps what
+it held; a key it holds is still replaced. From 1 to 255.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh configuration is a document, and zenoh-pico keeps its numbered keys in a map on its heap bounded by no count. The default holds every numbered key zenoh-pico defines at once, the 27 from 0x40 to the last (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_CONFIG_LISTEN_EXIT_ON_FAILURE_KEY 0x5A`), and five more."
+
+[limit.pico_preset]
+value = 8
+reason = "zenoh-pico's map of keys is bounded by no count; the preset holds the keys of its examples without TLS: the mode and the three scouting keys its default config inserts (`vendor/zenoh-pico/src/net/config.c` @ `_zp_config_insert(ps, Z_CONFIG_MULTICAST_LOCATOR_KEY, Z_CONFIG_MULTICAST_LOCATOR_DEFAULT),`), a connect and a listen locator, the session id and what to scout for, eight, as the text of CONFIG_TEXT_BYTES's preset does."
+
+[[limit]]
+id = "CONFIG_TEXT_BYTES"
+kconfig = "WZ_LIMIT_CONFIG_TEXT_BYTES"
+kind = "parameter"
+range = [1, 1048576]
+default = 16384
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes of value text one config of the pico C ABI holds, each value with
+its terminator, part of the config object. A key's new value is written over
+its old place when it fits there, else after the last value. A value that
+finds no room is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps
+what it held. At least 1.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh-pico copies each value into an allocation of its own length (`vendor/zenoh-pico/src/protocol/config.c` @ `res = _z_str_intmap_insert(ps, key, _z_str_clone(value));`). The default holds the five inline certificates and keys of zenoh-pico's TLS example, a trust bundle of 1,608 bytes and a certificate of 1,552 and a key of 2,052 for each of listen and connect, 8,816 bytes, with its other values and room to replace them."
+
+[limit.pico_preset]
+value = 256
+reason = "zenoh-pico's values are bounded by no constant; the preset holds what its examples without TLS set at the longest: the mode, a connect and a listen locator of MAX_LOCATOR_LEN (64) each, the session id of 36 characters and the four scouting keys, each with its terminator, about 210 bytes, and room to replace one."
+
+[[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
 kconfig = "WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS"
 kind = "bound"
