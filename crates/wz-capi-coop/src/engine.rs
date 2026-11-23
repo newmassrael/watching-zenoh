@@ -85,7 +85,6 @@ use wz_runtime_coop::{
 };
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::declare::matching::BoxedMatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
@@ -6009,8 +6008,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // matches reports it as it registers, and a delivery on another thread may hand that out
         // before this call reaches its own.
         lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
-        let queue = self.matching.clone();
-        let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
+        let report = registry::FlipReport {
+            queue: self.matching.clone(),
+            id,
+        };
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         // An already-matching registration is told so by the registry as it registers, as

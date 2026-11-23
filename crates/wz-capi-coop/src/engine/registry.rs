@@ -49,13 +49,15 @@ use wz_session_core::slot_observer::{
 };
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
+use super::queued::Queued;
 use super::SubscriberRow;
 use crate::arena::{FacePeers, GetTables};
-use wz_capi_port::FilterPlane;
+use crate::lane::MatchFlips;
+use wz_capi_port::{FilterPlane, MatchId};
 use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
 
-use wz_session_core::declare::matching::BoxedMatchingSink;
+use wz_session_core::declare::matching::MatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
@@ -270,9 +272,23 @@ impl ObserverSinks for CoopSinks {
     type Undeclared = BoxedUndeclSink;
 }
 
+/// Where a matching listener's flips go on this engine: the session's queue of them, by the
+/// listener's id, handed to its callback after the lock (`MatchFlips`). A value of its own, so
+/// the tables keep no box and no closure per listener.
+pub(super) struct FlipReport {
+    pub(super) queue: alloc::sync::Arc<Queued<MatchFlips>>,
+    pub(super) id: MatchId,
+}
+
+impl MatchingSink for FlipReport {
+    fn on_matching_changed(&mut self, matching: bool) {
+        self.queue.lock().flip(self.id, matching);
+    }
+}
+
 /// What the application registered on the session: its tables' rows lent from the session's
 /// arena at its open, each as many as the limit the open resolved.
-pub(super) type App = SlotObserverOf<CoopSinks, Lent>;
+pub(super) type App = SlotObserverOf<CoopSinks, Lent, FlipReport>;
 
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
@@ -823,7 +839,7 @@ impl Registry {
         &mut self,
         criterion: PublisherCriterion,
         local: bool,
-        sink: BoxedMatchingSink,
+        sink: FlipReport,
     ) -> u64 {
         let Split { app, face, others } = self
             .split(DIAL_FACE)
@@ -843,7 +859,7 @@ impl Registry {
         &mut self,
         criterion: QuerierCriterion,
         local: bool,
-        sink: BoxedMatchingSink,
+        sink: FlipReport,
     ) -> u64 {
         let Split { app, face, others } = self
             .split(DIAL_FACE)
@@ -985,6 +1001,22 @@ mod tests {
     use wz_session_core::peer_tables::PeerPoolRows;
     use wz_session_core::reply_stage::FinalStaging;
     use wz_session_core::sample::QosLevel;
+
+    /// A flip reported for a listener waits in the session's queue under the listener's id, to be
+    /// handed after the lock; a change back before it is handed takes it away.
+    #[test]
+    fn a_reported_flip_waits_in_the_sessions_queue_by_the_listeners_id() {
+        let queue = alloc::sync::Arc::new(Queued::new(MatchFlips::new()));
+        let mut report = FlipReport {
+            queue: queue.clone(),
+            id: 7,
+        };
+        report.on_matching_changed(true);
+        assert_eq!(queue.lock().next(), Some((7, true)));
+        report.on_matching_changed(false);
+        report.on_matching_changed(true);
+        assert_eq!(queue.lock().next(), None);
+    }
 
     /// A registry and the arena its tables were lent from, the registry first so its tables go
     /// before the memory they lie in, and how many sets the open lent rows to.

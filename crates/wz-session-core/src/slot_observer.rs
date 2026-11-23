@@ -52,6 +52,7 @@ use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
 use crate::declare::queryable::RemoteQueryableTable;
 #[cfg(feature = "declare-subscriber")]
 use crate::declare::subscriber::RemoteSubscriberTable;
+use crate::declare::{DefaultMatchingReport, MatchingReport};
 use crate::driver_loop::IterationEvent;
 use crate::key_arena::KeySpace;
 use crate::limit_binding::{Quota, UnlentRows};
@@ -237,7 +238,14 @@ impl OtherPeers for NoOtherPeers {
 /// [`Lent`] for an observer whose rows a session's arena lent at its open
 /// ([`SlotObserverOf::lent`]), the declaration watchers' lists among them. What a peer
 /// writes is in the [`PeerTables`] each call is handed, of their own policy.
-pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile> {
+///
+/// `M` is what a matching listener's flips are handed to ([`MatchingReport`]): a boxed closure
+/// unless the holder names a sink of its own.
+pub struct SlotObserverOf<
+    K: ObserverSinks = DefaultSinks,
+    P: Storage = Profile,
+    M: MatchingReport = DefaultMatchingReport,
+> {
     /// The local subscriptions. One registration serves every session.
     pub subscribers: SubscriberTable<K::Subscriber, P>,
     /// The statechart switchboard (the keyexpr -> event table).
@@ -248,10 +256,10 @@ pub struct SlotObserverOf<K: ObserverSinks = DefaultSinks, P: Storage = Profile>
     pub queryables: QueryableRegistry<K::Queryable, P>,
     /// The application's listeners on the subscribers a peer declares.
     #[cfg(feature = "declare-subscriber")]
-    pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared, P>,
+    pub remote_subscribers: RemoteSubscriberTable<K::Declared, K::Undeclared, P, M>,
     /// The application's listeners on the queryables a peer declares.
     #[cfg(feature = "declare-queryable")]
-    pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared, P>,
+    pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared, P, M>,
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
@@ -613,7 +621,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 }
 
-impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
+impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
     /// many rows each as `rows` states, their keys kept in `keys`, the session's key arena, and
     /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. The declaration watchers'
@@ -720,7 +728,7 @@ const fn sum_of(a: Option<usize>, b: Option<usize>) -> Option<usize> {
     }
 }
 
-impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
+impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// Hold each registry to the limits `limits` states: what the creator of the session resolved
     /// for it. A table reads its bound here and never from the build. In place, as the observer of a
     /// node is built where it stays ([`ObserverCell::init_with`]) and is never a value; what each
