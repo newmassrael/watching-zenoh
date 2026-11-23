@@ -2358,19 +2358,7 @@ unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
 /// a THROUGHPUT benchmark rather than a publish loop.
 #[no_mangle]
 pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResult {
-    guarded(|| match session_handle(zs) {
-        Some(handle) => {
-            let engine = engine_ref(handle);
-            if !engine.has_transport() {
-                return Z_ERR_TRANSPORT_NOT_AVAILABLE;
-            }
-            engine.batch_start_all();
-            Z_OK
-        }
-        // pico: `if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);` -- a null
-        // session is answered as a closed one, for all three batch calls.
-        None => Z_ERR_SESSION_CLOSED,
-    })
+    batch_door(zs, BatchStep::Start)
 }
 
 /// Flush every open batch window without closing it (pico `zp_batch_flush`).
@@ -2381,33 +2369,67 @@ pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResul
 /// `z_put_options_default`.
 #[no_mangle]
 pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResult {
+    batch_door(zs, BatchStep::Flush)
+}
+
+/// Close every batch window, draining what it holds (pico `zp_batch_stop`).
+#[no_mangle]
+pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult {
+    batch_door(zs, BatchStep::Stop)
+}
+
+/// What a `zp_batch_*` door asks of every batch window of the session.
+#[derive(Clone, Copy)]
+enum BatchStep {
+    Start,
+    Flush,
+    Stop,
+}
+
+/// The body the three batch doors share, out of line so that none of them holds a copy of the
+/// session's lookup and the transport check. pico answers a null session as a closed one for all
+/// three (`if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);`), and a session with no
+/// transport `_Z_ERR_TRANSPORT_NOT_AVAILABLE`.
+///
+/// # Safety
+/// `zs` must be null or a live loaned session.
+#[inline(never)]
+unsafe fn batch_door(zs: *const z_loaned_session_t, step: BatchStep) -> ZResult {
     guarded(|| match session_handle(zs) {
         Some(handle) => {
             let engine = engine_ref(handle);
             if !engine.has_transport() {
                 return Z_ERR_TRANSPORT_NOT_AVAILABLE;
             }
-            engine.batch_flush_all();
+            match step {
+                BatchStep::Start => engine.batch_start_all(),
+                BatchStep::Flush => engine.batch_flush_all(),
+                BatchStep::Stop => engine.batch_stop_all(),
+            };
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,
     })
 }
 
-/// Close every batch window, draining what it holds (pico `zp_batch_stop`).
-#[no_mangle]
-pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult {
-    guarded(|| match session_handle(zs) {
-        Some(handle) => {
-            let engine = engine_ref(handle);
-            if !engine.has_transport() {
-                return Z_ERR_TRANSPORT_NOT_AVAILABLE;
+/// The three batch doors share one body: each answers a null session, and a loan of no session,
+/// as a closed one.
+#[cfg(test)]
+mod batch_door_tests {
+    use super::*;
+
+    #[test]
+    fn every_batch_door_answers_no_session_as_a_closed_one() {
+        // SAFETY: a null session and a loan holding none are what the doors refuse.
+        unsafe {
+            let empty = z_owned_session_t::null_value();
+            let loaned = z_session_loan(&empty);
+            for door in [zp_batch_start, zp_batch_flush, zp_batch_stop] {
+                assert_eq!(door(core::ptr::null()), Z_ERR_SESSION_CLOSED);
+                assert_eq!(door(loaned), Z_ERR_SESSION_CLOSED);
             }
-            engine.batch_stop_all();
-            Z_OK
         }
-        None => Z_ERR_SESSION_CLOSED,
-    })
+    }
 }
 
 // --- R311y559: the entity-identity accessors --------------------------------

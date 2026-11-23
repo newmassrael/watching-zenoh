@@ -79,19 +79,17 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 ///
 /// pico `_z_declared_keyexpr_alias_to_wire`
 /// (`vendor/zenoh-pico/src/session/keyexpr.c`), which every message that names
-/// a caller's key goes through. `None` when `ke` is null or not UTF-8.
+/// a caller's key goes through. Every caller has read the key's text first
+/// ([`keyexpr_str`]), which refuses a null or non-UTF-8 key, so the text is not
+/// read again here: only the declaration is.
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
-pub(crate) unsafe fn wire_key_of(
-    ke: *const z_loaned_keyexpr_t,
-    shared: &Engine,
-) -> Option<WireKey> {
-    keyexpr_str(ke)?;
-    Some(match declared_of(ke) {
+pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
+    match declared_of(ke) {
         Some(declared) => declared.wire(shared),
         None => WireKey::literal(),
-    })
+    }
 }
 
 /// pico `_z_keyexpr_wire_declaration_t` behind its refcount: ONE keyexpr
@@ -426,7 +424,7 @@ impl DeclaredKeyexpr {
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        Self::declare_up_to(shared, literal, existing, literal.len())
+        Self::declare_up_to(shared, literal, existing, literal)
     }
 
     /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
@@ -436,15 +434,18 @@ impl DeclaredKeyexpr {
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        Self::declare_up_to(shared, literal, existing, non_wild_prefix_len(literal))
+        Self::declare_up_to(shared, literal, existing, non_wild_prefix(literal))
     }
 
+    /// `literal` declared on `shared` up to `prefix`, a prefix of it (the whole key or its
+    /// non-wild prefix), named as text so that no length is cut out of the key by index.
     fn declare_up_to(
         shared: &Arc<Engine>,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
-        prefix_len: usize,
+        prefix: &str,
     ) -> Result<Self, ZResult> {
+        let prefix_len = prefix.len();
         // A key the session's tables cannot hold is refused before anything is declared.
         if !fits(literal) {
             return Err(Z_EINVAL);
@@ -476,7 +477,7 @@ impl DeclaredKeyexpr {
         // A session that holds no more declarations, its table at the limit it opened under or
         // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing; the key
         // goes back with `text`.
-        let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
+        let Some(id) = shared.acquire_keyexpr(prefix) else {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {
@@ -490,14 +491,22 @@ impl DeclaredKeyexpr {
     }
 }
 
-/// pico `_z_keyexpr_non_wild_prefix_len`: the length up to the `/` before the
-/// first `*`, the whole key when there is none, 0 when the key opens wild.
-fn non_wild_prefix_len(literal: &str) -> usize {
+/// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
+/// the first `*`, the whole key when there is none, empty when the key opens wild.
+///
+/// The prefix ends at an ASCII byte or at the key's end, both boundaries of the text, so `get`
+/// always answers it; taking it by `get` rather than by index leaves the declaration no path
+/// to the formatter of a failed slice.
+fn non_wild_prefix(literal: &str) -> &str {
     let bytes = literal.as_bytes();
-    let Some(star) = bytes.iter().position(|&b| b == b'*') else {
-        return bytes.len();
+    let len = match bytes.iter().position(|&b| b == b'*') {
+        Some(star) => bytes
+            .get(..star)
+            .and_then(|head| head.iter().rposition(|&b| b == b'/'))
+            .unwrap_or(0),
+        None => bytes.len(),
     };
-    bytes[..star].iter().rposition(|&b| b == b'/').unwrap_or(0)
+    literal.get(..len).unwrap_or_default()
 }
 
 /// Whether `text` is a key expression in canon form, as pico's
@@ -973,19 +982,20 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         };
         // The canon CHECK, not the canon transform: equality with the canonical
         // form is exactly `_z_keyexpr_is_canon` returning OK.
-        if !is_pico_canon(&text) {
+        if !is_pico_canon(text) {
             return Z_ERR_INVALID;
         }
-        if !fits(&text) {
+        if !fits(text) {
             return Z_EINVAL;
         }
-        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(&text));
+        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
         Z_OK
     })
 }
 
 /// Build an owned keyexpr from a NUL-terminated string, CANONIZING it first
-/// (pico `z_keyexpr_from_str_autocanonize`).
+/// (pico `z_keyexpr_from_str_autocanonize`): the substring form over the string's
+/// length, as pico's is.
 ///
 /// # Safety
 /// As [`z_keyexpr_from_str`].
@@ -994,24 +1004,12 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    guarded(|| {
-        let len = if name.is_null() {
-            0
-        } else {
-            CStr::from_ptr(name).to_bytes().len()
-        };
-        let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
-            return Z_ERR_NULL;
-        };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
-    })
+    let mut len = if name.is_null() {
+        0
+    } else {
+        CStr::from_ptr(name).to_bytes().len()
+    };
+    z_keyexpr_from_substr_autocanonize(keyexpr, name, &mut len)
 }
 
 /// Build an owned keyexpr from a substring, canonizing it and writing the
@@ -1038,7 +1036,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
             return Z_ERR_NULL;
         };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 *len = canon.as_str().len();
@@ -1050,16 +1048,21 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
     })
 }
 
-/// Null `keyexpr` and read `name[..len]` as UTF-8, or `None` on any bad input.
+/// Null `keyexpr` and read `name[..len]` as UTF-8 where it lies, or `None` on any bad
+/// input. The owned key is made from it once, where it is stored, so nothing is copied to read it.
 ///
-/// Shared by the four owned constructors so the "null the destination FIRST"
+/// Shared by the owned constructors so the "null the destination FIRST"
 /// discipline cannot drift between them: a constructor that failed without
 /// nulling would leave the caller's stack value looking live.
-unsafe fn owned_keyexpr_input(
+///
+/// # Safety
+/// `keyexpr` must be null or valid and writable; `name` must be null or point at `len`
+/// readable bytes, which outlive the answer.
+unsafe fn owned_keyexpr_input<'a>(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
     len: usize,
-) -> Option<String> {
+) -> Option<&'a str> {
     if keyexpr.is_null() {
         return None;
     }
@@ -1068,7 +1071,7 @@ unsafe fn owned_keyexpr_input(
         return None;
     }
     let bytes = core::slice::from_raw_parts(name as *const u8, len);
-    core::str::from_utf8(bytes).ok().map(str::to_owned)
+    core::str::from_utf8(bytes).ok()
 }
 
 /// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
@@ -1168,16 +1171,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        let joined = [head, tail].concat();
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
-            // Canonizing only shortens a key, so one still past the bound is past it.
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
+        store_joined(key, left, &[head, tail])
     })
 }
 
@@ -1191,6 +1185,43 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
     match declared_of(left) {
         Some(declared) => declared.extended(literal),
         None => DeclaredKeyexpr::literal_only(literal),
+    }
+}
+
+/// The body `z_keyexpr_concat` and `z_keyexpr_join` share, out of line so neither export holds a
+/// copy of it: `parts` written one after the other into a buffer of the longest key a row of the
+/// session's tables holds, canonized, and stored in `key` keeping `left`'s declaration
+/// ([`extended_from`]). A text longer than the buffer is refused with `Z_EINVAL` before it is
+/// canonized, as one longer after canonizing is: the buffer is the bound every key of this build
+/// is held to, and the join takes no allocation of its own.
+///
+/// # Safety
+/// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
+#[inline(never)]
+unsafe fn store_joined(
+    key: *mut z_owned_keyexpr_t,
+    left: *const z_loaned_keyexpr_t,
+    parts: &[&str],
+) -> ZResult {
+    let mut buf = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
+    let mut used = 0usize;
+    for part in parts {
+        let Some(room) = buf.get_mut(used..used + part.len()) else {
+            return Z_EINVAL;
+        };
+        room.copy_from_slice(part.as_bytes());
+        used += part.len();
+    }
+    // SAFETY: `buf[..used]` is whole `str` values written one after the other, which is UTF-8.
+    let joined = core::str::from_utf8_unchecked(&buf[..used]);
+    match wz_session_core::keyexpr_canon::canonize_keyexpr(joined) {
+        // Canonizing only shortens a key, so one still past the bound is past it.
+        Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
+        Ok(canon) => {
+            store_owned_keyexpr(key, extended_from(left, canon.as_str()));
+            Z_OK
+        }
+        Err(_) => Z_ERR_INVALID,
     }
 }
 
@@ -1213,15 +1244,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        let joined = [l, "/", r].concat();
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
+        store_joined(key, left, &[l, "/", r])
     })
 }
 
@@ -1530,11 +1553,11 @@ mod tests {
     /// key opens wild.
     #[test]
     fn the_non_wild_prefix_stops_at_the_chunk_before_the_first_star() {
-        assert_eq!(non_wild_prefix_len("demo/kd/sub/**"), "demo/kd/sub".len());
-        assert_eq!(non_wild_prefix_len("demo/kd/qbl/*/x"), "demo/kd/qbl".len());
-        assert_eq!(non_wild_prefix_len("demo/kd/pub"), "demo/kd/pub".len());
-        assert_eq!(non_wild_prefix_len("**"), 0);
-        assert_eq!(non_wild_prefix_len("a/b$*/c"), "a".len());
+        assert_eq!(non_wild_prefix("demo/kd/sub/**"), "demo/kd/sub");
+        assert_eq!(non_wild_prefix("demo/kd/qbl/*/x"), "demo/kd/qbl");
+        assert_eq!(non_wild_prefix("demo/kd/pub"), "demo/kd/pub");
+        assert_eq!(non_wild_prefix("**"), "");
+        assert_eq!(non_wild_prefix("a/b$*/c"), "a");
     }
 
     /// R2959 — a declaration is retracted when its LAST holder lets go, and not
@@ -1586,6 +1609,26 @@ mod tests {
             0,
             "another session's id is not ours"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::non_wild_prefix;
+
+    /// The non-wild prefix is cut at the `/` before the first `*` whatever the chunks before
+    /// it hold, multi-byte characters included, and is the whole key or nothing at the two ends.
+    #[test]
+    fn the_non_wild_prefix_is_cut_at_a_boundary_of_the_text() {
+        assert_eq!(
+            non_wild_prefix("d\u{e9}mo/\u{d55c}/sub/**"),
+            "d\u{e9}mo/\u{d55c}/sub"
+        );
+        assert_eq!(non_wild_prefix("\u{d55c}/*"), "\u{d55c}");
+        assert_eq!(non_wild_prefix("\u{d55c}\u{ae00}"), "\u{d55c}\u{ae00}");
+        assert_eq!(non_wild_prefix("*/a"), "");
+        assert_eq!(non_wild_prefix("a*/b"), "");
+        assert_eq!(non_wild_prefix(""), "");
     }
 }
 
@@ -1677,6 +1720,84 @@ mod bound_tests {
             for key in [&mut left, &mut right, &mut wider, &mut full] {
                 z_keyexpr_drop(z_keyexpr_move(key));
             }
+        }
+    }
+
+    /// A concatenation is written into a buffer of the bound before it is canonized: a text past
+    /// the bound is refused even where canonizing would have shortened it under the bound,
+    /// leaving the destination null, and one under it is canonized and kept.
+    #[test]
+    fn a_concatenation_past_the_bound_is_refused_before_it_is_canonized() {
+        unsafe {
+            let (rc, mut left) = owned(&key_of(MAX_KEYEXPR_BYTES - 10));
+            assert_eq!(rc, Z_OK);
+            let past = "/$*$*$*$*$*$*";
+            let mut concat = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&left),
+                    past.as_ptr() as *const c_char,
+                    past.len(),
+                ),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
+            let under = "/$*";
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&left),
+                    under.as_ptr() as *const c_char,
+                    under.len(),
+                ),
+                Z_OK
+            );
+            let made = keyexpr_str(z_keyexpr_loan(&concat)).expect("a key");
+            assert_eq!(made.len(), MAX_KEYEXPR_BYTES - 10 + 2);
+            assert!(made.ends_with("/*"), "the lone `$*` chunk is canonized");
+            z_keyexpr_drop(z_keyexpr_move(&mut concat));
+            z_keyexpr_drop(z_keyexpr_move(&mut left));
+        }
+    }
+
+    /// The string form of the canonizing constructor is the substring form over the string's
+    /// length: both canonize alike, the substring form writes the canonical length back, and a
+    /// null string is refused with the destination left null.
+    #[test]
+    fn both_canonizing_constructors_canonize_alike() {
+        unsafe {
+            let mut by_str = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_str_autocanonize(&mut by_str, c"demo/$*/x".as_ptr()),
+                Z_OK
+            );
+            let text = "demo/$*/x";
+            let mut len = text.len();
+            let mut by_substr = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(
+                    &mut by_substr,
+                    text.as_ptr() as *const c_char,
+                    &mut len,
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                len,
+                "demo/*/x".len(),
+                "the canonical length is written back"
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&by_str)), Some("demo/*/x"));
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&by_substr)), Some("demo/*/x"));
+            let mut none = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_str_autocanonize(&mut none, core::ptr::null()),
+                Z_ERR_NULL
+            );
+            assert!(!z_internal_keyexpr_check(&none));
+            z_keyexpr_drop(z_keyexpr_move(&mut by_str));
+            z_keyexpr_drop(z_keyexpr_move(&mut by_substr));
         }
     }
 }
