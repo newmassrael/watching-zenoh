@@ -36,6 +36,7 @@
 // free of the heap; boxing it would allocate.
 #![allow(clippy::result_large_err)]
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use wz_link_lwip::rx_sockets::{SessionRxPool, SessionRxSocket};
@@ -148,6 +149,8 @@ struct Rig<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASK
     sink: SessionRxSocket,
     /// The `InitSyn`s the sink has read so far.
     init_syns: usize,
+    /// How many application layers the dials made, each from its session's handle.
+    layers: Cell<usize>,
     next: u8,
 }
 
@@ -176,6 +179,7 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
             sink_port,
             sink,
             init_syns: 0,
+            layers: Cell::new(0),
             next: 0,
         }
     }
@@ -190,7 +194,10 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
             Counting(zid),
             || params(zid),
             config(),
-            |_| |_: wz_session_core::driver_loop::IterationEvent<'_, '_>| {},
+            |_| {
+                self.layers.set(self.layers.get() + 1);
+                |_: wz_session_core::driver_loop::IterationEvent<'_, '_>| {}
+            },
         )
     }
 
@@ -238,6 +245,7 @@ fn dial_then_refuse<
     });
     assert_eq!(n, 0, "{fill} dials cost the heap nothing");
     assert_eq!(rig.init_syns, fill, "each dial sent its InitSyn, once");
+    assert_eq!(rig.layers.get(), fill, "a layer for each session");
     assert_eq!(rig.sockets.in_use(), fill, "a socket for each");
     assert_eq!(rig.sessions.in_use(), fill, "a slot for each");
     assert_eq!(rig.pumps.in_use(), fill, "a pump cell for each");
@@ -268,6 +276,13 @@ fn dial_then_refuse<
         refusal, expected,
         "{why:?}: the typed refusal names the table"
     );
+    // A layer is made once the session's slot and pump are built, so only the task table's
+    // refusal comes after one was made, and drops it.
+    let made = match why {
+        Why::Socket | Why::SessionSlot | Why::PumpCell => fill,
+        Why::Task => fill + 1,
+    };
+    assert_eq!(rig.layers.get(), made, "{why:?}: the layers made");
 
     // Counted by the table that said no, and by no other.
     let (socket, slot, pump, task) = match why {
