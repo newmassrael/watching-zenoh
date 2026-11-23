@@ -112,19 +112,23 @@ its generation, so a handle kept past its object's release is refused, never rea
 ### 4.1 Owned objects handed to the program
 
 Samples, replies and queries the program holds (`z_sample_clone`, `z_reply_clone`, a query kept
-past its callback), payload bytes (`bytes.rs`: `ByteBuf` over `Arc<Backing>`), strings and
-string arrays, encodings and their schema, owned key expressions not declared on a session.
+past its callback), payload bytes (`bytes.rs`: `ByteBuf` over a shared `Block`), strings and
+string arrays, encodings and their schema, owned key expressions not declared on a session, and
+what a program makes before any session: its configs and the hellos it keeps.
 
-- Bound: the counts of `wz_ext_object_pool_counts_t` become limits: `HELD_SESSIONS`,
+- Bound: the counts of `wz_ext_object_pool_counts_t` are limits: `HELD_SESSIONS`,
   `HELD_SAMPLES`, `HELD_REPLIES`, `HELD_QUERIES` and `HELD_PAYLOADS` (the payload handles; the
-  entities take their session limits times `HELD_SESSIONS`), NEW HELD_OBJECTS (strings,
-  encodings, string arrays, key expressions, configs), and NEW HELD_PAYLOAD_BYTES for the bytes
-  the payloads carry; one payload is at most
-  `PICO_FRAG_MAX_BYTES`, one key at most `MAX_KEYEXPR_BYTES`. The C struct stays the door that
-  states them in C.
-- Form: the existing per-kind object pools for the objects; the payload bytes in a block pool of
-  the same slot classes (16 bytes to 16 KiB), a payload taking the smallest class that holds it.
-  A payload is shared by reference count inside its block, not by `Arc`.
+  entities take their session limits times `HELD_SESSIONS`), `HELD_CONFIGS`, `HELD_HELLOS` and
+  `HELD_PAYLOAD_BYTES` for the bytes the payloads, strings and slices carry; NEW HELD_OBJECTS for
+  the handles of strings, slices, string arrays and encodings and owned key expressions. One
+  payload is at most the area's largest block, one key at most `MAX_KEYEXPR_BYTES`. The C struct
+  stays the door that states them in C.
+- Form: the per-kind object pools for the objects (`crate::process_pool`), each slot the
+  smallest of the reported sizes (16 bytes to 16 KiB) that holds its object, or for an object past
+  them (a config of the build's text) the object's own size; the bytes in one area beside the
+  pools, a buddy allocator of power-of-two blocks from 32 bytes, a payload taking the smallest
+  that holds its bytes and a 16-byte head. A payload is shared by the count in its block's head,
+  not by `Arc`; a hello the program keeps holds its locators' text inline in its slot.
 - Lifetime: process pools reserved at the library's first call (decision Q1 of the record);
   a slot is returned by the drop of the owned object, from any thread.
 - Exhausted: the call that would make or copy the object answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and
@@ -331,9 +335,11 @@ device-requirements door's facilities, TLS material.
   member is written straight into rows of the build's ids (`DocumentRows`: the profile, a row per
   policy, a row per limit of a session), which `policy_document::resolve_layers_under` composes as
   `resolve_document_under` composes a tree; `wz/key-ids`, a shape of its own, is still read
-  through the tree reader. A locator is parsed into borrowed fields. The object itself is still one
-  allocation of the global allocator, made before the open; its slot in the process pools (a kind
-  of `object_slot.rs` counted by NEW HELD_OBJECTS) is U9's.
+  through the tree reader. A locator is parsed into borrowed fields. The object itself is a slot of
+  the process pools (`Kind::Config` of `object_slot.rs`, `HELD_CONFIGS` of them, each the
+  config's own size), which a pico program's first config reserves, so the config allocates
+  nothing; a full pool refuses `z_config_default` and `z_config_clone` with
+  `_Z_ERR_SYSTEM_OUT_OF_MEMORY` and leaves the config null.
 - Lifetime: a config from `z_config_default` to its move into `z_open` or its drop.
 - Exhausted: `zp_config_insert` of a new key past the rows or a value past the text answers
   `_Z_ERR_CONFIG_FAILED_INSERT` (-95), zenoh-pico's code for an insert it could not make
@@ -521,6 +527,25 @@ suites (C1co, Layer Z) unchanged.
     entity keeps it standing; past the last holder the copy names freed memory, as a copy of
     zenoh-pico's does). The tokio engine keeps `Slot::take`, and a build with the pool doors
     still reserves its session pool, which the cooperative engine does not use.
+    Taken for the rest: the pools are apart from their doors. `src/process_pool.rs` holds them and
+    is in every library without the tokio engine (`wz_process_pools`, set by `build.rs`), so a
+    build without `unstable-api`, the speed matrix's and the release set's, has them and makes no
+    allocation for its objects after its first; `object-pool` is only the doors
+    (`wz_ext_object_pool_*`), which still imply `unstable-api`, and on the tokio engine bring
+    the pools with them. `Slot::take` has no heap fallback where the pools are. The config
+    (`Kind::Config`, `HELD_CONFIGS`, a slot of its own size since the build's config is past
+    the largest class) and a hello the program keeps (`Kind::Hello`, `HELD_HELLOS`: the hello, its
+    lent array, `SCOUT_HELLO_LOCATORS` views and their text in one slot) are kinds of the pools.
+    The bytes of payloads, strings and slices are blocks of one area beside them
+    (`HELD_PAYLOAD_BYTES`, a buddy allocator, `bytes.rs` `Block` with its count in its head in
+    place of `Arc<Backing>`); every constructor and copy is fallible and answers
+    `_Z_ERR_SYSTEM_OUT_OF_MEMORY` with its output null, an alias's release run at once. A reply's and
+    a query's payload and attachment are read where the view holds them, as a sample's were
+    (the borrowed marshal), and copied only when kept past the callback. The doors' counts
+    gained `configs`, `hellos` and `payload_bytes`; the doors report no class for the area or for
+    a slot past the largest class. Tests: `process_pool::tests` (the area's split, join and refusal,
+    a slot past the classes), `bytes::block_tests`, `object_pool_doors` ARM 4b (a copy past the
+    area answers the code and leaves the source).
 11. **U10. The port without heap types.** `wz-capi-port` `engine.rs`, `drive.rs`, `lib.rs`:
     methods returning `Vec` write into a caller's buffer, `Arc<dyn SessionEngine>` becomes the
     session's slot and generation, `Box<dyn SessionDrive>` the session object itself. Families:
@@ -615,9 +640,11 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 ## 7. The heap the C ABI build still links
 
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
-units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, U14 in part, U15's scouting delivery,
-the peer-written tables of section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
-unit that takes each away:
+units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9 in part, U14 in part, U15's scouting
+delivery, the peer-written tables of section 4.5 and the links' reassembly of section 4.9), read
+from the source and to be confirmed by the symbol diff of the library, and the unit that takes
+each away. The process pools are in every such library, with or without their doors
+(`object-pool`), so what U9 took is gone from a build without the unstable surface as well:
 
 | what | where | taken away by |
 |------|-------|---------------|
@@ -625,14 +652,13 @@ unit that takes each away:
 | the declaration watchers inside the lent observer (`remote_subscribers`, `remote_queryables`, `liveliness`) | `wz-session-core` `slot_observer.rs` (`SlotObserverOf::lent`) | U5's remainder: their lists lent at open, at most `MAX_DECL_OBSERVERS` each |
 | the keys canonized for the ABI's own key expressions (`canonize_keyexpr`, a `Heap` string) | `wz-capi-pico` `keyexpr.rs` | U6 |
 | the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
-| the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
-| a payload's place (`box_bytes`: a `Box<ByteBuf>` for each `z_bytes_clone` and each copy, as a build with no thread-local cache keeps none) and its bytes (`Backing::Owned`, an `Arc` over a `Vec`) | `wz-capi-pico` `bytes.rs` | U9: the pools and a block pool of HELD_PAYLOAD_BYTES. `object-pool` implies `unstable-api`, whose layouts a program built without `Z_FEATURE_UNSTABLE_API` (the speed matrix's) does not compile against, so such a build needs the pools apart from their doors |
-| the place of each handle object of a build without the pools (`Slot::take`, a `Box`) but the session's, which lies in its arena (U9) and whose drive is not boxed (U10) | `wz-capi-pico` `object_slot.rs` | U9, as above |
+| the faces' list, the keys the sample, reply and query marshals copy and the query marshal's parameters (their payloads and attachments are read where the view holds them), the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), `get.rs` (`ReplyMarshal`), `query.rs` (`QueryMarshal`), the port's sink factories | 4.6, U9's borrowed marshal for the keys and parameters, U7 |
+| the segment ends of a payload a writer appends whole payloads to (`ByteBuf::bounds`, a `Vec` that allocates on the first append), and the attachment a put's or an advanced put's options carry, copied into the `Vec` the options take (`take_moved_bytes_to_vec`) | `wz-capi-pico` `bytes.rs`, `serde.rs`, `pubsub.rs`, `advanced.rs`; `wz-session-core` `PublishOptions` | U9's remainder: the ends in the payload's block; options that read the attachment where it lies |
 | an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, an Interest form's suffix, a subscriber's wire anchor (the port's arguments are `&str` since U10, so no call makes a copy for the engine) | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs` | U6 |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
 | a document's `wz/key-ids` (read through `Json5Value`) | `wz-capi-pico` `config_policy.rs` (`key_ids_of`) | U14's remainder: the key ids read by the lexer into rows |
-| a config object (one block of the build's size) and a hello a program clones | `wz-capi-pico` `config.rs`, `scout.rs` | U9: their slots in the process pools |
+| the handles of strings, slices, string arrays, encodings and payload writers (`Box<StringState>`, `Box<SliceState>`, `Box<StringArrayState>` and its entries, the writer's `Box<ByteBuf>`), and a hello lent to a scout's callback with more locators than `MAX_ADMIN_LOCATORS` | `wz-capi-pico` `bytes.rs`, `string_array.rs`, `encoding.rs`, `serde.rs`, `scout.rs` | U9's remainder: their kinds in the process pools, counted by NEW HELD_OBJECTS; the lent hello's views in a table of `SCOUT_HELLO_LOCATORS` |
 | a scouting window's actions, its Scout, the first locator and the ignored record, and its read buffer | `wz-session-core` `scouting_host.rs`; `wz-capi-coop` `scout.rs`, `scout_datagram.rs` | U15's remainder: the window's state in a place of its holder, its buffers lent |
 | the wait of a session on the program's time base (an `Arc` for each `ClockMoves::moved`) | `wz-capi-pico` `time_base.rs`; `wz-capi-coop` `ClockMoves` | U15's remainder: a wait that borrows the time base |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
