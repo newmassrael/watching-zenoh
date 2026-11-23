@@ -281,7 +281,9 @@ pub struct Waited {
 
 impl IdleWait {
     /// Wait, sleeping with `sleep` (milliseconds) where there is nothing to wait on, and hand back
-    /// what the wait leaves.
+    /// what the wait leaves. Out of line: a session's open and each of its reads wait, and a copy
+    /// in each is larger than the call.
+    #[inline(never)]
     pub fn wait(self, sleep: impl FnOnce(u32)) -> Waited {
         match self {
             IdleWait::None => Waited {
