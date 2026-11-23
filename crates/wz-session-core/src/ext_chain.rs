@@ -436,8 +436,14 @@ pub(crate) fn collect_ext_chain<'a>(
 }
 
 /// The verdict [`collect_ext_chain`] gives the chain `walked` yields, entry by entry, with
-/// nothing kept: for a reader that refuses the message whatever its chain says and needs only
-/// the refusals the decoder would have answered with (the in-place reader of a transport OAM).
+/// nothing kept and nothing copied: for a reader that refuses the message whatever its chain
+/// says and needs only the refusals the decoder would have answered with (the in-place reader of
+/// a JOIN and of a transport OAM).
+///
+/// Each entry is lent where it lies, which is the step of `received_entry` that can refuse:
+/// its second step stores the lent entry at the transport profile, which is the heap in every
+/// build this is compiled in, and the heap refuses no body. So a ZBuf extension's body is judged
+/// without the copy of it the stored entry would make.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
@@ -447,7 +453,10 @@ pub(crate) fn check_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     for entry in walked {
-        received_entry(&entry)?;
+        let mut lent = wz_codecs::lent::ExtEntry::default();
+        entry
+            .into_builder(&mut lent)
+            .map_err(crate::parse_error::InboundParseError::Codec)?;
     }
     Ok(())
 }

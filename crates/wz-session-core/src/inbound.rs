@@ -1923,12 +1923,17 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             ControlRead::KeepAlive { extensions }
         }
         // A JOIN is refused whatever it says, but it is read to its end with the decoder's
-        // refusals, so the walk of the unit steps over it as the decoder's reading does.
+        // refusals, in the decoder's order (the message, its chain, its zid), so the walk of the
+        // unit steps over it as the decoder's reading does. Nothing of it is kept: the zid is
+        // judged where it lies and the chain by the verdict alone.
         #[cfg(feature = "codec-join")]
         wire_const::T_MID_JOIN => {
-            let (frame, used) = decode_join_message(bytes)?;
-            refuse_unnamed_zid(&frame)?;
-            return Ok((ControlRead::Refused, used));
+            let view = wz_codecs::transport_join::TransportJoinView::decode(&mut cursor)?;
+            crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
+            if let Err(refused) = crate::session_zid::SessionZid::new(view.body.zid.into_inner()) {
+                return Err(InboundParseError::InvalidZid(refused));
+            }
+            ControlRead::Refused
         }
         // A transport OAM likewise: its encoding and its chain are judged as the decoder judges
         // them, and nothing of it is kept.
@@ -1992,8 +1997,10 @@ fn decode_keep_alive(bytes: &[u8], out: &mut InboundFrame) -> Result<usize, Inbo
 /// no ext awareness, so the chain starts wherever the base body stopped. The lease is projected
 /// to milliseconds as every Join reader here projects it (`crate::join_decode` is the SSOT the
 /// multicast participant shares, which keeps the S bit's two optional fields and the T bit's
-/// lease UNIT projected in one place). A function of its own so the decoder and the in-place
-/// reader of a control message (`read_control`) read it the same way.
+/// lease UNIT projected in one place). The in-place reader of a control message
+/// (`read_control`) gives the same refusals without the owned body or chain, since a
+/// participant refuses a JOIN whatever it says; a test holds the two readers to each other
+/// on every wire and every prefix of it.
 #[cfg(all(feature = "alloc", feature = "codec-join"))]
 fn decode_join_message(bytes: &[u8]) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut cursor = SceCursor::new(bytes);
@@ -2951,6 +2958,8 @@ mod control_read_tests {
         wires.push(vec![T_MID_OAM | 0x40, 0x01, 0x02, 0xAB, 0xCD]);
         wires.push(vec![T_MID_OAM | 0x60, 0x01]);
         wires.push(vec![T_MID_OAM | FLAG_T_Z, 0x01, 0x27, 0x01]);
+        // A ZBuf extension (id 0x2, not mandatory), read to its end and copied nowhere.
+        wires.push(vec![T_MID_OAM | FLAG_T_Z, 0x01, 0x42, 0x02, 0xAB, 0xCD]);
         #[cfg(feature = "codec-join")]
         {
             let join = wz_codecs::join::Join {
@@ -2967,6 +2976,18 @@ mod control_read_tests {
             };
             let mut wire = vec![T_MID_JOIN | FLAG_T_JOIN_S];
             wire.extend_from_slice(&join.encode_to_vec());
+            wires.push(wire.clone());
+            // The QoS extension (id 0x1, mandatory, a ZBuf) behind the body.
+            wire[0] |= FLAG_T_Z;
+            wire.extend_from_slice(&[0x51, 0x02, 0xAB, 0xCD]);
+            wires.push(wire);
+            // A zid of zeros, which names no node: refused by both readers, after the chain.
+            let unnamed = wz_codecs::join::Join {
+                zid: wz_codecs::Bounded::new(&[0u8, 0, 0, 0] as &[u8]).unwrap(),
+                ..join
+            };
+            let mut wire = vec![T_MID_JOIN | FLAG_T_JOIN_S];
+            wire.extend_from_slice(&unnamed.encode_to_vec());
             wires.push(wire);
         }
         wires.push(vec![0x1F]);
