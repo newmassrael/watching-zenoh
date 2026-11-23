@@ -1148,275 +1148,27 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         self.subscribers.is_empty()
     }
 
-    /// Route an `IterationEvent` produced by the wz-runtime-tokio
-    /// `drive_session_until_terminal` loop
-    /// to matching subscriber callbacks. The adapter pulls
-    /// `FramePayload.messages` out of `IterationEvent::Poll` and
-    /// dispatches each record via [`dispatch`](Self::dispatch),
-    /// threading the frame's `reliable` discriminator through so the
-    /// downstream `Sample.reliability` carries the link-layer
-    /// classification (R226 — zenoh-pico `_z_trigger_push` argument
-    /// mirror). `Lease` events and non-FramePayload poll outcomes are
-    /// no-ops. Callers use this as the registry's observer callback so
-    /// they need not hand-write the `if let Poll(FramePayload { ... })`
-    /// matcher at the integration site.
-    ///
-    /// A Push the in-place receive path lends ([`IterationEvent::InPlace`]) is
-    /// delivered here too, as a borrowed sample over the frame's own bytes: the
-    /// same subscribers, the same projection, the same self-echo rule, and no
-    /// heap for a Put whose keyexpr fits (see `pubsub::in_place`).
-    ///
-    /// S9a — `peer` is the side of the registry the sending peer owns (its
-    /// aliases, its interests), passed in so one table serves many sessions; a
-    /// [`SubscriberRegistry`] passes its own.
-    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
-    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
-    #[inline(never)]
+    /// [`SubscriberPeer::dispatch_iteration_event`] over this table, from `peer`, the side of the
+    /// registry the sending peer owns.
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_iteration_event<Q: Storage>(
         &mut self,
         peer: &mut SubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
     ) {
-        match event {
-            #[cfg(feature = "alloc")]
-            IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                messages, reliable, ..
-            }) => {
-                if let Some(messages) = crate::driver_loop::owned_records(messages) {
-                    let reliability = Reliability::from_reliable_bool(*reliable);
-                    for message in messages {
-                        self.dispatch(peer, message, reliability);
-                    }
-                }
-            }
-            // A frame of plain Puts, reported as where they lie in it: the stream
-            // lane, delivered without an owned message per record. The lane is the copying
-            // receive's, which a build whose tables take no owned record does not read by.
-            #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-            IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
-                reliable,
-                payload,
-                puts,
-                ..
-            }) => {
-                if crate::driver_loop::OWNED_RECORDS {
-                    peer.dispatch_plain_puts(self, *reliable, payload, puts);
-                }
-            }
-            // A Push lent where its frame lies, and the control records lent beside
-            // it where a build lends them: a Declare's alias is absorbed and a
-            // subscriber Interest is answered from the same views.
-            #[cfg(any(
-                feature = "pubsub-put",
-                feature = "pubsub-delete",
-                feature = "rx-lent-control"
-            ))]
-            IterationEvent::InPlace(record) => {
-                #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-                peer.dispatch_in_place(self, &record);
-                #[cfg(feature = "rx-lent-control")]
-                self.dispatch_in_place_control(peer, &record);
-            }
-            _ => {}
-        }
+        peer.dispatch_iteration_event(self, event);
     }
 
-    /// The control records this registry owns, lent where
-    /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
-    /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
-    /// session's own subscriptions. Both are the owned forms' rules over the
-    /// borrowed views ([`SubscriberPeer::absorb_declare_view`],
-    /// `respond_to_subscriber_interest_view`); a record of any other kind is another
-    /// registry's.
-    #[cfg(feature = "rx-lent-control")]
-    fn dispatch_in_place_control<Q: Storage>(
-        &mut self,
-        peer: &mut SubscriberPeer<Q>,
-        record: &crate::driver_loop::InPlaceRecord<'_, '_>,
-    ) {
-        #[cfg(feature = "codec-declare")]
-        if let Some(declare) = record.declare() {
-            peer.absorb_declare_view(&declare.body);
-        }
-        #[cfg(feature = "declare-subscriber")]
-        if let Some(interest) = record.interest() {
-            self.respond_to_subscriber_interest_view(peer, interest);
-        }
-        // Nothing of either kind is compiled in: the arguments are unread.
-        let _ = (&self, &peer, &record);
-    }
-
-    /// Route a decoded `NetworkMessage` to matching subscriber
-    /// callbacks. R98 routes Push; R121d also processes
-    /// `Declare(DeclKexpr / UndeclKexpr)` to maintain the peer
-    /// mapping table so a downstream mapping-id Push can be
-    /// resolved against it. Other `Declare` sub-variants
-    /// (DeclSubscriber, DeclQueryable, DeclToken, etc.) and other
-    /// `NetworkMessage` variants are no-ops in this registry's
-    /// scope — the AP MVP path only needs Push round-trip.
-    ///
-    /// `reliability` is the link-layer classification of the frame
-    /// that carried this message; it is threaded into Push dispatch so
-    /// the resulting `Sample.reliability` reflects the actual delivery
-    /// guarantee (R226 — see `dispatch_iteration_event` for the
-    /// canonical caller that derives this from
-    /// `FramePayload.reliable`). Declare-arm dispatch ignores
-    /// `reliability` because the peer-mapping absorb is reliability-
-    /// agnostic (declarations always travel on the reliable channel).
-    ///
-    /// S9a — `peer` is the sending peer's side of the registry; see
-    /// [`dispatch_iteration_event`](Self::dispatch_iteration_event).
+    /// [`SubscriberPeer::dispatch`] over this table, from `peer`, the side of the registry the
+    /// sending peer owns.
     #[cfg(feature = "alloc")]
     pub fn dispatch<Q: Storage>(
         &mut self,
         peer: &mut SubscriberPeer<Q>,
         message: &NetworkMessage,
-        _reliability: Reliability,
+        reliability: Reliability,
     ) {
-        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-        let reliability = _reliability;
-        match message {
-            // R227 — wire-arrived Push carries `is_remote = true` so
-            // the locality filter selects `allows_remote()`. The
-            // self-publish loopback path (see
-            // [`local_publish`](Self::local_publish)) enters
-            // [`fire_to_subscribers`](Self::fire_to_subscribers)
-            // directly with `is_remote = false`.
-            //
-            // R311h — the `NetworkMessage::Push` variant is elided when
-            // `codec-push` is off. R311dx-pre — the dispatch arm here is
-            // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
-            // projecting a Push into a Sample needs at least one body op
-            // (Put/Del), so a `codec-push`-only build can parse a Push
-            // frame but has no body op to interpret it. The arm is then
-            // absent and the Push falls through to `_ => {}` (drop),
-            // mirroring the `PushOwnedVariant::Default` silent-drop. The
-            // loopback path ([`local_publish`](Self::local_publish)) stays
-            // unguarded — it does not depend on the wire codec gate.
-            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => peer.dispatch_push(self, push, reliability, true),
-            #[cfg(feature = "codec-declare")]
-            NetworkMessage::Declare(decl) => peer.absorb_declare(&decl.body),
-            // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
-            // from this session's OWN subscriptions; see
-            // [`Self::respond_to_subscriber_interest`].
-            #[cfg(feature = "declare-subscriber")]
-            NetworkMessage::Interest(interest) => {
-                self.respond_to_subscriber_interest(peer, interest)
-            }
-            _ => {}
-        }
-        // `peer` is read by every arm that exists; with none compiled in it is
-        // not, and the signature is the same in every subset.
-        let _ = &peer;
-    }
-
-    /// R311y530 — `alloc` inbound-parse entry: consume an inbound
-    /// `Interest`, resolve its keyexpr through the peer mapping table, and
-    /// funnel into the no-heap
-    /// [`Self::respond_to_subscriber_interest_borrowed`].
-    ///
-    /// No-op unless the interest targets SUBSCRIBERS. A subscriber interest
-    /// with no keyexpr is match-all; one naming an undeclared peer mapping id
-    /// drops silently (the same policy every sibling registry applies to an
-    /// unresolvable wireexpr — firing on a partial keyexpr is worse than not
-    /// firing).
-    ///
-    /// S9a — the keyexpr is resolved into a bounded buffer
-    /// ([`resolve_wireexpr_into`]), not a `String`, so on the fixed backing the
-    /// whole absorb of an interest allocates nothing; one longer than
-    /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
-    /// terminating `Final` alone, as an over-long one always was.
-    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
-    fn respond_to_subscriber_interest<Q: Storage>(
-        &mut self,
-        peer: &mut SubscriberPeer<Q>,
-        interest: &InterestOwned,
-    ) {
-        let SubscriberPeer {
-            naming, interests, ..
-        } = peer;
-        let interest_id = interest.interest_id;
-        let (current, future) = (interest.c(), interest.f());
-        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
-            // No body and neither bit set is zenoh's interest FINAL: the peer
-            // is CANCELLING `interest_id` (pico emits exactly this when a
-            // declared publisher drops, `net/primitives.c`). Retire the row so
-            // a recycled id cannot inherit a dead publisher's keyexpr.
-            if !current && !future {
-                interests.retire(interest_id);
-            }
-            return;
-        };
-        if !body.su() {
-            // A queryable / token interest — the query and liveliness planes
-            // answer those; this registry holds neither.
-            return;
-        }
-        let mut composed = KeyexprBuf::new();
-        let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match resolve_wireexpr_into(&w.body, naming.spaces(), &mut composed) {
-                Ok(Some(p)) => Some(p),
-                Ok(None) => return,
-                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
-                    interests.stage_final_only(interest_id);
-                    return;
-                }
-            },
-            None => None,
-        };
-        self.respond_to_interest(interests, interest_id, pattern, body.ag(), current, future);
-    }
-
-    /// [`Self::respond_to_subscriber_interest`] for an `Interest` the in-place
-    /// receive path lends: the same reading of the interest (a FINAL retires its
-    /// row, only a subscriber interest is answered, a keyexpr past the buffer is
-    /// answered with the terminating `Final` alone) over the interest as it is
-    /// decoded where its frame lies, then the one staging SSOT both forms funnel
-    /// into. The keyexpr is resolved by the rule both forms share
-    /// ([`crate::wireexpr_resolve::resolve_wireexpr_view`]).
-    #[cfg(all(
-        feature = "storage-profile",
-        feature = "declare-subscriber",
-        feature = "rx-lent-control"
-    ))]
-    fn respond_to_subscriber_interest_view<Q: Storage>(
-        &mut self,
-        peer: &mut SubscriberPeer<Q>,
-        interest: &wz_codecs::lent::Interest<'_>,
-    ) {
-        let SubscriberPeer {
-            naming, interests, ..
-        } = peer;
-        let interest_id = interest.interest_id;
-        let (current, future) = (interest.c(), interest.f());
-        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
-            if !current && !future {
-                interests.retire(interest_id);
-            }
-            return;
-        };
-        if !body.su() {
-            return;
-        }
-        let mut composed = KeyexprBuf::new();
-        let pattern: Option<&str> = match &body.keyexpr {
-            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
-                &w.body,
-                naming.spaces(),
-                &mut composed,
-            ) {
-                Ok(Some(p)) => Some(p),
-                Ok(None) => return,
-                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
-                    interests.stage_final_only(interest_id);
-                    return;
-                }
-            },
-            None => None,
-        };
-        self.respond_to_interest(interests, interest_id, pattern, body.ag(), current, future);
+        peer.dispatch(self, message, reliability);
     }
 
     /// R311y530 — the no-heap staging SSOT for an inbound SUBSCRIBER
@@ -2009,6 +1761,279 @@ impl<Q: Storage> SubscriberPeer<Q> {
         } else {
             subs.fire_matching(sample.keyexpr(), true, false, |sink| sink.deliver(&sample));
         }
+    }
+}
+
+impl<Q: Storage> SubscriberPeer<Q> {
+    /// Route an `IterationEvent` produced by the wz-runtime-tokio
+    /// `drive_session_until_terminal` loop
+    /// to matching subscriber callbacks. The adapter pulls
+    /// `FramePayload.messages` out of `IterationEvent::Poll` and
+    /// dispatches each record via [`dispatch`](Self::dispatch),
+    /// threading the frame's `reliable` discriminator through so the
+    /// downstream `Sample.reliability` carries the link-layer
+    /// classification (R226 — zenoh-pico `_z_trigger_push` argument
+    /// mirror). `Lease` events and non-FramePayload poll outcomes are
+    /// no-ops. Callers use this as the registry's observer callback so
+    /// they need not hand-write the `if let Poll(FramePayload { ... })`
+    /// matcher at the integration site.
+    ///
+    /// A Push the in-place receive path lends ([`IterationEvent::InPlace`]) is
+    /// delivered here too, as a borrowed sample over the frame's own bytes: the
+    /// same subscribers, the same projection, the same self-echo rule, and no
+    /// heap for a Put whose keyexpr fits (see `pubsub::in_place`).
+    ///
+    /// This is the side the sending peer owns (its aliases, its interests); `subs` are the
+    /// session's subscriptions, any [`LocalSubscribers`], passed in so one table serves many
+    /// sessions. A [`SubscriberRegistry`] passes its own table.
+    // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
+    // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
+    #[inline(never)]
+    #[cfg(feature = "storage-profile")]
+    pub fn dispatch_iteration_event<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        event: IterationEvent<'_, '_>,
+    ) {
+        match event {
+            #[cfg(feature = "alloc")]
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages, reliable, ..
+            }) => {
+                if let Some(messages) = crate::driver_loop::owned_records(messages) {
+                    let reliability = Reliability::from_reliable_bool(*reliable);
+                    for message in messages {
+                        self.dispatch(subs, message, reliability);
+                    }
+                }
+            }
+            // A frame of plain Puts, reported as where they lie in it: the stream
+            // lane, delivered without an owned message per record. The lane is the copying
+            // receive's, which a build whose tables take no owned record does not read by.
+            #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+            IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                payload,
+                puts,
+                ..
+            }) => {
+                if crate::driver_loop::OWNED_RECORDS {
+                    self.dispatch_plain_puts(subs, *reliable, payload, puts);
+                }
+            }
+            // A Push lent where its frame lies, and the control records lent beside
+            // it where a build lends them: a Declare's alias is absorbed and a
+            // subscriber Interest is answered from the same views.
+            #[cfg(any(
+                feature = "pubsub-put",
+                feature = "pubsub-delete",
+                feature = "rx-lent-control"
+            ))]
+            IterationEvent::InPlace(record) => {
+                #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+                self.dispatch_in_place(subs, &record);
+                #[cfg(feature = "rx-lent-control")]
+                self.dispatch_in_place_control(subs, &record);
+            }
+            _ => {}
+        }
+    }
+
+    /// The control records this registry owns, lent where
+    /// their frame lies: a `Declare`'s `DeclKexpr` / `UndeclKexpr` bind and unbind
+    /// the peer's keyexpr aliases, and a subscriber `Interest` is answered from this
+    /// session's own subscriptions. Both are the owned forms' rules over the
+    /// borrowed views ([`SubscriberPeer::absorb_declare_view`],
+    /// `respond_to_subscriber_interest_view`); a record of any other kind is another
+    /// registry's.
+    #[cfg(feature = "rx-lent-control")]
+    fn dispatch_in_place_control<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        record: &crate::driver_loop::InPlaceRecord<'_, '_>,
+    ) {
+        #[cfg(feature = "codec-declare")]
+        if let Some(declare) = record.declare() {
+            self.absorb_declare_view(&declare.body);
+        }
+        #[cfg(feature = "declare-subscriber")]
+        if let Some(interest) = record.interest() {
+            self.respond_to_subscriber_interest_view(subs, interest);
+        }
+        // Nothing of either kind is compiled in: the arguments are unread.
+        let _ = (&self, &subs, &record);
+    }
+
+    /// Route a decoded `NetworkMessage` to matching subscriber
+    /// callbacks. R98 routes Push; R121d also processes
+    /// `Declare(DeclKexpr / UndeclKexpr)` to maintain the peer
+    /// mapping table so a downstream mapping-id Push can be
+    /// resolved against it. Other `Declare` sub-variants
+    /// (DeclSubscriber, DeclQueryable, DeclToken, etc.) and other
+    /// `NetworkMessage` variants are no-ops in this registry's
+    /// scope — the AP MVP path only needs Push round-trip.
+    ///
+    /// `reliability` is the link-layer classification of the frame
+    /// that carried this message; it is threaded into Push dispatch so
+    /// the resulting `Sample.reliability` reflects the actual delivery
+    /// guarantee (R226 — see `dispatch_iteration_event` for the
+    /// canonical caller that derives this from
+    /// `FramePayload.reliable`). Declare-arm dispatch ignores
+    /// `reliability` because the peer-mapping absorb is reliability-
+    /// agnostic (declarations always travel on the reliable channel).
+    ///
+    /// `subs` are the subscriptions delivered to; see
+    /// [`dispatch_iteration_event`](Self::dispatch_iteration_event).
+    #[cfg(feature = "alloc")]
+    pub fn dispatch<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        message: &NetworkMessage,
+        _reliability: Reliability,
+    ) {
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        let reliability = _reliability;
+        match message {
+            // R227 — wire-arrived Push carries `is_remote = true` so
+            // the locality filter selects `allows_remote()`. The
+            // self-publish loopback path (see
+            // [`local_publish`](SubscriberTable::local_publish)) enters
+            // `fire_to_subscribers`
+            // directly with `is_remote = false`.
+            //
+            // R311h — the `NetworkMessage::Push` variant is elided when
+            // `codec-push` is off. R311dx-pre — the dispatch arm here is
+            // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
+            // projecting a Push into a Sample needs at least one body op
+            // (Put/Del), so a `codec-push`-only build can parse a Push
+            // frame but has no body op to interpret it. The arm is then
+            // absent and the Push falls through to `_ => {}` (drop),
+            // mirroring the `PushOwnedVariant::Default` silent-drop. The
+            // loopback path ([`local_publish`](SubscriberTable::local_publish)) stays
+            // unguarded — it does not depend on the wire codec gate.
+            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+            NetworkMessage::Push(push) => self.dispatch_push(subs, push, reliability, true),
+            #[cfg(feature = "codec-declare")]
+            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
+            // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
+            // from this session's OWN subscriptions; see
+            // [`Self::respond_to_subscriber_interest`].
+            #[cfg(feature = "declare-subscriber")]
+            NetworkMessage::Interest(interest) => {
+                self.respond_to_subscriber_interest(subs, interest)
+            }
+            _ => {}
+        }
+        // `subs` is read by every arm that exists; with none compiled in it is
+        // not, and the signature is the same in every subset.
+        let _ = &subs;
+    }
+
+    /// R311y530 — `alloc` inbound-parse entry: consume an inbound
+    /// `Interest`, resolve its keyexpr through the peer mapping table, and
+    /// funnel into the no-heap
+    /// [`SubscriberTable::respond_to_subscriber_interest_borrowed`].
+    ///
+    /// No-op unless the interest targets SUBSCRIBERS. A subscriber interest
+    /// with no keyexpr is match-all; one naming an undeclared peer mapping id
+    /// drops silently (the same policy every sibling registry applies to an
+    /// unresolvable wireexpr — firing on a partial keyexpr is worse than not
+    /// firing).
+    ///
+    /// S9a — the keyexpr is resolved into a bounded buffer
+    /// ([`resolve_wireexpr_into`]), not a `String`, so on the fixed backing the
+    /// whole absorb of an interest allocates nothing; one longer than
+    /// [`KeyexprBuf`] holds cannot be remembered and is answered with its
+    /// terminating `Final` alone, as an over-long one always was.
+    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    fn respond_to_subscriber_interest<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        interest: &InterestOwned,
+    ) {
+        let SubscriberPeer {
+            naming, interests, ..
+        } = self;
+        let interest_id = interest.interest_id;
+        let (current, future) = (interest.c(), interest.f());
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+            // No body and neither bit set is zenoh's interest FINAL: the peer
+            // is CANCELLING `interest_id` (pico emits exactly this when a
+            // declared publisher drops, `net/primitives.c`). Retire the row so
+            // a recycled id cannot inherit a dead publisher's keyexpr.
+            if !current && !future {
+                interests.retire(interest_id);
+            }
+            return;
+        };
+        if !body.su() {
+            // A queryable / token interest — the query and liveliness planes
+            // answer those; this registry holds neither.
+            return;
+        }
+        let mut composed = KeyexprBuf::new();
+        let pattern: Option<&str> = match &body.keyexpr {
+            Some(w) => match resolve_wireexpr_into(&w.body, naming.spaces(), &mut composed) {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return,
+                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
+                    interests.stage_final_only(interest_id);
+                    return;
+                }
+            },
+            None => None,
+        };
+        interests.answer(subs, interest_id, pattern, body.ag(), current, future);
+    }
+
+    /// [`Self::respond_to_subscriber_interest`] for an `Interest` the in-place
+    /// receive path lends: the same reading of the interest (a FINAL retires its
+    /// row, only a subscriber interest is answered, a keyexpr past the buffer is
+    /// answered with the terminating `Final` alone) over the interest as it is
+    /// decoded where its frame lies, then the one staging SSOT both forms funnel
+    /// into. The keyexpr is resolved by the rule both forms share
+    /// ([`crate::wireexpr_resolve::resolve_wireexpr_view`]).
+    #[cfg(all(
+        feature = "storage-profile",
+        feature = "declare-subscriber",
+        feature = "rx-lent-control"
+    ))]
+    fn respond_to_subscriber_interest_view<L: LocalSubscribers>(
+        &mut self,
+        subs: &mut L,
+        interest: &wz_codecs::lent::Interest<'_>,
+    ) {
+        let SubscriberPeer {
+            naming, interests, ..
+        } = self;
+        let interest_id = interest.interest_id;
+        let (current, future) = (interest.c(), interest.f());
+        let Some(body) = crate::interest_build::interest_body(&interest.header_c_or_f) else {
+            if !current && !future {
+                interests.retire(interest_id);
+            }
+            return;
+        };
+        if !body.su() {
+            return;
+        }
+        let mut composed = KeyexprBuf::new();
+        let pattern: Option<&str> = match &body.keyexpr {
+            Some(w) => match crate::wireexpr_resolve::resolve_wireexpr_view(
+                &w.body,
+                naming.spaces(),
+                &mut composed,
+            ) {
+                Ok(Some(p)) => Some(p),
+                Ok(None) => return,
+                Err(crate::wireexpr_resolve::KeyexprPastBound) => {
+                    interests.stage_final_only(interest_id);
+                    return;
+                }
+            },
+            None => None,
+        };
+        interests.answer(subs, interest_id, pattern, body.ag(), current, future);
     }
 }
 
@@ -4730,6 +4755,46 @@ mod tests {
             1,
             "matching keyexpr fires the callback exactly once"
         );
+    }
+
+    /// A peer's push reaches the session's one table set by the same receive path: the peer's
+    /// side resolves the key and the table set matches it.
+    #[test]
+    fn a_peers_push_reaches_the_table_set_through_the_peers_side() {
+        use crate::session_tables::{KeyForm, RowCallbacks, SessionTables};
+        enum Boxed {}
+        impl RowCallbacks for Boxed {
+            type Subscriber = BoxedSink;
+            type Queryable = u32;
+            type LivelinessSubscriber = u32;
+            type Matching = u32;
+            type Reply = u32;
+        }
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counted = counter.clone();
+        let mut tables = SessionTables::<Boxed>::new();
+        tables
+            .declare_subscriber(
+                "topic/a",
+                crate::locality::Locality::Any,
+                KeyForm::default(),
+                BoxedSink::new(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .expect("a table of the build's bound has room");
+        let mut peer: SubscriberPeer = SubscriberPeer::default();
+        peer.dispatch(
+            &mut tables,
+            &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a"))),
+            Reliability::Reliable,
+        );
+        peer.dispatch(
+            &mut tables,
+            &NetworkMessage::Push(Box::new(push_with_keyexpr("topic/b"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "the matching key, once");
     }
 
     /// R2662 (open-debt item 763) — A WILDCARD-ADDRESSED PUT REACHES A CONCRETE
