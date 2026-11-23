@@ -206,7 +206,7 @@ use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 mod liveliness;
 #[cfg(feature = "liveliness")]
 use {
-    liveliness::{LiveSubEntry, TokenEntry},
+    liveliness::{retract_token, LiveSubEntry},
     registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
@@ -1250,9 +1250,6 @@ impl EntryBytes {
     /// A queryable's row.
     #[cfg(feature = "queryable")]
     pub(crate) const QUERYABLE: usize = core::mem::size_of::<QblEntry>();
-    /// A liveliness token's row.
-    #[cfg(feature = "liveliness")]
-    pub(crate) const TOKEN: usize = core::mem::size_of::<TokenEntry>();
     /// A liveliness subscriber's row.
     #[cfg(feature = "liveliness")]
     pub(crate) const LIVELINESS_SUBSCRIBER: usize = core::mem::size_of::<LiveSubEntry>();
@@ -1374,9 +1371,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     pending_gets: Vec<PendingGet>,
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
-    /// The tokens the session holds, and its liveliness subscribers (`liveliness`).
-    #[cfg(feature = "liveliness")]
-    tokens: Rows<TokenEntry, { caps::MAX_LOCAL_TOKENS }>,
+    /// The session's liveliness subscribers (`liveliness`); its tokens are rows of its tables.
     #[cfg(feature = "liveliness")]
     live_subs: Rows<LiveSubEntry, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
@@ -2082,6 +2077,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.keys
             .kept(keyexpr)
             .or_else(|| self.keys.key(keyexpr).ok())
+    }
+
+    /// The form an entity the ABI declares with `wire` takes in the session's tables: named by the
+    /// key expression declaration `wire` names, which the entity's row holds for as long as it
+    /// stands, and with its key named in its retraction when `names_key`.
+    #[cfg(feature = "liveliness")]
+    fn key_form(
+        &self,
+        wire: &WireKey,
+        names_key: bool,
+    ) -> wz_session_core::session_tables::KeyForm {
+        let prefix = if wire.mapping_id == 0 {
+            None
+        } else {
+            self.tables.borrow().keyexpr_by_id(wire.mapping_id)
+        };
+        wz_session_core::session_tables::KeyForm { prefix, names_key }
     }
 
     /// Why [`Self::row_key`] refused `keyexpr`: longer than a row holds, or no room for it left in
@@ -3649,8 +3661,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "queryable")]
         let queryables = arena.lend(entities.queryables).map_err(OpenError::Arena)?;
         #[cfg(feature = "liveliness")]
-        let tokens = arena.lend(entities.tokens).map_err(OpenError::Arena)?;
-        #[cfg(feature = "liveliness")]
         let live_subs = arena
             .lend(entities.liveliness_subscribers)
             .map_err(OpenError::Arena)?;
@@ -3753,8 +3763,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
             gets: Arc::new(GetPlane::new(ended)),
-            #[cfg(feature = "liveliness")]
-            tokens,
             #[cfg(feature = "liveliness")]
             live_subs,
             #[cfg(feature = "ticker")]
@@ -6603,67 +6611,104 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
         let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
-        // A full table refuses the token before it takes an id, registers or sends anything.
-        if core.tokens.free_slots() == 0 {
-            return Err(Declined::TableFull);
-        }
-        // So does a key the session cannot hold.
-        let Some(key) = core.row_key(keyexpr) else {
-            return Err(core.key_refusal(keyexpr));
-        };
-        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
-        core.registry
+        // The token is a row of the session's tables, which takes its id: a full table, a key the
+        // session cannot hold or no id left refuses it before anything is registered or sent. It
+        // holds the key expression declaration its key is named by for as long as it stands.
+        let form = core.key_form(&wire, retraction.is_some());
+        let declared = core.tables.borrow_mut().declare_token(keyexpr, form)?;
+        let id = declared.id;
+        if let Err(refused) = core
+            .registry
             .borrow_mut()
             .app
             .local_tokens
-            .register(u64::from(id), keyexpr)?;
-        let entry = TokenEntry {
-            id,
-            keyexpr: key,
-            wire,
-            retraction,
-        };
-        core.announce(Kind::Token, |actions| entry.declare(actions));
+            .register(u64::from(id), keyexpr)
+        {
+            let _ = core.tables.borrow_mut().undeclare_token(declared.handle);
+            return Err(refused.into());
+        }
+        core.announce_token(declared.handle);
         // A token takes no traffic of its own, so every group that is told tokens is told it. It is
         // held before it is announced (the registration above, in the tables a group's
         // dispatch answers a member's Interest from), so a member that asks right after it
         // hears the announcement finds it held: the tokio engine's group holds it the same way.
         #[cfg(feature = "group")]
-        core.announce_to_groups(GroupEntity {
-            what: GroupDeclaration::Token,
-            entity: id,
-            keyexpr: &entry.keyexpr,
-            wire: &entry.wire,
-            retraction: entry.retraction.as_ref(),
-            allowed_origin: Locality::Any,
-        });
-        keep(&mut core.tokens, entry);
+        core.announce_token_to_groups(declared.handle);
         Ok(id)
     }
 
     #[cfg(feature = "liveliness")]
     fn undeclare_liveliness_token(&self, id: TokenId) {
-        let entry = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            let at = core.tokens.iter().position(|t| t.id == id)?;
-            let links = core.retract(Kind::Token, at);
-            let mut entry = core.tokens.remove(at);
-            #[cfg(feature = "group")]
-            core.retract_from_groups(id);
-            core.registry
-                .borrow_mut()
-                .app
-                .local_tokens
-                .unregister(u64::from(id));
-            for actions in links {
-                entry.retract(&actions);
-            }
-            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
-            entry.keyexpr.let_go();
-            Some(entry)
+        let Some(mut core) = self.live() else {
+            return;
+        };
+        let core = &mut core.0;
+        let retracted = {
+            let tables = core.tables.borrow();
+            tables
+                .tokens()
+                .iter()
+                .find(|(_, row)| row.id() == id)
+                .map(|(handle, row)| {
+                    // What its retraction names: the declaration's id and the length of the rest
+                    // of the key, read while the declaration stands.
+                    let names = row.key().names_key().then(|| {
+                        let form = tables.wire_of(row.key());
+                        (form.mapping, form.suffix.len())
+                    });
+                    // The declaration its key is named by, when the token is its last holder.
+                    let last = row.key().prefix().filter(|&prefix| {
+                        tables
+                            .keyexprs()
+                            .get(prefix)
+                            .is_some_and(|keyexpr| keyexpr.holds() <= 1)
+                    });
+                    (handle, names, last)
+                })
+        };
+        let Some((handle, names, last)) = retracted else {
+            return;
+        };
+        // The links are asked while the rows stand, which are their places in the replay's order:
+        // the token's, then the declaration's, which comes before every token.
+        let token_place = core.token_place(handle);
+        let token_links = core.retract_at(token_place);
+        let keyexpr_links = last.map(|prefix| {
+            let place = core.keyexpr_place(prefix);
+            core.retract_at(place)
         });
-        // Its key may hold a declaration whose release reaches the session: after the lock.
-        drop(entry);
+        let Some(undeclared) = core.tables.borrow_mut().undeclare_token(handle) else {
+            return;
+        };
+        #[cfg(feature = "group")]
+        core.retract_from_groups(id);
+        core.registry
+            .borrow_mut()
+            .app
+            .local_tokens
+            .unregister(u64::from(id));
+        // The rows went before the links are told: a send never finds the tables borrowed.
+        if let Some(row) = &undeclared.row {
+            let key = row.key().as_str();
+            let names = names.map(|(mapping, rest)| {
+                (
+                    mapping,
+                    key.get(key.len().saturating_sub(rest)..).unwrap_or(key),
+                )
+            });
+            for actions in token_links {
+                retract_token(&actions, id, names);
+            }
+        }
+        if let (Some(links), Some(mapping_id)) = (keyexpr_links, undeclared.keyexpr) {
+            for actions in links {
+                actions.send_undeclare_kexpr(mapping_id);
+            }
+            #[cfg(feature = "group")]
+            for group in &core.groups {
+                group.retract_keyexpr(mapping_id);
+            }
+        }
     }
 
     #[cfg(feature = "liveliness")]
@@ -6802,9 +6847,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
                 pending.unregister(&mut registry);
             }
         }
-        // The session's tokens end with its link.
+        // The session's tokens end with its link: the rows of its tables go, each with its hold of the
+        // declaration its key is named by.
         #[cfg(feature = "liveliness")]
-        core.tokens.clear();
+        {
+            let mut tables = core.tables.borrow_mut();
+            while let Some(handle) = tables.tokens().iter().next().map(|(handle, _)| handle) {
+                let _ = tables.undeclare_token(handle);
+            }
+        }
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
         // of with no lock held.
         #[cfg(any(

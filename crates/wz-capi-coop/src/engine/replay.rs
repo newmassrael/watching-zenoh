@@ -37,6 +37,8 @@ use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::session_tables::KeyexprHandle;
+#[cfg(feature = "liveliness")]
+use wz_session_core::session_tables::TokenHandle;
 use wz_session_mcu::dial::McuActions;
 
 use super::{Core, Face, Link};
@@ -199,7 +201,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             #[cfg(feature = "queryable")]
             Kind::Queryable => self.queryables.len(),
             #[cfg(feature = "liveliness")]
-            Kind::Token => self.tokens.len(),
+            Kind::Token => self.tables.borrow().tokens().len(),
             #[cfg(feature = "liveliness")]
             Kind::LiveSub => self.live_subs.len(),
         }
@@ -249,7 +251,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 #[cfg(feature = "queryable")]
                 Kind::Queryable => self.queryables[left].declare(actions),
                 #[cfg(feature = "liveliness")]
-                Kind::Token => self.tokens[left].declare(actions),
+                Kind::Token => {
+                    let tables = self.tables.borrow();
+                    let row = tables.tokens().iter().nth(left);
+                    row.map_or(true, |(_, row)| {
+                        super::liveliness::declare_token(
+                            actions,
+                            row.id(),
+                            row.key().as_str(),
+                            tables.wire_of(row.key()),
+                        )
+                    })
+                }
                 #[cfg(feature = "liveliness")]
                 Kind::LiveSub => self.live_subs[left].ask(actions),
             };
@@ -370,6 +383,45 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .position(|(held, _)| held == handle)
             .unwrap_or(keyexprs.len());
         self.start_of(Kind::Keyexpr) + rank
+    }
+
+    /// The place in the replay's order of the token `handle` names, the one past the last for a
+    /// handle that names none: its rank in the table's slot order, which the replay tells them in.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn token_place(&self, handle: TokenHandle) -> usize {
+        let tables = self.tables.borrow();
+        let tokens = tables.tokens();
+        let rank = tokens
+            .iter()
+            .position(|(held, _)| held == handle)
+            .unwrap_or(tokens.len());
+        self.start_of(Kind::Token) + rank
+    }
+
+    /// Tell each face that is up of the token `handle` names, as [`Self::announce`] tells a
+    /// declaration: the row is the declaration itself, so the tables stored it before any link is
+    /// told of it, and each link is told from the row.
+    #[cfg(feature = "liveliness")]
+    pub(super) fn announce_token(&mut self, handle: TokenHandle) {
+        let place = self.token_place(handle);
+        let tables = &self.tables;
+        announce_on(
+            &mut self.faces,
+            place,
+            OnRefusal::Forget,
+            |actions| {
+                let tables = tables.borrow();
+                tables.tokens().get(handle).is_some_and(|row| {
+                    super::liveliness::declare_token(
+                        actions,
+                        row.id(),
+                        row.key().as_str(),
+                        tables.wire_of(row.key()),
+                    )
+                })
+            },
+            |_| {},
+        );
     }
 
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it

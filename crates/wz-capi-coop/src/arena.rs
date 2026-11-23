@@ -149,7 +149,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 35;
+pub const ARENA_ROWS: usize = 34;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -599,20 +599,12 @@ impl ArenaPlan {
             EntryBytes::QUERYABLE,
         )?;
         #[cfg(feature = "liveliness")]
-        {
-            self.put(
-                "token declarations",
-                "MAX_LOCAL_TOKENS",
-                rows.tokens,
-                EntryBytes::TOKEN,
-            )?;
-            self.put(
-                "liveliness subscriber declarations",
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
-                rows.liveliness_subscribers,
-                EntryBytes::LIVELINESS_SUBSCRIBER,
-            )?;
-        }
+        self.put(
+            "liveliness subscriber declarations",
+            "MAX_LIVELINESS_SUBSCRIPTIONS",
+            rows.liveliness_subscribers,
+            EntryBytes::LIVELINESS_SUBSCRIBER,
+        )?;
         // The session's one table set, holding the kinds moved onto it so far.
         self.put(
             "session tables",
@@ -665,6 +657,7 @@ impl ArenaPlan {
     pub fn tables(&self) -> TableRows {
         TableRows {
             keyexprs: self.entities.keyexprs,
+            tokens: self.entities.tokens,
             ..TableRows::default()
         }
     }

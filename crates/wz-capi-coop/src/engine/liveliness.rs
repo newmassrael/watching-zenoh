@@ -17,12 +17,18 @@
 //! or gone with a lost link. The deliveries hand them out with no lock held; the tokens alive when
 //! the subscriber asked for its history are handed on the declaring thread.
 
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 
 use wz_capi_port::{SubId, TokenId, WireKey};
+#[cfg(feature = "group")]
+use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, LivelinessSample};
+#[cfg(feature = "group")]
 use wz_session_core::declare_form::RetractionKey;
+use wz_session_core::session_tables::WireForm;
+use wz_session_core::wire_id::ExprId;
 use wz_session_mcu::dial::McuActions;
 
 use super::LivelinessCallback;
@@ -30,34 +36,101 @@ use super::LivelinessCallback;
 use crate::prelude::*;
 use crate::round::Round;
 
-/// A token the session holds: what its declaration says on the wire, kept to announce it again
-/// over a new link; holding the key also keeps alive what it holds.
-pub(super) struct TokenEntry {
-    pub(super) id: TokenId,
-    pub(super) keyexpr: super::RowKey,
-    pub(super) wire: WireKey,
-    pub(super) retraction: Option<RetractionKey>,
+/// How the link of `actions` names `keyexpr`, which the session's tables name `form` on the
+/// wire: the declaration's id and the rest of the key, or id 0 and the whole key. The link's key-
+/// wire form decides where the session shares key ids (`shared-key-ids`), and the tables' form
+/// stands otherwise.
+fn named_on_link<'a, C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    keyexpr: &'a str,
+    form: WireForm<'a>,
+) -> (ExprId, Option<Cow<'a, str>>) {
+    #[cfg(feature = "shared-key-ids")]
+    if let Some(linked) = wz_capi_port::wire_on_link(actions.key_wire_on_link(keyexpr)) {
+        if linked.is_literal() {
+            return (0, Some(Cow::Borrowed(keyexpr)));
+        }
+        return (linked.mapping_id, linked.suffix.map(Cow::Owned));
+    }
+    #[cfg(not(feature = "shared-key-ids"))]
+    let _ = actions;
+    if form.mapping == 0 {
+        return (0, Some(Cow::Borrowed(keyexpr)));
+    }
+    (
+        form.mapping,
+        (!form.suffix.is_empty()).then_some(Cow::Borrowed(form.suffix)),
+    )
 }
 
-impl TokenEntry {
-    /// Announce this token over `actions`: whether the link took it.
-    pub(super) fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let wire = super::on_link(actions, &self.keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_declare_token(self.id, 0, Some(&self.keyexpr))
-        } else {
-            actions.send_declare_token(self.id, wire.mapping_id, wire.suffix.as_deref())
-        }
-        .is_ok()
+/// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
+/// entity it names.
+#[cfg(feature = "group")]
+fn wire_key_of(form: WireForm<'_>) -> WireKey {
+    if form.mapping == 0 {
+        return WireKey::literal();
     }
+    WireKey::aliased(
+        form.mapping,
+        (!form.suffix.is_empty()).then(|| String::from(form.suffix)),
+    )
+}
 
-    /// Retract this token over `actions`, naming its key when its declaration asked to.
-    pub(super) fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let id = u64::from(self.id);
-        match &self.retraction {
-            Some(key) => actions.send_undeclare_token_naming(id, key.mapping_id, &key.suffix),
-            None => actions.send_undeclare_token(id),
-        }
+/// Announce the token `id` the session holds on `keyexpr` over `actions`, its key named as the
+/// session's tables name it on the wire (`form`) or as the link's key-wire form says: whether the
+/// link took it.
+pub(super) fn declare_token<C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    id: TokenId,
+    keyexpr: &str,
+    form: WireForm<'_>,
+) -> bool {
+    let (mapping, suffix) = named_on_link(actions, keyexpr, form);
+    actions
+        .send_declare_token(id, mapping, suffix.as_deref())
+        .is_ok()
+}
+
+#[cfg(feature = "group")]
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C> {
+    /// Tell each group the session joined of the token `handle` names, as its row in the
+    /// session's tables states it (`group`).
+    pub(super) fn announce_token_to_groups(
+        &self,
+        handle: wz_session_core::session_tables::TokenHandle,
+    ) {
+        let tables = self.tables.borrow();
+        let Some(row) = tables.tokens().get(handle) else {
+            return;
+        };
+        let form = tables.wire_of(row.key());
+        let wire = wire_key_of(form);
+        let retraction = row.key().names_key().then(|| RetractionKey {
+            mapping_id: form.mapping,
+            suffix: String::from(form.suffix),
+        });
+        self.announce_to_groups(super::group::GroupEntity {
+            what: wz_session_core::declare_form::GroupDeclaration::Token,
+            entity: row.id(),
+            keyexpr: row.key().as_str(),
+            wire: &wire,
+            retraction: retraction.as_ref(),
+            allowed_origin: wz_session_core::locality::Locality::Any,
+        });
+    }
+}
+
+/// Retract the token `id` over `actions`, naming its key as `names` says (the declaration's id
+/// and the rest of the key) when its declaration asked to.
+pub(super) fn retract_token<C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    id: TokenId,
+    names: Option<(ExprId, &str)>,
+) {
+    let id = u64::from(id);
+    match names {
+        Some((mapping, suffix)) => actions.send_undeclare_token_naming(id, mapping, suffix),
+        None => actions.send_undeclare_token(id),
     }
 }
 
