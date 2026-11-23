@@ -8,8 +8,6 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::ThreadStart;
-
 /// The parking place's mutex. It lives in a `static` and never moves, which a pthread mutex needs.
 pub(crate) struct ParkLock(UnsafeCell<libc::pthread_mutex_t>);
 
@@ -156,22 +154,18 @@ pub(crate) fn monotonic_ns() -> u64 {
 pub(crate) type Thread = libc::pthread_t;
 
 extern "C" fn entry(arg: *mut c_void) -> *mut c_void {
-    // SAFETY: `arg` is the record `spawn` handed `pthread_create`.
+    // SAFETY: `arg` is what `spawn` handed `pthread_create`.
     unsafe { crate::enter(arg) };
     core::ptr::null_mut()
 }
 
+/// Start a thread that calls `crate::enter` with `arg`.
+///
 /// # Safety
-/// As [`crate::spawn`].
-pub(crate) unsafe fn spawn(start: *mut ThreadStart) -> Option<(Thread, usize)> {
+/// `arg` is what `crate::enter` is to be called with, valid until it has run.
+pub(crate) unsafe fn spawn(arg: *mut c_void) -> Option<(Thread, usize)> {
     let mut thread: libc::pthread_t = core::mem::zeroed();
-    if libc::pthread_create(
-        &mut thread,
-        core::ptr::null(),
-        entry,
-        start.cast::<c_void>(),
-    ) != 0
-    {
+    if libc::pthread_create(&mut thread, core::ptr::null(), entry, arg) != 0 {
         return None;
     }
     // The number `pthread_self` answers on the new thread.

@@ -16,8 +16,6 @@ use windows_sys::Win32::System::Threading::{
     CONDITION_VARIABLE_INIT, INFINITE, SRWLOCK, SRWLOCK_INIT,
 };
 
-use crate::ThreadStart;
-
 /// The parking place's lock, held exclusively.
 pub(crate) struct ParkLock(UnsafeCell<SRWLOCK>);
 
@@ -118,15 +116,17 @@ unsafe extern "system" fn entry(arg: *mut c_void) -> u32 {
     0
 }
 
+/// Start a thread that calls `crate::enter` with `arg`.
+///
 /// # Safety
-/// As [`crate::spawn`].
-pub(crate) unsafe fn spawn(start: *mut ThreadStart) -> Option<(Thread, usize)> {
+/// `arg` is what `crate::enter` is to be called with, valid until it has run.
+pub(crate) unsafe fn spawn(arg: *mut c_void) -> Option<(Thread, usize)> {
     let mut id = 0u32;
     let handle = CreateThread(
         core::ptr::null(),
         0,
         Some(entry),
-        start.cast_const().cast::<c_void>(),
+        arg.cast_const(),
         0,
         &mut id,
     );

@@ -14,9 +14,9 @@
 # Every lock and condition variable here is one word, made in a `const` context and movable while
 # no thread holds it, so a value that is one can live in a `static` and in a value that moves; a
 # thread that must wait parks on one process-wide place, the only object that holds the system's
-# own lock. No `std` and nothing exported; nothing allocates but `spawn_fn`, which carries a
-# closure to its thread on the heap. Also the typed forms the doors of the pico ABI's additional
-# features hold (`Mutex`, `Condvar`, `Instant`), in the shape of `std`'s.
+# own lock. No `std`, nothing exported and nothing allocated: `spawn_fn` moves a thread's body into
+# a record of a static pool of `THREADS`. Also the typed forms the doors of the pico ABI's
+# additional features hold (`Mutex`, `Condvar`, `Instant`), in the shape of `std`'s.
 
 [package]
 name = "wz-host-sync"
