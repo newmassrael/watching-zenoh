@@ -7041,6 +7041,31 @@
         "The multicast groups' datagram inline write keeps the 8 us floor alone: their queues have no LinkHearing.",
         "From Round 4609: the debug frames of FaceLoopIo::new (84,168), dial_locator_on (80,824) and the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage (151,944); whether drive_multicast_session_running joins a shared drive."
       ]
+    },
+    "Round 4617": {
+      "decision_summary": "A fan-in lane joins the host comparison: one probe on zenoh's public API (conformance/host-bench/wz_fanin.rs), built over upstream's zenoh and with the family patched in as the parity package builds upstream's examples, run by scripts/host-bench/fanin.py in rounds that alternate pairs of arms, so that several publishers of large samples converge on one subscriber, the shape of a vehicle's camera and lidar streams. A round is judged on what both arms must hold: under block every sample put arrives, and none arrives corrupt, duplicated, reordered or foreign. Its first runs found that a 4,000,000-byte sample is lost whenever either end is wz while upstream to upstream delivers all; the AP reassembly bound is 1 MiB against upstream's 1 GiB, and the refused send is reported to the caller as sent. Both are filed as debts; whether transport-fragmentation is re-graded PARTIAL, which moves the completeness ratchet up, is left to the owner.",
+      "changes_bullets": [
+        "conformance/host-bench/wz_fanin.rs (new): pub/sub probe; samples carry publisher id, sequence and wall time, the subscriber counts received, gaps, behind, corrupt and foreign per publisher and prints one JSON line.",
+        "scripts/lib/z8_upstream_suite.py: WZ_PARITY_PROGRAMS and WZ_PARITY_SOURCES; the parity examples package builds wz_fanin beside upstream's eight programs on both arms.",
+        "scripts/host-bench/fanin.py (new): rounds of pairs (subscriber arm, publishers' arm), the judgement in judge(), --selftest; a subscriber that saw nothing is a delivery reading, not a round that did not run.",
+        "scripts/pico-compare.sh: fanin mode; parity_build_rust takes the programs to build; parity_fail_log prints a failed build's first errors, which a bx run's own log otherwise does not show.",
+        "scripts/run-ci.sh: Layer C0 leg fanin.selftest; scripts/lib/script_exercise_census.py names fanin.py among the tools pico-compare.sh runs.",
+        "Store: debt-ap-reassembly-cap-one-mebibyte, debt-oversize-publish-refusal-not-reported."
+      ],
+      "verification_bullets": [
+        "pico-compare.sh fanin on pc2 (3 publishers x 4,000,000 B at 20 Hz for 10 s, block, 2 rounds of PP, WW, PW, WP): PP delivered 1200 of 1200 (one-way p50 1.7 ms, p99 6.0 ms on one clock); WW, PW and WP delivered 0 of 1200 each, every put returning Ok.",
+        "One publisher, 3 s, block: 1,024 B delivered on all four pairs; 60,000 B and 200,000 B delivered on WW; 4,000,000 B delivered 0 on WW, PW and WP.",
+        "The bound read in the tree: out/wz-runtime-tokio/reassembly_pool_ap.rs SLOT_SIZE 1048576 (32 slots), applied as the RX ceiling in wz-runtime-tokio reassembly.rs and as the TX refusal bound in session_glue.rs.",
+        "fanin.py --selftest OK; z8_upstream_suite.py --selftest OK; script_exercise_census, reason_review_pin_gate, depth_axis_census and completeness_gate OK; shellcheck of pico-compare.sh and run-ci.sh clean; the pre-push round-fed gates 168 of 170 (the two that fail, feature_gate_diagnostic and silent_skip_gate, fail the same on origin/main and are another landing's); validate-workspace orphans 30+0 and T3 warn 4, unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Owner decision: re-grade transport-fragmentation PARTIAL (its reason says no residual matters vs upstream, which the fan-in reading refutes); that moves c.partial-atoms in deploy/completeness_ratchet.json from 2 to 3.",
+        "Repay debt-ap-reassembly-cap-one-mebibyte and debt-oversize-publish-refusal-not-reported; the reassembly dispatcher is under edit on the no-heap branches, so agree the change with that work first.",
+        "Two-host fan-in (pc2 and pc4 share a 1 Gbps segment), where three camera streams oversubscribe the link, and the lane's figures as rows of the AP superiority matrix (scripts/host-bench/ap_matrix.py)."
+      ]
     }
   },
   "inventory_entries": {
