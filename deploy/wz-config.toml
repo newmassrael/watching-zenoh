@@ -3503,6 +3503,41 @@ value = 2
 reason = "zenoh-pico reads every peer of a unicast transport into the transport's one receive buffer and keeps a stream peer's batch that arrived in part in a buffer of that peer's (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`, `vendor/zenoh-pico/src/transport/unicast/read.c` @ `static z_result_t _z_unicast_handle_remaining_data(_z_transport_unicast_t *ztu, _z_transport_peer_unicast_t *peer,`): one buffer read into and one part held."
 
 [[limit]]
+id = "TX_POOL_SLOTS"
+kconfig = "WZ_LIMIT_TX_POOL_SLOTS"
+kind = "parameter"
+range = [1, 4294967295]
+on_heap = "quota"
+default = 4
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a frame a link would keep past its send while the pool is short leaves at once,
+# whole, so a peer reads the same frames, sent earlier.
+wire = "none"
+help = '''
+How many outbound slots, each of the batch a session advertises, the links of a
+session share when its engine lends their buffers from the session's memory at
+open. A link holds one from the moment it encodes a frame until the frame is
+written. It keeps one past that only while the pool keeps another free for the
+session's other links: a frame the stream took in part is then written at once,
+waiting for the stream as a blocking write does, and a batch frame left open is
+sent with the messages it holds. A pool as large as the links a session may hold
+keeps every link's slot its own, and is held to them. At least 1; a session may
+lower it and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: a zenoh transport builds each link's batches in buffers of its own, and the count of wz's shared outbound slots is wz's own."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico encodes every message of a unicast transport into the transport's one write buffer and writes it to its peers before it takes the next (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._wbuf = _z_wbuf_make(wbuf_size, false);`, `vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`): one slot written into and one held by a frame a stream took in part."
+
+[[limit]]
 id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kind = "bound"

@@ -66,6 +66,10 @@ struct LendingLink {
     /// Grants left before the link stops lending (a pool that runs dry part
     /// way through a send); `usize::MAX` for a link that never does.
     grants_left: AtomicUsize,
+    /// What the link answers when asked whether a slot it lent may stay open
+    /// past the call (`tx_slot_spare`): `false` for a link of a pool with none
+    /// free besides.
+    spare: core::sync::atomic::AtomicBool,
 }
 
 impl LendingLink {
@@ -73,6 +77,7 @@ impl LendingLink {
         Arc::new(Self {
             lends,
             grants_left: AtomicUsize::new(usize::MAX),
+            spare: core::sync::atomic::AtomicBool::new(true),
             headroom,
             slots: (0..n_slots)
                 .map(|_| SlotMem(UnsafeCell::new(vec![0u8; slot_len].into_boxed_slice())))
@@ -159,6 +164,10 @@ impl BoxedLinkDriver for LendingLink {
             slot: TxSlot(idx as u32),
             headroom: self.headroom,
         })
+    }
+
+    fn tx_slot_spare(&self) -> bool {
+        self.spare.load(Ordering::SeqCst)
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
@@ -806,6 +815,29 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
         }
     );
     link.assert_every_slot_home();
+}
+
+/// A link whose slots come from a pool with none free besides the one a window's frame takes
+/// says it cannot keep it (`tx_slot_spare`): each message of the window leaves at once in a slot
+/// of its own, every slot is back when the window closes, and nothing crosses the byte door. The
+/// CONTROL is the same window on a link that may keep its slot, which leaves as one frame.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn a_window_on_a_link_with_no_slot_to_spare_sends_each_message_at_once() {
+    let payloads: [&[u8]; 3] = [b"one", b"two", b"three"];
+    let roomy = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    run_window(&batching_session(roomy.clone()), &payloads);
+    assert_eq!(roomy.lent().len(), 1, "CONTROL: one frame for the window");
+
+    let short = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    short.spare.store(false, Ordering::SeqCst);
+    let actions = batching_session(short.clone());
+    run_window(&actions, &payloads);
+    assert_eq!(short.lent().len(), 3, "a frame for each message");
+    assert_eq!(short.grants.load(Ordering::SeqCst), 3);
+    assert!(short.heap().is_empty(), "nothing crossed the byte door");
+    assert_eq!(actions.batch_lend_counts().slot_frames, 3);
+    short.assert_every_slot_home();
 }
 
 /// An open frame is filled without asking its link where the slot is: the grant asks once, and

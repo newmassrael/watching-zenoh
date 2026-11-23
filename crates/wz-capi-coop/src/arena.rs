@@ -38,11 +38,12 @@
 //! - the buffers of the links the session may hold: a pool of receive buffers of the batch the
 //!   session advertises, a streamed batch's length counted inside it, as many as
 //!   `RX_POOL_BUFFERS` and no more than the links, which a link holds only while it holds part of
-//!   a batch or something it was asked to keep; and for each link [`LINK_TX_SLOTS`] slots of that
-//!   length to encode its frames into; each table with the flags that say which buffers are lent
-//!   (`SessionArena::lend_links`). The batch is the config's, held to the session's
-//!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
-//!   first;
+//!   a batch or something it was asked to keep; a pool of slots of that length to encode frames
+//!   into, as many as `TX_POOL_SLOTS` and no more than the links, of which a link holds
+//!   [`LINK_TX_SLOTS`] at a time from its grant to its send; and a place for each link; each table
+//!   with the flags that say which buffers are lent (`SessionArena::lend_links`). The batch is
+//!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
+//!   the rows lent when the session opens, first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
 //!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
@@ -152,7 +153,8 @@ impl ArenaRow {
 /// handle ([`ArenaPlan::holding`]).
 pub const ARENA_ROWS: usize = 30;
 
-/// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
+/// The slots each link holds at once to encode its frames into, from the pool its session's links
+/// share (`TX_POOL_SLOTS`): one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
 /// `static z_result_t _z_transport_tx_send_t_msg_inner(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,`).
 /// The batch a session holds open is sent before a message that does not join it takes the slot:
@@ -162,6 +164,9 @@ pub const ARENA_ROWS: usize = 30;
 /// which writes it (`wait_for_room`), and a message that asks for a slot meanwhile writes it first
 /// (`StreamDriver::tx_slot_acquire` in `wz-runtime-coop`).
 pub const LINK_TX_SLOTS: usize = 1;
+
+// A link of a pool holds one slot at a time (`wz_runtime_coop::link_storage::PooledTx`).
+const _: () = assert!(LINK_TX_SLOTS == 1);
 
 /// A row of a plan that has none yet.
 const NO_ROW: ArenaRow = ArenaRow {
@@ -285,6 +290,9 @@ pub struct ArenaPlan {
     /// The receive buffers of the pool those links share (`RX_POOL_BUFFERS`, at most one for each
     /// link).
     rx_buffers: usize,
+    /// The outbound slots of the pool those links share (`TX_POOL_SLOTS`, at most one for each
+    /// link).
+    tx_slots: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
     /// The bytes of the session's delivery lane (`crate::lane`).
@@ -334,11 +342,20 @@ impl ArenaPlan {
             Quota::at_most(limits.rx_pool_buffers()),
         )?
         .min(links);
+        // The links encode their frames into a pool of slots they share as well, a slot held by a
+        // link from its grant to its send, and past it only while the pool keeps another free
+        // (`wz_runtime_coop::link_storage::PooledTx`).
+        let tx_slots = lent::<{ caps::TX_POOL_SLOTS }>(
+            "TX_POOL_SLOTS",
+            Quota::at_most(limits.tx_pool_slots()),
+        )?
+        .min(links);
         let mut plan = Self {
             rows: [NO_ROW; ARENA_ROWS],
             len: 0,
             links,
             rx_buffers,
+            tx_slots,
             link_bytes,
             lane_bytes: lent::<{ caps::DELIVERY_LANE_BYTES }>(
                 "DELIVERY_LANE_BYTES",
@@ -372,15 +389,18 @@ impl ArenaPlan {
         )?;
         plan.put(
             "link transmit flags",
-            "PICO_UNICAST_BATCH_BYTES",
-            links,
+            "TX_POOL_SLOTS",
+            tx_slots,
             LentByteCells::FLAG_BYTES,
         )?;
+        plan.put("link transmit slots", "TX_POOL_SLOTS", tx_slots, link_bytes)?;
+        // A place for each link, which bounds the links that open: the flags of a table of
+        // buffers of no bytes.
         plan.put(
-            "link transmit slots",
-            "PICO_UNICAST_BATCH_BYTES",
+            "link places",
+            "MAX_FACES + MAX_ACCEPT_PENDING",
             links,
-            times(LINK_TX_SLOTS, link_bytes)?,
+            LentByteCells::FLAG_BYTES,
         )?;
         // The delivery lane's area, lent next (`SessionArena::lend_lane`): one table of one buffer.
         plan.put(
@@ -940,11 +960,6 @@ fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaR
     Ok(())
 }
 
-/// `count` items for each of `each` holders.
-fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
-    each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
-}
-
 /// Whether a session `config` opens gives its dial role's face a link: it does when it lists an
 /// endpoint to dial, and when it lists none and has neither a port to listen on nor a group to
 /// join, whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks
@@ -1091,20 +1106,24 @@ impl SessionArena {
 
     /// Lend the tables of the links' buffers `plan` lays out, its first rows: the pool of receive
     /// buffers the links share, each held by a link only while it holds something of its own in
-    /// it, and [`LINK_TX_SLOTS`] slots for each link the session may hold, which the session's
-    /// links claim as they open and give back as they go. Refused only by an arena reserved by
-    /// another plan.
+    /// it, the pool of outbound slots they share, each held by a link from its grant to its send
+    /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
+    /// session's links claim as they open and give back as they go. Refused only by an arena
+    /// reserved by another plan.
     pub(crate) fn lend_links(&mut self, plan: &ArenaPlan) -> Result<LinkTables, ArenaRefused> {
-        let slots = times(LINK_TX_SLOTS, plan.link_bytes)?;
         let rx = self
             .arena
             .lend_byte_cells(plan.link_bytes, plan.rx_buffers)
             .map_err(ArenaRefused::Lend)?;
         let tx = self
             .arena
-            .lend_byte_cells(slots, plan.links)
+            .lend_byte_cells(plan.link_bytes, plan.tx_slots)
             .map_err(ArenaRefused::Lend)?;
-        Ok(LinkTables::new(rx, tx, plan.link_bytes))
+        let places = self
+            .arena
+            .lend_byte_cells(0, plan.links)
+            .map_err(ArenaRefused::Lend)?;
+        Ok(LinkTables::pooled(rx, tx, places))
     }
 
     /// Lend the delivery lane's area `plan` lays out, next after the links' buffers: one buffer of
@@ -1226,6 +1245,7 @@ mod tests {
             len: 0,
             links: 0,
             rx_buffers: 0,
+            tx_slots: 0,
             link_bytes: 0,
             lane_bytes: 0,
             reassembly_bytes: 0,

@@ -559,14 +559,25 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
-        match self.tx.take(slot, start, len) {
-            Some(frame) => self.send_datagram(frame),
-            None => LinkSendOutcome::Dropped(LinkDropCause::Oversize),
-        }
+        // The slot is held until the socket has the datagram, and given back after: a slot of a
+        // pool another link may be granted next.
+        let Some((from, end)) = self.tx.frame_prefixed(slot, start, len, &[]) else {
+            self.tx.release(slot);
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        };
+        // SAFETY: the session handed the slot over and the link holds it until the release below:
+        // nothing writes it while the socket reads it.
+        let outcome = self.send_datagram(unsafe { self.tx.held(slot, from, end) });
+        self.tx.release(slot);
+        outcome
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
         self.tx.release(slot);
+    }
+
+    fn tx_slot_spare(&self) -> bool {
+        self.tx.spare()
     }
 
     fn open_blocking(&self) {}

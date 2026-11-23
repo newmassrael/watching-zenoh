@@ -5430,6 +5430,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link.link_driver().tx_slot_abort(stale);
                 batch.lend.lost = batch.lend.lost.wrapping_add(1);
             }
+            // A link whose slots come from a pool the session's other links share keeps none
+            // past this message while the pool has no other free: the frame leaves now with this
+            // message alone, as the window's flush would send it, and the next link that asks
+            // for a slot finds one.
+            if !link.link_driver().tx_slot_spare() {
+                self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
+                batch.stage.count = 0;
+                batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
+                return LentBatchOpen::Opened;
+            }
             let open = slot.keep_open();
             link.batch_slots[idx].hold(open.slot());
             batch.stage.lent = Some(open);

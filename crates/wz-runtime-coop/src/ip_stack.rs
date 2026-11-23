@@ -167,6 +167,10 @@ where
         either!(self, link => link.tx_slot_abort(slot))
     }
 
+    fn tx_slot_spare(&self) -> bool {
+        either!(self, link => link.tx_slot_spare())
+    }
+
     fn open_blocking(&self) {
         either!(self, link => link.open_blocking())
     }

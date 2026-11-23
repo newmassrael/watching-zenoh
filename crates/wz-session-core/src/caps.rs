@@ -576,6 +576,17 @@ const _: () = assert!(
     "a pool of no receive buffer reads nothing"
 );
 
+/// How many outbound slots the links of a session whose engine lends them from its arena share at
+/// most: a link holds one from a frame's encode to its write, and past it only while the pool
+/// keeps another free, as zenoh-pico encodes every message into its transport's one write buffer.
+/// At least `1`.
+pub const TX_POOL_SLOTS: usize = generated::TX_POOL_SLOTS;
+
+const _: () = assert!(
+    TX_POOL_SLOTS >= 1,
+    "a pool of no outbound slot sends nothing"
+);
+
 /// Maximum number of key expressions all the peers of a session hold declared to it at once,
 /// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'
 /// peers declare in one pool the faces share lends the fewer of this and what its faces could

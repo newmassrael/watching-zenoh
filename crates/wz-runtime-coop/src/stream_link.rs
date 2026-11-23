@@ -1100,6 +1100,13 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
     /// taken: none for a frame that waits whole behind another.
     fn owe(&self, owed: Owed, skip: usize) -> LinkSendOutcome {
+        // A slot of a pool the session's other links need is not held past this call: what the
+        // stream has not taken is written now, waiting for it, as zenoh-pico's send waits on its
+        // one buffer (`vendor/zenoh-pico/src/transport/common/tx.c` @
+        // `static z_result_t _z_transport_tx_flush_buffer(`).
+        if owed.held_slot().is_some() && !self.tx.spare() {
+            return self.write_through(owed, skip);
+        }
         let refused = self.owed.borrow_mut().push(owed);
         match refused {
             Ok(()) => LinkSendOutcome::Sent,
@@ -1108,6 +1115,48 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                     self.tx.release(slot);
                 }
                 self.cannot_owe(skip)
+            }
+        }
+    }
+
+    /// Write `last` behind everything owed before it, waiting for the stream to take each (the
+    /// stream's own wait, `StreamSocket::send_parts`), and give each slot back as it is written.
+    /// `skip` is how much of `last`'s frame the stream has taken.
+    fn write_through(&self, last: Owed, skip: usize) -> LinkSendOutcome {
+        if let Err(last) = self.owed.borrow_mut().push(last) {
+            if let Some(slot) = last.held_slot() {
+                self.tx.release(slot);
+            }
+            return self.cannot_owe(skip);
+        }
+        loop {
+            if self.lost.get().is_some() {
+                self.drop_owed();
+                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+            }
+            let mut owed = self.owed.borrow_mut();
+            let Some(front) = owed.front_mut() else {
+                self.room_known.set(false);
+                return LinkSendOutcome::Sent;
+            };
+            let rest: &[u8] = match &*front {
+                // SAFETY: the slot is held by the link (`Owed::Slot`) until the pop below gives
+                // it back, so nothing writes it.
+                Owed::Slot { slot, from, end } => unsafe { self.tx.held(*slot, *from, *end) },
+                #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+                Owed::Bytes { bytes, from } => &bytes[*from..],
+            };
+            match self.socket.send_parts(&[rest]) {
+                Ok(()) => {
+                    if let Some(slot) = owed.pop().and_then(|done| done.held_slot()) {
+                        self.tx.release(slot);
+                    }
+                }
+                Err(e) => {
+                    drop(owed);
+                    self.fail(e);
+                    return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+                }
             }
         }
     }
@@ -1225,6 +1274,10 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
 
     fn tx_slot_abort(&self, slot: TxSlot) {
         self.tx.release(slot);
+    }
+
+    fn tx_slot_spare(&self) -> bool {
+        self.tx.spare()
     }
 
     fn open_blocking(&self) {}
@@ -2345,6 +2398,133 @@ mod tests {
             link.tx_slot_acquire(16, Priority::DEFAULT).is_some(),
             "written, the slot is back"
         );
+    }
+
+    /// Links of a pool of `slots` outbound slots of 32 bytes with `places` places, and the tables.
+    fn pooled_tx_links(
+        places: usize,
+        slots: usize,
+    ) -> (
+        crate::link_storage::LinkTables,
+        std::vec::Vec<StreamDriver<Pipe, [u8; 34], crate::link_storage::LinkTx>>,
+    ) {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let bytes = [(34, 1), (32, slots), (0, places)]
+            .iter()
+            .map(|&(size, count)| Arena::byte_cells_bytes(size, count).expect("fits"))
+            .sum::<usize>();
+        let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+        let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
+        // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every buffer.
+        let mut arena = unsafe {
+            Arena::over(
+                core::ptr::NonNull::from(region).cast::<u8>(),
+                blocks * ARENA_ALIGN,
+            )
+        };
+        let rx = arena.lend_byte_cells(34, 1).expect("the receive pool");
+        let tx = arena.lend_byte_cells(32, slots).expect("the slot pool");
+        let at = arena.lend_byte_cells(0, places).expect("the places");
+        let tables = crate::link_storage::LinkTables::pooled(rx, tx, at);
+        let links = (0..places)
+            .map(|_| {
+                let (_, tx) = tables.claim().expect("a place");
+                let link = StreamDriver::over(Pipe::default(), [0u8; 34], tx);
+                link.socket.tries.set(true);
+                link
+            })
+            .collect();
+        (tables, links)
+    }
+
+    /// Hand `link` a frame of `bytes` in a slot it lends, the stream taking `takes` of it.
+    fn send_lent<T: TxStore + 'static>(
+        link: &StreamDriver<Pipe, [u8; 34], T>,
+        bytes: &[u8],
+        takes: Option<usize>,
+    ) -> LinkSendOutcome {
+        let grant = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a free slot");
+        let (base, _) = link.tx_slot_storage(grant.slot);
+        // SAFETY: the slot was just granted to this test, 32 bytes long, and the frame past its
+        // headroom is inside it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(grant.headroom), bytes.len())
+        };
+        link.socket.takes.set(takes);
+        link.tx_slot_send(
+            grant.slot,
+            grant.headroom,
+            bytes.len(),
+            Reliability::Reliable,
+            Priority::DEFAULT,
+        )
+    }
+
+    /// A link of a pool that has no slot free besides the one it holds does not keep that slot for
+    /// a frame the stream took in part: it writes the rest at once, waiting for the stream, and the
+    /// slot is back for the other link, which finds one. The CONTROL is a pool with a slot for
+    /// each link, where the frame is owed and its slot held, as a link of its own slots does.
+    #[test]
+    fn a_link_of_a_short_pool_writes_a_frame_through_rather_than_hold_its_slot() {
+        let (tables, links) = pooled_tx_links(2, 1);
+        assert_eq!(
+            send_lent(&links[0], b"through", Some(3)),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            links[0].socket.waited_writes.get(),
+            1,
+            "the rest, waited for"
+        );
+        assert_eq!(links[0].socket.writes.borrow().concat(), batch(b"through"));
+        assert!(!links[0].owes());
+        assert_eq!(tables.tx_in_use(), 0, "the slot is back in the pool");
+        assert_eq!(send_lent(&links[1], b"next", None), LinkSendOutcome::Sent);
+        assert_eq!(links[1].socket.writes.borrow().concat(), batch(b"next"));
+
+        let (roomy, links) = pooled_tx_links(2, 2);
+        assert_eq!(
+            send_lent(&links[0], b"owed", Some(3)),
+            LinkSendOutcome::Sent
+        );
+        assert!(
+            links[0].owes(),
+            "CONTROL: a slot for every link, so the frame is owed"
+        );
+        assert_eq!(links[0].socket.waited_writes.get(), 0);
+        assert_eq!(roomy.tx_in_use(), 1, "and its slot held");
+        assert!(links[0].tx_slot_spare());
+    }
+
+    /// A link of a pool whose open batch frame would take the last free slot says so
+    /// (`tx_slot_spare`), and one with a slot free besides, or with a slot for every link, says
+    /// it may keep it.
+    #[test]
+    fn a_link_says_whether_the_slot_it_holds_leaves_one_spare() {
+        let (tables, links) = pooled_tx_links(3, 2);
+        let first = links[0]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a slot");
+        assert!(links[0].tx_slot_spare(), "another is free");
+        let second = links[1]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a slot");
+        assert!(!links[1].tx_slot_spare(), "it holds the last");
+        assert!(links[2].tx_slot_acquire(16, Priority::DEFAULT).is_none());
+        links[0].tx_slot_abort(first.slot);
+        links[1].tx_slot_abort(second.slot);
+        assert_eq!(tables.tx_in_use(), 0);
+        let own = link();
+        let _held = own.tx_slot_acquire(16, Priority::DEFAULT).expect("a slot");
+        assert!(own.tx_slot_spare(), "slots of its own: always");
     }
 
     /// A link whose every slot is out, one of them held by a frame the stream took only part of,
