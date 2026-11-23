@@ -325,9 +325,12 @@ device-requirements door's facilities, TLS material.
   the pointer `zp_config_get` lends stays valid while the config lives and the key is not inserted
   again. The policy statements of `wz_ext_config_policy` and `wz_ext_config_profile` are the
   build's own ids (`PolicyStatements`, a row per policy), found by the door, so they hold no text
-  of their own. The document is still a tree (`Json5Value`): the pull reader that keeps a stack of
-  at most CONFIG_DOCUMENT_DEPTH frames, builds no tree and reports each `wz/*` member it meets is
-  the remainder of U14. A locator is parsed into borrowed fields. The object itself is still one
+  of their own. The document is walked once by the no-heap lexer (`json5_lex::Lexer`), at most
+  `CONFIG_DOCUMENT_DEPTH` deep (default 16; zenoh's reference document nests 7), and its `wz`
+  member is written straight into rows of the build's ids (`DocumentRows`: the profile, a row per
+  policy, a row per limit of a session), which `policy_document::resolve_layers_under` composes as
+  `resolve_document_under` composes a tree; `wz/key-ids`, a shape of its own, is still read
+  through the tree reader. A locator is parsed into borrowed fields. The object itself is still one
   allocation of the global allocator, made before the open; its slot in the process pools (a kind
   of `object_slot.rs` counted by NEW HELD_OBJECTS) is U9's.
 - Lifetime: a config from `z_config_default` to its move into `z_open` or its drop.
@@ -336,7 +339,7 @@ device-requirements door's facilities, TLS material.
   (`vendor/zenoh-pico/src/protocol/config.c` @ `ret = _Z_ERR_CONFIG_FAILED_INSERT;`), and the
   config keeps what it held; a policy, value or profile the build does not have is refused at its
   door with `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it; a document
-  deeper than its bound will be refused at its door with the same.
+  deeper than its bound is refused at its door with the same.
 
 ### 4.14 Multicast group
 
@@ -372,11 +375,15 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   through a table of `MAX_ADMIN_LOCATORS` views on the delivering frame (`lend_hello`,
   `StringArrayState::lent`), so a delivery copies nothing, and the scout reads its config's keys
   in place; a Hello with more locators than the table is handed through copies, and
-  `z_hello_clone` owns copies. The window's half is not: the window still collects its Hellos as
-  `Vec<ScoutedHello>`, each with `Vec<String>` locators, and delivers them after the window
-  (`wz-session-core` `scouting_host.rs` `deliver_in_upstream_order`; `wz-capi-coop`
-  `scout.rs` and `scout_datagram.rs`); bounding it is a table of MAX_SCOUT_HELLOS Hellos, each
-  its locators' bytes in a text of the window, which `ScoutedHello` then borrows.
+  `z_hello_clone` owns copies. The window's half: a window records its Hellos in a table of
+  `MAX_SCOUT_HELLOS` rows (`HelloTable`, pico preset 1), each row its locators, at most
+  `SCOUT_HELLO_LOCATORS` of `MAX_LOCATOR_LEN` bytes, in a text of its own (`HelloRow`), decoded
+  from the datagram with no heap (`decode_hello_row`); a Hello past the table is counted
+  (`hellos_refused`), and the cooperative windows lend the rows to the callback
+  (`deliver_rows_in_upstream_order`). What a window still allocates: its actions (`Arc`), the
+  Scout it stages (`Vec<u8>`), the first locator it captured (`String`), the record of ignored
+  datagrams, the read buffer (`vec![0; rx]`), and `scouted_hellos`/`scout_first` for a host or
+  an open that takes owned Hellos.
 - **Admin space**: `MAX_ADMIN_REPLY_BYTES`, `MAX_ADMIN_LOCATORS`, `MAX_ADMIN_SESSION_LINKS`; the
   fixed profile's admin rows (`adminspace-fixed`, `wz-session-mcu`'s `admin_fixed`) replace the
   growable node; a reply past its buffer is an error reply, as there.
@@ -512,20 +519,17 @@ suites (C1co, Layer Z) unchanged.
     and the profile kept as the build's ids, so the open's composition borrows them and makes no
     list. Tests: an insert written over its old place, the last place grown in place, a value past
     the text and a key past the rows refused with the config kept, a clone apart from its source,
-    the doors keeping the build's own ids. Left: the document's tree, read by a pull reader of
-    CONFIG_DOCUMENT_DEPTH frames in `json5.rs` and `policy_document.rs`
-    (`statements_from_json5`, `resolve_document_under`), refusing a deeper document with
-    `Z_ERR_CONFIG_INVALID_VALUE`; it is what the `config-document` row of the ratchet counts (the
-    config object and the tree of `{ mode: "peer" }`); and the config's slot in the process pools
-    (U9).
+    the doors keeping the build's own ids. Done since: the document read with no tree into rows, at most
+    `CONFIG_DOCUMENT_DEPTH` deep (the `config-document` row expected from 4 to 1, the config
+    object; an estimate). Left: `wz/key-ids` read through the tree, and the config's slot in the
+    process pools (U9).
 16. **U15. The remaining planes, one commit set each.** Liveliness (`wz-capi-pico`
     `liveliness.rs`, `wz-capi-coop` `engine/liveliness.rs`), scouting (`scout.rs` of both,
     `scouting_host.rs`), connectivity, the admin space (`admin_space.rs` over `adminspace-fixed`),
     history and replay (`advanced*.rs`, `replay_*.rs`, `engine/replay.rs`), end-to-end, catalogs,
     observation. Family: each plane's own. Where each stands:
-    - Scouting: the ABI's half done (section 4.15): the hello a callback reads lends the scouted
-      Hello's strings. Left: the window's collection (MAX_SCOUT_HELLOS), in `scouting_host.rs` and
-      `wz-capi-coop` `scout.rs`, `scout_datagram.rs`, and the locators `z_open` takes from a
+    - Scouting: both halves done (section 4.15): the window's table of rows and the lent hello.
+      Left: the window's own allocations listed there, and the locators `z_open` takes from a
       scout (`locators_by_scout`, a `Vec<String>` handed to the open).
     - Liveliness: nothing of the `liveliness-token` and `liveliness-get` rows lies in
       `liveliness.rs` alone. A token's declaration takes the key's declaration
@@ -535,13 +539,13 @@ suites (C1co, Layer Z) unchanged.
       liveliness get adds the reply gate's key and the fan's legs (`crate::get`, U8). The plane
       follows those units; a liveliness get copies its key twice (`ke.to_owned()` and the gate's
       `clone`), once of which goes with U8's gate.
-    - History and replay: a replay answer copies every frame it answers into a `Vec<Vec<u8>>` and
-      the order of the cells into a `Vec<usize>`, and the release of held frames a buffer of
-      `frame_max` (`replay_publisher.rs` `answer`, `end_answer`), because the replies go out
-      after the cache's lock is let go. The form that takes none: the snapshot area, the order and
-      the release buffer part of the program's own storage, sized by
-      `wz_ext_replay_publisher_storage_size`, with one answer at a time over them. The `replay`
-      row's rounds put and do not answer, so the row does not move with it.
+    - History and replay: done for the answer. The program's storage, sized by
+      `wz_ext_replay_publisher_storage_size`, holds past the rings an answer area (`AnswerArea`:
+      the order of the cells, each frame's length, a copy of every frame and one frame's room for
+      the release), aligned wherever the storage starts; one answer at a time copies into it under
+      the cache's lock and replies after it, so an answer allocates nothing. A query asked of the
+      cache from inside a callback of its own answer, on the answering thread, would wait on that
+      answer. The `replay` row's rounds put and do not answer, so the row does not move with it.
     - End-to-end and catalogs: the supervision's streams and the catalogs' entries are lent under
       the process's rows already (`ProcessRows`). In this crate their doors allocate the state's
       `Box<Mutex<..>>` when it is made (U9) and a refusal's text (`format!` and `to_string`
@@ -579,10 +583,9 @@ unit that takes each away:
 | an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, the `String` each port call takes and drops, an Interest form's suffix, a subscriber's wire anchor | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs`; `wz-capi-port` `engine.rs` | U6, and U10 for the port's arguments (`&str`) |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
-| the document a config is handed (`Json5Value`, a tree of `String`s and `Vec`s) | `wz-capi-pico` `config_policy.rs`; `wz-session-core` `json5.rs`, `policy_document.rs` | U14's remainder: a pull reader of CONFIG_DOCUMENT_DEPTH frames |
+| a document's `wz/key-ids` (read through `Json5Value`) | `wz-capi-pico` `config_policy.rs` (`key_ids_of`) | U14's remainder: the key ids read by the lexer into rows |
 | a config object (one block of the build's size) and a hello a program clones | `wz-capi-pico` `config.rs`, `scout.rs` | U9: their slots in the process pools |
-| a scouting window's Hellos (`Vec<ScoutedHello>`, each with `Vec<String>` locators) | `wz-session-core` `scouting_host.rs`; `wz-capi-coop` `scout.rs`, `scout_datagram.rs` | U15's remainder: MAX_SCOUT_HELLOS Hellos over a text of the window |
-| a replay answer's snapshot of the frames, its order of cells and the release buffer | `wz-capi-pico` `replay_publisher.rs` | U15's remainder: those areas in the program's storage |
+| a scouting window's actions, its Scout, the first locator and the ignored record, and its read buffer | `wz-session-core` `scouting_host.rs`; `wz-capi-coop` `scout.rs`, `scout_datagram.rs` | U15's remainder: the window's state in a place of its holder, its buffers lent |
 | the wait of a session on the program's time base (an `Arc` for each `ClockMoves::moved`) | `wz-capi-pico` `time_base.rs`; `wz-capi-coop` `ClockMoves` | U15's remainder: a wait that borrows the time base |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
 
