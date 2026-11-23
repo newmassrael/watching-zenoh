@@ -449,6 +449,27 @@ transport-link-unixpipe,transport-link-ws|"
         multi-thread,\
         multicast-transport\
         |app_transport"
+    # pico's multicast declarations (`multicast-declarations`): a session that joins a group tells it
+    # its keyexprs and write filters too. The two-member group over the program's transport, on each
+    # engine, opened with the group's declarations mapped: the put and the get still cross it. What
+    # goes on the group's wire is held where the mapping is made (`wz-capi-port`'s `group` tests and
+    # `wz-capi-coop`'s `tests::group::`); this is the open that selects it.
+    "wz-capi-pico|hook|app-transport,multicast-declarations|--test=app_transport_doors"
+    "wz-capi-pico|hook|\
+        -default,\
+        engine-coop,\
+        app-transport,\
+        peer,\
+        query,\
+        queryable,\
+        multi-thread,\
+        multicast-transport,\
+        multicast-declarations\
+        |app_transport"
+    # The scout of an image (`scout-mcu`), over one datagram socket of the cooperative engine's
+    # stack, here the host's: an open that names no locator scouts for the budget and finds nobody,
+    # where a build that cannot scout answers at once. The C1co lane runs the same file with `scout`.
+    "wz-capi-pico|hook|-default,engine-coop,link-udp,scout-mcu|--test=open_scouts_for_a_locator"
     "wz-capi-pico|hook|shared-key-ids|--test=key_ids_tokio"
     # A session's batch size stated by its config's document (`wz/limits`) through the document door:
     # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
@@ -638,6 +659,10 @@ transport-link-unixpipe,transport-link-ws|"
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
     "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    # A `tls/` listener that tells the node's event log of a connection it dropped (`event-ring`): bytes
+    # that are no handshake are dropped and the event follows (`tests/tls_provider.rs`, whose other
+    # tests run as the row above runs them).
+    "wz-capi-coop|hook|event-ring,tls-mbedtls|--test=tls_provider"
     # The keys a session names by a dictionary it shares with its peers (`tests::shared_key_ids::`,
     # 19), compiled with `shared-key-ids` beside `listen`, `query` and `queryable`, the four the
     # module's `cfg` names; the rest of the crate's tests are the leg above's. `liveliness` and
@@ -832,6 +857,19 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # `app-link` is a feature no row above names, so before this row none of these ran; `host-lock`
     # is the host's wait, a parked thread.
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
+    # The same links and the runtime's critical sections with the host's locks made of its own calls
+    # (`host-lock-sys`, `wz-host-sync`), the form a host library without `std` runs: the section
+    # nests on a thread and excludes across threads (`cs::tests`), and the links' waits park on
+    # the host's condition variable. One build for the two rows.
+    "wz-runtime-coop|hook|app-link,host-lock-sys|app_link::"
+    "wz-runtime-coop|hook|app-link,host-lock-sys|cs::"
+    # The critical section of an image that states one context (`single-context`): it takes no
+    # lock, runs, nests and leaves the cells' own borrow rules (`cs::single_context_tests`).
+    "wz-runtime-coop|hook|single-context|cs::"
+    # The high-water mark of the task table on the slot profile (`pool-monitor`): the most cells held
+    # at once, which a build without the feature reports as unknown. The slot profile's row above,
+    # with the feature, on its own module.
+    "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,pool-monitor|static_tests::"
     # The fixed-memory profile's secure channel (decision D9): its tests run the channel, so they
     # link the Mbed TLS `vendored` builds from the pinned submodules, which is not a default.
     # `host-lock` serialises the library's calls for the tests that run two engines on two threads.
@@ -1366,6 +1404,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
+    # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
+    # the feature a token is refused by name. `slot_node` is built with `client-slot`.
+    "wz-session-mcu|hook|client-slot,declare-token|slot_node::"
+    # The client on the heap profile (`client-node`, `client_node::`): what it registers is declared
+    # once per session over the in-memory network, and a query on a registered key is answered.
+    "wz-session-mcu|hook|client-node|client_node::"
     # S9d: the receive path of the slot profile lends the control records (a
     # Declare, an Interest, a ResponseFinal) where their frame lies, and every
     # registry that consumes one reads the lent form and the owned form through one
@@ -1436,6 +1481,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # read by the key-id dictionary and the link's noted requests (`shared-key-ids`) and by the
     # program's links (`app-link`) are tests no other row builds.
     "wz-session-core|hook|shared-key-ids,app-link|limits::enforcement::"
+    # The three request slots a build may or may not honour (`query-target`, `query-timeout`,
+    # `query-consolidation`): each test of `query_options::` asserts the slot read and carried in
+    # this build and dropped in one without it, which the crate's wide row above builds (`query-get`
+    # without the three).
+    "wz-session-core|hook|query-target,query-timeout,query-consolidation|query_options::"
+    # The endpoint list a node dials (`connect_endpoints::`, a module built with `connect-endpoints`
+    # alone): a group's count of its entries and the bounds that refuse on every backing.
+    "wz-session-core|hook|connect-endpoints|connect_endpoints::"
+    # An engine that lends a parameter's bytes at the open (`limits-lent-at-open`, a selector the C
+    # library's cooperative engine names): the domain of such a parameter stops at the build's value
+    # and a value past it is refused by the capacity's name. The one test that reads the selector
+    # runs in the default build on the declared range; this row runs it on the lent one.
+    "wz-session-core|hook|limits-lent-at-open|\
+limits::tests::a_parameter_lent_at_the_open_stops_at_the_builds_value_where_it_is_lent"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),

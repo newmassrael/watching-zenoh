@@ -97,3 +97,77 @@ pub fn group_len(list: &[ConnectEntry], index: u8) -> usize {
         .filter(|e| e.group.map(|g| g.index) == Some(index) && !e.endpoint.is_empty())
         .count()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(endpoint: &str) -> EndpointText {
+        let mut text = EndpointText::new();
+        text.push_str(endpoint)
+            .expect("an endpoint within the bound");
+        text
+    }
+
+    fn in_group(endpoint: &str, index: u8, strategy: LocatorsStrategy) -> ConnectEntry {
+        ConnectEntry {
+            endpoint: text(endpoint),
+            group: Some(EndpointGroup { index, strategy }),
+        }
+    }
+
+    #[test]
+    fn a_bare_endpoint_is_in_no_group_and_reads_back_as_written() {
+        let entry = ConnectEntry::single(text("udp/10.0.0.1:7447"));
+        assert_eq!(entry.group, None);
+        assert_eq!(entry.as_str(), "udp/10.0.0.1:7447");
+    }
+
+    #[test]
+    fn each_strategy_reads_as_its_wire_spelling() {
+        assert_eq!(LocatorsStrategy::AllOf.as_str(), "allOf");
+        assert_eq!(LocatorsStrategy::OneOf.as_str(), "oneOf");
+    }
+
+    /// A group counts its own entries that name an endpoint: a bare entry is in none, another
+    /// group's are not its own, and an empty group (`locators: []`) names nothing to dial.
+    #[test]
+    fn a_group_counts_only_its_own_entries_that_name_an_endpoint() {
+        let list = [
+            ConnectEntry::single(text("tcp/10.0.0.1:7447")),
+            in_group("tcp/10.0.0.2:7447", 0, LocatorsStrategy::AllOf),
+            in_group("udp/10.0.0.2:7447", 0, LocatorsStrategy::AllOf),
+            in_group("tcp/10.0.0.3:7447", 1, LocatorsStrategy::OneOf),
+            in_group("", 2, LocatorsStrategy::AllOf),
+        ];
+        assert_eq!(group_len(&list, 0), 2);
+        assert_eq!(group_len(&list, 1), 1);
+        assert_eq!(group_len(&list, 2), 0, "an empty group names nothing");
+        assert_eq!(group_len(&list, 3), 0, "a group the list does not hold");
+    }
+
+    /// The bounds are the build's whatever the allocator: an endpoint one byte past its bound and
+    /// an entry past the list's capacity are refused, where the backing of `alloc` would grow.
+    #[test]
+    fn an_endpoint_and_a_list_past_their_bounds_are_refused() {
+        let mut endpoint = EndpointText::new();
+        for _ in 0..caps::MAX_LOCATOR_LEN {
+            endpoint.push('a').expect("within the bound");
+        }
+        assert!(endpoint.push('a').is_err(), "one byte past the bound");
+        assert_eq!(endpoint.len(), caps::MAX_LOCATOR_LEN);
+
+        let mut list = ConnectEndpoints::new();
+        for _ in 0..caps::MAX_STATIC_CONNECT {
+            assert!(list
+                .push(ConnectEntry::single(text("udp/10.0.0.1:7447")))
+                .is_ok());
+        }
+        assert!(
+            list.push(ConnectEntry::single(text("udp/10.0.0.1:7447")))
+                .is_err(),
+            "one entry past the capacity"
+        );
+        assert_eq!(list.len(), caps::MAX_STATIC_CONNECT);
+    }
+}

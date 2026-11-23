@@ -9,14 +9,18 @@
 #
 #   scripts/mcu-speed.sh [--board mps2/an385] [--qemu-machine mps2-an385] [--reps 3] [--sizes 8,64,1024]
 #                        [--no-build] [-- <more options of mcu_speed.py run>]
+#   scripts/mcu-speed.sh --images-only [--arms P,W] [--board mps2/an385]
 #
 # It builds what it runs into target/mcu-speed under the artifact root: the four images (west), and the
 # host probe (scripts/host-bench/perf_probe.c against zenoh-pico from a copy of vendor/zenoh-pico, so the
-# submodule is only read). With --no-build it runs what is there.
+# submodule is only read). With --no-build it runs what is there. With --images-only it builds the images
+# of the arms --arms names (both by default), in both threading arms, and runs nothing: Layer Qzp of
+# scripts/run-ci.sh builds arm W this way, so the lane and the matrix build the image one way.
 #
 # What it needs: the Zephyr workspace (WZ_ZEPHYR_VENV and WZ_ZEPHYR_BASE, by default under
 # ~/zephyrproject), qemu-system-arm, cmake and cc for the host probe, and a zenohd (WZ_ZENOHD_BIN, by
-# default the oracle under the artifact root). A missing one is refused by name.
+# default the oracle under the artifact root); --images-only needs the Zephyr workspace alone. A missing
+# one is refused by name.
 #
 # Exit: the gate's (0 every row held, 1 a row failed, 2 an input refused, 3 a row not measured), and 2
 # when something could not be built or the run was refused.
@@ -32,6 +36,8 @@ machine=""
 reps=3
 sizes="8,64,1024"
 build=1
+images_only=0
+arms="P,W"
 extra=()
 while (($# > 0)); do
     case "$1" in
@@ -55,6 +61,14 @@ while (($# > 0)); do
             build=0
             shift
             ;;
+        --images-only)
+            images_only=1
+            shift
+            ;;
+        --arms)
+            arms="${2:?--arms is a comma list of P and W}"
+            shift 2
+            ;;
         --)
             shift
             extra=("$@")
@@ -72,6 +86,22 @@ refuse() {
     exit 2
 }
 
+# The arms to build, each P or W, once each.
+build_arms=()
+IFS=',' read -r -a arm_list <<<"$arms"
+for arm in "${arm_list[@]}"; do
+    case "$arm" in
+        P | W) [[ " ${build_arms[*]} " == *" $arm "* ]] || build_arms+=("$arm") ;;
+        *) refuse "--arms names $arm; an arm is P or W" ;;
+    esac
+done
+((${#build_arms[@]} > 0)) || refuse "--arms names no arm"
+if ((images_only)); then
+    ((build)) || refuse "--images-only builds the images, and --no-build builds nothing"
+elif [[ "$arms" != "P,W" ]]; then
+    refuse "--arms is for --images-only: a run compares both arms"
+fi
+
 venv="${WZ_ZEPHYR_VENV:-$HOME/zephyrproject/.venv}"
 zephyr_base="${WZ_ZEPHYR_BASE:-$HOME/zephyrproject/zephyr}"
 zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
@@ -81,10 +111,12 @@ peer="$out/bin/perf_probe"
 pacer="$out/bin/paced_pub"
 logs="$out/logs"
 
-for tool in qemu-system-arm python3; do
-    command -v "$tool" >/dev/null 2>&1 || refuse "$tool is not on PATH"
-done
-[[ -x "$zenohd" ]] || refuse "no zenohd at $zenohd (WZ_ZENOHD_BIN names another)"
+# python3 runs the stack gate on arm W's images; QEMU and the router only a run.
+command -v python3 >/dev/null 2>&1 || refuse "python3 is not on PATH"
+if ((!images_only)); then
+    command -v qemu-system-arm >/dev/null 2>&1 || refuse "qemu-system-arm is not on PATH"
+    [[ -x "$zenohd" ]] || refuse "no zenohd at $zenohd (WZ_ZENOHD_BIN names another)"
+fi
 mkdir -p "$images" "$out/bin" "$logs" || refuse "$out cannot be made"
 
 # build_image <arm> <threads>: the image of one arm and threading arm, built from nothing, its ELF kept
@@ -161,12 +193,16 @@ if ((build)); then
     # The physical path: Zephyr writes linker snippets relative to the tree, and a path through a link
     # resolves them wrong (the reason is written at _qz_toolchain in scripts/run-ci.sh).
     zephyr_base="$(cd "$zephyr_base" && pwd -P)"
-    build_peer
-    for arm in P W; do
+    ((images_only)) || build_peer
+    for arm in "${build_arms[@]}"; do
         for threads in st mt; do
             build_image "$arm" "$threads"
         done
     done
+fi
+if ((images_only)); then
+    echo "mcu-speed: built the images of arm(s) ${build_arms[*]} under $images; nothing was run"
+    exit 0
 fi
 
 run="$out/runs/$(date -u +%Y%m%dT%H%M%S)"

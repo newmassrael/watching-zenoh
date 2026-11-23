@@ -7109,15 +7109,17 @@ mod clock_moves_tests {
     fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
         let (moves, word) = word();
         let wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
-        let waiting = std::thread::spawn(move || {
-            let started = Instant::now();
-            wait.wait();
-            started.elapsed()
+        // The wait stays on the thread that made it, as a session's read does (its lent receive
+        // lease is no value of another thread's); the word comes from another, as a program's does.
+        let telling = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            *moves.count.lock().unwrap() += 1;
+            moves.moved.notify_all();
         });
-        std::thread::sleep(Duration::from_millis(100));
-        *moves.count.lock().unwrap() += 1;
-        moves.moved.notify_all();
-        let took = waiting.join().expect("the waiting thread");
+        let started = Instant::now();
+        wait.wait();
+        let took = started.elapsed();
+        telling.join().expect("the thread that tells the word");
         assert!(
             took < Duration::from_millis(2_500),
             "the read waited out its bound instead of the word ({took:?})"
