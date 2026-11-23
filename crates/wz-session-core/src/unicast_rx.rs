@@ -190,6 +190,10 @@ where
 /// Each call borrows the Router for its own length. One made while another holds it (a receive
 /// reached from inside another's delivery) is not reassembled: it is reported as a receive that
 /// rejoins no fragment does (`()`), which hands a fragment up unstaged, and nothing panics.
+///
+/// A handle sweeps nothing: the session that holds the Router sweeps it once a step
+/// ([`Self::with`]), so a chain past its deadline is ended whichever link's task is stepped, and
+/// not once for each link.
 #[cfg(feature = "alloc")]
 pub struct SharedReassembly<D>(alloc::rc::Rc<core::cell::RefCell<D>>);
 
@@ -219,11 +223,7 @@ impl<D> Clone for SharedReassembly<D> {
 
 #[cfg(feature = "alloc")]
 impl<D: RxReassembly> RxReassembly for SharedReassembly<D> {
-    fn sweep_chains(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
-        if let Ok(mut router) = self.0.try_borrow_mut() {
-            router.sweep_chains(now_ms, on_event);
-        }
-    }
+    fn sweep_chains(&mut self, _now_ms: u64, _on_event: &mut dyn EventSink) {}
 
     fn report_copied<R: SessionRuntime, T: TimeSource>(
         &mut self,
@@ -574,6 +574,48 @@ mod tests {
         });
         assert_eq!(ended, Some(1));
         assert_eq!(rx.router().active_chains(), 0);
+    }
+
+    /// A receive over a handle on a session's shared Router ends no chain when it sweeps, past
+    /// the chain's deadline too: the session sweeps the Router through the handle, and that
+    /// sweep ends it.
+    #[cfg(all(feature = "reassembly", feature = "alloc"))]
+    #[test]
+    fn a_receive_over_a_shared_router_leaves_the_sweep_to_the_session() {
+        use crate::reassembly_dispatch::{Fragment, ReassemblyConfig};
+        const TIMEOUT_MS: u64 = 500;
+        let router: ReassemblyDispatcher<2, 64> =
+            ReassemblyDispatcher::new(ReassemblyConfig::new(2, TIMEOUT_MS));
+        let session = SharedReassembly::new(router);
+        let begun = session.with(|router| {
+            router.ingest(
+                Fragment {
+                    peer_key: &[0x11; 16],
+                    reliable: true,
+                    sn: 1,
+                    more: 1,
+                    payload: b"part",
+                    priority: crate::qos::Priority::DEFAULT,
+                    markers: crate::extfragment::FragmentMarkers::NONE,
+                },
+                crate::sn::mask_from_res(0x02),
+                0,
+                |_| {},
+            )
+        });
+        assert_eq!(
+            begun,
+            Some(crate::reassembly_dispatch::IngestOutcome::Begun)
+        );
+        let mut rx = UnicastRx::new(session.clone());
+        let mut events = 0usize;
+        rx.sweep(TIMEOUT_MS, &mut |_event: IterationEvent<'_, '_>| {
+            events += 1
+        });
+        assert_eq!(events, 0, "the link's receive sweeps nothing");
+        assert_eq!(session.with(|router| router.active_chains()), Some(1));
+        assert_eq!(session.with(|router| router.sweep(TIMEOUT_MS)), Some(1));
+        assert_eq!(session.with(|router| router.active_chains()), Some(0));
     }
 
     /// Each path a unit takes is counted under its own name, and the copied total is the sum of

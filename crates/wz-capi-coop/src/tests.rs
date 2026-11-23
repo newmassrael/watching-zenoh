@@ -952,6 +952,46 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     );
 }
 
+/// The session's step ends a chain of its one reassembly Router once the chain is past its
+/// deadline, though no link's receive sweeps it; the CONTROL is the chain, still open when it is
+/// begun.
+#[test]
+fn the_sessions_step_ends_a_chain_past_its_deadline() {
+    use wz_runtime_coop::ClockSource;
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome};
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let chains = engine.chain_router();
+    let begun = chains.with(|reassembly| {
+        reassembly.ingest(
+            Fragment {
+                peer_key: &[0x5a; 16],
+                reliable: true,
+                sn: 1,
+                more: 1,
+                payload: b"part",
+                priority: Priority::DEFAULT,
+                markers: FragmentMarkers::NONE,
+            },
+            wz_session_core::sn::mask_from_res(0x02),
+            PosixClock.now_us() / 1000,
+            |_| {},
+        )
+    });
+    assert_eq!(begun, Some(IngestOutcome::Begun));
+    assert_eq!(
+        chains.with(|reassembly| reassembly.active_chains()),
+        Some(1),
+        "CONTROL: the chain is open"
+    );
+    until(&engine, "the step to end the chain", || {
+        chains.with(|reassembly| reassembly.active_chains()) == Some(0)
+    });
+}
+
 /// The samples a link lends are handed the callback their subscriber's row holds, copied out of the
 /// row with each of them under the session's lock: the table of callbacks is not searched for
 /// them, however many steps they arrive in. The CONTROL is the count of the samples handed.

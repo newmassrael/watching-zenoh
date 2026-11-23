@@ -3866,6 +3866,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
+    /// A handle on the session's one reassembly Router: what a test of the chains the session's
+    /// step ends stages its chain in. Taken under the lock, uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn chain_router(&self) -> SharedReassembly<SessionReassembly> {
+        self.core.lock().0.router.clone()
+    }
+
     /// How many subscribers the session core's table holds, each one row: what a test of a
     /// subscriber's ends reads. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
@@ -4847,6 +4854,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
         core.local.run_until_idle();
         let now_us = core.now_us();
+        // A link's handle on the one reassembly Router sweeps nothing, so the session ends the
+        // chains past their deadline here, once a step and by its reading, whichever link's task
+        // ran.
+        core.router.with(|router| router.sweep(now_us / 1000));
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
