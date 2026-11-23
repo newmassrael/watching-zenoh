@@ -315,6 +315,7 @@ impl<Router> UnicastRx<Router> {
 impl<Router: RxReassembly> UnicastRx<Router> {
     /// End the fragment chains past their deadline at `now_ms`, telling `on_event` how many
     /// (`IterationEvent::ReassemblyTimeout`). A receive that rejoins no fragment has none.
+    #[inline(never)]
     pub fn sweep(&mut self, now_ms: u64, on_event: &mut dyn EventSink) {
         self.router.sweep_chains(now_ms, on_event);
     }
