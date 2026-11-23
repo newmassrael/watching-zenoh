@@ -1043,7 +1043,7 @@ pub fn multicast_tx_group_announcement<R>(
 /// The most bytes the `ext_keyexpr` body of a retraction takes: its inner header, a ten-byte id
 /// and a key of the build's longest.
 #[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
-const RETRACTION_KEY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
+const RETRACTION_KEY_BYTES: usize = crate::caps::MAX_KEYEXPR_BYTES.saturating_add(11);
 
 /// [`crate::declare_build::build_group_retraction`] written from its parts, its key's
 /// `ext_keyexpr` body on the stack, and handed to `f` as a message lent for the call; refused
