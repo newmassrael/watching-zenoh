@@ -25,7 +25,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
-use wz_runtime_coop::ip_stack::{IpDriver, IpLinks};
+use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::session_drive::{LinkOpenError, Locator, SessionLinks};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 use wz_runtime_posix::net::PosixUdpSocket;
@@ -242,10 +242,12 @@ fn a_tls_locator_opens_the_stream_link_over_the_channel_on_the_hosts_links() {
     let link = links
         .open_initiator(Locator::tls(at(port)))
         .expect("the secure stream link opens")
-        .pump;
-    let IpDriver::Tls(_) = &*link else {
-        panic!("a `tls/` dial opened another kind of link");
-    };
+        .sink;
+    assert_eq!(
+        link.link_subject().and_then(|subject| subject.kind),
+        Some(wz_session_core::link::LinkKind::Tls),
+        "a `tls/` dial opened another kind of link"
+    );
     assert_eq!(
         link.link_endpoints().map(|ends| ends.dst.as_str()),
         Some(format!("tls/127.0.0.1:{port}").as_str())

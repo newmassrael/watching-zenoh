@@ -23,7 +23,7 @@ use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLi
 use wz_runtime_coop::udp_link::{bind_refused, dial_bind};
 
 use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
-use crate::stream::{ZephyrTcpDial, ZephyrTcpSocket};
+use crate::stream::ZephyrTcpDial;
 
 /// Zephyr's sockets as the session shell's links on the heap profile, `udp/` and `tcp/` alike:
 /// `wz_runtime_coop::ip_stack`'s `IpLinks` at [`ZephyrUdpSocket`] and [`ZephyrTcpDial`], made
@@ -33,10 +33,6 @@ use crate::stream::{ZephyrTcpDial, ZephyrTcpSocket};
 /// allocator on Zephyr (the pico C ABI over the cooperative engine) gives the session shell;
 /// [`ZephyrLinks`] is the datagram-only form the heap images that predate it were written against.
 pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;
-
-/// The driver [`ZephyrIpLinks`] opens: a datagram or a stream link, as the dial named.
-pub type ZephyrHeapDriver =
-    wz_runtime_coop::ip_stack::HeapIpDriver<ZephyrUdpSocket, ZephyrTcpSocket>;
 
 /// The links of a node whose network stack is Zephyr's own.
 pub struct ZephyrLinks {
@@ -136,12 +132,12 @@ mod tests {
 
     use wz_runtime_coop::session_drive::SessionLinks;
 
-    /// What the session shell holds of a stack: its links, and the driver each link pumps.
-    fn shell_links<L: SessionLinks<Pump = Rc<ZephyrHeapDriver>>>(_: &L) {}
+    /// What the session shell holds of a stack: its links, each pumped through its own table.
+    fn shell_links<L: SessionLinks<Pump = wz_runtime_coop::ip_stack::HeapLink>>(_: &L) {}
 
     /// Zephyr's two sockets meet every bound the heap profile's stack asks of a platform's, so the
     /// session shell takes them as it takes the host's: the stack is made without opening a
-    /// socket, and its driver is the datagram-or-stream one.
+    /// socket, and its links are the heap profile's.
     #[test]
     fn zephyrs_sockets_are_the_shells_links_on_the_heap_profile() {
         let links = ZephyrIpLinks::new(IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED), ZephyrTcpDial)

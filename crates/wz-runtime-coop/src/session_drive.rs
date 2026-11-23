@@ -681,6 +681,32 @@ impl LinkProto {
             LinkProto::Tls => "tls",
         }
     }
+
+    /// What a link of the protocol reports of itself to a connectivity plane
+    /// (`BoxedLinkDriver::link_subject`): its kind, which says whether it is streamed and how
+    /// reliable. The NICs its address sits on are not resolved, so they read as undetermined and
+    /// not as none: an answer a link that does not ask the platform cannot give.
+    #[cfg(feature = "alloc")]
+    pub fn subject(self) -> &'static wz_session_core::link::LinkSubject {
+        use wz_session_core::link::{LinkKind, LinkSubject};
+        static UDP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Udp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TCP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tcp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TLS: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tls),
+            ..LinkSubject::UNKNOWN
+        };
+        match self {
+            LinkProto::Udp => &UDP,
+            LinkProto::Tcp => &TCP,
+            LinkProto::Tls => &TLS,
+        }
+    }
 }
 
 /// What a dial names: a protocol and the end it reaches, an IPv4 or an IPv6 address and a port:

@@ -1232,6 +1232,11 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
         Some(&self.endpoints)
     }
 
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&wz_session_core::link::LinkSubject> {
+        Some(S::PROTO.subject())
+    }
+
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
         self.socket.peer_credential_zid()
     }

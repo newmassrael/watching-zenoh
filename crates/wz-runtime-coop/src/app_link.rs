@@ -61,7 +61,7 @@ use wz_session_core::app_link_table::{
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
 
 use crate::group_transport::{GroupSend, GroupTransport};
-use crate::ip_stack::{HeapIpDriver, IpDriver};
+use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator,
@@ -722,12 +722,12 @@ pub struct AppDial(AppDialing);
 // Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
 #[allow(clippy::large_enum_variant)]
 enum AppDialing {
-    Made(Dialled<Rc<AppDriver>>),
+    Made(Dialled<HeapLink>),
     Pending(PendingAppLink),
 }
 
-impl PendingDial<Rc<AppDriver>> for AppDial {
-    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<AppDriver>>, LinkOpenError>> {
+impl PendingDial<HeapLink> for AppDial {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
         match &mut self.0 {
             AppDialing::Made(made) => made.poll(),
             AppDialing::Pending(pending) => pending.poll(),
@@ -735,8 +735,8 @@ impl PendingDial<Rc<AppDriver>> for AppDial {
     }
 }
 
-impl From<OpenedLink<Rc<AppDriver>>> for AppDial {
-    fn from(opened: OpenedLink<Rc<AppDriver>>) -> Self {
+impl From<OpenedLink<HeapLink>> for AppDial {
+    fn from(opened: OpenedLink<HeapLink>) -> Self {
         Self(AppDialing::Made(Dialled::new(opened)))
     }
 }
@@ -754,8 +754,8 @@ struct PendingAppLink {
     owner_waits: OwnerWaits,
 }
 
-impl PendingDial<Rc<AppDriver>> for PendingAppLink {
-    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<AppDriver>>, LinkOpenError>> {
+impl PendingDial<HeapLink> for PendingAppLink {
+    fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink>, LinkOpenError>> {
         let held = self.held.as_ref()?;
         let handle = held.handle;
         match held.transport.with(|table| table.poll_open(handle, None)) {
@@ -769,8 +769,8 @@ impl PendingDial<Rc<AppDriver>> for PendingAppLink {
             OpenProgress::Open => {
                 let held = self.held.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                let driver: AppDriver = if self.datagram {
-                    IpDriver::Udp(self.owner_waits.datagram(UdpDriver::initiator_in(
+                Some(Ok(if self.datagram {
+                    heap_link(self.owner_waits.datagram(UdpDriver::initiator_in(
                         AppDatagramSocket {
                             held,
                             peer: self.to,
@@ -781,7 +781,7 @@ impl PendingDial<Rc<AppDriver>> for PendingAppLink {
                         tx,
                     )))
                 } else {
-                    IpDriver::Tcp(self.owner_waits.stream(StreamDriver::over(
+                    heap_link(self.owner_waits.stream(StreamDriver::over(
                         AppStreamSocket {
                             held,
                             local: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -790,11 +790,6 @@ impl PendingDial<Rc<AppDriver>> for PendingAppLink {
                         rx,
                         tx,
                     )))
-                };
-                let driver = Rc::new(driver);
-                Some(Ok(OpenedLink {
-                    sink: driver.clone(),
-                    pump: driver,
                 }))
             }
         }
@@ -1198,11 +1193,8 @@ impl AppLinks {
     }
 }
 
-/// The driver a link of [`AppLinks`] is: a datagram or a stream link over the program's transport.
-pub type AppDriver = HeapIpDriver<AppDatagramSocket, AppStreamSocket>;
-
 impl SessionLinks for AppLinks {
-    type Pump = Rc<AppDriver>;
+    type Pump = HeapLink;
 
     type Dial = AppDial;
 
@@ -1216,35 +1208,32 @@ impl SessionLinks for AppLinks {
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The buffers are claimed before the program is asked for a link, so a session whose
         // tables are full asks it for none.
-        let driver: AppDriver = match to.proto {
+        match to.proto {
             LinkProto::Udp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-                IpDriver::Udp(self.owner_waits.datagram(UdpDriver::initiator_in(
-                    AppDatagramSocket::dial_bounded(
-                        &self.transport,
+                Ok(heap_link(self.owner_waits.datagram(
+                    UdpDriver::initiator_in(
+                        AppDatagramSocket::dial_bounded(
+                            &self.transport,
+                            to.at,
+                            self.open_bound.as_ref(),
+                        )?,
                         to.at,
-                        self.open_bound.as_ref(),
-                    )?,
-                    to.at,
-                    rx,
-                    tx,
+                        rx,
+                        tx,
+                    ),
                 )))
             }
             LinkProto::Tcp => {
                 let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-                IpDriver::Tcp(self.owner_waits.stream(StreamDriver::over(
+                Ok(heap_link(self.owner_waits.stream(StreamDriver::over(
                     self.dial.dial(to.at)?,
                     rx,
                     tx,
-                )))
+                ))))
             }
-            LinkProto::Tls => return Err(LinkOpenError::Unsupported),
-        };
-        let driver = Rc::new(driver);
-        Ok(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        })
+            LinkProto::Tls => Err(LinkOpenError::Unsupported),
+        }
     }
 
     /// The program is asked for the link and the dial returned before it reports the link up
@@ -1342,12 +1331,12 @@ struct AppDatagramListener {
     owner_waits: OwnerWaits,
 }
 
-impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
+impl LinkListener<HeapLink> for AppDatagramListener {
     fn local(&self) -> Locator {
         Locator::udp(self.at)
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let next = self
             .held
             .transport
@@ -1365,14 +1354,10 @@ impl LinkListener<Rc<AppDriver>> for AppDatagramListener {
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
-        let driver = Rc::new(IpDriver::Udp(
+        Ok(Some(heap_link(
             self.owner_waits
                 .datagram(UdpDriver::initiator_in(socket, peer, rx, tx)),
-        ));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        )))
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1391,23 +1376,19 @@ struct AppLinkListener {
     owner_waits: OwnerWaits,
 }
 
-impl LinkListener<Rc<AppDriver>> for AppLinkListener {
+impl LinkListener<HeapLink> for AppLinkListener {
     fn local(&self) -> Locator {
         Locator::tcp(self.listener.local())
     }
 
-    fn accept(&self) -> Result<Option<OpenedLink<Rc<AppDriver>>>, LinkOpenError> {
+    fn accept(&self) -> Result<Option<OpenedLink<HeapLink>>, LinkOpenError> {
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
         let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
-        let driver = Rc::new(IpDriver::Tcp(
+        Ok(Some(heap_link(
             self.owner_waits.stream(StreamDriver::over(stream, rx, tx)),
-        ));
-        Ok(Some(OpenedLink {
-            sink: driver.clone(),
-            pump: driver,
-        }))
+        )))
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -2404,10 +2385,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         /// The links a session over `transport` holds: two dialled, one accepted, one begun.
-        fn opened(
-            transport: &Arc<AppTransport>,
-            links: &AppLinks,
-        ) -> Vec<OpenedLink<Rc<AppDriver>>> {
+        fn opened(transport: &Arc<AppTransport>, links: &AppLinks) -> Vec<OpenedLink<HeapLink>> {
             let mut opened = vec![
                 links.open_initiator(Locator::tcp(PEER)).expect("a stream"),
                 links
