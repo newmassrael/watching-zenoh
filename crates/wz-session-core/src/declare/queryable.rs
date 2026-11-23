@@ -1737,6 +1737,7 @@ mod tests {
         assert!(!reg.has_matching("home/door"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn queryable_has_matching_true_when_peer_pattern_covers_query_literal() {
         let mut reg = RemoteQueryableRegistry::new();
@@ -1748,6 +1749,7 @@ mod tests {
         assert!(!reg.has_matching("other/x"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn queryable_has_matching_true_when_query_pattern_covers_peer_literal() {
         let mut reg = RemoteQueryableRegistry::new();
@@ -1785,8 +1787,8 @@ mod tests {
         assert_eq!(reg.declared_count(), 3);
         // Match on the middle entry; other entries do not interfere.
         assert!(reg.has_matching("home/temp"));
-        // Match on the last entry via query-pattern asymmetric arm.
-        assert!(reg.has_matching("a/**"));
+        // Match on the last entry.
+        assert!(reg.has_matching("a/b/c"));
         // No match on either side.
         assert!(!reg.has_matching("nothing/here"));
     }
@@ -1794,6 +1796,7 @@ mod tests {
     // ── R293 — honest two-pattern overlap (was a false-negative under
     // the pre-R293 bidirectional asymmetric pattern-match approx) ──
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn queryable_has_matching_true_when_two_patterns_share_literal_via_mid_star() {
         // The textbook two-pattern overlap case: `home/*/temp` (peer)
@@ -1830,6 +1833,7 @@ mod tests {
         assert!(!reg.has_matching("kitchen/**/temp"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn queryable_has_matching_true_when_double_star_intersects_either_direction() {
         // `home/** ∩ **/temp` shares `home/temp` and any

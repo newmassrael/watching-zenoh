@@ -2095,6 +2095,7 @@ mod tests {
         assert!(!reg.has_matching("home/door"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_peer_pattern_covers_publish_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
@@ -2106,6 +2107,7 @@ mod tests {
         assert!(!reg.has_matching("other/x"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_false_on_a_malformed_published_key() {
         // The LOCAL delivery membership check (zenoh compute_data_route parity):
@@ -2127,6 +2129,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_publish_pattern_covers_peer_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
@@ -2155,6 +2158,7 @@ mod tests {
 
     // ── R293 — honest two-pattern overlap (Pub-side mirror) ──
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn subscriber_has_matching_true_when_two_patterns_share_literal_via_mid_star() {
         // Pub-side mirror of the Q-side test
@@ -2186,6 +2190,7 @@ mod tests {
         assert!(!reg.has_matching("kitchen/**/temp"));
     }
 
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn subscriber_has_matching_true_when_double_star_intersects_either_direction() {
         // Pub-side mirror — `home/** ∩ **/temp` shares `home/temp`

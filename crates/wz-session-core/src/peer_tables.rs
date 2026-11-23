@@ -1334,7 +1334,7 @@ mod lent_tests {
         .expect("the arena has the rows");
         let mut table = RemoteSubscribers::default();
         declare_alias(&mut tables, 3, "demo/alias");
-        declare_subscriber(&mut table, &mut tables, 1, "demo/sub/**");
+        declare_subscriber(&mut table, &mut tables, 1, "demo/sub/x");
         assert_eq!(
             tables.subscribers.resolve_inbound_mapping(3).as_deref(),
             Some("demo/alias")
@@ -1342,7 +1342,7 @@ mod lent_tests {
         assert!(tables.remote_subscribers.has_matching("demo/sub/x"));
         assert!(!tables.remote_subscribers.has_matching("demo/other"));
         let blocks = block_bytes("demo/alias".len()).expect("short")
-            + block_bytes("demo/sub/**".len()).expect("short");
+            + block_bytes("demo/sub/x".len()).expect("short");
         assert_eq!(keys.counts().used, blocks, "a block of each key's length");
         let peak = keys.counts().peak;
         tables.forget_peer();

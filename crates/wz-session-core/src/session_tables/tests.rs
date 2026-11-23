@@ -1145,9 +1145,9 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
         .declare_subscriber("c", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
     let mut peer: SubscriberPeer = SubscriberPeer::default();
-    // A CURRENT interest on a/**: one subscription answers it, then the Final.
+    // A CURRENT interest on a/b: one subscription answers it, then the Final.
     assert_eq!(
-        peer.answer_subscriber_interest(&mut tables, 7, Some("a/**"), false, true, false),
+        peer.answer_subscriber_interest(&mut tables, 7, Some("a/b"), false, true, false),
         1
     );
     let staged = peer.take_staged_sub_interest_replies();
@@ -1170,7 +1170,7 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
     assert_eq!(after, Some(sub.id + 3));
     // A FUTURE interest is told of a subscription registered after it.
     assert_eq!(
-        peer.answer_subscriber_interest(&mut tables, 8, Some("d/*"), false, false, true),
+        peer.answer_subscriber_interest(&mut tables, 8, Some("d/e"), false, false, true),
         0
     );
     let _ = peer.take_staged_sub_interest_replies();

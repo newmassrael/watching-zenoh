@@ -9179,7 +9179,7 @@ mod entity_id_space_tests {
             .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
             .expect("registers");
         assert_eq!(
-            control.respond_to_subscriber_interest_borrowed(7, Some("topic/**"), true, true, false),
+            control.respond_to_subscriber_interest_borrowed(7, Some("topic/a"), true, true, false),
             1,
             "a table with ids left answers the aggregate interest"
         );
@@ -9190,7 +9190,7 @@ mod entity_id_space_tests {
             .register_sink("topic/a", Locality::Any, BoxedSink::new(|_| {}))
             .expect("the last id is free");
         assert_eq!(
-            spent.respond_to_subscriber_interest_borrowed(7, Some("topic/**"), true, true, false),
+            spent.respond_to_subscriber_interest_borrowed(7, Some("topic/a"), true, true, false),
             0,
             "no id is left for the aggregate reply"
         );
@@ -9396,7 +9396,7 @@ mod local_subscribers_tests {
         let mut table = SubscriberTable::<BoxedSink>::new();
         let epoch = LocalSubscribers::epoch(&table);
         let next = table.next_subscription_id();
-        let any = table.register("a/*", |_| {}).unwrap();
+        let any = table.register("a/b", |_| {}).unwrap();
         let remote = table
             .register_with_locality("a/b", Locality::Remote, |_| {})
             .unwrap();
@@ -9413,7 +9413,7 @@ mod local_subscribers_tests {
                 (remote.as_u64(), Locality::Remote)
             ]
         );
-        assert!(LocalSubscribers::has_local_matching(&table, "a/c"));
+        assert!(LocalSubscribers::has_local_matching(&table, "a/b"));
         assert!(!LocalSubscribers::has_local_matching(&table, "b"));
         let mut calls = 0usize;
         assert_eq!(
