@@ -76,7 +76,7 @@ pub(super) const MAX_ADMIN_SESSION_LINKS: usize =
     limit(option_env!("WZ_LIMIT_MAX_ADMIN_SESSION_LINKS"), 2);
 pub(super) const MAX_MULTICAST_REPLIES: usize =
     limit(option_env!("WZ_LIMIT_MAX_MULTICAST_REPLIES"), 8);
-pub(super) const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 8);
+pub(super) const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 16);
 pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 16);
 pub(super) const MAX_TICKERS: usize = limit(option_env!("WZ_LIMIT_MAX_TICKERS"), 16);
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
