@@ -983,7 +983,7 @@ pub struct DocumentSinks;
 
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
-    type Subscribers<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;

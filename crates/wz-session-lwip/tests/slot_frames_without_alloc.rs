@@ -111,7 +111,7 @@ impl DeclSink for CountDeclared {
 struct Sinks;
 impl ObserverSinks for Sinks {
     type Subscriber = NoSink;
-    type Subscribers<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = NoSink;
     type Declared = CountDeclared;
     type Undeclared = NoSink;

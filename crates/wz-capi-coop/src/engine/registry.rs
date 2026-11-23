@@ -264,7 +264,7 @@ pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
-    type Subscribers<P: wz_session_core::bounded::Storage> =
+    type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::pubsub::SubscriberTable<Self::Subscriber, P>;
     type Queryable = BoxedQuerySink;
     type Declared = BoxedDeclSink;
