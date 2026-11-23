@@ -767,7 +767,8 @@ z_result_t wz_ext_e2e_sender_frame_size(
  * largest value and does not wrap, a payload longer than the length field
  * describes), refusal saying why; Z_ERR_NULL for a NULL sender, out or
  * written, or a NULL payload with a length. Anything but Z_OK writes nothing
- * to out and consumes no counter value. */
+ * to out and consumes no counter value. The frame is written into out where
+ * it lies, so out must not overlap payload. */
 z_result_t wz_ext_e2e_sender_protect(const wz_ext_loaned_e2e_sender_t *this_,
                                      size_t stream, const uint8_t *payload,
                                      size_t len, uint8_t *out, size_t capacity,

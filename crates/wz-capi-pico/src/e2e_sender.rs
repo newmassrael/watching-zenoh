@@ -231,7 +231,8 @@ pub unsafe extern "C" fn wz_ext_e2e_sender_frame_size(
 ///
 /// # Safety
 /// `this_` is null or a loaned sender; `payload` is readable for `len` bytes; `out` is writable for
-/// `capacity` bytes; `written`, `counter` and `refusal` are null or writable.
+/// `capacity` bytes and does not overlap `payload`; `written`, `counter` and `refusal` are null
+/// or writable.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wz_ext_e2e_sender_protect(
@@ -260,10 +261,11 @@ pub unsafe extern "C" fn wz_ext_e2e_sender_protect(
         if capacity < sender.frame_bytes(len) {
             return Z_ERR_OVERFLOW;
         }
-        match sender.protect(stream, bytes_arg(payload, len)) {
+        // The frame is written into the caller's buffer where it lies, and nothing is allocated.
+        let frame = core::slice::from_raw_parts_mut(out, capacity);
+        match sender.protect_into(stream, bytes_arg(payload, len), frame) {
             Ok(frame) => {
-                core::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), out, frame.bytes.len());
-                *written = frame.bytes.len();
+                *written = frame.len;
                 if !counter.is_null() {
                     *counter = frame.counter;
                 }
