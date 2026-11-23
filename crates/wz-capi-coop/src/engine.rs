@@ -6637,7 +6637,9 @@ impl Deref for CoopDrive {
     type Target = dyn SessionDrive;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        // Named, not coerced: a coercion of `&Arc<dyn SessionDrive>` to `&dyn SessionDrive` is
+        // read as an unsizing of the `Arc`, which is no drive.
+        Arc::as_ref(&self.0)
     }
 }
 
