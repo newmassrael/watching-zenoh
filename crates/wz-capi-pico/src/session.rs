@@ -935,8 +935,10 @@ unsafe fn open_request(
         return Err(Z_ERR_NULL);
     }
     // z_open consumes the config: take ownership and null the source so a
-    // defensive later `z_config_drop` is a safe no-op.
-    let cfg = Box::from_raw(cfg_handle as *mut ConfigState);
+    // defensive later `z_config_drop` is a safe no-op. Its slot is given back when `cfg` drops.
+    let Some(cfg) = crate::object_slot::Placed::from_raw(cfg_handle as *mut ConfigState) else {
+        return Err(Z_ERR_NULL);
+    };
     (*config)._this = z_owned_config_t::null_value();
 
     let open = open_config(&cfg)?;

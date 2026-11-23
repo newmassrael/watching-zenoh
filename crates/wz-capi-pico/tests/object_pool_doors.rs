@@ -6,7 +6,7 @@
 //! One test, in a process of its own, because the pools are the process's: the arms run in order
 //! against them, and an object another test made while they are reserved would be taken from them.
 //! The first object of the process reserves the build's pools, so the arms give those up before a
-//! program's own are reserved.
+//! program's own are reserved. A program that reserves its own states the configs it opens from.
 //! The counts state every entity, so the arms hold in a build whose limits bound none of them.
 
 #![cfg(all(feature = "object-pool", feature = "peer"))]
@@ -146,7 +146,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         }
         assert_eq!(slots(), 0, "a refused plan reserves nothing");
 
-        // ARM 3: one of each entity for one session, and two payloads.
+        // ARM 3: one of each entity for one session, two payloads, and the config each open of
+        // the arms below is made from, one at a time.
         let counts = wz_ext_object_pool_counts_t {
             sessions: 1,
             publishers: 1,
@@ -155,10 +156,22 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             liveliness_tokens: 1,
             liveliness_subscribers: 1,
             bytes: 2,
+            configs: 1,
             ..Default::default()
         };
         let mut bytes = 0usize;
         assert_eq!(wz_ext_object_pool_bytes(&counts, &mut bytes), Z_OK);
+        // A config's slot is its own size where the build's config is larger than the largest
+        // class, and no class reports it then.
+        let without_configs = wz_ext_object_pool_counts_t {
+            configs: 0,
+            ..counts
+        };
+        let mut bare = 0usize;
+        assert_eq!(wz_ext_object_pool_bytes(&without_configs, &mut bare), Z_OK);
+        let config_slot = bytes - bare;
+        let largest = classes()[WZ_EXT_OBJECT_POOL_CLASSES - 1].slot_bytes;
+        let configs_reported = usize::from(config_slot <= largest);
         assert_eq!(wz_ext_object_pool_reserve(&counts), Z_OK);
         assert_eq!(
             wz_ext_object_pool_reserve(&counts),
@@ -167,13 +180,15 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         );
         let held_by_plane = usize::from(cfg!(feature = "queryable"))
             + 2 * usize::from(cfg!(feature = "liveliness"));
-        assert_eq!(slots(), 1 + 1 + 1 + held_by_plane + 2);
+        let reported = 1 + 1 + 1 + held_by_plane + 2 + configs_reported;
+        assert_eq!(slots(), reported);
         let laid: usize = classes()
             .iter()
             .map(|class| class.slots * class.slot_bytes)
             .sum();
         assert_eq!(
-            laid, bytes,
+            laid + (1 - configs_reported) * config_slot,
+            bytes,
             "the reservation is the bytes the door answered"
         );
 
@@ -189,7 +204,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
 
         // ARM 5: the pools are kept while they hold an object.
         assert_eq!(wz_ext_object_pool_release(), Z_EINVAL);
-        assert_eq!(slots(), 1 + 1 + 1 + held_by_plane + 2);
+        assert_eq!(slots(), reported);
 
         // ARM 6: a pooled payload let go makes room for the next.
         z_bytes_drop(z_bytes_move(&mut second));

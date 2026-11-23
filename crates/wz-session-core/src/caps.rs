@@ -258,6 +258,14 @@ pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
 /// payloads, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
 
+/// The configs a program holds through the C ABI at once: the slots of the process's pool of
+/// configs, each the size of one config of the build, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
+
+/// The hellos a program keeps through the C ABI at once: the slots of the process's pool of kept
+/// hellos, each holding [`SCOUT_HELLO_LOCATORS`] locators, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
+
 /// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
 /// the config object. A new key past them is refused at its insert.
 pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;

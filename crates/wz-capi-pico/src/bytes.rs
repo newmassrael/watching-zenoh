@@ -502,12 +502,12 @@ impl StringState {
 }
 
 /// How many empty boxes a thread keeps for the next payload it makes.
-#[cfg(all(feature = "std", not(feature = "object-pool")))]
+#[cfg(all(feature = "std", not(wz_process_pools)))]
 const BOX_CACHE: usize = 32;
 
 // Without `std` there is no thread-local storage to keep them in, and each payload is a box of
-// its own, as zenoh-pico's are. With the object pools the pool of payloads is what keeps them.
-#[cfg(all(feature = "std", not(feature = "object-pool")))]
+// its own, as zenoh-pico's are. With the process pools the pool of payloads is what keeps them.
+#[cfg(all(feature = "std", not(wz_process_pools)))]
 std::thread_local! {
     /// The allocations that held a payload this thread made and then consumed, kept empty. A
     /// publisher's loop clones a payload and puts it, over and over: the box the clone allocates
@@ -522,7 +522,7 @@ std::thread_local! {
 }
 
 /// An empty box this thread kept, if it has one.
-#[cfg(all(feature = "std", not(feature = "object-pool")))]
+#[cfg(all(feature = "std", not(wz_process_pools)))]
 fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     EMPTY_BOXES
         .try_with(|boxes| boxes.try_borrow_mut().ok().and_then(|mut b| b.pop()))
@@ -531,13 +531,13 @@ fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
 }
 
 /// None is kept without `std`.
-#[cfg(all(not(feature = "std"), not(feature = "object-pool")))]
+#[cfg(all(not(feature = "std"), not(wz_process_pools)))]
 fn kept_box() -> Option<Box<core::mem::MaybeUninit<ByteBuf>>> {
     None
 }
 
 /// Box `buf`, in a kept allocation when this thread has one; `None` never.
-#[cfg(not(feature = "object-pool"))]
+#[cfg(not(wz_process_pools))]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
     // `Box::new_uninit` is newer than this crate's minimum Rust; an uninitialised value boxed
     // is the same allocation, and the optimiser writes nothing into it.
@@ -547,7 +547,7 @@ fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
 }
 
 /// Place `buf` in a slot of its own; `None` when the pool of payloads is full.
-#[cfg(feature = "object-pool")]
+#[cfg(wz_process_pools)]
 fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
     crate::object_slot::Slot::take(crate::object_slot::Kind::Bytes).map(|slot| slot.fill(buf))
 }
@@ -557,7 +557,7 @@ fn box_bytes(buf: ByteBuf) -> Option<*mut ByteBuf> {
 ///
 /// # Safety
 /// `h` must be a live `ByteBuf` handle, not used again.
-#[cfg(feature = "object-pool")]
+#[cfg(wz_process_pools)]
 pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
     crate::object_slot::reclaim(h)
 }
@@ -567,7 +567,7 @@ pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
 ///
 /// # Safety
 /// `h` must be a live `Box::into_raw::<ByteBuf>` pointer, not used again.
-#[cfg(not(feature = "object-pool"))]
+#[cfg(not(wz_process_pools))]
 pub(crate) unsafe fn unbox_bytes(h: *mut ByteBuf) -> ByteBuf {
     let slot = Box::from_raw(h.cast::<core::mem::MaybeUninit<ByteBuf>>());
     let buf = slot.assume_init_read();
@@ -1773,7 +1773,7 @@ pub unsafe extern "C" fn z_view_string_loan_mut(
     str_in as *mut z_loaned_string_t
 }
 
-#[cfg(all(test, not(feature = "object-pool")))]
+#[cfg(all(test, not(wz_process_pools)))]
 mod box_cache_tests {
     use super::*;
 
