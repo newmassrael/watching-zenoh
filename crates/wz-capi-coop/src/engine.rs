@@ -5520,15 +5520,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             Target::Subscriber(Arc::new(Mutex::new(callback))),
         ));
         // Each link is told it from the row, which names the key as the table keeps it.
-        let registry = Rc::clone(&core.registry);
-        core.announce_stored(Kind::Subscriber, at, |actions| {
-            registry
-                .borrow()
-                .app
-                .subscribers
-                .row_at(at)
-                .is_some_and(|(keyexpr, row)| row.declare(keyexpr, actions))
-        });
+        core.announce_subscriber(at);
         #[cfg(feature = "group")]
         {
             let registry = core.registry.borrow();
