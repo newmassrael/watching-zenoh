@@ -1705,7 +1705,11 @@ where
                 })
             });
         }
-        match this.place.get_mut().step(&mut this.on_event) {
+        // A pump its maker did not build in its place is no session to drive: the task ends.
+        let Some(pump) = this.place.get_mut() else {
+            return core::task::Poll::Ready(DriverOutcome::Terminated);
+        };
+        match pump.step(&mut this.on_event) {
             Some(outcome) => core::task::Poll::Ready(outcome),
             None => {
                 // Yield: the task is ready again at once, after the executor has gone round.
@@ -1752,28 +1756,29 @@ impl<T> InPlace<T> {
     }
 
     /// Have `make` write the value in this place and lend it back, and lend it on. A maker that
-    /// lends back anything but the place it was handed has not written it there, and is refused
-    /// with a panic; the place then holds nothing still. Built once: the place is the value's for
-    /// as long as the holder lives.
-    fn build(&mut self, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> &mut T {
+    /// lends back anything but the place it was handed has not written it there, and is refused:
+    /// `None`, and the place holds nothing still. Built once: the place is the value's for as long
+    /// as the holder lives.
+    fn build(&mut self, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> Option<&mut T> {
         debug_assert!(!self.built, "a place is built once");
         let place: *const T = self.value.as_ptr();
         let made: *const T = make(&mut self.value);
-        assert!(
-            core::ptr::eq(made, place),
-            "the value is written in the place it was handed"
-        );
+        if !core::ptr::eq(made, place) {
+            return None;
+        }
         self.built = true;
         // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing a
         // `T` there (`MaybeUninit::write`).
-        unsafe { self.value.assume_init_mut() }
+        Some(unsafe { self.value.assume_init_mut() })
     }
 
-    /// The value built here. Asked only once it is built.
-    fn get_mut(&mut self) -> &mut T {
-        assert!(self.built, "the place is built before it is read");
+    /// The value built here; `None` while nothing is.
+    fn get_mut(&mut self) -> Option<&mut T> {
+        if !self.built {
+            return None;
+        }
         // SAFETY: `built` is set only once `build` saw the value written here.
-        unsafe { self.value.assume_init_mut() }
+        Some(unsafe { self.value.assume_init_mut() })
     }
 }
 
@@ -2845,19 +2850,22 @@ mod in_place_tests {
         let drops = Cell::new(0);
         {
             let mut place = InPlace::empty();
-            let value = place.build(|slot| slot.write(Counted(&drops)));
+            let value = place
+                .build(|slot| slot.write(Counted(&drops)))
+                .expect("written in its place");
             assert_eq!(value.0.get(), 0, "built and lent, not dropped");
+            assert!(place.get_mut().is_some(), "and lent again once built");
         }
         assert_eq!(drops.get(), 1, "dropped once, with the place");
     }
 
     /// A maker that lends back a value it did not write in the place is refused, and the place,
-    /// not taken as built, drops nothing as the refusal unwinds through it.
+    /// not taken as built, lends nothing and drops nothing.
     #[test]
-    #[should_panic(expected = "the value is written in the place it was handed")]
     fn a_maker_that_lends_back_another_value_is_refused() {
         let elsewhere: &'static mut u32 = Box::leak(Box::new(7));
         let mut place = InPlace::<u32>::empty();
-        let _ = place.build(|_slot| elsewhere);
+        assert!(place.build(|_slot| elsewhere).is_none());
+        assert!(place.get_mut().is_none(), "nothing was built");
     }
 }
