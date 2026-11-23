@@ -298,6 +298,42 @@ pub const HELD_PAYLOADS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::HELD_CONFIGS`] is bound.
+pub const HELD_CONFIGS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_HELLOS`] is bound.
+pub const HELD_HELLOS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_PAYLOAD_BYTES`] is bound.
+pub const HELD_PAYLOAD_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::CONFIG_ENTRIES`] is bound.
 pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
