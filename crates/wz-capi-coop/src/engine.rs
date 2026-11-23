@@ -632,7 +632,7 @@ pub(crate) fn derived_zid(
 
 /// One session the program steps; see the module doc.
 pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    core: Mutex<Confined<Core<L, C>>>,
+    core: CoreLock<L, C>,
     /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
     /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
@@ -768,6 +768,70 @@ impl Takes {
 
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
+
+/// The session's state behind its one lock. Every hold of it goes through here, and tells the
+/// session's key arena that the lock is held for as long as it is
+/// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
+/// key let go of after the lock (a row taken out of a table and dropped outside it) fails a debug
+/// build at once instead of racing a reader that holds the lock.
+struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(Mutex<Confined<Core<L, C>>>);
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
+    /// `core` behind the lock, its key arena guarded by it from now on.
+    fn new(core: Core<L, C>) -> Self {
+        core.keys.guard_by_owner_lock();
+        Self(Mutex::new(Confined(core)))
+    }
+
+    fn lock(&self) -> CoreGuard<'_, L, C> {
+        CoreGuard::taken(self.0.lock())
+    }
+
+    fn try_lock(&self) -> Option<CoreGuard<'_, L, C>> {
+        self.0.try_lock().map(CoreGuard::taken)
+    }
+
+    /// The state with no lock, the engine being let go of: the key arena is marked held for the
+    /// rest of the engine's drop, which drops every row that keeps a key.
+    fn dropping(&mut self) -> &mut Core<L, C> {
+        let core = &mut self.0.get_mut().0;
+        core.keys.owner_lock_taken();
+        core
+    }
+}
+
+/// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
+struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+    guard: MutexGuard<'a, Confined<Core<L, C>>>,
+}
+
+impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
+    fn taken(guard: MutexGuard<'a, Confined<Core<L, C>>>) -> Self {
+        guard.0.keys.owner_lock_taken();
+        Self { guard }
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for CoreGuard<'_, L, C> {
+    type Target = Confined<Core<L, C>>;
+
+    fn deref(&self) -> &Confined<Core<L, C>> {
+        &self.guard
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard<'_, L, C> {
+    fn deref_mut(&mut self) -> &mut Confined<Core<L, C>> {
+        &mut self.guard
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
+    fn drop(&mut self) {
+        // Before the lock is let go of, which the guard's own drop does after this body.
+        self.guard.0.keys.owner_lock_released();
+    }
+}
 
 /// The waits for room of the session's faces that are up, each with its face, kept outside
 /// [`Core`] so that a publish that finds the session held asks them with nothing of it held. Each
@@ -1079,7 +1143,7 @@ type QueryableCallback = Arc<Mutex<QueryCallback>>;
 /// lane published is handed on to the deliveries (`SharedLane`), so nothing the session wrote
 /// under its lock waits for another hold to be handed out.
 struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
-    core: MutexGuard<'a, Confined<Core<L, C>>>,
+    core: CoreGuard<'a, L, C>,
     lane: &'a SharedLane,
 }
 
@@ -3531,7 +3595,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
         let arena_bytes = core.arena.bytes();
         Ok(Arc::new_cyclic(|this| Self {
-            core: Mutex::new(Confined(core)),
+            core: CoreLock::new(core),
             rooms,
             wait_before_drop_us,
             held_drop,
@@ -3583,7 +3647,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// engine's state, which nothing else can take before the open returns the engine.
     #[inline(never)]
     fn open_links(&self) -> Result<(), OpenError> {
-        let mut held = lock(&self.core);
+        let mut held = self.core.lock();
         let core = &mut held.0;
         core.listen_on_config()?;
         core.join_groups()?;
@@ -3612,13 +3676,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// What the session's key arena holds now, closed or not.
     #[cfg(test)]
     pub(crate) fn key_counts(&self) -> wz_session_core::key_arena::KeyCounts {
-        lock(&self.core).0.keys.counts()
+        self.core.lock().0.keys.counts()
     }
 
     /// The samples the session's delivery lane did not hand a subscriber, by why
     /// (`crate::lane`).
     pub fn lane_counts(&self) -> LaneCounts {
-        let _session = lock(&self.core);
+        let _session = self.core.lock();
         // SAFETY: the session's lock is held (`_session`).
         unsafe { self.samples.held() }.counts()
     }
@@ -3780,7 +3844,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// test of the cost of one read step counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn clock_reads(&self) -> usize {
-        lock(&self.core).0.clock_reads.get()
+        self.core.lock().0.clock_reads.get()
     }
 
     /// How many samples the session's delivery lane handed on to the deliveries since the open:
@@ -3810,7 +3874,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
-        lock(&self.core).0.registry.borrow().push_dispatches()
+        self.core.lock().0.registry.borrow().push_dispatches()
     }
 
     /// Whether the peer of every established link has been told every declaration the session
@@ -3828,7 +3892,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let guard = lock(&self.core);
+        let guard = self.core.lock();
         #[cfg(test)]
         self.takes.core.fetch_add(1, Ordering::Relaxed);
         if self.closed.load(Ordering::Acquire) {
@@ -5025,7 +5089,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// a filtered put counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
-        lock(&self.core).0.registry.borrow().peer_looks()
+        self.core.lock().0.registry.borrow().peer_looks()
     }
 
     /// Tell every matching listener on the subscribers' plane that counts the session's own
@@ -5099,7 +5163,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn now_ms(&self) -> u64 {
         // The session's own clock, which is what its deadlines and its jobs run on. Read under the
         // session's lock, which nothing here holds while a callback runs.
-        lock(&self.core).0.clock.now_us() / 1000
+        self.core.lock().0.clock.now_us() / 1000
     }
 
     fn next_entity_id(&self) -> Option<EntityId> {
@@ -6533,7 +6597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys fo
 
     fn share_key(&self, key: &HeldKey) -> HeldKey {
         if !self.closed.load(Ordering::Acquire) {
-            let _session = lock(&self.core);
+            let _session = self.core.lock();
             if !self.closed.load(Ordering::Acquire) {
                 // SAFETY: the session's lock is held (`_session`).
                 return unsafe { key.share() };
@@ -6547,7 +6611,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys fo
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let _session = lock(&self.core);
+        let _session = self.core.lock();
         if !self.closed.load(Ordering::Acquire) {
             // SAFETY: the session's lock is held (`_session`).
             unsafe { key.release() };
@@ -6573,7 +6637,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // from the read task itself stops nothing and leaves the thread to see the session
         // closed.
         let _ = self.stop_reader();
-        let mut guard = lock(&self.core);
+        let mut guard = self.core.lock();
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -6831,7 +6895,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
-        self.core.get_mut().0.end_links();
+        self.core.dropping().end_links();
         // The stages the queries were answered into lie in the arena, which the session's state
         // gives back as it is dropped, after this.
         #[cfg(feature = "queryable")]

@@ -45,6 +45,8 @@ use core::cell::Cell;
 use core::fmt;
 use core::ops::Deref;
 use core::ptr::NonNull;
+#[cfg(debug_assertions)]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept};
 
@@ -97,9 +99,27 @@ struct KeyStore {
     peak: Cell<u32>,
     /// The keys refused for want of room.
     refused: Cell<u32>,
+    /// Whether the arena's owner keeps it behind one lock ([`KeySpace::guard_by_owner_lock`]).
+    #[cfg(debug_assertions)]
+    guarded: AtomicBool,
+    /// Whether that lock is held now.
+    #[cfg(debug_assertions)]
+    held: AtomicBool,
 }
 
 impl KeyStore {
+    /// Fail at once, in a build with debug assertions, when a key of an arena its owner's lock
+    /// guards is made, shared or let go of with that lock not held: the counts are cells, and a
+    /// thread that touches them outside the lock races the one that holds it.
+    #[inline]
+    fn assert_owner_lock(&self) {
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.guarded.load(Ordering::Relaxed) || self.held.load(Ordering::Relaxed),
+            "a key of an arena its owner's lock guards was touched with that lock not held"
+        );
+    }
+
     /// Header word `word` of the block at `at`.
     fn word(&self, at: u32, word: u32) -> u32 {
         // SAFETY: every block lies below `top`, inside the blocks, and starts on a multiple of
@@ -287,6 +307,10 @@ impl KeySpace {
                 used: Cell::new(0),
                 peak: Cell::new(0),
                 refused: Cell::new(0),
+                #[cfg(debug_assertions)]
+                guarded: AtomicBool::new(false),
+                #[cfg(debug_assertions)]
+                held: AtomicBool::new(false),
             });
         }
         Self { store }
@@ -309,6 +333,7 @@ impl KeySpace {
             });
         }
         let store = self.store();
+        store.assert_owner_lock();
         let refused = |asked: Option<usize>| {
             store.refused.set(store.refused.get().wrapping_add(1));
             KeysExhausted { asked }
@@ -337,6 +362,30 @@ impl KeySpace {
             at,
             len: text.len() as u32,
         })
+    }
+
+    /// Keep the arena behind its owner's one lock from now on: in a build with debug assertions a
+    /// key of it made, shared or let go of while the owner has not marked the lock held
+    /// ([`Self::owner_lock_taken`]) fails at once, so a path that lets go of a row's key after the
+    /// lock is let go of fails every test that takes it rather than racing a holder of the lock.
+    /// Nothing is kept or checked in a build without debug assertions.
+    pub fn guard_by_owner_lock(&self) {
+        #[cfg(debug_assertions)]
+        self.store().guarded.store(true, Ordering::Relaxed);
+    }
+
+    /// The owner took the lock that guards the arena.
+    #[inline]
+    pub fn owner_lock_taken(&self) {
+        #[cfg(debug_assertions)]
+        self.store().held.store(true, Ordering::Relaxed);
+    }
+
+    /// The owner is letting go of the lock that guards the arena.
+    #[inline]
+    pub fn owner_lock_released(&self) {
+        #[cfg(debug_assertions)]
+        self.store().held.store(false, Ordering::Relaxed);
     }
 
     /// What the arena holds now.
@@ -435,6 +484,7 @@ impl Clone for KeyRef {
         if self.at != NIL {
             // SAFETY: as `as_str`.
             let store = unsafe { self.store.as_ref() };
+            store.assert_owner_lock();
             let holders = store.word(self.at, LINK);
             store.set_word(self.at, LINK, holders + 1);
         }
@@ -453,6 +503,7 @@ impl Drop for KeyRef {
         }
         // SAFETY: as `as_str`.
         let store = unsafe { self.store.as_ref() };
+        store.assert_owner_lock();
         let holders = store.word(self.at, LINK) - 1;
         if holders > 0 {
             store.set_word(self.at, LINK, holders);
@@ -734,6 +785,37 @@ mod tests {
         assert_eq!(lent.key("k").map(|key| key.len()), Ok(1));
         assert_eq!(LentKeys::default().key("k").err(), Some(KeyUnkept::NoRoom));
         assert!(LentKeys::default().space().is_none());
+    }
+
+    /// An arena its owner's lock guards takes, shares and lets go of keys while the owner marks
+    /// the lock held; a key let go of after the lock is let go of fails a debug build at once.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "that lock not held")]
+    fn a_key_let_go_of_outside_its_owners_lock_fails() {
+        let keys = keys_of(128);
+        keys.guard_by_owner_lock();
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        let shared = key.clone();
+        drop(shared);
+        keys.owner_lock_released();
+        drop(key);
+    }
+
+    /// The CONTROL: the same key let go of while the lock is held, and an arena no lock guards,
+    /// pass.
+    #[test]
+    fn a_key_let_go_of_under_its_owners_lock_passes() {
+        let keys = keys_of(128);
+        keys.guard_by_owner_lock();
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        drop(key);
+        keys.owner_lock_released();
+        let unguarded = keys_of(128);
+        drop(unguarded.key("demo/free").expect("room"));
+        assert_eq!(keys.counts().used, 0);
     }
 
     /// An arena refuses a key arena whose span is past what it has left, taking nothing, and one
