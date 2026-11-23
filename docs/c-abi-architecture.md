@@ -375,6 +375,15 @@ no choice spells. Its indexing is the `ALL[index]` of `policy_generated.rs`, whi
 writes. A generated key table is checked the other way: the library answers `try_new`, and the
 image's own crate, which `wz_key_set.py` writes, turns a refusal into the build error.
 
+TD-137 (`held_list::one_entry`) is an `unreachable!` behind a fallible constructor: the
+bounds of a one-entry list are checked when the build is compiled, but `Bounded::new` answers an
+`Option` all the same. A `Result` there would spread a failure that cannot happen into every
+infallible declaration builder, so the row waits for a constructor whose type proves it: a
+`Bounded::one` in SCE's forge runtime that checks a capacity of one or more in a `const` and
+cannot fail. That is a change to SCE, reviewed by an SCE session, and a pin move here; the row
+leaves with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
+
 `bounded` left the register with one panic no lint names: `BoundedVec::remove` keeps
 `Vec::remove`'s documented panic for an index past the end (an `assert!` on the lent backing,
 which guards the unsafe move). Its value form, `Option<T>`, moves the callers in the cooperative
