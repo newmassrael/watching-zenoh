@@ -51,11 +51,10 @@ use wz_session_core::caps;
 use wz_session_core::lifecycle_wire::VerbKey;
 use wz_session_core::lifecycle_wire::{write_verb_list, OpenKey, OPEN_VERB};
 use wz_session_core::locality::Locality;
-use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
-use wz_session_core::slot_observer::{NoSink, ObserverSinks};
+use wz_session_core::slot_observer::{NoSink, ObserverSinks, RegistryTables};
 use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::node_opening::open_verdict;
@@ -563,8 +562,9 @@ impl<const BODY: usize, const SESSIONS: usize, O: InBand> ObserverSinks
     #[cfg(not(feature = "adminspace-write"))]
     type Subscriber = NoSink;
     type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type QueryableId = wz_session_core::query::QueryableId;
     type Delivery = ();
-    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
     type Queryable = AdminQuerySink<BODY, SESSIONS, O>;
     type Declared = NoSink;
     type Undeclared = NoSink;

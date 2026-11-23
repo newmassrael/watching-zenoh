@@ -238,10 +238,15 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
     let (observer, ()) = s
         .app
         .install_with(|observer| {
-            host_connect_writes_fixed(&mut observer.subscribers, &zid_hex, "peer", &s.control)
-                .expect("the config subscriber is registered");
+            host_connect_writes_fixed(
+                &mut observer.tables.subscribers,
+                &zid_hex,
+                "peer",
+                &s.control,
+            )
+            .expect("the config subscriber is registered");
             host_admin_queryable_fixed(
-                &mut observer.queryables,
+                &mut observer.tables.queryables,
                 identity,
                 &s.status,
                 &s.admin,

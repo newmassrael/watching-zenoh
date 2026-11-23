@@ -42,7 +42,7 @@ use wz_codecs::query_ext_entry::{QueryExtEntryView, QueryExtEntryViewVariant};
 use wz_codecs::request::{RequestView, RequestViewVariant};
 
 use super::{
-    DispatchOutcome, LocalQueryables, QueryEnvelope, QueryPeer, QueryProjection, ResponderSink,
+    DispatchOutcome, LocalQueryables, QueryDelivery, QueryEnvelope, QueryPeer, QueryProjection,
 };
 use crate::ext_view::{walked, ExtEntryView};
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
@@ -154,16 +154,19 @@ impl QueryPeer {
     /// staging replies into `pending_replies` and the Final it owes into
     /// `pending_final_rids`, as [`Self::dispatch_messages`] does for an owned
     /// one. See the module docs for what it hands to the owned projection.
-    pub(super) fn dispatch_request_in_place<L: LocalQueryables, S: crate::bounded::Storage>(
+    pub(super) fn dispatch_request_in_place<
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
+        cx: &mut X,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) where
-        L::Sink: ResponderSink,
-    {
+    ) {
         // As the owned path: a Query that would owe a Final the table cannot
         // hold is refused before any queryable runs, and counted.
         if matches!(request.body, RequestViewVariant::CodecZenohQuery(_))
@@ -180,7 +183,7 @@ impl QueryPeer {
             target,
             qos,
         };
-        match self.dispatch_lent(queryables, request, spaces, envelope, pending_replies) {
+        match self.dispatch_lent(queryables, cx, request, spaces, envelope, pending_replies) {
             Ok(outcome) => {
                 if outcome.owes_final(self.answers_unresolved_queries()) {
                     // The terminator carries the query's QoS, read by the rule
@@ -192,6 +195,7 @@ impl QueryPeer {
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => self
                 .dispatch_owned_projection(
                     queryables,
+                    cx,
                     request,
                     spaces,
                     pending_replies,
@@ -210,17 +214,19 @@ impl QueryPeer {
 
     /// The lent dispatch itself: [`Self::dispatch_request`]'s steps over the
     /// Request where it lies.
-    fn dispatch_lent<L: LocalQueryables, S: crate::bounded::Storage>(
+    fn dispatch_lent<
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
+        cx: &mut X,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         envelope: QueryEnvelope,
         replies: &mut ReplyStage<S>,
-    ) -> Result<DispatchOutcome, Fallback>
-    where
-        L::Sink: ResponderSink,
-    {
+    ) -> Result<DispatchOutcome, Fallback> {
         // Only the Query body arm reaches the table.
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(DispatchOutcome::NOT_DISPATCHED);
@@ -246,7 +252,7 @@ impl QueryPeer {
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack.as_ref(),
         );
-        let matched = self.fire_projection(queryables, envelope, keyexpr, projection, replies);
+        let matched = self.fire_projection(queryables, cx, envelope, keyexpr, projection, replies);
         Ok(DispatchOutcome::routed(matched))
     }
 
@@ -255,16 +261,19 @@ impl QueryPeer {
     /// lent form cannot represent is dispatched, and owes its Final, exactly as
     /// it always did. Heap profile only, and not a build that lends only (`rx-lent-only`).
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection<L: LocalQueryables, S: crate::bounded::Storage>(
+    fn dispatch_owned_projection<
+        L: LocalQueryables,
+        X: QueryDelivery<L::Sink, L::RowId>,
+        S: crate::bounded::Storage,
+    >(
         &mut self,
         queryables: &mut L,
+        cx: &mut X,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) where
-        L::Sink: ResponderSink,
-    {
+    ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
         // ranges), so this projection cannot refuse a decoded Request. The
         // view is first filled into the codec's own record (the heap profile has the stack
@@ -275,8 +284,9 @@ impl QueryPeer {
             return;
         }
         if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_messages(
+            self.dispatch_messages_with(
                 queryables,
+                cx,
                 &[crate::network_message::NetworkMessage::Request(Box::new(
                     owned,
                 ))],
@@ -398,6 +408,7 @@ mod tests {
         let (mut lent_replies, mut lent_finals) = (ReplyStage::new(), FinalStage::new());
         QueryPeer::default().dispatch_iteration_event(
             &mut lent,
+            &mut (),
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
                 &decoded,
                 true,
@@ -675,6 +686,7 @@ mod tests {
         }
         QueryPeer::default().dispatch_iteration_event(
             &mut reg,
+            &mut (),
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
                 &decoded,
                 true,

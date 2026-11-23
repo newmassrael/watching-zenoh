@@ -1909,6 +1909,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &self.queryables
     }
 
+    /// The queryables to ask, with the key expressions the session declared beside them as its
+    /// own id space: a peer's query names its key through the one while the other is asked, so
+    /// the two are borrowed apart.
+    #[cfg(feature = "storage-profile")]
+    pub fn queries_mut(
+        &mut self,
+    ) -> (crate::wireexpr_resolve::OwnSpace<'_>, &mut Queryables<F, P>) {
+        (P::own_space(&self.keyexprs), &mut self.queryables)
+    }
+
     /// The liveliness tokens.
     pub fn tokens(&self) -> &Tokens<P> {
         &self.tokens
@@ -2184,22 +2194,43 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
     }
 }
 
-impl<Key: KeyBacking, Cb, P: Storage> QueryableRows
+/// As the subscribers' rows: a row whose calls read it where it lies is handed shared, one only
+/// the tables' holder reaches exclusively.
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage> QueryableRows
     for SlotMap<kind::Queryable, QueryableRow<Key, Cb>, { caps::MAX_QUERYABLES }, P>
 {
     type Sink = Cb;
+    type RowId = QueryableHandle;
 
-    fn each_row_mut<F: FnMut(QueryableRef<'_>, &mut Cb)>(&mut self, mut f: F) {
-        for (_, row) in self.live_places_mut() {
-            let found = QueryableRef {
-                #[cfg(feature = "alloc")]
-                id: u64::from(row.id),
-                pattern: text(&row.key.key),
-                facts: row.facts,
-                origin: row.origin,
-                complete: row.complete,
-            };
-            f(found, &mut row.callback);
+    fn each_row_mut<F: FnMut(QueryableRef<'_>, QueryableHandle, RowAccess<'_, Cb>)>(
+        &mut self,
+        mut f: F,
+    ) {
+        if Cb::READS_ROW_IN_PLACE {
+            for (_, handle, row) in self.live_handles() {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                f(found, handle, RowAccess::InPlace(&row.callback));
+            }
+        } else {
+            // The row's fields are borrowed apart: its key to read, its callback to change.
+            for (_, handle, row) in self.live_handles_mut() {
+                let found = QueryableRef {
+                    #[cfg(feature = "alloc")]
+                    id: u64::from(row.id),
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                    complete: row.complete,
+                };
+                f(found, handle, RowAccess::Held(&mut row.callback));
+            }
         }
     }
 
@@ -2218,12 +2249,17 @@ impl<Key: KeyBacking, Cb, P: Storage> QueryableRows
     }
 }
 
-impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTables<F, P> {
-    type Sink = F::Queryable;
+/// The queryables are asked as a table of their own, apart from the key expressions a peer's query
+/// is resolved through ([`SessionTables::queries_mut`]).
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage> crate::query::LocalQueryables
+    for SlotMap<kind::Queryable, QueryableRow<Key, Cb>, { caps::MAX_QUERYABLES }, P>
+{
+    type Sink = Cb;
+    type RowId = QueryableHandle;
 
     #[cfg(feature = "storage-profile")]
     fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool {
-        any_local_queryable(&self.queryables, query_keyexpr, require_complete)
+        any_local_queryable(self, query_keyexpr, require_complete)
     }
 
     #[cfg(feature = "alloc")]
@@ -2234,10 +2270,10 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
         aggregate: bool,
         staged: &mut alloc::vec::Vec<crate::query::QueryableInterestReply>,
     ) -> usize {
-        stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
+        stage_queryable_interest(self, interest_id, pattern, aggregate, staged)
     }
 
-    fn fire_matching_queryables<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching_queryables<D: FnMut(QueryableHandle, RowAccess<'_, Self::Sink>)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: KeyFacts,
@@ -2245,14 +2281,7 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
         target: Option<crate::query_mode::QueryTarget>,
         deliver: D,
     ) -> usize {
-        fire_queryables(
-            &mut self.queryables,
-            keyexpr,
-            keyexpr_facts,
-            is_remote,
-            target,
-            deliver,
-        )
+        fire_queryables(self, keyexpr, keyexpr_facts, is_remote, target, deliver)
     }
 }
 

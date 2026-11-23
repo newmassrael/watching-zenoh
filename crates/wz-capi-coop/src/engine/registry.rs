@@ -39,7 +39,6 @@ use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
-use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
@@ -299,18 +298,19 @@ impl OtherPeers for Others<'_> {
 pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 
 /// What the application's tables hold on this engine: the heap profile's registrations, but for
-/// the session's own subscribers, which are rows of the session's one table set, each row's
-/// callback the engine's whole record of it ([`SubscriberRow`]), not a closure over the engine's
-/// own.
+/// the session's own subscribers and queryables, which are rows of the session's one table set,
+/// each row's callback the engine's whole record of it ([`SubscriberRow`], the queryable's row),
+/// not a closure over the engine's own.
 pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
     type SubscriberId = wz_session_core::session_tables::SubscriberHandle;
+    type QueryableId = wz_session_core::session_tables::QueryableHandle;
     type Delivery = RoundDelivery;
     type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
-    type Queryable = BoxedQuerySink;
+    type Queryable = <super::CoopRows as wz_session_core::session_tables::RowCallbacks>::Queryable;
     type Declared = BoxedDeclSink;
     type Undeclared = BoxedUndeclSink;
 }
@@ -740,9 +740,32 @@ impl Registry {
         sample: &dyn wz_session_core::sink::SampleView,
     ) -> usize {
         wz_session_core::pubsub::LocalSubscribers::local_publish(
-            &mut self.app.subscribers,
+            &mut self.app.tables,
             &mut self.delivery,
             sample,
+        )
+    }
+
+    /// Ask the session's own queryables `query`, a get of the session's own on `keyexpr`: each
+    /// that matches begins a call and holds the get's Final (`QueryPlane::arrive`), so none
+    /// stages a reply into `replies`. How many matched.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn ask_own_queryables<S: wz_session_core::bounded::Storage>(
+        &mut self,
+        envelope: wz_session_core::query::QueryEnvelope,
+        keyexpr: &str,
+        query: &wz_session_core::wire::parts::QueryOwned,
+        replies: &mut wz_session_core::reply_stage::ReplyStage<S>,
+    ) -> usize {
+        let (_, queryables) = self.app.tables.queries_mut();
+        wz_session_core::query::ask_local_queryables(
+            queryables,
+            &mut self.delivery,
+            envelope,
+            keyexpr,
+            query,
+            None,
+            replies,
         )
     }
 
@@ -772,7 +795,7 @@ impl Registry {
     /// leaves each peer to read the table's epoch, and nothing else reads it.
     fn reconcile_subscribers(&mut self, id: FaceId) {
         if let Some(Split { app, face, .. }) = self.split(id) {
-            face.peer.subscribers.reconcile(&app.subscribers);
+            face.peer.subscribers.reconcile(&app.tables);
         }
     }
 
@@ -827,12 +850,10 @@ impl Registry {
                 face,
                 ..
             }) => {
-                face.peer.subscribers.dispatch_iteration_event(
-                    &mut app.subscribers,
-                    delivery,
-                    event,
-                );
-                face.peer.subscribers.reconcile(&app.subscribers);
+                face.peer
+                    .subscribers
+                    .dispatch_iteration_event(&mut app.tables, delivery, event);
+                face.peer.subscribers.reconcile(&app.tables);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
             }
@@ -880,8 +901,8 @@ impl Registry {
         {
             face.peer
                 .subscribers
-                .dispatch_iteration_event(&mut app.subscribers, delivery, event);
-            face.peer.subscribers.reconcile(&app.subscribers);
+                .dispatch_iteration_event(&mut app.tables, delivery, event);
+            face.peer.subscribers.reconcile(&app.tables);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
         #[cfg(all(test, feature = "std"))]
@@ -1023,7 +1044,7 @@ impl Registry {
         } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
-        let subscribers = &app.subscribers;
+        let subscribers = &app.tables;
         app.remote_subscribers
             .reevaluate_matching(&face.peer.remote_subscribers, &|criterion| {
                 (criterion.locality.allows_local()
@@ -1043,12 +1064,15 @@ impl Registry {
         } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
-        let queryables = &app.queryables;
+        let queryables = app.tables.queryables();
         app.remote_queryables
             .reevaluate_matching(&face.peer.remote_queryables, &|criterion| {
                 (criterion.locality.allows_local()
-                    && queryables
-                        .has_local_matching(&criterion.keyexpr, criterion.complete_required))
+                    && wz_session_core::query::LocalQueryables::has_local_queryable(
+                        queryables,
+                        &criterion.keyexpr,
+                        criterion.complete_required,
+                    ))
                     || others.answers(criterion)
             });
     }
@@ -1255,6 +1279,13 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
+        #[cfg(not(feature = "queryable"))]
+        let delivery = RoundDelivery::new(crate::round::Round::leaked(1024, 4));
+        #[cfg(feature = "queryable")]
+        let delivery = RoundDelivery::new(
+            crate::round::Round::leaked(1024, 4),
+            alloc::sync::Arc::new(super::super::query::QueryPlane::holding(1)),
+        );
         let registry = Registry::new(
             &SessionLimits::defaults(),
             arena.arena_mut(),
@@ -1266,7 +1297,7 @@ mod tests {
             },
             gets,
             peers,
-            RoundDelivery::new(crate::round::Round::leaked(1024, 4)),
+            delivery,
         )
         .expect("the arena has the rows");
         Held {
@@ -1475,7 +1506,7 @@ mod tests {
             let Registry { app, sets, .. } = &mut held.registry;
             let set = &mut sets[at];
             set.peer.subscribers.answer_subscriber_interest(
-                &mut app.subscribers,
+                &mut app.tables,
                 7,
                 Some("demo/**"),
                 false,

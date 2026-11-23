@@ -243,9 +243,9 @@ impl Drop for Counted<'_> {
 /// Fill `map` with a live row, a row removed at once and a row removed while pinned, and drop
 /// it: each of the three is dropped once, the removed one when it is handed back, the other two
 /// with the table.
-fn drops_each_row_once<const N: usize, P: Storage>(
-    mut map: SlotMap<Test, Counted<'_>, N, P>,
-    drops: &Cell<u32>,
+fn drops_each_row_once<'a, const N: usize, P: Storage>(
+    mut map: SlotMap<Test, Counted<'a>, N, P>,
+    drops: &'a Cell<u32>,
 ) {
     let (Ok(_live), Ok(removed), Ok(pinned)) = (
         map.insert(Counted(drops)),

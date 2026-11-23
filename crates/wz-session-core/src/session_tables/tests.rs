@@ -1615,12 +1615,12 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     }
     let fire = |tables: &mut Tables, remote: bool, target: Option<QueryTarget>| {
         let mut asked = Vec::new();
-        let fired = tables.fire_matching_queryables(
+        let fired = tables.queryables.fire_matching_queryables(
             "q/a",
             KeyFacts::of("q/a"),
             remote,
             target,
-            |callback: &mut u32| asked.push(*callback),
+            |_, callback: RowAccess<'_, u32>| asked.push(*callback.row()),
         );
         assert_eq!(fired, asked.len());
         asked
@@ -1630,7 +1630,7 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     assert_eq!(fire(&mut tables, false, None), [1, 3]);
     #[cfg(feature = "storage-profile")]
     {
-        assert!(tables.has_local_queryable("q/a", false));
-        assert!(!tables.has_local_queryable("elsewhere", false));
+        assert!(tables.queryables.has_local_queryable("q/a", false));
+        assert!(!tables.queryables.has_local_queryable("elsewhere", false));
     }
 }

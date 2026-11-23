@@ -598,7 +598,7 @@ pub fn install_entities<const N: usize>(
     let installed = app.install_with(|observer| {
         observer.limit_to(&limits);
         for document in documents {
-            register_document(&mut observer.queryables, document.key, document.body)
+            register_document(&mut observer.tables.queryables, document.key, document.body)
                 .map_err(|_| InstallRefused::Registry)?;
             if !declared.push(Declaration {
                 kind: DeclarationKind::Queryable,
@@ -609,7 +609,7 @@ pub fn install_entities<const N: usize>(
         }
         for mirror in entities.mirrors {
             register_answer(
-                &mut observer.queryables,
+                &mut observer.tables.queryables,
                 mirror.key,
                 Answer::Latest(mirror.cell),
             )
@@ -625,7 +625,7 @@ pub fn install_entities<const N: usize>(
         #[cfg(feature = "client-verbs")]
         if let Some(legs) = entities.verbs {
             let key = legs.key().ok_or(InstallRefused::Verbs)?;
-            register_answer(&mut observer.queryables, key, Answer::Verbs(legs))
+            register_answer(&mut observer.tables.queryables, key, Answer::Verbs(legs))
                 .map_err(|_| InstallRefused::Registry)?;
             if !declared.push(Declaration {
                 kind: DeclarationKind::Queryable,
@@ -640,7 +640,7 @@ pub fn install_entities<const N: usize>(
                 subscription.cell.index,
                 subscription.capacity,
             );
-            register_latest(&mut observer.subscribers, subscription.key, sink)
+            register_latest(&mut observer.tables.subscribers, subscription.key, sink)
                 .map_err(|_| InstallRefused::Subscriptions)?;
             if !declared.push(Declaration {
                 kind: DeclarationKind::Subscriber,
@@ -2032,11 +2032,13 @@ mod tests {
         };
         let reached = observer
             .borrow_mut()
+            .tables
             .subscribers
             .dispatch_borrowed(&view("demo/in", b"21.5!"), true);
         assert_eq!(reached, 1);
         let reached = observer
             .borrow_mut()
+            .tables
             .subscribers
             .dispatch_borrowed(&view("demo/elsewhere", b"x"), true);
         assert_eq!(reached, 0);
@@ -2106,7 +2108,7 @@ mod tests {
         let observer = held
             .get()
             .expect("the observer was built before the refusal");
-        assert_eq!(observer.borrow_mut().subscribers.len(), 2);
+        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 2);
         assert_eq!(
             stated_declared.all().len(),
             2,
@@ -2124,7 +2126,7 @@ mod tests {
             control_declared,
         )
         .expect("the build's limits take it");
-        assert_eq!(observer.borrow_mut().subscribers.len(), 3);
+        assert_eq!(observer.borrow_mut().tables.subscribers.len(), 3);
         assert_eq!(control_declared.all().len(), 3);
     }
 
