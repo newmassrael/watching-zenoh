@@ -273,6 +273,32 @@ pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), Keyexpr
     )
 }
 
+/// Whether `input` is already the canonical form `dialect` writes: what comparing
+/// [`canonize_keyexpr_in`]'s answer with `input` says, decided as the walk writes each piece,
+/// against the text where it lies, so nothing is written and nothing is allocated on any profile.
+/// `false` for a text the walk refuses.
+pub fn is_canon(input: &str, dialect: KeyexprDialect) -> bool {
+    if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
+        return false;
+    }
+    let mut rest = input;
+    let walked = walk_canonical(
+        input,
+        dialect,
+        <<Profile as Storage>::Scratch as Storage>::ENFORCES_CAPACITY,
+        &mut |piece: &str| match rest.strip_prefix(piece) {
+            Some(after) => {
+                rest = after;
+                Ok(())
+            }
+            // The walk is stopped at the first piece the text does not hold; which refusal
+            // stops it is not read, only that the text differs.
+            None => Err(KeyexprCanonError::ExceedsCapacity),
+        },
+    );
+    walked.is_ok() && rest.is_empty()
+}
+
 /// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
 /// text with every run of `$*` written once, which is the longest the canonical form can be,
 /// past `CAPACITY`, the bytes the output's type holds
@@ -1072,6 +1098,44 @@ fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The canon check answers what comparing the canonizer's answer with the text answers, in
+    /// both dialects: for canonical texts, texts the canonizer rewrites (a `$*` chunk, a run of
+    /// `$*`, a wild run out of order, the split between the dialects), and texts it refuses.
+    #[test]
+    fn the_canon_check_is_the_canonizer_compared_with_the_text() {
+        let inputs = [
+            "home/temp",
+            "a",
+            "home/*/temp",
+            "home/$*/temp",
+            "home/$*$*$*foo",
+            "home/$*foo",
+            "home/**/*/temp",
+            "home/*/**/temp",
+            "**/$*/temp",
+            "*/**/temp",
+            "**/*",
+            "*/**",
+            "home//temp",
+            "/home",
+            "home/",
+            "home/foo?bar",
+            "foo$bar",
+            "",
+        ];
+        let mut canon = 0usize;
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            for input in inputs {
+                let compared =
+                    canonize_keyexpr_in(input, dialect).is_ok_and(|form| form.as_str() == input);
+                assert_eq!(is_canon(input, dialect), compared, "{input:?} {dialect:?}");
+                canon = canon.saturating_add(usize::from(compared));
+            }
+        }
+        // Both answers are met, so a check that always said one of them would fail.
+        assert!(canon > 0 && canon < inputs.len().saturating_mul(2));
+    }
 
     // ── The one walk answers what the canonizer written as two passes answered ──
 
