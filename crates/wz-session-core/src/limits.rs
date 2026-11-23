@@ -790,10 +790,17 @@ mod enforcement {
             .subscribers
             .interest_staging_refusals()
             .future_interests;
-        observer.with_app(|app_half| {
+        observer.with_parts(|app_half, face_half| {
             app_half
                 .subscribers
-                .respond_to_subscriber_interest_borrowed(index as u64, None, false, false, true)
+                .respond_to_subscriber_interest_borrowed(
+                    &mut *face_half.subscribers,
+                    index as u64,
+                    None,
+                    false,
+                    false,
+                    true,
+                )
         });
         let now = observer
             .face_ref()
@@ -1047,10 +1054,17 @@ mod enforcement {
         {
             let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
             for interest in 0..admitted as u64 {
-                observer.with_app(|app_half| {
+                observer.with_parts(|app_half, face_half| {
                     app_half
                         .subscribers
-                        .respond_to_subscriber_interest_borrowed(interest, None, false, true, false)
+                        .respond_to_subscriber_interest_borrowed(
+                            &mut *face_half.subscribers,
+                            interest,
+                            None,
+                            false,
+                            true,
+                            false,
+                        )
                 });
             }
             assert_eq!(
@@ -1062,10 +1076,11 @@ mod enforcement {
                 0
             );
             assert_eq!(
-                observer.with_app(|app_half| app_half
+                observer
+                    .face()
                     .subscribers
                     .take_staged_sub_interest_replies()
-                    .len()),
+                    .len(),
                 admitted
             );
         }
@@ -1270,8 +1285,9 @@ mod enforcement {
         let declare = wz_session_core_test_support::declare_envelope_decl_kexpr(
             wz_session_core_test_support::decl_kexpr(id, &declared_key("alias", id)),
         );
-        observer.with_app(|app_half| {
+        observer.with_parts(|app_half, face_half| {
             app_half.subscribers.dispatch(
+                &mut *face_half.subscribers,
                 &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(declare)),
                 crate::sample::Reliability::Reliable,
             )
@@ -1283,8 +1299,9 @@ mod enforcement {
         let undeclare = wz_session_core_test_support::declare_envelope_undecl_kexpr(
             wz_session_core_test_support::undecl_kexpr(id),
         );
-        observer.with_app(|app_half| {
+        observer.with_parts(|app_half, face_half| {
             app_half.subscribers.dispatch(
+                &mut *face_half.subscribers,
                 &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(undeclare)),
                 crate::sample::Reliability::Reliable,
             )
