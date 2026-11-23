@@ -3057,9 +3057,9 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.spaces()
     }
 
-    /// [`Self::mapping_spaces`] with `own`, when given, as our own space: the session's table set
-    /// of the subscriptions the peer's messages are delivered to, read in place of any space
-    /// installed here ([`LocalSubscribers::own_space`]).
+    /// [`Self::mapping_spaces`] with `own`, when given, as our own space where none is installed
+    /// here: the session's table set of the subscriptions the peer's messages are delivered to
+    /// ([`LocalSubscribers::own_space`]). A space a host installs is read first.
     #[cfg(feature = "storage-profile")]
     pub fn mapping_spaces_over<'a>(
         &'a self,
@@ -3067,8 +3067,8 @@ impl<P: Storage> SubscriberPeer<P> {
     ) -> MappingSpaces<'a> {
         let spaces = self.naming.spaces();
         match own {
-            Some(own) => spaces.over_own(own),
-            None => spaces,
+            Some(own) if !spaces.has_own() => spaces.over_own(own),
+            _ => spaces,
         }
     }
 
@@ -4119,7 +4119,7 @@ pub trait LocalSubscribers {
 
     /// Our own id space, when the subscriptions are kept in the session's one table set, which
     /// holds the key expressions the session declared: what an `M=0` key of a peer's message is
-    /// read against, in place of any space installed on the peer's side. `None` for a table of
+    /// read against where no space is installed on the peer's side. `None` for a table of
     /// subscriptions alone.
     #[cfg(feature = "storage-profile")]
     fn own_space(&self) -> Option<crate::wireexpr_resolve::OwnSpace<'_>> {

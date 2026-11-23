@@ -807,8 +807,8 @@ pub fn resolve_wireexpr_view<'k, 'f: 'k, D: WireexprLentStorage>(
     resolve_wireexpr_view_over(body, spaces, None, out)
 }
 
-/// [`resolve_wireexpr_view`] with our own space given apart from the pair, in place of the one
-/// the pair holds: an `M=0` key is copied out of `own` into `out`, so the answer borrows the
+/// [`resolve_wireexpr_view`] with our own space given apart from the pair, read where the pair
+/// holds none: an `M=0` key is copied out of `own` into `out`, so the answer borrows the
 /// frame, the peer's table and `out` alone, and the table `own` was read from may be written as
 /// soon as this returns (the session's table set, which the delivery of the key then writes).
 pub fn resolve_wireexpr_view_over<'k, 'f: 'k, D: WireexprLentStorage>(
@@ -963,10 +963,7 @@ fn resolve_parts<'k>(
         // `M=0`: OUR space, which is copied out of its lock into `out`, and for an id we did not
         // declare, the shared dictionary.
         Space::Own => {
-            let appended = match own {
-                Some(own) => own.append_own_mapping(id, out),
-                None => spaces.own.and_then(|own| own.append_own_mapping(id, out)),
-            };
+            let appended = own_append(spaces, own, id, out);
             match appended {
                 Some(Err(_)) => return Err(KeyexprPastBound),
                 Some(Ok(())) => {}
@@ -1153,10 +1150,7 @@ fn resolve_declared_parts<'k>(
     // Neither declared space knowing the id, the shared dictionary's literal stands where the
     // peer's would: it is the same in both spaces, so it cannot disagree with either.
     let peer_base = spaces.peer.literal(id);
-    let appended = match own {
-        Some(own) => own.append_own_mapping(id, out),
-        None => spaces.own.and_then(|own| own.append_own_mapping(id, out)),
-    };
+    let appended = own_append(spaces, own, id, out);
     let own_base = match appended {
         None => false,
         Some(Err(_)) => return Err(KeyexprPastBound),
@@ -1186,6 +1180,21 @@ fn resolve_declared_parts<'k>(
     }
     let out: &'k KeyexprBuf = out;
     Ok(Some(out.as_str()))
+}
+
+/// Our own literal for `id` appended to `out`: read from the space the pair holds, and when it holds
+/// none, from `own`, the session's table set apart from the pair. A host that installs a space of
+/// its own keeps reading it; a session that installs none reads its tables.
+fn own_append(
+    spaces: MappingSpaces<'_>,
+    own: Option<OwnSpace<'_>>,
+    id: crate::wire_id::ExprId,
+    out: &mut KeyexprBuf,
+) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
+    match spaces.own {
+        Some(installed) => installed.append_own_mapping(id, out),
+        None => own.and_then(|own| own.append_own_mapping(id, out)),
+    }
 }
 
 /// Which space an arm names. Local to the resolver — the public surface says

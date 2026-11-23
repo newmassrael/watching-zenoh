@@ -821,11 +821,13 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
 /// The table set is the session's own id space: a peer's `M=0` key that names a key expression
 /// the session declared is read from the set's own table and reaches the subscriber on that key,
 /// with no space installed on the peer's side, and one that names an id the session never declared
-/// reaches nothing. The CONTROL is the peer's side alone, which holds no own space.
+/// reaches nothing; a space a host installs there is read before the tables. The CONTROL is the
+/// peer's side alone, which holds no own space.
 #[cfg(all(
     feature = "alloc",
     feature = "storage-profile",
     feature = "codec-push",
+    target_has_atomic = "ptr",
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 #[test]
@@ -883,6 +885,34 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
         heard(&tables, subscriber.handle),
         1,
         "an id never declared reaches nothing"
+    );
+    // A space a host installs on the peer's side is read before the tables: the same id names
+    // the key the host holds for it.
+    let elsewhere = tables
+        .declare_subscriber(
+            "installed/key",
+            Locality::Any,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let mut installed = hashbrown::HashMap::new();
+    installed.insert(declared.id, std::string::String::from("installed/key"));
+    let installed: crate::wireexpr_resolve::SharedOwnMappingSpace =
+        alloc::sync::Arc::new(installed);
+    peer.set_own_mapping_space(installed);
+    peer.dispatch(
+        &mut tables,
+        &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
+        Reliability::Reliable,
+    );
+    assert_eq!(
+        (
+            heard(&tables, elsewhere.handle),
+            heard(&tables, subscriber.handle)
+        ),
+        (1, 1),
+        "the installed space is read first"
     );
 }
 
