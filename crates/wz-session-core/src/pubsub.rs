@@ -3036,6 +3036,9 @@ impl SubscriberPeer<Lent> {
     /// Lend an empty side its interest table (`interests` rows) and staging (`staged` rows) from
     /// `arena`, where it lies: what [`Self::lent`] makes, without the side, whose alias table is
     /// inline and kilobytes, being a value of its own. Refused as `lent` is.
+    ///
+    /// The key arena the side was handed (`keep_keys_in`) stays its own: lending rows before or
+    /// after it was handed one keeps the interests' keys in it.
     #[cfg(feature = "declare-subscriber")]
     pub fn lend_rows(
         &mut self,
@@ -3043,7 +3046,7 @@ impl SubscriberPeer<Lent> {
         interests: usize,
         staged: usize,
     ) -> Result<(), LendRefused> {
-        self.interests = InterestSide::lent(arena, interests, staged)?;
+        self.interests = InterestSide::lent(arena, interests, staged, self.interests.keys)?;
         Ok(())
     }
 
@@ -3551,14 +3554,19 @@ impl<P: Storage> Default for InterestSide<P> {
 #[cfg(feature = "declare-subscriber")]
 impl InterestSide<Lent> {
     /// No interest registered, nothing staged, `interests` rows of interests and `staged` of the
-    /// answers staged back lent from `arena`.
-    fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
+    /// answers staged back lent from `arena`, the interests' keys kept in `keys`.
+    fn lent(
+        arena: &mut Arena,
+        interests: usize,
+        staged: usize,
+        keys: LentKeys,
+    ) -> Result<Self, LendRefused> {
         Ok(Self {
             rows: arena.lend(interests)?,
             staged: arena.lend(staged)?,
             refusals: SubInterestRefusals::default(),
             reconciled_epoch: 0,
-            keys: LentKeys::default(),
+            keys,
         })
     }
 

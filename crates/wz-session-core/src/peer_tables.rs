@@ -832,6 +832,40 @@ mod lent_tests {
             .is_err());
     }
 
+    /// An interest the peer asks keeps its key in the key arena the tables were handed, though
+    /// the interest side's rows are lent after the arena is handed (`PeerTables::lend_rows`): the
+    /// row is held with its key, and the answer is more than a `Final` alone.
+    #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
+    #[test]
+    fn a_lent_peers_interest_keeps_its_key_in_the_key_arena() {
+        use crate::key_arena::block_bytes;
+        use crate::pubsub::SubscriberTable;
+        use crate::sink::BoxedSink;
+
+        let keys = keys(256);
+        let mut tables = PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            keys,
+            rows(1),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let mut table = SubscriberTable::<BoxedSink>::default();
+        table.respond_to_subscriber_interest_borrowed(
+            &mut tables.subscribers,
+            7,
+            Some("demo/**"),
+            false,
+            true,
+            false,
+        );
+        assert_eq!(
+            keys.counts().used,
+            block_bytes("demo/**".len()).expect("a short key"),
+            "the interest's row keeps its key in the arena"
+        );
+    }
+
     /// The table a peer's subscriber declarations are dispatched through.
     #[cfg(all(
         feature = "alloc",
