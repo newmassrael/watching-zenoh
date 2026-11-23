@@ -20,11 +20,6 @@
 //! action bodies stay gated on their codec / handshake-role feature —
 //! cfg-off is a documented no-emit no-op, not a build error.
 
-#[cfg(all(
-    feature = "alloc",
-    any(not(feature = "session-slot"), feature = "session-extshm")
-))]
-use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
@@ -9676,7 +9671,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn relayed_slice<'a>(
         &'a self,
         holds: &'a dyn crate::extshm::ShmRelayHolds,
-        reservations: &'a mut Vec<Box<dyn crate::extshm::ShmReservation>>,
+        reservations: &'a mut Vec<alloc::boxed::Box<dyn crate::extshm::ShmReservation>>,
     ) -> impl FnMut(&[u8]) -> Option<crate::put_payload::Relayed> + 'a {
         move |descriptor| {
             let held = holds.held(&crate::extshm::decode_shm_descriptor(descriptor)?)?;
