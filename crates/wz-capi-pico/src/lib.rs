@@ -689,8 +689,6 @@ pub mod scout;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]
-// Totality debt TD-189 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod segment_sender;
 // Totality debt TD-160 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
