@@ -600,8 +600,6 @@ pub mod get;
 // A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
 // `targeted-query` policy is off.
 #[cfg(feature = "query")]
-// Totality debt TD-187 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod get_to_peer;
 // Totality debt TD-176 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::unreachable, clippy::arithmetic_side_effects)]
