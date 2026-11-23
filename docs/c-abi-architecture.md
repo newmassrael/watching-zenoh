@@ -237,7 +237,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-017 | `wz-session-core` | `frame_encode` | `expect_used` | 37 | open |
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-026 | `wz-session-core` | `row_pool` | `panic`, `arithmetic_side_effects` | 27 | open |
-| TD-027 | `wz-session-core` | `sorted_chunks` | `indexing_slicing`, `arithmetic_side_effects` | 27 | open |
 | TD-028 | `wz-session-core` | `dissect` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 26 | open |
 | TD-029 | `wz-session-core` | `multicast_dispatch` | `indexing_slicing`, `arithmetic_side_effects` | 26 | open |
 | TD-030 | `wz-session-core` | `chunk_log` | `indexing_slicing`, `arithmetic_side_effects` | 25 | open |

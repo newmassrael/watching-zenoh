@@ -1712,8 +1712,6 @@ pub mod column_log;
 // Open-debt item 924, step 5 — an ordered map in sorted chunks whose every byte is
 // counted. Undocumented on this line for the reason above.
 #[cfg(feature = "alloc")]
-// Totality debt TD-027 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod sorted_chunks;
 
 // Open-debt item 924, step 5 — the arithmetic a holder's memory report shares.
