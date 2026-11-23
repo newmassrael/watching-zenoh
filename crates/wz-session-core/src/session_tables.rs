@@ -924,21 +924,31 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.pending_gets.limit_to(rows.pending_gets);
     }
 
-    /// The entity ids from `next` on are the only ones left.
-    #[cfg(test)]
-    fn spend_entity_ids_to(&mut self, next: EntityId) {
-        self.next_entity = Some(next);
-    }
-
     // ---- key expressions -------------------------------------------------------------------
 
     /// Declare `key`, or hold the declaration of it the session made already once more.
     pub fn declare_keyexpr(&mut self, key: &str) -> Result<KeyexprDeclared, RegisterError> {
-        let found = self
-            .keyexprs
-            .iter()
-            .find(|(_, row)| text(&row.key) == key)
-            .map(|(handle, row)| (handle, row.id, row.holds));
+        self.declare_keyexpr_where(key, false, |_| true)
+    }
+
+    /// Declare `key` under an id `usable` admits: with `apart` a declaration of its own whatever
+    /// the session holds, otherwise the declaration of it the session made already, held once more,
+    /// when there is one. Refused with [`RegisterError::IdsExhausted`] when no id is left that is
+    /// neither declared nor refused by `usable` (an id a dictionary of shared key ids names).
+    pub fn declare_keyexpr_where(
+        &mut self,
+        key: &str,
+        apart: bool,
+        usable: impl Fn(ExprId) -> bool,
+    ) -> Result<KeyexprDeclared, RegisterError> {
+        let found = if apart {
+            None
+        } else {
+            self.keyexprs
+                .iter()
+                .find(|(_, row)| text(&row.key) == key)
+                .map(|(handle, row)| (handle, row.id, row.holds))
+        };
         if let Some((handle, id, holds)) = found {
             let holds = holds.checked_add(1).ok_or(RegisterError::TableFull)?;
             if let Some(row) = self.keyexprs.get_mut(handle) {
@@ -954,7 +964,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             return Err(RegisterError::TableFull);
         }
         let kept = KeyMaker::key(&self.keys, key).map_err(unkept)?;
-        let id = self.mint_expr();
+        let id = self.mint_expr(usable).ok_or(RegisterError::IdsExhausted)?;
         let handle = self
             .keyexprs
             .insert(KeyexprRow {
@@ -976,17 +986,55 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         release_keyexpr(&mut self.keyexprs, handle)
     }
 
-    /// The next key expression id: from 1, past any still declared.
-    fn mint_expr(&mut self) -> ExprId {
-        let mut id = self.next_expr;
-        for _ in 0..=self.keyexprs.len() {
-            id = self.next_expr.max(1);
+    /// Retract the declaration `handle` names whatever holds it: its id, for its retraction to go
+    /// on the wire. An entity that named its key by it names it whole from here on
+    /// ([`Self::wire_of`]).
+    pub fn retract_keyexpr(&mut self, handle: KeyexprHandle) -> Option<ExprId> {
+        let id = self.keyexprs.get(handle)?.id;
+        let _ = self.keyexprs.remove(handle);
+        Some(id)
+    }
+
+    /// The declaration the wire names by `id`.
+    pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
+        self.keyexprs
+            .iter()
+            .find(|(_, row)| row.id == id)
+            .map(|(handle, _)| handle)
+    }
+
+    /// The next key expression id: from 1, past any still declared and any `usable` refuses;
+    /// `None` when every id is one or the other.
+    fn mint_expr(&mut self, usable: impl Fn(ExprId) -> bool) -> Option<ExprId> {
+        for _ in 0..=usize::from(ExprId::MAX) {
+            let id = self.next_expr.max(1);
             self.next_expr = id.wrapping_add(1);
-            if !self.keyexprs.iter().any(|(_, row)| row.id == id) {
-                return id;
+            if usable(id) && !self.keyexprs.iter().any(|(_, row)| row.id == id) {
+                return Some(id);
             }
         }
-        id
+        None
+    }
+
+    // ---- entity ids ------------------------------------------------------------------------
+
+    /// The next entity id, for an entity the session numbers and keeps no row of here (a
+    /// publisher, a querier, a get's Interest); `None` once every one has been handed out.
+    pub fn take_entity_id(&mut self) -> Option<EntityId> {
+        let id = self.next_entity?;
+        self.next_entity = id.checked_add(1);
+        Some(id)
+    }
+
+    /// The entity id the next declaration takes, `None` once every one has been handed out.
+    pub fn next_entity_id(&self) -> Option<EntityId> {
+        self.next_entity
+    }
+
+    /// Hand out entity ids from `next` on, or none with `None`: for a host that carries a
+    /// session's numbering over, and for a test that reaches the end of the space.
+    pub fn entity_ids_from(&mut self, next: Option<EntityId>) {
+        self.next_entity = next;
     }
 
     /// `key` as the wire carries it: by the declaration its form names where it still stands,

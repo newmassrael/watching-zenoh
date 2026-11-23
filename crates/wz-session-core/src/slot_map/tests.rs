@@ -214,3 +214,18 @@ fn a_table_made_without_rows_on_the_lent_policy_refuses_every_insert() {
     assert!(map.is_full());
     assert!(map.insert(1).is_err());
 }
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_growable_table_takes_its_bound_from_its_limit_not_from_the_build() {
+    let mut map = SlotMap::<Test, u32, 2, crate::bounded::Heap>::new();
+    for value in 0..3 {
+        map.insert(value).unwrap();
+    }
+    assert_eq!(map.len(), 3);
+    map.limit_to(4);
+    assert_eq!(map.capacity(), 4);
+    map.insert(3).unwrap();
+    assert!(map.is_full());
+    assert!(map.insert(4).is_err());
+}

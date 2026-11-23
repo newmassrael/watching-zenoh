@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 use std::vec::Vec;
 
 /// Callbacks the tests can tell apart: a number each.
-struct Calls;
+enum Calls {}
 
 impl RowCallbacks for Calls {
     type Subscriber = u32;
@@ -119,7 +119,7 @@ fn a_full_table_refuses_before_an_id_is_spent_and_hands_the_callback_back() {
 #[test]
 fn spent_entity_ids_refuse_a_declaration_rather_than_wrap() {
     let mut tables = Tables::new();
-    tables.spend_entity_ids_to(u32::MAX);
+    tables.entity_ids_from(Some(u32::MAX));
     assert_eq!(subscribe(&mut tables, "a", Locality::Any, 1).id, u32::MAX);
     let refused = tables
         .declare_subscriber("b", Locality::Any, KeyForm::default(), 2)
@@ -668,4 +668,53 @@ fn lent_tables_past_a_build_bound_are_refused() {
         SessionTables::<Calls, Lent>::lent(&mut arena, keys(64), &rows),
         Err(LendRefused::OverCeiling { .. })
     ));
+}
+
+#[test]
+fn a_declaration_apart_takes_an_id_of_its_own_and_skips_the_unusable_ones() {
+    let mut tables = Tables::new();
+    let shared = tables.declare_keyexpr("k").unwrap();
+    let apart = tables.declare_keyexpr_where("k", true, |_| true).unwrap();
+    assert!(apart.new);
+    assert_ne!(apart.id, shared.id);
+    let skipped = tables
+        .declare_keyexpr_where("j", true, |id| id != 3)
+        .unwrap();
+    assert_eq!(skipped.id, 4);
+    assert_eq!(tables.keyexpr_by_id(4), Some(skipped.handle));
+    assert_eq!(
+        tables.declare_keyexpr_where("i", true, |_| false),
+        Err(RegisterError::IdsExhausted)
+    );
+}
+
+#[test]
+fn a_retracted_declaration_goes_whatever_holds_it() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    tables.declare_keyexpr("demo/").unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        names_key: false,
+    };
+    let token = tables.declare_token("demo/x", form).unwrap();
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    assert_eq!(tables.keyexpr_by_id(declared.id), None);
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(tables.wire_of(key).mapping, 0);
+    assert_eq!(tables.retract_keyexpr(declared.handle), None);
+    // The token's retraction finds no declaration left to let go of.
+    assert_eq!(tables.undeclare_token(token.handle).unwrap().keyexpr, None);
+}
+
+#[test]
+fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
+    let mut tables = Tables::new();
+    assert_eq!(tables.take_entity_id(), Some(1));
+    assert_eq!(tables.declare_token("t", KeyForm::default()).unwrap().id, 2);
+    assert_eq!(tables.next_entity_id(), Some(3));
+    tables.entity_ids_from(Some(u32::MAX));
+    assert_eq!(tables.take_entity_id(), Some(u32::MAX));
+    assert_eq!(tables.take_entity_id(), None);
+    assert_eq!(tables.next_entity_id(), None);
 }

@@ -26,8 +26,9 @@
 //! (P5). What is typed is a column of `Option<T>` beside it and the few lines that move a value in
 //! and out of it. Both columns are `BoundedVec`s of the storage policy `P`: lent from the
 //! session's arena at its open on the lent policy ([`SlotMap::lent`]), fixed on the static one,
-//! growable up to the bound on the heap one. A table at its bound refuses an insert and hands the
-//! value back; nothing grows past it (P3).
+//! growable on the heap one, where `N` is advisory as it is for every table of that policy and
+//! the bound is the one [`SlotMap::limit_to`] sets, or [`MAX_SLOTS`]. A table at its bound
+//! refuses an insert and hands the value back; nothing grows past it (P3).
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -338,21 +339,33 @@ pub struct SlotMap<K, T, const N: usize, P: Storage = Profile> {
 }
 
 impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
-    /// A table of no rows, holding at most `N`. On the lent policy a table made so was lent no
-    /// rows and refuses every insert; [`SlotMap::lent`] makes the one a session holds.
+    /// A table of no rows, holding at most `N` on a policy that enforces its capacity and at most
+    /// [`MAX_SLOTS`] on the growable one. On the lent policy a table made so was lent no rows and
+    /// refuses every insert; [`SlotMap::lent`] makes the one a session holds.
     pub fn new() -> Self {
         Self {
             meta: BoundedVec::default(),
             rows: BoundedVec::default(),
-            core: Core::new(N),
+            core: Core::new(Self::ceiling()),
             kind: PhantomData,
         }
     }
 
+    /// The most rows the policy lets the table hold: `N` where it enforces a capacity.
+    fn ceiling() -> usize {
+        if P::ENFORCES_CAPACITY {
+            N
+        } else {
+            MAX_SLOTS
+        }
+    }
+
     /// Hold at most `rows` rows from here on: the value the session's limits resolved, under the
-    /// build's `N`. A bound under the rows held now refuses every insert until enough leave.
+    /// build's `N` where the policy enforces it. A bound under the rows held now refuses every
+    /// insert until enough leave.
     pub fn limit_to(&mut self, rows: usize) {
-        self.core.limit = u16::try_from(rows.min(N).min(MAX_SLOTS)).unwrap_or(u16::MAX);
+        self.core.limit =
+            u16::try_from(rows.min(Self::ceiling()).min(MAX_SLOTS)).unwrap_or(u16::MAX);
     }
 
     /// The most rows the table holds at once.
