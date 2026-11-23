@@ -138,8 +138,6 @@ pub mod slot_client;
 pub mod latest;
 // The client node as a publisher: a stream of puts on a key, at the times of an arrival process, from
 // the session's own application layer or the group's pump.
-// Totality debt TD-209 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
 // The client node as a replayer: a recorded sequence of puts compiled into the image, paced and

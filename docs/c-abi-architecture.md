@@ -211,7 +211,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (175) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (173) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -330,7 +330,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-206 | `wz-runtime-coop` | `session_runtime` | `panic` | 1 | open |
 | TD-207 | `wz-session-mcu` | `connect_manager` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 39 | open |
 | TD-208 | `wz-session-mcu` | `dial` | `indexing_slicing`, `arithmetic_side_effects` | 32 | open |
-| TD-209 | `wz-session-mcu` | `slot_publisher` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
 | TD-210 | `wz-session-mcu` | `slot_replay` | `indexing_slicing`, `arithmetic_side_effects` | 17 | open |
 | TD-211 | `wz-session-mcu` | `slot_getter` | `indexing_slicing`, `arithmetic_side_effects` | 17 | open |
 | TD-212 | `wz-session-mcu` | `group_drive` | `indexing_slicing`, `arithmetic_side_effects` | 11 | in flight |
