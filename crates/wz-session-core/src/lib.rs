@@ -200,6 +200,12 @@ pub mod key_arena;
 #[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod row_pool;
 
+/// The callback a row of the session's tables owns, a C closure's three values or a Rust closure,
+/// and the latch its calls are counted on, so a row is let go of after its last call (P11). Where
+/// the target has the atomic word the latch is.
+#[cfg(target_has_atomic = "32")]
+pub mod row_callback;
+
 /// Fixed-capacity slot maps: rows named by generation-checked handles, pinned while a call of
 /// what they own runs, kept as the storage policy keeps a table. Unconditional, like [`bounded`];
 /// a build that holds no slot map links none of it.
