@@ -1689,8 +1689,6 @@ pub mod passive_messages;
 // layer's TCP run map are both kept in. Undocumented on this line for the
 // reason the module above gives; its note is in its own file.
 #[cfg(feature = "alloc")]
-// Totality debt TD-030 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod chunk_log;
 
 // Open-debt item 924, D10 — the log of rows of 64-bit columns, kept by frame of
