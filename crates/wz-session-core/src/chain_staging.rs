@@ -288,7 +288,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
         if self.outstanding >= SLOTS {
             return None;
         }
-        self.outstanding += 1;
+        self.outstanding = self.outstanding.saturating_add(1);
         Some(HeapChain {
             buf: crate::bounded::BoundedVec::new(),
             reserved: 0,
@@ -342,8 +342,8 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for HeapStag
         // so resolving it means giving back what the filler did not use. The
         // pooled backing never grew, so it advances instead -- opposite
         // mechanics, identical observable.
-        let unused = chain.reserved - filled;
-        chain.buf.truncate(chain.buf.len() - unused);
+        let unused = chain.reserved.saturating_sub(filled);
+        chain.buf.truncate(chain.buf.len().saturating_sub(unused));
         chain.reserved = 0;
         Ok(())
     }
@@ -438,9 +438,13 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
         if self.held() >= self.chains {
             return None;
         }
-        let at = (0..SLOTS).find(|&at| self.bufs[at].is_none())?;
         let cells = self.cells?;
-        self.bufs[at] = Some(cells.claim()?);
+        let (at, slot) = self
+            .bufs
+            .iter_mut()
+            .enumerate()
+            .find(|(_, buf)| buf.is_none())?;
+        *slot = Some(cells.claim()?);
         Some(LentChain {
             at,
             len: 0,
@@ -450,27 +454,34 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
 
     fn release(&mut self, chain: Self::Chain) {
         // Dropped, the buffer is its table's again, for the next chain of any link of the session.
-        self.bufs[chain.at] = None;
+        if let Some(buf) = self.bufs.get_mut(chain.at) {
+            *buf = None;
+        }
     }
 
     fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
         if !self.fits(chain, payload.len()) {
             return Err(StagingError::ChainCapExceeded);
         }
-        let buf = self.bufs[chain.at]
-            .as_mut()
+        // `fits` held the end to the capacity, which is the buffer's length.
+        let end = chain.len.saturating_add(payload.len());
+        let into = self
+            .bufs
+            .get_mut(chain.at)
+            .and_then(Option::as_mut)
+            .and_then(|buf| buf.as_mut_slice().get_mut(chain.len..end))
             .ok_or(StagingError::ChainCapExceeded)?;
-        let end = chain.len + payload.len();
-        buf.as_mut_slice()[chain.len..end].copy_from_slice(payload);
+        into.copy_from_slice(payload);
         chain.len = end;
         Ok(())
     }
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
-        match self.bufs[chain.at].as_ref() {
-            Some(buf) => &buf.as_slice()[..chain.len],
-            None => &[],
-        }
+        self.bufs
+            .get(chain.at)
+            .and_then(Option::as_ref)
+            .and_then(|buf| buf.as_slice().get(..chain.len))
+            .unwrap_or_default()
     }
 
     fn fits(&self, chain: &Self::Chain, len: usize) -> bool {
@@ -488,11 +499,15 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
         if !self.fits(chain, want) {
             return Err(StagingError::ChainCapExceeded);
         }
-        let buf = self.bufs[chain.at]
-            .as_mut()
+        let end = chain.len.saturating_add(want);
+        let lent = self
+            .bufs
+            .get_mut(chain.at)
+            .and_then(Option::as_mut)
+            .and_then(|buf| buf.as_mut_slice().get_mut(chain.len..end))
             .ok_or(StagingError::ChainCapExceeded)?;
         chain.reserved = want;
-        Ok(&mut buf.as_mut_slice()[chain.len..chain.len + want])
+        Ok(lent)
     }
 
     fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
@@ -500,7 +515,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
             return Err(StagingError::ChainCapExceeded);
         }
         // The buffer never grew for the reservation, so what was filled is what the chain gains.
-        chain.len += filled;
+        chain.len = chain.len.saturating_add(filled);
         chain.reserved = 0;
         Ok(())
     }
@@ -559,7 +574,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for VecStagi
         if self.outstanding >= SLOTS {
             return None;
         }
-        self.outstanding += 1;
+        self.outstanding = self.outstanding.saturating_add(1);
         Some(VecChain {
             buf: alloc::vec::Vec::new(),
             reserved: 0,
@@ -594,15 +609,18 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for VecStagi
             .ok_or(StagingError::ChainCapExceeded)?;
         chain.reserved = want;
         chain.buf.resize(end, 0);
-        Ok(&mut chain.buf[start..end])
+        chain
+            .buf
+            .get_mut(start..end)
+            .ok_or(StagingError::ChainCapExceeded)
     }
 
     fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
         if filled > chain.reserved {
             return Err(StagingError::ChainCapExceeded);
         }
-        let unused = chain.reserved - filled;
-        chain.buf.truncate(chain.buf.len() - unused);
+        let unused = chain.reserved.saturating_sub(filled);
+        chain.buf.truncate(chain.buf.len().saturating_sub(unused));
         chain.reserved = 0;
         Ok(())
     }

@@ -2132,8 +2132,6 @@ pub mod reassembly_slot {
 // on-demand-heap arena. Gated with the Router it serves: a build without
 // `reassembly` has no chains to stage.
 #[cfg(feature = "reassembly")]
-// Totality debt TD-043 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod chain_staging;
 
 /// R311y713 (§B7) — what a reassembly sweep gave up on, as a value.
