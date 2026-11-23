@@ -1,0 +1,442 @@
+# Release proof: the pico C ABI Windows DLL against zenoh-pico
+
+Status: a ledger of evidence, held by `scripts/lib/release_proof_ledger_gate.py` (Layer C0). It
+states, for every public function, build switch, example and test of zenoh-pico at the pin, and for
+every door of wz's own, which lane runs it and whether that lane runs the library that is shipped.
+It is not a specification and the atomic store does not parse it. Edit it by hand; the gate says
+when an edit no longer matches the tree.
+
+## 1. What is proven, and on what
+
+**The release form** (owner, 2026-11-23): the DLL of the Windows package, `wz-capi-pico` built from
+the profile `configs/profiles/host-peer-ext.conf` on the cooperative engine without `std`
+(`os-windows`, `pico_windows_package.py --stdlib nostd`), as the one library (`--form single`), for
+x64 and x86. Every memory a session uses is reserved when it opens (`docs/c-abi-no-heap-pools.md`,
+`docs/c-abi-engine-and-memory.md` E3 and P4).
+
+**The release criteria** (owner, 2026-11-23):
+
+- (a) no cell where zenoh-pico wins: size, every performance cell and memory, measured on the
+  Windows host against zenoh-pico built as the same build (section 7);
+- (b) every feature of zenoh-pico proven on that DLL by running zenoh-pico's own tests and examples
+  against it: a run, not a claim (sections 3 to 6);
+- (c) every door zenoh-pico does not have at production level: tests, fuzzing, a sanitizer, a
+  coverage floor and documentation (section 8).
+
+**A row is proven only by a run of the release form.** A lane on Linux, or on Windows with `std`,
+or under another profile, is evidence that the code works there and is recorded, but its row reads
+`unproven`: the release DLL is a different build (another engine's host, another allocator,
+another feature list), and what differs is exactly what it has not shown.
+
+The status of a row is one of:
+
+- `proven`: a lane of the release form runs it, and a red of that lane fails its run;
+- `observed`: a lane of the release form runs it, and its red is printed but fails nothing
+  (`continue-on-error`);
+- `unproven`: lanes run it, none of them on the release form;
+- `none`: no lane runs it;
+- `absent`: the release DLL does not carry it; what to do about it is a decision (W07);
+- `n/a`: not a zenoh-pico feature on Windows, or a test of zenoh-pico's private code, which a
+  drop-in does not have; the gap says which.
+
+The first four are derived: the gate computes them from the lanes a row cites (section 2, the
+`release form` and `gated` columns) and refuses a row that states another. Every row short of
+`proven` names the work item that closes it (section 9).
+
+**How a lane is credited with a row.** For an API row: a program of the lane names one of the row's
+functions, read from the program's text with its comments removed. That is a reading of the text,
+not of the build: a name in an `#if` arm the lane's build leaves out still counts, so a lane is
+cited on a row only after that arm was read. Row A28 is where it matters: the package's examples
+name `zp_spin_once` in their single-threaded arm only, which the package's build never compiles,
+and A28 does not cite them. A row is credited as a whole when one of its names is: `observed`
+on A04 would not say that each of its functions ran. The proof of each function is zenoh-pico's own
+suite run on the release DLL (W03); until then a row says what has run, at its grain. For an
+example or a test row: the lane's programs include that program.
+
+## 2. Lanes
+
+A lane is what runs, where it is defined, on which host, against which form and profile of the
+library, and whether its red fails its run. `release form` is `yes` exactly when the host is
+Windows, the form is `nostd` and the profile is `host-peer-ext`; the gate derives it. A source
+`<file>#<job>` names a job of a workflow.
+
+<!-- release-proof: lanes -->
+| lane | what runs | programs | source | host | form | profile | gated | release form |
+|---|---|---|---|---|---|---|---|---|
+| L01 | zenoh-pico's own API tests linked to wz and run beside a zenohd (13 run; 3 pinned as reaching pico internals) | `vendor/zenoh-pico/tests/z_api_null_drop_test.c` `vendor/zenoh-pico/tests/z_api_double_drop_test.c` `vendor/zenoh-pico/tests/z_api_bytes_test.c` `vendor/zenoh-pico/tests/z_api_encoding_test.c` `vendor/zenoh-pico/tests/z_api_alignment_test.c` `vendor/zenoh-pico/tests/z_api_liveliness_test.c` `vendor/zenoh-pico/tests/z_api_cancellation_test.c` `vendor/zenoh-pico/tests/z_api_matching_test.c` `vendor/zenoh-pico/tests/z_api_connectivity_test.c` `vendor/zenoh-pico/tests/z_api_queryable_test.c` `vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` `vendor/zenoh-pico/tests/z_api_callback_drop_on_undeclare_test.c` `vendor/zenoh-pico/tests/z_api_batching_test.c` | `crates/wz-integration-tests/tests/it/files/pico_upstream_api_tests_on_wz.rs` `scripts/run-ci.sh` | linux | std | integration arm | gate | no |
+| L02 | zenoh-pico's session-local delivery tests linked to wz, beside a zenohd | `vendor/zenoh-pico/tests/z_api_local_subscriber_test.c` `vendor/zenoh-pico/tests/z_api_local_queryable_test.c` | `crates/wz-integration-tests/tests/it/files/pico_local_delivery_upstream_tests_on_wz.rs` | linux | std | local arm | gate | no |
+| L03 | the 32 C11 examples of zenoh-pico linked to wz, each against a real pico or zenohd peer | `vendor/zenoh-pico/examples/unix/c11/*.c` | `crates/wz-integration-tests/tests/it/files/pico_c_examples_on_wz_capi_dropin.rs` | linux | std | reference arm | gate | no |
+| L04 | zenoh-pico's multicast peer test program linked to wz | `vendor/zenoh-pico/tests/z_test_peer_multicast.c` | `crates/wz-integration-tests/tests/it/files/pico_peer_multicast_on_wz_capi.rs` | linux | std | reference arm | gate | no |
+| L05 | pico C programs on the DLL of the default features: the host layer, two sessions over loopback, every platform export, a transport the program supplies | `crates/wz-capi-pico/tests/c/pico_host_layer.c` `crates/wz-capi-pico/tests/c/pico_session_loopback.c` `crates/wz-capi-pico/tests/c/pico_platform_surface.c` `crates/wz-capi-pico/tests/c/pico_app_transport.c` | `.github/workflows/platform.yml#capi` `scripts/pico-c-program.sh` | windows | std | default features | gate | no |
+| L06 | the Rust unit and integration tests of the pico C ABI crate on a Windows host | — | `.github/workflows/platform.yml#capi` | windows | std | default features | gate | no |
+| L07 | a single-threaded pico C program, two processes over one loopback port, on the library without std | `crates/wz-capi-pico/tests/c/pico_coop_single_thread.c` | `.github/workflows/platform.yml#capi-coop` `scripts/pico-c-program.sh` | windows | nostd | peer,query,queryable | observed | no |
+| L08 | the C examples of the package and the program-supplied transport, against the library of the package profile | `crates/wz-capi-pico/examples/c/*.c` `crates/wz-capi-pico/examples/c/example_common.h` `crates/wz-capi-pico/tests/c/pico_app_transport.c` `crates/wz-capi-pico/tests/c/pico_platform_surface.c` | `.github/workflows/platform.yml#capi-examples` `scripts/pico-c-program.sh` | windows | std | host-peer-ext | gate | no |
+| L09 | the Windows package built with std, extracted, held to its manifest, and every example, the check program and the layout pins compiled with MSVC against it and run (debug and release, x64 and x86, single and split) | `crates/wz-capi-pico/examples/c/*.c` `crates/wz-capi-pico/examples/c/example_common.h` `crates/wz-capi-pico/tests/c/pico_app_transport.c` `crates/wz-capi-pico/tests/c/package_check.c` `crates/wz-capi-pico/csrc/pico_layout_pins.c` | `.github/workflows/platform.yml#package-windows` `.github/actions/pico-windows-package/action.yml` `scripts/lib/pico_windows_package.py` | windows | std | host-peer-ext | gate | no |
+| L10 | the same package test on the DLL without std (`--stdlib nostd`, single form, x64 and x86) | `crates/wz-capi-pico/examples/c/*.c` `crates/wz-capi-pico/examples/c/example_common.h` `crates/wz-capi-pico/tests/c/pico_app_transport.c` `crates/wz-capi-pico/tests/c/package_check.c` `crates/wz-capi-pico/csrc/pico_layout_pins.c` | `.github/workflows/platform.yml#package-windows` `.github/actions/pico-windows-package/action.yml` `scripts/lib/pico_windows_package.py` | windows | nostd | host-peer-ext | observed | yes |
+| L11 | the sizes of the size gate's client with and without std on Windows, printed after the nostd package test | — | `.github/actions/pico-windows-package/action.yml` `scripts/lib/pico_windows_package.py` | windows | nostd | size gate client | observed | no |
+| L12 | what a capability costs in the C ABI binaries, each pico case held to its ratio to zenoh-pico (ELF sizes) | — | `scripts/lib/capability_cost_gate.py` `deploy/pico_host_ceiling.json` | linux | nostd | size gate client | gate | no |
+| L13 | the allocations the C ABI makes after a session opens, per operation family, held to their ratchet rows | — | `crates/wz-capi-pico/tests/no_heap_after_open.rs` `scripts/lib/no_heap_ratchet_gate.py` `deploy/no_heap_ratchet.json` | linux | std | engine-coop with the families' capabilities | gate | no |
+| L14 | the host performance matrix on Windows, arm W the package against arm P zenoh-pico built with MSVC as the same build | — | `scripts/host-bench/windows/perf_matrix.ps1` `deploy/pico_perf_ceiling_windows.json` | windows | std | host-peer-ext | manual | no |
+| L15 | the host performance matrix on Linux, held to its ceiling rows | — | `scripts/host-bench/perf_matrix.py` `deploy/pico_perf_ceiling.json` | linux | std | host-peer-ext | manual | no |
+| L16 | the pico C ABI under load, faults, close and reopen, and the sequential test under valgrind memcheck; the allocation-failure sweep | — | `crates/wz-capi-pico/tests/stability.rs` `crates/wz-capi-pico/tests/allocation_faults.rs` `scripts/run-ci.sh` | linux | std | app-transport | gate | no |
+| L17 | the fuzz targets' seeds and reproducers under AddressSanitizer, among them the cooperative engine read as a C program reads it | — | `crates/wz-fuzz/README.md` `crates/wz-fuzz/coop-engine/Cargo.toml` `scripts/fuzz.sh` | linux | std | fuzz packages | gate | no |
+| L18 | the Windows release packages a release attaches, built and tested by the same composite action | `crates/wz-capi-pico/examples/c/*.c` `crates/wz-capi-pico/examples/c/example_common.h` `crates/wz-capi-pico/tests/c/pico_app_transport.c` `crates/wz-capi-pico/tests/c/package_check.c` `crates/wz-capi-pico/csrc/pico_layout_pins.c` | `.github/workflows/release.yml#windows-packages` `.github/actions/pico-windows-package/action.yml` | windows | std | host-peer-ext | gate | no |
+
+What the lanes say together, read on the tree of this note: the one lane of the release form is
+L10, the package's own regression test on the nostd DLL, and it is observed; its programs are wz's
+examples and the package's check program, not zenoh-pico's. Every run of zenoh-pico's own programs
+(L01 to L04) is on Linux with `std`. The release workflow attaches the `std` package (L18), not the
+release form (C05).
+
+## 3. The API
+
+The population is every function zenoh-pico's header declares whose name starts `z_`, `zp_` or
+`ze_` (a type name ending `_t` aside), read through the preprocessor under the three
+configurations of `scripts/lib/drop_in_header_gate.py` (upstream's defaults, every switch on, every
+switch on and single-threaded), with the generic macros of `api/macros.h`: 877 functions and 13
+macros at zenoh-pico 1.10.2. Each name belongs to the FIRST row one of whose patterns it matches
+(`fnmatch`, `*` any run of characters), so a row placed earlier takes its names from a broader
+pattern below it; every name has a row and every pattern takes at least one name.
+
+<!-- release-proof: api -->
+| row | feature | names | lanes | status | gap |
+|---|---|---|---|---|---|
+| A01 | the generic macros of `api/macros.h` (`_Generic` dispatch over the owned, loaned and moved types) | `z_loan` `z_loan_mut` `z_move` `z_drop` `z_clone` `z_take` `z_take_from_loaned` `z_internal_check` `z_internal_null` `z_closure` `z_call` `z_recv` `z_try_recv` | L01, L02, L03, L04 | unproven | pico's own programs, which reach these through `_Generic`, are run only on Linux with std (W03) |
+| A02 | configuration: a config made, cloned and its keys read and written | `z_config_*` `z_internal_config_*` `zp_config_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | the nostd package test is observed, not gated (W02) |
+| A03 | session: open with options, close, state, the session handle | `z_open` `z_open_options_default` `z_close` `z_session_*` `z_internal_session_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A04 | connectivity (unstable): links and transports listed, their events listened to | `z_info_links` `z_info_links_options_default` `z_info_transports` `z_link_*` `z_internal_link_*` `z_transport_*` `z_internal_transport_*` `z_closure_link*` `z_internal_closure_link*` `z_closure_transport*` `z_internal_closure_transport*` `z_declare_link_events_listener` `z_declare_background_link_events_listener` `z_undeclare_link_events_listener` `z_declare_transport_events_listener` `z_declare_background_transport_events_listener` `z_undeclare_transport_events_listener` | L01, L03 | unproven | `z_api_connectivity_test` and the info examples run on Linux with std only (W03) |
+| A05 | session info: own id, routers and peers | `z_info_*` `z_closure_zid*` `z_internal_closure_zid*` `z_id_to_string` | L01, L03, L05, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A06 | key expressions: views, owned, canonize, relations, join and concat, declare and undeclare | `z_keyexpr_*` `z_internal_keyexpr_*` `z_view_keyexpr_*` `z_declare_keyexpr` `z_undeclare_keyexpr` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A07 | payload bytes: copy, alias, static, reader, writer, slice iterator | `z_bytes_*` `z_internal_bytes_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02); pico's `z_api_bytes_test` not on the release DLL (W03) |
+| A08 | slices, strings and string arrays | `z_slice_*` `z_internal_slice_*` `z_view_slice_*` `z_string_*` `z_internal_string_*` `z_view_string_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A09 | encodings: the predefined table, from and to a string, a schema | `z_encoding_*` `z_internal_encoding_*` | L01, L03 | unproven | `z_api_encoding_test` on Linux with std only (W03) |
+| A10 | serialization (`ze_serialize*`, `ze_deserialize*`, the serializer and deserializer) | `ze_serialize*` `ze_deserialize*` `ze_serializer_*` `ze_deserializer_*` `ze_internal_serializer_*` | L01, L03 | unproven | `z_api_bytes_test` and `z_bytes.c` on Linux with std only (W03) |
+| A11 | matching status and matching listeners on a publisher and a querier | `z_matching_listener_*` `z_internal_matching_listener_*` `z_closure_matching_status*` `z_internal_closure_matching_status*` `z_undeclare_matching_listener` `z_publisher_get_matching_status` `z_publisher_declare_matching_listener` `z_publisher_declare_background_matching_listener` `z_querier_get_matching_status` `z_querier_declare_matching_listener` `z_querier_declare_background_matching_listener` | L01, L03 | unproven | `z_api_matching_test` on Linux with std only (W03) |
+| A12 | publisher: declare, put, delete, its key and id, undeclare | `z_declare_publisher` `z_undeclare_publisher` `z_publisher_*` `z_internal_publisher_*` | L01, L03, L04, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A13 | put and delete on the session | `z_put` `z_put_options_default` `z_delete` `z_delete_options_default` | L01, L02, L03, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A14 | subscriber and samples: declare with a closure or in the background, the sample accessors | `z_declare_subscriber` `z_declare_background_subscriber` `z_undeclare_subscriber` `z_subscriber_*` `z_internal_subscriber_*` `z_closure_sample*` `z_internal_closure_sample*` `z_sample_*` `z_internal_sample_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A15 | get and replies: options, consolidation, target, the reply accessors and the reply error | `z_get` `z_get_options_default` `z_get_with_parameters_substr` `z_query_consolidation_*` `z_query_target_default` `z_reply_*` `z_internal_reply_*` `z_closure_reply*` `z_internal_closure_reply*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A16 | querier: declare, get, undeclare | `z_declare_querier` `z_undeclare_querier` `z_querier_*` `z_internal_querier_*` | L01, L03, L04 | unproven | `z_querier.c` and the queryable test on Linux with std only (W03) |
+| A17 | queryable and queries: declare, the query accessors, reply, reply error, reply delete | `z_declare_queryable` `z_declare_background_queryable` `z_undeclare_queryable` `z_queryable_*` `z_internal_queryable_*` `z_query_*` `z_internal_query_*` `z_closure_query*` `z_internal_closure_query*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A18 | channels: FIFO and ring handlers for samples, queries and replies | `z_fifo_*` `z_internal_fifo_*` `z_ring_*` `z_internal_ring_*` | L01, L02, L03, L04, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A19 | liveliness: tokens, liveliness subscribers, liveliness get | `z_liveliness_*` `z_internal_liveliness_token_*` | L01, L03 | unproven | `z_api_liveliness_test` and the liveliness examples on Linux with std only (W03) |
+| A20 | scouting: z_scout, hellos, their locators and whatami | `z_scout` `z_scout_options_default` `z_hello_*` `z_internal_hello_*` `z_closure_hello*` `z_internal_closure_hello*` `zp_hello_locators` `z_whatami_to_view_string` | L01, L03 | unproven | `z_scout.c` on Linux with std only (W03) |
+| A21 | advanced publisher (cache, miss detection, matching) | `ze_advanced_publisher_*` `ze_declare_advanced_publisher` `ze_undeclare_advanced_publisher` `ze_internal_advanced_publisher_*` | L01, L03 | unproven | `z_api_advanced_pubsub_test` and `z_advanced_pub.c` on Linux with std only (W03) |
+| A22 | advanced subscriber (history, recovery, miss listeners, publisher detection) | `ze_advanced_subscriber_*` `ze_declare_advanced_subscriber` `ze_declare_background_advanced_subscriber` `ze_undeclare_advanced_subscriber` `ze_internal_advanced_subscriber_*` `ze_closure_miss*` `ze_internal_closure_miss*` `ze_sample_miss_listener_*` `ze_internal_sample_miss_listener_*` `ze_undeclare_sample_miss_listener` | L01, L03 | unproven | as A21 (W03) |
+| A23 | entity ids, source info and timestamps (unstable) | `z_entity_global_id_*` `z_source_info_*` `z_timestamp_*` | L03, L08, L09, L10, L18 | observed | as A02 (W02); pico's source-info and timestamp tests reach pico internals, so the behaviour needs a program of public calls (W08) |
+| A24 | cancellation tokens (unstable) | `z_cancellation_token_*` `z_internal_cancellation_token_*` | L01 | unproven | `z_api_cancellation_test` on Linux with std only (W03) |
+| A25 | QoS and locality defaults | `z_priority_default` `z_reliability_default` `z_locality_default` `z_internal_congestion_control_default_*` | — | none | no program reads these defaults (W09) |
+| A26 | batching: start, flush, stop | `zp_batch_*` | L01, L03, L08, L09, L10, L18 | observed | as A02 (W02); `z_api_batching_test` not on the release DLL (W03) |
+| A27 | the multi-threaded drive: the read and lease tasks | `zp_start_read_task` `zp_stop_read_task` `zp_read_task_is_running` `zp_start_lease_task` `zp_stop_lease_task` `zp_lease_task_is_running` `zp_task_read_options_default` `zp_task_lease_options_default` | L08, L09, L10, L18 | observed | as A02 (W02) |
+| A28 | the single-threaded drive: zp_read, keep-alive, join, spin | `zp_read` `zp_read_options_default` `zp_send_keep_alive` `zp_send_keep_alive_options_default` `zp_send_join` `zp_send_join_options_default` `zp_spin_once` | L03, L07 | absent | the release DLL is the multi-threaded arm, so a program of pico's single-threaded arm does not link against it; L07 runs this arm without std under another profile (W07) |
+| A29 | the admin space | `zp_start_admin_space` `zp_stop_admin_space` | L03 | absent | `admin-space` is off in `host-peer-ext`, as in zenoh-pico's default build (W07) |
+| A30 | platform: threads, mutexes, condition variables | `z_task_*` `z_internal_task_null` `z_mutex_*` `z_internal_mutex_null` `z_condvar_*` `z_internal_condvar_null` | L01, L03, L05, L08, L09, L10, L18 | observed | as A02 (W02) |
+| A31 | platform: memory, random numbers, sleep, clocks, wall time | `z_malloc` `z_realloc` `z_free` `z_random_*` `z_sleep_*` `z_clock_*` `zp_clock_*` `z_time_*` | L01, L02, L03, L04, L05, L07, L08, L09, L10, L18 | observed | as A02 (W02) |
+
+## 4. Build switches
+
+The population is every `Z_FEATURE_*` switch zenoh-pico's CMake defines
+(`scripts/lib/upstream_switch_map.py`), with its default there. `wz` is the declaration's answer
+for the pico ABI (`[[upstream_switch]]` of `deploy/wz-config.toml`): the crate feature it maps to,
+or `always` and `n/a`. A switch zenoh-pico's Windows port refuses is `n/a`: the release DLL is
+compared with zenoh-pico on Windows, and there zenoh-pico has no such feature.
+
+<!-- release-proof: switches -->
+| switch | pico default | pico on Windows | wz | lanes | status | gap |
+|---|---|---|---|---|---|---|
+| `Z_FEATURE_ADMIN_SPACE` | off | yes | `wz-capi-pico/admin-space` | — | absent | as A29 (W07) |
+| `Z_FEATURE_ADVANCED_PUBLICATION` | off | yes | `wz-capi-pico/advanced` | L01, L03 | unproven | W03 |
+| `Z_FEATURE_ADVANCED_SUBSCRIPTION` | off | yes | `wz-capi-pico/advanced` | L01, L03 | unproven | W03 |
+| `Z_FEATURE_AUTO_RECONNECT` | on | yes | always | — | none | no program loses its link and is held to the redial (W09) |
+| `Z_FEATURE_BATCHING` | on | yes | always | L01, L10 | observed | W02 |
+| `Z_FEATURE_BATCH_PEER_MUTEX` | off | yes | n/a | — | n/a | the same locking choice of the C implementation, for the peer list |
+| `Z_FEATURE_BATCH_TX_MUTEX` | off | yes | n/a | — | n/a | which of zenoh-pico's own mutexes a batch window holds; no behaviour a program can observe |
+| `Z_FEATURE_CONNECTIVITY` | off | yes | `wz-capi-pico/connectivity` | L01, L03 | unproven | W03 |
+| `Z_FEATURE_ENCODING_VALUES` | on | yes | always | L01, L03 | unproven | W03 |
+| `Z_FEATURE_FRAGMENTATION` | on | yes | always | L06 | unproven | pico's fragment programs and `fragment.py` run nowhere (W08); the Rust round trip runs on Windows with std only (W13) |
+| `Z_FEATURE_INTEREST` | on | yes | always | L01, L03 | unproven | every session sends interests, but no program on the release DLL asserts what they bring (W03) |
+| `Z_FEATURE_LINK_BLUETOOTH` | off | no | never | — | n/a | zenoh-pico refuses it on Windows: `vendor/zenoh-pico/src/system/windows/network.c` @ `#error "Bluetooth not supported yet on Windows port of Zenoh-Pico"` |
+| `Z_FEATURE_LINK_SERIAL` | off | no | `wz-capi-pico/transport-link-serial` | — | n/a | zenoh-pico refuses it on Windows: `vendor/zenoh-pico/src/system/windows/network.c` @ `#error "Serial not supported yet on Windows port of Zenoh-Pico"` |
+| `Z_FEATURE_LINK_SERIAL_USB` | off | no | never | — | n/a | the USB serial link of one board family; zenoh-pico has no serial link on Windows at all (`vendor/zenoh-pico/src/system/windows/network.c` @ `#error "Serial not supported yet on Windows port of Zenoh-Pico"`) |
+| `Z_FEATURE_LINK_TCP` | on | yes | always | L03, L10 | observed | W02 |
+| `Z_FEATURE_LINK_TLS` | off | yes | `wz-capi-pico/transport-link-tls` | — | absent | zenoh-pico builds it on Windows only with Mbed TLS supplied; the TLS link of the pico ABI is the tokio engine's and leaves the cooperative build (W07) |
+| `Z_FEATURE_LINK_UDP_MULTICAST` | on | yes | `wz-capi-pico/multicast-transport` | L04, L10 | observed | W02 |
+| `Z_FEATURE_LINK_UDP_UNICAST` | on | yes | `wz-capi-pico/link-udp` | L10 | observed | W02 |
+| `Z_FEATURE_LINK_WS` | off | no | `wz-capi-pico/transport-link-ws` | — | n/a | zenoh-pico allows it on emscripten alone: `vendor/zenoh-pico/cmake/feature_config.cmake` @ `Z_FEATURE_LINK_WS is currently only supported on the emscripten platform.` |
+| `Z_FEATURE_LIVELINESS` | on | yes | `wz-capi-pico/liveliness` | L01, L03 | unproven | W03 |
+| `Z_FEATURE_LOCAL_QUERYABLE` | off | yes | `wz-capi-pico/local-queryable` | L02 | absent | off in `host-peer-ext`, as in zenoh-pico's default build (W07) |
+| `Z_FEATURE_LOCAL_SUBSCRIBER` | off | yes | `wz-capi-pico/local-subscriber` | L02 | absent | off in `host-peer-ext`, as in zenoh-pico's default build (W07) |
+| `Z_FEATURE_MATCHING` | on | yes | always | L01, L03 | unproven | W03 |
+| `Z_FEATURE_MULTICAST_DECLARATIONS` | off | yes | `wz-capi-pico/multicast-declarations` | — | absent | off in `host-peer-ext`, as in zenoh-pico's default build (W07) |
+| `Z_FEATURE_MULTICAST_TRANSPORT` | on | yes | `wz-capi-pico/multicast-transport` | L04, L10 | observed | W02 |
+| `Z_FEATURE_MULTI_THREAD` | on | yes | `wz-capi-pico/multi-thread` | L08, L10 | observed | W02 |
+| `Z_FEATURE_PUBLICATION` | on | yes | always | L01, L03, L10 | observed | W02 |
+| `Z_FEATURE_QUERY` | on | yes | `wz-capi-pico/query` | L01, L03, L10 | observed | W02 |
+| `Z_FEATURE_QUERYABLE` | on | yes | `wz-capi-pico/queryable` | L01, L03, L10 | observed | W02 |
+| `Z_FEATURE_RAWETH_TRANSPORT` | off | no | `wz-capi-pico/raweth-transport` | — | n/a | zenoh-pico refuses it on Windows: `vendor/zenoh-pico/src/system/windows/network.c` @ `#error "Raw ethernet transport not supported yet on Windows port of Zenoh-Pico"` |
+| `Z_FEATURE_RX_CACHE` | off | yes | always | — | n/a | a receive-path memo with no behaviour of its own; what it buys is read in the performance cells (C02) |
+| `Z_FEATURE_SCOUTING` | on | yes | `wz-capi-pico/scout` | L01, L03 | unproven | W03 |
+| `Z_FEATURE_SESSION_CHECK` | on | yes | always | L06 | unproven | its test runs on Windows with std and the tokio engine only (W13) |
+| `Z_FEATURE_SUBSCRIPTION` | on | yes | always | L01, L03, L10 | observed | W02 |
+| `Z_FEATURE_TCP_NODELAY` | on | yes | always | — | none | its anchor is the tokio runtime; nothing reads the option off a socket of the cooperative engine (W09) |
+| `Z_FEATURE_UNICAST_PEER` | on | yes | `wz-capi-pico/peer` | L10 | observed | W02 |
+| `Z_FEATURE_UNICAST_TRANSPORT` | on | yes | always | L03, L10 | observed | W02 |
+| `Z_FEATURE_UNSTABLE_API` | off | yes | `wz-capi-pico/unstable-api` | L01, L03, L10 | observed | the nostd package test is observed, not gated (W02) |
+
+## 5. Examples
+
+Every program of `examples/unix/c11`, `examples/unix/c99` and `examples/windows`. L03 builds the
+C11 set against wz on Linux, each against a real zenoh-pico or zenohd peer, and checks that no
+program compiled to its stub `main`; nothing links zenoh-pico's C99 or Windows programs to wz.
+
+<!-- release-proof: examples -->
+| program | lanes | status | gap |
+|---|---|---|---|
+| `vendor/zenoh-pico/examples/unix/c11/z_advanced_pub.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_advanced_sub.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_bytes.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_get.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_get_attachment.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_get_channel.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_get_lat.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_get_liveliness.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_info.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_liveliness.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_ping.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pong.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pub.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pub_attachment.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pub_st.c` | L03 | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pub_thr.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pub_tls.c` | L03 | absent | the release DLL carries no TLS link (W07) |
+| `vendor/zenoh-pico/examples/unix/c11/z_pull.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_put.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_querier.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_queryable.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_queryable_attachment.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_queryable_channel.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_queryable_lat.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_scout.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_attachment.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_channel.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_liveliness.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_st.c` | L03 | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_thr.c` | L03 | unproven | run on Linux with std against pico or zenohd peers (W03) |
+| `vendor/zenoh-pico/examples/unix/c11/z_sub_tls.c` | L03 | absent | the release DLL carries no TLS link (W07) |
+| `vendor/zenoh-pico/examples/unix/c99/z_get.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_info.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_ping.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_pong.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_pub.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_pub_st.c` | — | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+| `vendor/zenoh-pico/examples/unix/c99/z_pull.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_put.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_queryable.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_scout.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_sub.c` | — | none | never linked to wz (W03) |
+| `vendor/zenoh-pico/examples/unix/c99/z_sub_st.c` | — | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+| `vendor/zenoh-pico/examples/windows/z_get.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_info.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_ping.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_pong.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_pub.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_pub_st.c` | — | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+| `vendor/zenoh-pico/examples/windows/z_pull.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_put.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_queryable.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_scout.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_sub.c` | — | none | zenoh-pico's own Windows programs; none is linked to the DLL (W03) |
+| `vendor/zenoh-pico/examples/windows/z_sub_st.c` | — | absent | a program of zenoh-pico's single-threaded arm; the release DLL is the multi-threaded one (W07) |
+
+## 6. Tests
+
+Every file at the top of zenoh-pico's `tests/` directory that is a C program or a script. `api`:
+a `z_api_*_test` program; `program`: another test program that calls zenoh-pico's public API only;
+`internal`: a test of zenoh-pico's private modules (it calls `_z_*` functions or includes private
+headers), which a drop-in with opaque handles does not have and which the gate requires to read
+`n/a`; `script`: a runner or a scenario over the example programs.
+
+<!-- release-proof: tests -->
+| program | kind | lanes | status | gap |
+|---|---|---|---|---|
+| `vendor/zenoh-pico/tests/api.sh` | script | — | n/a | the runner of the API tests; L01 reproduces its build and its run |
+| `vendor/zenoh-pico/tests/attachment.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/connection_restore.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/fragment.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/memory_leak.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/modularity.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/multicast.sh` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/no_router.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/raweth.py` | script | — | n/a | raw Ethernet is not a zenoh-pico feature on Windows (`Z_FEATURE_RAWETH_TRANSPORT`) |
+| `vendor/zenoh-pico/tests/routed.sh` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/routed_peer_client.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/single_thread.py` | script | — | none | a scenario over pico's example programs that no lane runs against wz (W08) |
+| `vendor/zenoh-pico/tests/tls_verify.sh` | script | — | absent | the release DLL carries no TLS link (W07) |
+| `vendor/zenoh-pico/tests/z_api_admin_space_test.c` | api | — | n/a | builds its keys and lists with pico-private helpers, which L01 pins as not exported; the feature is A29 |
+| `vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_alignment_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_batching_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_bytes_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_callback_drop_on_undeclare_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_cancellation_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_connectivity_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_double_drop_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_encoding_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_liveliness_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_local_queryable_test.c` | api | L02 | absent | session-local delivery is off in `host-peer-ext` (W07) |
+| `vendor/zenoh-pico/tests/z_api_local_subscriber_test.c` | api | L02 | absent | session-local delivery is off in `host-peer-ext` (W07) |
+| `vendor/zenoh-pico/tests/z_api_matching_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_null_drop_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_queryable_test.c` | api | L01 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_api_source_info_test.c` | api | — | n/a | links the pico-private `_z_bytes_len` and `_z_bytes_to_buf`, which L01 pins as not exported; the behaviour is A23, held by a program of public calls (W08) |
+| `vendor/zenoh-pico/tests/z_api_timestamp_test.c` | api | — | n/a | builds a pico session struct itself and needs a hook only a test-hooks build of pico has, which L01 pins; the behaviour is A23 (W08) |
+| `vendor/zenoh-pico/tests/z_background_executor_test.c` | internal | — | n/a | tests pico's background executor, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_bytes_test.c` | internal | — | n/a | tests pico's private byte collection (the public half is A07), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_cancellation_token_test.c` | internal | — | n/a | tests the private token and sync group (the public half is A24), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_channels_test.c` | internal | — | n/a | tests channels filled through private constructors (the public half is A18), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_client_test.c` | internal | — | n/a | tests a client session read through private string and identifier helpers, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_collections_test.c` | internal | — | n/a | tests pico's private collections, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_condvar_wait_until_test.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_data_struct_test.c` | internal | — | n/a | tests pico's private data structures, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_endpoint_test.c` | internal | — | n/a | tests the private endpoint and locator parser, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_executor_test.c` | internal | — | n/a | tests pico's executor, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_hashmap_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_hashset_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_iobuf_test.c` | internal | — | n/a | tests pico's private I/O buffers, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_json_encoder_test.c` | internal | — | n/a | tests pico's private JSON encoder, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_keyexpr_test.c` | internal | — | n/a | tests the private key expression module (the public half is A06), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_local_loopback_test.c` | internal | — | n/a | tests the private session loopback, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_lru_cache_test.c` | internal | — | n/a | tests a private cache, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_msgcodec_test.c` | internal | — | n/a | tests pico's private message codecs, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_multi_pubsub_test.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_multi_queryable_test.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_open_test.c` | internal | — | n/a | tests an open read through private transport peers (the public half is A03), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_perf_rx.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_perf_tx.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_refcount_test.c` | internal | — | n/a | tests private reference counts, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_scout_test.c` | internal | — | n/a | tests private hello processing (the public half is A20), which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_bit_vector_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_bitset_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_deque_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_hashmap_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_hashset_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_pqueue_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_static_vector_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_sync_group_test.c` | internal | — | n/a | tests a private sync group, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_test_fragment_decode_error_transport_zbuf.c` | internal | — | n/a | tests private transport encoders, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_test_fragment_reliability.c` | internal | — | n/a | tests private transport buffers, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_test_fragment_rx.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_test_fragment_tx.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_test_peer_multicast.c` | program | L04 | unproven | run on Linux with std (W03) |
+| `vendor/zenoh-pico/tests/z_test_peer_unicast.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+| `vendor/zenoh-pico/tests/z_tls_config_test.c` | program | — | absent | the release DLL carries no TLS link (W07) |
+| `vendor/zenoh-pico/tests/z_tls_test.c` | internal | — | n/a | tests the private TLS configuration parser, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_utils_test.c` | internal | — | n/a | tests private utilities, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_variant_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_vector_template_test.c` | internal | — | n/a | tests a private container template, which a drop-in does not have |
+| `vendor/zenoh-pico/tests/z_wildcard_subscription_test.c` | program | — | none | public calls only, and no lane links it to wz (W08) |
+
+## 7. Criterion (a): no cell where zenoh-pico wins
+
+<!-- release-proof: criteria -->
+| row | cell | reading | lanes | status | gap |
+|---|---|---|---|---|---|
+| C01 | size: the release DLL's code against zenoh-pico's DLL built as the same build, x64 and x86 | on Windows the client's sizes are printed with no zenoh-pico side and gate nothing (L11); on Linux the nostd client reads 565,295 bytes of text against zenoh-pico's 403,086, ratio 1.4025, a loss (`pico-client-coop-nostd` of `deploy/pico_host_ceiling.json`) | L11, L12 | unproven | W04 |
+| C02 | performance: every cell of the host matrix (round trip p50 and p99, throughput, CPU per message), tcp and multicast, batching off and on, 8 to 1024 bytes | every row of `deploy/pico_perf_ceiling_windows.json` is null: no run has filled it; the Linux table is not the release form | L14, L15 | unproven | W05 |
+| C03 | memory: the resident set of each cell beside zenoh-pico's | the `rss_kib` rows of the same table, null | L14 | unproven | W05 |
+| C04 | no allocation after a session opens, every family at 0 and locked | 14 families, none at 0 (the largest: `liveliness-token` 67.03 a round, `queryable-reply` 55), read on Linux with std | L13 | unproven | W06 |
+| C05 | the release attaches the DLL without std | `RELEASE_STDLIBS` of `scripts/lib/pico_windows_package.py` names `std` alone, and the release workflow builds no nostd package | L18 | unproven | W01 |
+| C06 | the nostd package's regression test fails its run on a red | its rows are `continue-on-error` | L10 | observed | W02 |
+| C07 | load, faults, close and reopen, a memory checker, every allocation failing in turn | Layer S on Linux with std | L16 | unproven | W11 |
+| C08 | hostile bytes from a peer into the engine, under AddressSanitizer | the cooperative engine's fuzz target on Linux with std | L17 | unproven | W10 |
+
+## 8. Criterion (c): the doors zenoh-pico does not have
+
+The population is every `wz_ext_*` function `crates/wz-capi-core/include/wz_ext.h` declares, read
+from its text with the comments removed and every `#if` arm kept, so a door of either arm has a row.
+`release DLL` says whether `host-peer-ext` builds the door's capability; production evidence is
+owed by the doors the release DLL carries. A cell that reads `none` is a gap, and its row names the
+work item. `tests` names the in-module tests, the integration tests and the C programs that call
+the doors; where they run is the crate's lanes (Layer C1 on Linux, L06 on Windows with the default
+features), not the release form.
+
+<!-- release-proof: ext -->
+| row | feature | doors | release DLL | tests | fuzz | sanitizer | coverage floor | docs | gap |
+|---|---|---|---|---|---|---|---|---|---|
+| E01 | a network stack the program supplies (`app-transport`) | `wz_ext_transport_*` `wz_ext_internal_transport_*` `wz_ext_config_transport` | yes | `crates/wz-capi-pico/tests/it/files/app_transport_doors.rs` `crates/wz-capi-pico/tests/c/pico_app_transport.c` `crates/wz-capi-pico/tests/c/pico_app_transport_dial.c` | none | L16 (valgrind memcheck over the stability test, Linux with std) | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/own_transport.c` | no fuzz target reads what a program hands `wz_ext_transport_received` (W10); no coverage floor (W12) |
+| E02 | the policies and the profile of a config stated from code (`config-policy`) | `wz_ext_config_policy` `wz_ext_config_profile` | yes | `crates/wz-capi-pico/src/config_policy.rs` `crates/wz-capi-pico/examples/c/profiles.c` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/profiles.c` | W10, W11, W12 |
+| E03 | the zenoh configuration document handed to a config (`config-document`) | `wz_ext_config_document` `wz_ext_runtime_limits_document` | yes | `crates/wz-capi-pico/src/config_policy.rs` `crates/wz-capi-pico/tests/no_heap_after_open.rs` | none (the zenoh-c ABI's config verdict has one, `crates/wz-fuzz/fuzz_targets/config.rs`; these doors have none) | none | none | `crates/wz-capi-core/include/wz_ext.h` | a JSON5 document is outside bytes and no fuzz target reads it through these doors (W10); W11, W12 |
+| E04 | the digest of the build's configuration (`conformance-digest`) | `wz_ext_conformance_digest` | yes | `crates/wz-capi-pico/src/conformance.rs` `crates/wz-capi-pico/tests/c/package_check.c` | none (takes no input) | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/package/README.md` | W11, W12 |
+| E05 | key ids every node of a deployment shares (`shared-key-ids`) | `wz_ext_config_key_ids` `wz_ext_config_key_wire_form_for` | yes | `crates/wz-capi-pico/src/key_ids.rs` `crates/wz-capi-pico/tests/it/files/key_ids_tokio.rs` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` | its round trip runs on the tokio engine only (W13); W10, W11, W12 |
+| E06 | end-to-end protection, sending side (`e2e-sender`) | `wz_ext_e2e_sender_*` `wz_ext_internal_e2e_sender_*` | yes | `crates/wz-capi-pico/src/e2e.rs` `crates/wz-capi-pico/tests/it/files/e2e_doors.rs` `crates/wz-capi-pico/examples/c/e2e.c` | none (the zenoh-c ABI's sender has one, `crates/wz-fuzz/fuzz_targets/sender.rs`; these doors have none) | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/e2e.c` | W10, W11, W12 |
+| E07 | end-to-end protection, the receiving judge, one per sender (`e2e-receiver`, `e2e-sender-demux`) | `wz_ext_e2e_receiver_*` `wz_ext_internal_e2e_receiver_*` | yes | `crates/wz-capi-pico/src/e2e.rs` `crates/wz-capi-pico/tests/it/files/e2e_doors.rs` `crates/wz-capi-pico/examples/c/e2e.c` | none (the dissector's protection doors have one, `crates/wz-fuzz/fuzz_targets/e2e.rs`; the judge has none) | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/e2e.c` | the judge reads frames from the wire and no fuzz target drives it (W10); W11, W12 |
+| E08 | supervision of periodic streams on reception (`e2e-supervision`) | `wz_ext_stream_supervisor_*` `wz_ext_internal_stream_supervisor_*` | yes | `crates/wz-capi-pico/src/stream_supervision.rs` `crates/wz-capi-pico/tests/it/files/stream_supervision_doors.rs` `crates/wz-capi-pico/examples/c/supervision.c` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/supervision.c` | W10, W11, W12 |
+| E09 | the instance of a message read from its payload (`instance-key`) | `wz_ext_instance_keyer_*` `wz_ext_internal_instance_keyer_*` | yes | `crates/wz-capi-pico/tests/it/files/instance_key_doors.rs` `crates/wz-capi-pico/examples/c/keyed.c` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/keyed.c` | reads fields of payloads it is handed and no fuzz target drives it (W10); W11, W12 |
+| E10 | a deployment's messages declared once as data (`message-catalog`) | `wz_ext_message_catalog_*` `wz_ext_internal_message_catalog_*` | yes | `crates/wz-capi-pico/tests/it/files/message_catalog_doors.rs` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` | a catalog is outside text and no fuzz target reads it through these doors (W10); W11, W12 |
+| E11 | a catalog message's payload set and read by field path (`message-payload`) | `wz_ext_payload_schema_*` `wz_ext_internal_payload_schema_*` `wz_ext_message_payload_*` `wz_ext_internal_message_payload_*` | yes | `crates/wz-capi-pico/tests/it/files/message_payload_doors.rs` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` | `wz_ext_message_payload_decode` and the schema reader take outside bytes and no fuzz target drives them (W10); W11, W12 |
+| E12 | the replay cache: what each publisher last sent, replayed to a late subscriber (`replay-cache`) | `wz_ext_replay_*` `wz_ext_internal_replay_*` | yes | `crates/wz-capi-pico/src/replay_publisher.rs` `crates/wz-capi-pico/src/replay_subscriber.rs` `crates/wz-capi-pico/tests/it/files/replay_cache_doors.rs` `crates/wz-capi-pico/examples/c/history.c` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` `crates/wz-capi-pico/examples/c/history.c` | W10, W11, W12 |
+| E13 | the extension interface the additional doors read the core through | `wz_ext_interface_*` `wz_ext_additional_interface` | yes | `crates/wz-capi-pico/src/ext_interface.rs` `crates/wz-capi-pico/src/additional_view_tests.rs` `crates/wz-integration-tests/tests/it/files/pico_additional_split_wire.rs` | none (takes no outside bytes) | none | none | `docs/capi-pico-additional-library.md` `crates/wz-capi-core/include/wz_ext.h` | W11, W12 |
+| E14 | the core's own doors of the unstable surface: what an open asks of the system, a redeclaration, a get to one peer | `wz_ext_config_device_requires` `wz_ext_redeclare` `wz_ext_get_to_peer` | yes | `crates/wz-capi-pico/src/device_requires.rs` `crates/wz-capi-pico/src/redeclare.rs` `crates/wz-capi-pico/tests/it/files/get_to_peer_door.rs` | none | none | none | `crates/wz-capi-core/include/wz_ext.h` `docs/target-build-contract.md` | W10, W11, W12 |
+| E15 | the clock a program registers (`clock-source`) | `wz_ext_clock_*` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E16 | the event ring (`event-ring`) | `wz_ext_event_*` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E17 | the checkpoint supervisor that feeds a hardware watchdog (`supervision`) | `wz_ext_supervision_*` | no | — | — | — | — | — | left out of `host-peer-ext` on purpose (the profile says why) |
+| E18 | resource snapshots (`resource-snapshot`) | `wz_ext_snapshot_*` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E19 | the most memory a session holds (`session-memory`) | `wz_ext_session_memory*` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E20 | the sending side of a segmented message (`segment-sender`) | `wz_ext_segment_*` `wz_ext_internal_segment_sender_*` | no | — | — | — | — | — | left out of `host-peer-ext` on purpose (the profile says why) |
+| E21 | a time base the program moves (`time-base`) | `wz_ext_time_base_*` `wz_ext_internal_time_base_*` `wz_ext_config_time_base` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E22 | process pools a program reserves or places itself (`object-pool`) | `wz_ext_object_pool_*` | no | — | — | — | — | — | not in `host-peer-ext`; the reservation at the first call it serves is the subject of W06 |
+| E23 | a watch on the peers' declarations (`remote-declaration-watch`, `declarations-synced-event`) | `wz_ext_decl_watch_*` | no | — | — | — | — | — | not in `host-peer-ext` |
+
+## 9. Work to close the gaps
+
+In order of priority. P0 is what the release criteria cannot be met without; P1 completes the
+proof; P2 is a strengthening. `files` is where the work lands, for planning merges: the engine
+files of the no-heap units (`crates/wz-capi-coop/src/engine.rs`, `crates/wz-capi-pico/src/keyexpr.rs`)
+are owned by those units and are not this ledger's to touch.
+
+<!-- release-proof: work -->
+| item | priority | what | estimate | files |
+|---|---|---|---|---|
+| W01 | P0 | Ship the release form: the release workflow builds and attaches the package with `--stdlib nostd` (single form, x64 and x86) as the default DLL, `RELEASE_STDLIBS` names `nostd`, and `--release` holds the attached set to it; the release notes and usage say which form a recipient gets | small: a matrix row, a constant, the release check's expectation and its selftest arm, two package documents | `.github/workflows/release.yml` `scripts/lib/pico_windows_package.py` `crates/wz-capi-pico/package/RELEASE-NOTES.md` `docs/release.md` |
+| W02 | P0 | Gate the nostd package rows: drop `continue-on-error` from the `nostd` rows of `package-windows` once two consecutive hosted runs read every verdict line of them green (the workflow's own promotion rule); every row this ledger reads `observed` then reads `proven` | small once green; the runs decide when | `.github/workflows/platform.yml` |
+| W03 | P0 | zenoh-pico's own tests and examples on the release DLL, on Windows: compile with MSVC against the nostd package's headers and import library, and run, the API tests L01 runs (the routed ones beside a zenohd built for Windows, as `api.sh` runs them), the C11 examples that are not of a POSIX-only arm, and every program of `examples/windows`, each against a zenoh-pico or zenohd peer as L03 does on Linux; the stub check of L01 (a body that never calls `z_open`) carries over | large: a Windows runner of pico's programs inside the package test or a step of its own, a zenohd for Windows, the peer binaries built with MSVC, and a hosted budget for the routed programs | `scripts/lib/pico_windows_package.py` `.github/actions/pico-windows-package/action.yml` `.github/workflows/platform.yml` `scripts/pico-c-program.sh` |
+| W04 | P0 | Size on Windows: build zenoh-pico as the same build with MSVC (the switch derivation `windows-plan` of the performance runner already makes), read both DLLs' text from their section tables, and hold the ratio of the release DLL in a Windows row of the ceiling locked at WIN; the Linux nostd client, 1.4025 today, is the reading the size work starts from | medium for the gate; the fall to 1.0 is the size work of `docs/c-abi-size-diet.md` | `scripts/lib/pico_windows_package.py` `scripts/lib/capability_cost_gate.py` `deploy/pico_host_ceiling.json` `docs/upstream-parity.md` |
+| W05 | P0 | Performance and memory on Windows: run the matrix on pc3-win against the nostd package of a Platform run, fill `deploy/pico_perf_ceiling_windows.json` from the gate's own output (never by hand), and lock every row at WIN; a loss is a debt paid before the release | medium per run; the engine work for any losing cell is its own | `scripts/host-bench/windows/perf_matrix.ps1` `scripts/host-bench/perf_matrix.py` `deploy/pico_perf_ceiling_windows.json` `docs/pico-perf-matrix.md` |
+| W06 | P0 | No allocation after open: every family of `deploy/no_heap_ratchet.json` at 0 and locked, read on the release feature list, and the same reading taken of the nostd DLL on Windows (the process heap counted by the OS layer's allocator); the units of `docs/c-abi-no-heap-pools.md` section 6 do the conversion | large: the remaining units of the no-heap track, owned by their own workers | `crates/wz-capi-pico/tests/no_heap_after_open.rs` `deploy/no_heap_ratchet.json` `docs/c-abi-no-heap-pools.md` |
+| W07 | P1 | Decide what the release carries of the zenoh-pico features the release DLL leaves out (the admin space, session-local delivery, multicast declarations, the TLS link, the single-threaded arm): each is either turned on in `host-peer-ext`, at its measured size, or shipped as a second package with its own proof, or written down as out of the release with the owner's reason | small to decide; each carried feature then owes W03 and W04 for itself | `configs/profiles/host-peer-ext.conf` `docs/release.md` |
+| W08 | P1 | The zenoh-pico programs and scenarios no lane runs: the public-call test programs (`z_multi_pubsub_test`, `z_multi_queryable_test`, `z_wildcard_subscription_test`, `z_condvar_wait_until_test`, the fragment pair, the perf pair, `z_test_peer_unicast`) and the scenario scripts (`attachment.py`, `connection_restore.py`, `fragment.py`, `memory_leak.py`, `modularity.py`, `no_router.py`, `routed_peer_client.py`, `single_thread.py`, `routed.sh`, `multicast.sh`), first on Linux beside L01, then on the release DLL with W03; and a program of public calls for what the source-info and timestamp tests reach privately | medium | `crates/wz-integration-tests/tests/it/files/pico_upstream_api_tests_on_wz.rs` `scripts/run-ci.sh` |
+| W09 | P1 | Witness on the release DLL what no program reads: the QoS and locality defaults, TCP_NODELAY on the cooperative engine's sockets, and the redial of a lost link | small for the defaults (the package's check program); medium for the redial | `crates/wz-capi-pico/tests/c/package_check.c` |
+| W10 | P1 | Fuzz the doors of the release DLL that take outside bytes: the payload decode and schema reader, the catalog reader, the end-to-end judge, the instance keyer, the configuration document, the transport a program feeds, in a fuzz package of their own (cargo unifies features, so the pico ABI's doors meet no other package's selection), with seeds derived by the seed script and a regress leg in Layer Fz | medium: one package, about six targets, their seeds | `crates/wz-fuzz/README.md` `scripts/lib/fuzz_seeds.py` `scripts/fuzz.sh` |
+| W11 | P1 | A sanitizer lane for the pico C ABI: its door tests and the C programs of the package under AddressSanitizer and UndefinedBehaviorSanitizer on Linux, and the package's programs under MSVC's AddressSanitizer on Windows | medium | `scripts/run-ci.sh` `.github/workflows/ci.yml` `scripts/lib/pico_windows_package.py` |
+| W12 | P1 | A coverage floor: line coverage of each door module of the release feature list, one ratchet row a module that may only rise, held by a gate in the shape of the no-heap ratchet | medium: a gate, its table, a lane | `scripts/run-ci.sh` |
+| W13 | P2 | Run the door tests of the pico ABI crate on Windows with the release feature list on the cooperative engine and without std, where the Platform job runs the default features on the tokio engine with std | small: a step of the `capi-coop` job | `.github/workflows/platform.yml` |
+
+The order the P0 items depend on each other in: W01 and W02 first, since every later reading is of
+the nostd package; W03 then turns most `unproven` rows of sections 3 to 6 into rows of the release
+form; W04, W05 and W06 are the measurements of criterion (a), each of which can find a loss that
+is engine work of its own. A row moves to `proven` only by a lane of the release form being
+gated, which is why W02 moves every `observed` row at once and nothing else does.
+
+## 10. What the gate holds
+
+`scripts/lib/release_proof_ledger_gate.py --check`, in Layer C0 beside the drop-in header gate whose
+reader it uses, and in the pre-push hook's round-fed gates:
+
+- each table of this note is present, with its columns, under its marker;
+- the populations: every public function and generic macro of zenoh-pico's header is claimed by an
+  API row and every pattern claims a name; the switch rows are exactly zenoh-pico's `Z_FEATURE_*`
+  switches, each with its CMake default; the example and test rows are exactly the programs of
+  those directories; every `wz_ext_*` door is claimed by a row of section 8;
+- the lanes: every source file and workflow job exists, every program pattern matches a file, and
+  `release form` is what the host, form and profile make it;
+- the statuses: a derived status equals what the cited lanes make it; an API row's lane names one of
+  the row's functions; an example or test row's lane runs that program; an `internal` test reads
+  `n/a`; a switch zenoh-pico refuses on Windows reads `n/a`;
+- the gaps: a row short of `proven` names a work item, except `n/a`, which gives its reason; a door
+  the release DLL carries has every evidence cell filled, and a `none` names a work item; every
+  work item cited exists, and every work item is cited.
+
+What it does not hold: that a lane's program actually reaches the code a row names (section 1), and
+whether a lane was green on its last run. The first is W03's to make exact; the second is the
+lane's own verdict.

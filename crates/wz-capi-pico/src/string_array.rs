@@ -125,14 +125,14 @@ impl StringArrayState {
         matches!(self.items, Items::Lent { .. })
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match &self.items {
             Items::Owned(entries) => entries.len(),
             Items::Lent { len, .. } => *len,
         }
     }
 
-    fn view(&self, k: usize) -> Option<&z_loaned_string_t> {
+    pub(crate) fn view(&self, k: usize) -> Option<&z_loaned_string_t> {
         match &self.items {
             Items::Owned(entries) => entries.get(k).map(|entry| &entry.view),
             // SAFETY: `k` is within the views, which outlive the array (`Self::lent`).

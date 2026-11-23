@@ -54,16 +54,18 @@ static const char *const REFUSED[] = {
     "{ wz: ",
 };
 
+/* Each count is raised on a session thread and read on the program's, under the counter's lock:
+ * a plain flag written by one thread and polled by another is a data race. */
 static struct {
     ex_counter_t samples;
-    volatile int stamped;
+    ex_counter_t stamped; /* the samples that carried a timestamp */
 } heard;
 
 static struct {
     ex_counter_t replies;
-    volatile int done;
-    volatile int stamped;
-    char payload[64];
+    ex_counter_t done;    /* the gets whose reply closure was dropped */
+    ex_counter_t stamped; /* the replies that carried a timestamp */
+    char payload[64];     /* written before `replies` is raised, read after it is seen raised */
 } asked;
 
 static z_owned_session_t listener_session;
@@ -73,7 +75,7 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
     char text[64];
     ex_payload_text(z_sample_payload(sample), text, sizeof text);
     if (strcmp(text, "stamped") != 0) return;
-    heard.stamped = z_sample_timestamp(sample) != NULL;
+    if (z_sample_timestamp(sample) != NULL) ex_counter_add(&heard.stamped, 1);
     ex_counter_add(&heard.samples, 1);
 }
 
@@ -93,19 +95,19 @@ static void on_reply(z_loaned_reply_t *reply, void *arg) {
     if (!z_reply_is_ok(reply)) return;
     const z_loaned_sample_t *sample = z_reply_ok(reply);
     ex_payload_text(z_sample_payload(sample), asked.payload, sizeof asked.payload);
-    asked.stamped = z_sample_timestamp(sample) != NULL;
+    if (z_sample_timestamp(sample) != NULL) ex_counter_add(&asked.stamped, 1);
     ex_counter_add(&asked.replies, 1);
 }
 
 static void on_reply_drop(void *arg) {
     (void)arg;
-    asked.done = 1;
+    ex_counter_add(&asked.done, 1);
 }
 
 /* Ask until a get is answered or the bound runs out; whether one was. */
 static int ask(const z_loaned_session_t *session) {
     for (int attempt = 0; attempt < 15; attempt++) {
-        asked.done = 0;
+        int dropped = ex_counter_get(&asked.done);
         z_owned_closure_reply_t closure;
         z_closure_reply(&closure, on_reply, on_reply_drop, NULL);
         z_view_keyexpr_t ke;
@@ -116,7 +118,7 @@ static int ask(const z_loaned_session_t *session) {
         if (z_get(session, z_view_keyexpr_loan(&ke), "", z_closure_reply_move(&closure), &options) != Z_OK) {
             return 0;
         }
-        for (int i = 0; i < 500 && !asked.done; i++) z_sleep_ms(10);
+        (void)ex_wait_for(&asked.done, dropped + 1, 5000);
         if (ex_counter_get(&asked.replies) > 0) return 1;
     }
     return 0;
@@ -160,10 +162,10 @@ static z_result_t open_session(z_owned_session_t *session, int dial, const char 
 static void run_round(const char *what, const char *document, int opt_in) {
     printf("%s: %s: entity-timestamp-opt-in %s\n", EXAMPLE_NAME, what, opt_in ? "on" : "off (upstream)");
     ex_counter_init(&heard.samples);
+    ex_counter_init(&heard.stamped);
     ex_counter_init(&asked.replies);
-    heard.stamped = 0;
-    asked.done = 0;
-    asked.stamped = 0;
+    ex_counter_init(&asked.done);
+    ex_counter_init(&asked.stamped);
     asked.payload[0] = '\0';
     char locator[64];
     snprintf(locator, sizeof locator, "tcp/127.0.0.1:%u", ex_port());
@@ -172,7 +174,10 @@ static void run_round(const char *what, const char *document, int opt_in) {
     CHECK(rc == Z_OK, "%s: the listener did not open on %s (rc %d)", what, locator, (int)rc);
     if (rc != Z_OK) {
         ex_counter_drop(&heard.samples);
+        ex_counter_drop(&heard.stamped);
         ex_counter_drop(&asked.replies);
+        ex_counter_drop(&asked.done);
+        ex_counter_drop(&asked.stamped);
         return;
     }
 
@@ -209,19 +214,19 @@ static void run_round(const char *what, const char *document, int opt_in) {
         }
         CHECK(ex_counter_get(&heard.samples) > 0, "%s: the subscriber was never handed a sample", what);
         if (opt_in) {
-            CHECK(!heard.stamped, "%s: under opt-in the subscriber, declared without opting in, saw a timestamp",
+            CHECK(ex_counter_get(&heard.stamped) == 0, "%s: under opt-in the subscriber, declared without opting in, saw a timestamp",
                   what);
         } else {
-            CHECK(heard.stamped, "%s: under the upstream profile the subscriber did not see the put's timestamp",
+            CHECK(ex_counter_get(&heard.stamped) > 0, "%s: under the upstream profile the subscriber did not see the put's timestamp",
                   what);
         }
 
         CHECK(ask(z_session_loan(&dialer)), "%s: no get was answered", what);
         CHECK(strcmp(asked.payload, "answered") == 0, "%s: the reply was '%s'", what, asked.payload);
         if (opt_in) {
-            CHECK(!asked.stamped, "%s: under opt-in the querier saw the reply's timestamp", what);
+            CHECK(ex_counter_get(&asked.stamped) == 0, "%s: under opt-in the querier saw the reply's timestamp", what);
         } else {
-            CHECK(asked.stamped, "%s: under the upstream profile the querier did not see the reply's timestamp",
+            CHECK(ex_counter_get(&asked.stamped) > 0, "%s: under the upstream profile the querier did not see the reply's timestamp",
                   what);
         }
         ex_close(&dialer);
@@ -231,7 +236,10 @@ static void run_round(const char *what, const char *document, int opt_in) {
     z_queryable_drop(z_queryable_move(&queryable));
     ex_close(&listener_session);
     ex_counter_drop(&heard.samples);
+    ex_counter_drop(&heard.stamped);
     ex_counter_drop(&asked.replies);
+    ex_counter_drop(&asked.done);
+    ex_counter_drop(&asked.stamped);
 }
 
 int main(void) {

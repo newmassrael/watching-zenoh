@@ -1,9 +1,10 @@
 {
-  "about": "The W over P rows of the pico ABI performance matrix measured on Windows x64 (docs/pico-perf-matrix.md section 6): arm W the library of the Windows package, arm P zenoh-pico built with MSVC as the same build, run by scripts/host-bench/windows/perf_matrix.ps1 and judged by `scripts/host-bench/perf_matrix.py --gate` on the reading it writes. The rows, their four shapes and the rule are those of deploy/pico_perf_ceiling.json; `platform` keeps the two apart, so a run is judged only against the rows of the platform it was made on. A row is written only from the gate's own output for a run, never by hand.",
+  "about": "The W over P rows of the pico ABI performance matrix measured on Windows x64 (docs/pico-perf-matrix.md section 6): arm W the library of the Windows package, arm P zenoh-pico built with MSVC as the same build, run by scripts/host-bench/windows/perf_matrix.ps1 and judged by `scripts/host-bench/perf_matrix.py --gate` on the reading it writes. The rows, their four shapes and the rule are those of deploy/pico_perf_ceiling.json; `platform` keeps the two apart, so a run is judged only against the rows of the platform it was made on, and `stdlib` (`nostd`, the package a release ships) against the rows of the library it measured. A row is written only from the gate's own output for a run, never by hand.",
   "schema": "wz-pico-perf-ceiling/1",
   "pair": "W/P",
   "engine": "coop",
   "platform": "windows-x64",
+  "stdlib": "nostd",
   "tolerance": 0.05,
   "rows": {
     "tcp/off/rtt/8/rtt_p50_us": null,

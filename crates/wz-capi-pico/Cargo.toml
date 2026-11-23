@@ -546,14 +546,17 @@ time-base = [
     "wz-capi-core?/time-base",
     "wz-capi-coop?/time-base",
 ]
-# `object-pool`: fixed pools, one per kind of object, that the objects behind the owned handles (a
-# session, a publisher, a subscriber, a queryable, a liveliness token, an owned sample, reply or
-# query, a payload) are taken from in place of the heap, with no fallback to it: reserved by the
-# first object from the build's limits (`HELD_*` and the session limits), or by the program before
-# it (`wz_ext_object_pool_*`), each count held to the bound of the session limit that bounds the
-# object. A full pool refuses the object with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`. wz's own, off as the
-# reference build is, and part of the unstable surface. The pools are this ABI's and serve either
-# engine, so it selects neither.
+# `object-pool`: the doors through which a program reserves, with counts of its own, the fixed pools
+# the objects it holds outside a session are taken from (a session, a publisher, a subscriber, a
+# queryable, a liveliness token, an owned sample, reply or query, a payload, a config, a kept hello),
+# and reads what they hold (`wz_ext_object_pool_*`), each count held to the bound of the session
+# limit that bounds the object. wz's own, off as the reference build is, and part of the unstable
+# surface. The pools are not the doors': a library without the tokio engine has them in every build,
+# reserved by its first object from the build's limits (`HELD_*` and the session limits), with no
+# fallback to the heap (`src/process_pool.rs`, set by `build.rs`), so a build without the unstable
+# surface makes no allocation for them either. On the tokio engine, which otherwise keeps those
+# objects on the heap, the doors bring the pools with them. They serve either engine, so it selects
+# neither.
 object-pool = ["unstable-api", "wz-capi-core?/object-pool"]
 # `object-pool-region`: the same pools over memory the program hands over
 # (`wz_ext_object_pool_place`), for a program that states where its memory lies.
