@@ -246,8 +246,6 @@ pub mod process_limits;
 // The open stage of the policies: a document's statements composed in layers over a base into one
 // snapshot and the origin of each value, or every refusal found. The core is no_std and no_alloc;
 // the reader of a JSON5 tree needs `alloc`. Documented from inside.
-// Totality debt TD-048 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod policy_document;
 
 // The `wz/limits` members every door that reads a document is held to, and what each kind of
