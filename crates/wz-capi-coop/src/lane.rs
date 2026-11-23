@@ -1691,21 +1691,19 @@ impl SampleLane {
     }
 }
 
-/// How many samples of one datagram the pending table holds: as many as the lane has event slots,
-/// which the session's limits size. A datagram that carries more has the rest kept by its link
-/// and handed out in the next round.
-const PENDING_SAMPLES: usize = caps::DELIVERY_LANE_EVENTS;
+/// The callbacks one sample owes at most: one for each subscriber of the session, and no more than
+/// the pending table holds.
+const SAMPLE_CALLBACKS: usize =
+    least::<{ caps::MAX_SUBSCRIPTIONS }, { caps::DELIVERY_LANE_CALLBACKS }>();
 
-/// How many callbacks the samples of the pending table owe at most, one for each subscriber each
-/// of them reaches.
-const PENDING_CALLBACKS: usize = caps::DELIVERY_LANE_CALLBACKS;
-
-/// The callbacks one sample owes at most: one for each subscriber of the session.
-const SAMPLE_CALLBACKS: usize = if caps::MAX_SUBSCRIPTIONS < PENDING_CALLBACKS {
-    caps::MAX_SUBSCRIPTIONS
-} else {
-    PENDING_CALLBACKS
-};
+/// The lesser of two capacities the build sizes.
+const fn least<const A: usize, const B: usize>() -> usize {
+    if A < B {
+        A
+    } else {
+        B
+    }
+}
 
 /// The bytes of the keys the pending table writes: a key the session resolved from an alias lies
 /// in a frame of the dispatch, gone when the callbacks run.
@@ -1731,8 +1729,12 @@ struct PendingEntry {
 /// they owe, in order, and the keys it wrote.
 struct PendingTable {
     datagram: (*const u8, usize),
-    entries: BoundedVec<PendingEntry, PENDING_SAMPLES, Static>,
-    callbacks: BoundedVec<(SubId, SubscriberCallback), PENDING_CALLBACKS, Static>,
+    /// As many samples of one datagram as the lane has event slots, which the session's limits
+    /// size. A datagram that carries more has the rest kept by its link and handed out in the next
+    /// round.
+    entries: BoundedVec<PendingEntry, { caps::DELIVERY_LANE_EVENTS }, Static>,
+    /// The callbacks the samples owe at most, one for each subscriber each of them reaches.
+    callbacks: BoundedVec<(SubId, SubscriberCallback), { caps::DELIVERY_LANE_CALLBACKS }, Static>,
     keys: BoundedVec<u8, PENDING_KEY_BYTES, Static>,
     /// The key written last, which the samples on it that follow share.
     key: Option<Span>,
