@@ -1307,8 +1307,9 @@ impl PublisherQos {
 
     /// `opts` as this publisher sends it: its QoS on top of whatever the call
     /// carried, and its encoding when the call carried none. Taken by value, so the call's
-    /// attachment and encoding move into what is sent and are not copied.
-    fn apply<'a>(&self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
+    /// attachment and encoding move into what is sent and are not copied; the publisher's
+    /// encoding is lent for the publish, so a put copies none of it.
+    fn apply<'a>(&'a self, opts: PublishOptions<'a>) -> PublishOptions<'a> {
         let mut out = opts
             .with_priority(self.priority)
             .with_congestion_control(self.congestion_control)
@@ -1316,8 +1317,8 @@ impl PublisherQos {
             .with_reliability(self.reliability)
             .with_locality(self.destination);
         if out.encoding.is_none() {
-            if let Some(encoding) = self.encoding.clone() {
-                out = out.with_encoding(encoding);
+            if let Some(encoding) = &self.encoding {
+                out = out.with_encoding_lent(encoding);
             }
         }
         out

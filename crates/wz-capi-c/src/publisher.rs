@@ -568,7 +568,7 @@ impl PutOverrides {
     /// overrides for as long as the publish runs.
     fn apply<'a>(&'a self, base: PublishOptions<'a>) -> PublishOptions<'a> {
         let with_encoding = match &self.encoding {
-            Some(hint) => base.with_encoding(hint.clone()),
+            Some(hint) => base.with_encoding_lent(hint),
             None => base,
         };
         let with_attachment = match self.attachment.as_deref() {

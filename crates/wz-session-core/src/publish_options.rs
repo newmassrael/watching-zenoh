@@ -24,6 +24,8 @@
 //! are features of this crate; the runtime's features of the same names forward to them, so the
 //! answer in a tokio build is the answer it always was.
 
+use alloc::borrow::Cow;
+
 use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
@@ -91,8 +93,10 @@ pub struct PublishOptions<'a> {
     /// Del-kind ignores this field (zenoh-pico `_z_msg_del_t` has no encoding slot). Wire-side
     /// propagation is built (R233, `gated_encoding_field` on the Put body, gated
     /// `pubsub-encoding`) and foreign-proven — R311y207 (`wz_encoding_to_pico_zsub`,
-    /// `text/plain` decoded by pico); loopback honours it from R232.
-    pub encoding: Option<EncodingHint>,
+    /// `text/plain` decoded by pico); loopback honours it from R232. Lent by a holder that keeps
+    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`]), or
+    /// owned ([`Self::with_encoding`]).
+    pub encoding: Option<Cow<'a, EncodingHint>>,
     /// R232 — body-level source identification propagated to `Sample.source_info`. Cooperates
     /// with the R231 self-echo dedup: when the dispatcher fires on a wire-arrived Push whose
     /// `source_info.zid` matches the session's own zid, the dedup suppresses the duplicate fire so
@@ -143,7 +147,8 @@ pub struct PublishOptions<'a> {
 
 impl<'a> PublishOptions<'a> {
     /// These options without their attachment, and the attachment they borrowed: what a holder
-    /// that keeps the options past the call they were made for keeps, the bytes copied by it.
+    /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
+    /// encoding they were lent is copied into what is kept.
     pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
         let Self {
             allowed_destination,
@@ -172,7 +177,7 @@ impl<'a> PublishOptions<'a> {
                 reliability,
                 kind,
                 timestamp,
-                encoding,
+                encoding: encoding.map(|encoding| Cow::Owned(encoding.into_owned())),
                 source_info,
                 attachment: None,
                 qos,
@@ -287,7 +292,15 @@ impl<'a> PublishOptions<'a> {
     /// stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
-        self.encoding = Some(encoding);
+        self.encoding = Some(Cow::Owned(encoding));
+        self
+    }
+
+    /// [`Self::with_encoding`] with an encoding its holder keeps for as long as the publish runs:
+    /// a publisher's declared encoding is lent to each put that names none, and copied nowhere.
+    #[cfg(feature = "pubsub-encoding")]
+    pub fn with_encoding_lent(mut self, encoding: &'a EncodingHint) -> Self {
+        self.encoding = Some(Cow::Borrowed(encoding));
         self
     }
 
@@ -482,7 +495,7 @@ impl<'a> PublishOptions<'a> {
     pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
             timestamp: gated_timestamp(self.timestamp.as_ref()),
-            encoding: gated_encoding(self.encoding.as_ref()),
+            encoding: gated_encoding(self.encoding.as_deref()),
             source_info: gated_source_info(self.source_info.clone()),
             attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
@@ -801,6 +814,25 @@ metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
 #[cfg(test)]
 mod plain_put_tests {
     use super::*;
+
+    /// A lent encoding is what the publish carries, read where its holder keeps it, and options
+    /// kept past the call keep a copy of it: the holder's own is left as it was.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn a_lent_encoding_is_carried_and_copied_only_into_options_that_are_kept() {
+        let declared = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's']),
+        };
+        let lent = PublishOptions::put().with_encoding_lent(&declared);
+        assert!(matches!(lent.encoding, Some(Cow::Borrowed(_))));
+        assert_eq!(lent.push_metadata().encoding, Some(&declared));
+        let (kept, _) = lent.into_owned_parts();
+        assert!(matches!(kept.encoding, Some(Cow::Owned(_))));
+        assert_eq!(kept.encoding.as_deref(), Some(&declared));
+        let owned = PublishOptions::put().with_encoding(declared.clone());
+        assert!(matches!(owned.encoding, Some(Cow::Owned(_))));
+    }
 
     /// The constant the engine's tests read the build from is the answer of the function it
     /// stands for, and a Put that is not plain is no plain Put in any build.

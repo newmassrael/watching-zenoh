@@ -2072,10 +2072,10 @@ fn loopback_drops_timestamp_when_feature_off() {
 #[test]
 fn loopback_drops_encoding_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.encoding = Some(crate::sample::EncodingHint {
+    opts.encoding = Some(std::borrow::Cow::Owned(crate::sample::EncodingHint {
         packed_id: 13,
         schema: Some("application/json".into()),
-    });
+    }));
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.encoding.is_none(),
