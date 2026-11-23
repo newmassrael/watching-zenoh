@@ -128,7 +128,10 @@ const REENTERED: TlsError = TlsError::State;
 impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
     type Error = TlsStreamError<S::Error>;
 
-    type Link<B: AsMut<[u8]> + 'static, X: wz_runtime_coop::link_storage::TxStore + 'static>
+    type Link<
+        B: wz_runtime_coop::link_storage::RxStore + 'static,
+        X: wz_runtime_coop::link_storage::TxStore + 'static,
+    >
         = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
     where
         Self: 'static;

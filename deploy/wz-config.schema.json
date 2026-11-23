@@ -986,6 +986,19 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "RX_POOL_BUFFERS": {
+              "description": "How many receive buffers, each of the batch a session advertises, the links of a session share when its engine lends their buffers from the session's memory at open.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 4,
+              "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "SESSION_MAX_PEER_KEYEXPR_ALIASES": {
               "description": "The key expressions all the peers of a session may have declared to it at a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES.",
               "oneOf": [

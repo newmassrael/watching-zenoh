@@ -28,7 +28,9 @@ use wz_capi_pico::{
 };
 use wz_runtime_tokio_test_support::free_port;
 use wz_session_core::limits::SessionLimits;
+#[cfg(feature = "engine-tokio")]
 use wz_session_core::policy::SessionPolicy;
+#[cfg(feature = "engine-tokio")]
 use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::session_memory::{session_tables, Captures};
 
@@ -85,12 +87,27 @@ fn row<'a>(rows: &'a [Row], part: &str) -> &'a Row {
 
 /// The batches one link's transmit queue holds, every priority's together, for a session that
 /// opens under `limits` and the build's policies.
+#[cfg(feature = "engine-tokio")]
 fn queued_batches(limits: &SessionLimits) -> usize {
     TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), limits)
         .sizes
         .iter()
         .sum()
 }
+
+/// The batches one link holds to transmit from on the cooperative engine: the slots its arena
+/// lends each link, whatever queue sizes `limits` states.
+#[cfg(not(feature = "engine-tokio"))]
+fn queued_batches(_limits: &SessionLimits) -> usize {
+    wz_capi_coop::arena::LINK_TX_SLOTS
+}
+
+/// The basis the transmit row names: the queue sizes on the tokio engine, the arena's slots on the
+/// cooperative one.
+#[cfg(feature = "engine-tokio")]
+const TX_BASIS: &str = "PICO_TX_QUEUE_SIZE";
+#[cfg(not(feature = "engine-tokio"))]
+const TX_BASIS: &str = "LINK_TX_SLOTS";
 
 /// Opens a listener and a session that dials it, runs `check` on both, and lets them go.
 fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loaned_session_t)) {
@@ -160,7 +177,7 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         // A config that states no limit opens under the build's snapshot.
         let limits = SessionLimits::defaults();
         let queue = row(&dialled, "link transmit queues");
-        assert_eq!(queue.basis, "PICO_TX_QUEUE_SIZE");
+        assert_eq!(queue.basis, TX_BASIS);
         assert_eq!(
             (queue.door.bounded, queue.door.count, queue.door.entry_bytes),
             (

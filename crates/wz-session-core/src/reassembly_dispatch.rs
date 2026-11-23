@@ -1557,6 +1557,29 @@ where
             None => false,
         }
     }
+
+    /// End every chain of `peer_key`, whatever its channel: its link is gone, and a Router that
+    /// the links of a session share would otherwise hold the chains until their deadline, and
+    /// splice a later link's fragments of the same peer onto them. Each is driven through the
+    /// abort arm [`Self::abort_channel`] drives. Answers how many were ended.
+    pub fn abort_peer(&mut self, peer_key: &[u8]) -> usize {
+        let mut ended = 0;
+        for idx in 0..SLOTS {
+            let of_peer = self.slots[idx]
+                .open
+                .as_ref()
+                .is_some_and(|open| open.key.same_peer(peer_key));
+            if of_peer {
+                self.abort(
+                    idx,
+                    ReassemblySlotEvent::FragmentOoo,
+                    AbortReason::OutOfOrder,
+                );
+                ended += 1;
+            }
+        }
+        ended
+    }
 }
 
 /// Build the typed `fragment.chunk` event. The slot FSM's only guard

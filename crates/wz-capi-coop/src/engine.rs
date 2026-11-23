@@ -1971,8 +1971,8 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeTables {
     /// Reserved at once: a task cell for each face the session may hold at once (the dial role's
-    /// and each `max_faces` admits, a link in its handshake among them: a link taken off a port
-    /// past them is closed before it has a task), in the bytes a link's session task takes
+    /// when it dials, and each `max_faces` admits, a link in its handshake among them: a link
+    /// taken off a port past them is closed before it has a task), in the bytes a link's session task takes
     /// (`link_task_bytes`), and `MAX_TIMERS` deadlines.
     pub(crate) rows: RuntimeRows,
     /// The cells the open may add, one for each group it joins: a group's task is a future no
@@ -1986,7 +1986,7 @@ impl RuntimeTables {
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig) -> Self {
         let groups = config.groups.len().min(caps::MAX_TASKS);
-        let links = 1usize
+        let links = usize::from(crate::arena::dials(config))
             .saturating_add(config.max_faces)
             .min(caps::MAX_TASKS - groups);
         Self {
@@ -2192,7 +2192,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             lease_ms: self.config.lease_ms,
             keep_alive: self.config.keep_alive,
             initial_sn: 0,
-            cookie: Vec::new(),
+            cookie: Default::default(),
             tx_queue: self.config.tx_queue,
             link_rx: self.config.link_rx,
             policy: self.policy,
@@ -3671,8 +3671,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let core = &mut held.0;
         core.listen_on_config()?;
         core.join_groups()?;
-        if !(core.config.endpoints.is_empty() && (core.listens() || !core.config.groups.is_empty()))
-        {
+        // Asked as the arena asked it, so the dial role's face dials exactly when its plan lent
+        // it a link.
+        if crate::arena::dials(&core.config) {
             let link = core.dial_from(0, OpenError::NoEndpoint)?;
             core.links.put_link(0, link);
             // Open once the dial's link is up, or once the node it reached is held by a face that

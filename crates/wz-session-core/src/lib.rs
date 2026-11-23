@@ -163,8 +163,6 @@ pub mod keyexpr_match;
 // The borrowed core (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc;
 // the owned `OwnedNonWildKeyExpr` namespace value is `alloc`-gated.
 #[cfg(feature = "keyexpr-prefix")]
-// Totality debt TD-012 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod keyexpr_prefix;
 
 // §5.21 routing-namespace — the per-participant keyexpr namespace prefix/strip
@@ -188,8 +186,6 @@ pub mod bounded;
 /// The key arena of a session: one span of its arena that the rows of its tables keep their keys
 /// in, each row a [`key_arena::KeyRef`] of a few words rather than a buffer of the longest key.
 /// Unconditional, like [`bounded`].
-// Totality debt TD-015 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::arithmetic_side_effects)]
 pub mod key_arena;
 
 /// The pools of rows the faces of a session share: a slab of rows of one kind lent from the
@@ -318,11 +314,7 @@ pub mod delivery_lane;
 // and `key_gate_open.rs` (an open gate of no size) without it, at the same path either way.
 #[cfg(feature = "key-set-closed")]
 // Totality debt TD-014 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::panic)]
 pub mod key_catalogue;
 
 #[cfg(feature = "key-set-closed")]
@@ -1207,12 +1199,6 @@ pub mod json5;
 /// R2824 — the grammar of `json5` with no allocator: the scans both the tree
 /// builder and the no-heap readers walk, so there is one JSON5 in this crate.
 /// Unconditional, because it needs nothing.
-// Totality debt TD-009 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod json5_lex;
 
 /// R2830 — the connection-retry schedule (zenoh's `ConnectionRetryConf`),

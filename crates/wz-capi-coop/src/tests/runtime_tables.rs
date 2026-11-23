@@ -29,23 +29,28 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
 }
 
-/// A listener reserves a cell for the dial role's link and each face it admits, a link in its
-/// handshake among them; a link past them is closed before it has a task, so a handshake it holds
-/// takes no cell of its own.
+/// A listener reserves a cell for each face it admits, a link in its handshake among them, and for
+/// the dial role's link only when it dials; a link past them is closed before it has a task, so a
+/// handshake it holds takes no cell of its own.
 #[test]
 fn a_listener_reserves_a_cell_for_each_face_it_admits() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let listener = |endpoints: Vec<String>| CoopConfig {
+        endpoints,
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
         accept_pending: 2,
         ..client_config()
-    });
+    };
+    let tables = RuntimeTables::of::<PosixClock>(&listener(Vec::new()));
+    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(3));
+    let tables = RuntimeTables::of::<PosixClock>(&listener(vec!["tcp/127.0.0.1:7447".to_owned()]));
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3));
 }
 
 /// A session that listens with the peers zenoh-pico takes (its ten, `Z_LISTEN_MAX_CONNECTION_NB`)
-/// runs a task for each and for its dial: eleven cells, and the eighth to the eleventh session are
-/// spawned as the first is. Only a twelfth, a link past the faces it admits, finds no cell.
+/// runs a task for each: ten cells, and the eighth to the tenth session are spawned as the first
+/// is; one that also dials has a cell for its dial beside them. Only a link past the faces it
+/// admits finds no cell.
 #[test]
 fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
     let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
@@ -54,10 +59,18 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
         accept_pending: 1,
         ..client_config()
     });
-    assert_eq!(tables.rows.tasks, 11, "the dial role's and ten faces");
+    assert_eq!(tables.rows.tasks, 10, "the ten faces, and no dial");
+    let dialling = RuntimeTables::of::<PosixClock>(&CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 10,
+        accept_pending: 1,
+        ..client_config()
+    });
+    assert_eq!(dialling.rows.tasks, 11, "the dial role's and ten faces");
     let runtime = tables.runtime(PosixClock);
     let local = CoopLocalSet::new(&runtime);
-    let sessions: Vec<_> = (0..11u8)
+    let sessions: Vec<_> = (0..10u8)
         .map(|at| {
             local
                 .try_spawn_local(async move { at })

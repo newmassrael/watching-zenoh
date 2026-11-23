@@ -183,6 +183,17 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// Whether the link has input waiting in its stack that it cannot read: it receives into a
+    /// pool of buffers its session's links share, holds none, and every one is held by another
+    /// link for something of its own. A wait on its readiness would end at once and the step
+    /// that follows would read nothing, so its owner leaves it out of the wait; the step that
+    /// gives a buffer back is woken by the holder's own input, and the link is waited on again
+    /// once a buffer is free. The provided form answers `false`: a link that receives into a
+    /// buffer of its own always can.
+    fn waits_for_buffer(&self) -> bool {
+        false
+    }
+
     /// Whether the link owes its stack bytes of a frame it was already handed, which its next
     /// step writes as far as the stack takes them ([`Self::service`]). While it does, a wait its
     /// owner makes for the link's input must end on room as well (`AndRoom`, the heap profile's),
@@ -619,6 +630,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn holds_input(&self) -> bool {
         (**self).holds_input()
+    }
+
+    fn waits_for_buffer(&self) -> bool {
+        (**self).waits_for_buffer()
     }
 
     fn owes_write(&self) -> bool {
