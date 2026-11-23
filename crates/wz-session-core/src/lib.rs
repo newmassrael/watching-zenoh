@@ -1450,8 +1450,6 @@ pub mod held_list;
 /// its body, and its place in a chain of extensions. What a node records in it, and with what
 /// clock, is the host's.
 #[cfg(feature = "pubsub-ts-stack")]
-// Totality debt TD-078 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod ts_stack;
 
 /// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
