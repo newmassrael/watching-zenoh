@@ -3074,7 +3074,10 @@ unsafe fn declare_subscriber_with(
     // key the announce went out on. A background subscriber's entry keeps that declaration
     // alive through `wire`'s anchor, so the id it names stays declared as long as it can
     // retract.
-    let retraction = key.retraction_naming(&PicoSession::of(state));
+    let retraction = key.retraction_naming_in(
+        crate::write_filter::session_mode(state),
+        Arc::as_ref(&engine),
+    );
     let released = cclosure.release_latch();
     let released = if owned {
         Some(released)

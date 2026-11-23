@@ -43,7 +43,7 @@
 //! What IS reproduced, and is what a peer's mode changes on the wire: whether it
 //! asks at all (above), and that its subscriber and queryable retractions name
 //! the key they were held on, which a client's do not
-//! (`DeclaredKeyexpr::retraction_naming`).
+//! (`DeclaredKeyexpr::retraction_naming_in`).
 
 use alloc::sync::Arc;
 
