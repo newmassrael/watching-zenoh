@@ -347,8 +347,6 @@ pub mod text_out;
 /// [`id_map::FixedIdMap`] (inline rows, a full table is a counted refusal) on
 /// the fixed backing ([`bounded::ENFORCES_CAPACITY`]). Unconditional, like
 /// [`bounded`], so the registries name one backing-agnostic table.
-// Totality debt TD-103 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod id_map;
 
 /// What a fixed pool says of itself, the same way for every pool (`pool-monitor`): its capacity,
