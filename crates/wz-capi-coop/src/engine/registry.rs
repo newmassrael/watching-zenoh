@@ -1614,7 +1614,16 @@ mod tests {
             .arena_mut()
             .lend_keys(256, limits.max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let mut sets = Vec::new();
+        // The table of sets lies in an arena of its own, so `arena` counts the set's rows alone.
+        let mut sets_arena = SessionArena::of_bytes(
+            FACE_SET_BYTES + wz_session_core::bounded::ARENA_ALIGN,
+            &AllocatorMemory,
+        )
+        .expect("the host has the memory");
+        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent> = sets_arena
+            .arena_mut()
+            .lend(1)
+            .expect("the arena has a row for the set");
         lend_set(
             &mut sets,
             arena.arena_mut(),
