@@ -263,9 +263,9 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left hosts nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self
             .forwarder
@@ -275,7 +275,7 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Held::Plain(host));
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -294,9 +294,9 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
         // A node names every key whole: there is no alias to hold.
-        None
+        Err(Refusal::NotBuilt)
     }
 
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
@@ -413,9 +413,9 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Option<QblId> {
+    ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
@@ -427,7 +427,7 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, host);
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_queryable(&self, id: QblId) {
@@ -447,16 +447,16 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
+    ) -> Result<TokenId, Refusal> {
         // The id first, so a session with none left declares nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let host = self.declare_token(keyexpr);
         self.engine
             .tokens
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, host);
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_liveliness_token(&self, id: TokenId) {
@@ -477,16 +477,16 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left subscribes nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let face = self.liveliness.subscribe(keyexpr, history, sink());
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Held::Liveliness(face));
-        Some(id)
+        Ok(id)
     }
 
     fn get_on_wire(
@@ -610,16 +610,18 @@ impl SessionEngine for RouterState {
         Ok(1)
     }
 
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
-        // At least a millisecond, so that a job cannot make the node spin.
-        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)?;
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
+        // of its own, so a host with no thread left to give holds no more of them.
+        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
+            .ok_or(Refusal::TableFull)?;
         let id = self.engine.local_id();
         self.engine
             .jobs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, job);
-        Some(id)
+        Ok(id)
     }
 
     fn stop_ticker(&self, id: TickerId) {

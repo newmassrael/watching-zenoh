@@ -851,16 +851,26 @@ impl Engine {
         }
     }
 
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
+    /// Hold a declaration of `keyexpr`: its id, or `None` once the engine's id space, the wire's
+    /// `ExprId`, is spent, when the key is used whole as one not worth a declaration is. Any
+    /// other refusal of the engine is an error.
+    fn acquire_keyexpr(&self, keyexpr: &str) -> ZResult<Option<ExprId>> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr),
+            Engine::Tokio(state) => match state.shared.as_engine().acquire_keyexpr(keyexpr) {
+                Ok(id) => Ok(Some(id)),
+                Err(wz_capi_port::Refusal::NoEntityId) => Ok(None),
+                Err(refused) => Err(zerror!(
+                    "the engine refused a key expression declaration: {refused}"
+                )
+                .into()),
+            },
             // A node declares no key expression to its peers and names none by an id on the wire,
             // but it holds the declaration, so that the key is undeclared as it was declared.
-            Engine::Router(router) => router
+            Engine::Router(router) => Ok(router
                 .keys
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .acquire(keyexpr),
+                .acquire(keyexpr)),
         }
     }
 
@@ -1783,7 +1793,7 @@ impl Engine {
         match *self {}
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> ZResult<Option<ExprId>> {
         match *self {}
     }
 
@@ -6938,7 +6948,7 @@ impl WireAnchor for SessionInner {
         // declared is held again and a forced declaration is the same call.
         // `None` once the engine's id space, the wire's `ExprId`, is spent: the key is then used
         // whole, as one that is not worth a declaration is.
-        Ok(self.engine.acquire_keyexpr(prefix))
+        self.engine.acquire_keyexpr(prefix)
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {

@@ -37,7 +37,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
 use wz_capi_port::{
-    LivelinessSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId, WireKey,
+    LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId,
+    WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
@@ -81,6 +82,21 @@ pub enum HostError {
         /// Which knob: `"max_samples"` or `"max_age"`.
         knob: &'static str,
     },
+    /// The engine refused a declaration the subscriber is made of, for this cause.
+    Declined(Refusal),
+}
+
+impl HostError {
+    /// The engine's refusal of `what`, one of the declarations a subscriber is made of: a spent
+    /// id space and a plane this build does not hold keep the names they had, and any other
+    /// cause is carried as the engine gave it.
+    fn of(what: &'static str) -> impl FnOnce(Refusal) -> Self {
+        move |refused| match refused {
+            Refusal::NoEntityId => Self::IdsExhausted,
+            Refusal::NotBuilt => Self::Refused(what),
+            other => Self::Declined(other),
+        }
+    }
 }
 
 impl core::fmt::Display for HostError {
@@ -91,6 +107,9 @@ impl core::fmt::Display for HostError {
                 f.write_str("the session has handed out every 32-bit declaration id")
             }
             Self::HistoryBoundZero { knob } => write!(f, "history {knob} must not be zero"),
+            Self::Declined(refused) => {
+                write!(f, "the engine refused an advanced subscriber: {refused}")
+            }
         }
     }
 }
@@ -368,7 +387,7 @@ impl EngineSubscriber {
                             true
                         }),
                     )
-                    .ok_or(HostError::Refused("the engine runs no periodic jobs"))?,
+                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
                 )
             }
             None => None,
@@ -392,7 +411,7 @@ impl EngineSubscriber {
                             true
                         }),
                     )
-                    .ok_or(HostError::Refused("the engine runs no periodic jobs"))?,
+                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
                 )
             }
             None => None,
@@ -612,7 +631,7 @@ fn declare_subscription(
             form.retraction().cloned(),
             sink,
         )
-        .ok_or(HostError::IdsExhausted)?;
+        .map_err(HostError::of("the engine has no subscribers"))?;
     Ok(Held {
         entity: Subscription {
             engine: Arc::clone(engine),
@@ -633,7 +652,7 @@ fn declare_liveliness_subscription(
 ) -> Result<Held<Subscription>, HostError> {
     let id = engine
         .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
-        .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
+        .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Held {
         entity: Subscription {
             engine: Arc::clone(engine),
@@ -672,7 +691,7 @@ fn declare_detection_token(
     });
     let token = engine
         .declare_liveliness_token_on_wire(&ke, wire_of(&form), retraction)
-        .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
+        .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Some(Held {
         entity: Token {
             engine: Arc::clone(engine),

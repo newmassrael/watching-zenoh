@@ -182,7 +182,7 @@ impl AdvancedPublisherPlane for CPlane {
                 None,
                 sink,
             )
-            .ok_or_else(|| Self::refusal("cache queryable"))?;
+            .map_err(|_| Self::refusal("cache queryable"))?;
         Ok(CacheQueryable {
             engine: Arc::clone(&self.engine),
             id,
@@ -193,7 +193,7 @@ impl AdvancedPublisherPlane for CPlane {
         let id = self
             .engine
             .declare_liveliness_token_on_wire(keyexpr, WireKey::literal(), None)
-            .ok_or_else(|| Self::refusal("liveliness token"))?;
+            .map_err(|_| Self::refusal("liveliness token"))?;
         Ok(Token {
             engine: Arc::clone(&self.engine),
             id,
@@ -215,7 +215,7 @@ impl AdvancedPublisherPlane for CPlane {
     ) -> Option<Ticker> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start(&self.engine, period_ms, tick)
+        Ticker::start(&self.engine, period_ms, tick).ok()
     }
 
     fn publish(

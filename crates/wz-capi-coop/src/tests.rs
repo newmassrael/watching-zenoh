@@ -841,19 +841,21 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                assert_eq!(sample.payload(), b"hello");
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |sample: &dyn SampleView| {
+                    assert_eq!(sample.payload(), b"hello");
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -960,18 +962,20 @@ fn the_samples_a_link_lends_take_their_callback_from_the_row() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |_sample: &dyn SampleView| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1004,18 +1008,20 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |_sample: &dyn SampleView| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1071,18 +1077,20 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |_sample: &dyn SampleView| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
@@ -1540,18 +1548,20 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     });
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |_: &dyn SampleView| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
@@ -1651,18 +1661,20 @@ fn a_stepped_session_keeps_its_lease() {
     });
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let count = count.clone();
+                Box::new(move |_: &dyn SampleView| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     let quiet = Instant::now() + Duration::from_millis(3 * lease_ms);
     while Instant::now() < quiet {
         SessionDrive::read(&*engine, false).expect("the session stays open");
@@ -1701,18 +1713,20 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
 
     let arrived = Arc::new(Mutex::new(None));
     let stamp = arrived.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let stamp = stamp.clone();
-            Box::new(move |_: &dyn SampleView| {
-                stamp.lock().unwrap().get_or_insert(Instant::now());
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let stamp = stamp.clone();
+                Box::new(move |_: &dyn SampleView| {
+                    stamp.lock().unwrap().get_or_insert(Instant::now());
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     SessionDrive::start_read_task(&*engine).expect("a read task");
     // The read task's first wait is under way before the push is sent.
     std::thread::sleep(Duration::from_millis(250));
@@ -1895,21 +1909,23 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
     let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let record = seen.clone();
     let declares_before = router.seen(|s| s.declares);
-    engine.declare_subscriber_on_wire(
-        "demo/named",
-        WireKey::aliased(id, None),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let record = record.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                record
-                    .lock()
-                    .unwrap()
-                    .push((sample.keyexpr().to_string(), sample.payload().to_vec()));
-            })
-        }),
-    );
+    engine
+        .declare_subscriber_on_wire(
+            "demo/named",
+            WireKey::aliased(id, None),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let record = record.clone();
+                Box::new(move |sample: &dyn SampleView| {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((sample.keyexpr().to_string(), sample.payload().to_vec()));
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the declarations", || {
         router.seen(|s| s.declares) > declares_before
     });

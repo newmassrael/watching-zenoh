@@ -326,7 +326,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
 
     let token =
         engine.declare_liveliness_token_on_wire("wz/port/spent/t/last", WireKey::literal(), None);
-    assert_eq!(token, Some(u32::MAX), "the last entity id is handed out");
+    assert_eq!(token, Ok(u32::MAX), "the last entity id is handed out");
     let refused = engine.declare_queryable_on_wire(
         "wz/port/spent/q",
         WireKey::literal(),
@@ -335,7 +335,11 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         None,
         answer(),
     );
-    assert_eq!(refused, None, "a queryable past the last id is refused");
+    assert_eq!(
+        refused,
+        Err(Refusal::NoEntityId),
+        "a queryable past the last id is refused"
+    );
     assert_eq!(
         queryables("wz/port/spent/q"),
         Some(false),
@@ -347,7 +351,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
             WireKey::literal(),
             None,
         ),
-        None,
+        Err(Refusal::NoEntityId),
         "a token past the last id is refused"
     );
     assert_eq!(
@@ -778,7 +782,6 @@ fn a_node_that_dials_a_node_holds_it_as_a_face() {
 /// takes a stated call as if nothing were stated.
 #[test]
 fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
-    use wz_capi_port::LinksNotHonoured;
     use wz_session_core::admission_retry::AdmissionRetry;
     use wz_session_core::link_restriction::LinkRestriction;
     use wz_session_core::sink::SampleView;
@@ -860,7 +863,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink.clone()
         ),
-        Err(LinksNotHonoured),
+        Err(Refusal::NotHonoured(StatementNotHonoured::Links)),
         "a limited subscriber"
     );
     let taken = engine
@@ -872,19 +875,17 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink,
         )
-        .expect("no set is never refused")
-        .expect("a node has an id for a subscriber");
+        .expect("no set is never refused, and a node has an id for a subscriber");
     engine.undeclare_subscriber(taken);
 
     assert_eq!(
         engine.declare_liveliness_token_on_link_set(key, WireKey::literal(), one, None),
-        Err(LinksNotHonoured),
+        Err(Refusal::NotHonoured(StatementNotHonoured::Links)),
         "a limited token"
     );
     let token = engine
         .declare_liveliness_token_on_link_set(key, WireKey::literal(), LinkRestriction::Any, None)
-        .expect("no set is never refused")
-        .expect("a node has an id for a token");
+        .expect("no set is never refused, and a node has an id for a token");
     engine.undeclare_liveliness_token(token);
 
     router.close();

@@ -155,17 +155,17 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         if self.ids_spent.load(Ordering::SeqCst) {
-            return None;
+            return Err(Refusal::NoEntityId);
         }
-        let id = self.next_entity_id()?;
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare subscriber {keyexpr}"));
         self.subscriptions
             .lock()
             .unwrap()
             .push((id, keyexpr.to_owned(), wire, sink));
-        Some(id)
+        Ok(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -185,8 +185,8 @@ impl SessionEngine for Script {
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
     }
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
-        None
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
+        Err(Refusal::NotBuilt)
     }
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
@@ -243,10 +243,10 @@ impl SessionEngine for Script {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
-        let id = self.next_entity_id()?;
+    ) -> Result<TokenId, Refusal> {
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare token {keyexpr}"));
-        Some(id)
+        Ok(id)
     }
     fn undeclare_liveliness_token(&self, _id: TokenId) {
         self.event("retract token");
@@ -257,14 +257,14 @@ impl SessionEngine for Script {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
-        let id = self.next_entity_id()?;
+    ) -> Result<SubId, Refusal> {
+        let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare liveliness {keyexpr}"));
         self.liveliness
             .lock()
             .unwrap()
             .push((id, keyexpr.to_owned(), history, sink));
-        Some(id)
+        Ok(id)
     }
     fn get_on_wire(
         &self,
@@ -298,14 +298,14 @@ impl SessionEngine for Script {
         });
         Ok(count)
     }
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
         if self.no_tickers.load(Ordering::SeqCst) {
-            return None;
+            return Err(Refusal::NotBuilt);
         }
         let id = self.take_id();
         self.event(format!("start ticker {period_ms}"));
         self.tickers.lock().unwrap().push((id, period_ms, tick));
-        Some(id)
+        Ok(id)
     }
     fn stop_ticker(&self, _id: TickerId) {
         self.event("stop ticker");
@@ -318,8 +318,8 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         _sink: wz_capi_port::QueryableSink,
-    ) -> Option<QblId> {
-        None
+    ) -> Result<QblId, Refusal> {
+        Err(Refusal::NotBuilt)
     }
 }
 

@@ -228,7 +228,16 @@ pub(crate) enum Door {
     /// The write filter a publisher or a querier is declared with (`z_declare_publisher`,
     /// `z_declare_querier`, the advanced publisher's), made after the entity's key is declared.
     WriteFilter,
-    /// A get, a querier's get or a liveliness get (`z_get`, `z_querier_get`, `z_liveliness_get`).
+    /// The declaration of a key expression, made for an entity's key or by `z_declare_keyexpr`.
+    Keyexpr,
+    /// A subscriber, a liveliness subscriber or a queryable, declared once its key is.
+    Entity,
+    /// A liveliness token, declared once its key is, which a build without liveliness has none of.
+    #[cfg(feature = "liveliness")]
+    Token,
+    /// A get, a querier's get or a liveliness get (`z_get`, `z_querier_get`, `z_liveliness_get`),
+    /// which a build without the querying end has none of.
+    #[cfg(feature = "query")]
     Get,
 }
 
@@ -260,12 +269,32 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
             Refusal::Closed => Z_ERR_GENERIC,
             _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         },
+        // pico registers a key's declaration, and a token, under the session's lock taken only
+        // while it is open (`vendor/zenoh-pico/src/session/resource.c` @
+        // `_Z_RETURN_IF_ERR(_z_session_mutex_lock_if_open(zn));`), so a closed session refuses them
+        // with `_Z_ERR_SESSION_CLOSED`; a subscriber's or a queryable's
+        // registration on a closed session comes back empty, which its declaration answers with
+        // `_Z_ERR_SYSTEM_OUT_OF_MEMORY` as it answers one it has no room for
+        // (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_subscription_rc_t sp_s = _z_register_subscription(_Z_RC_IN_VAL(zn), _Z_SUBSCRIBER_KIND_SUBSCRIBER, &s);`).
+        // A declaration no link could carry is the failed send pico answers it with.
+        Door::Keyexpr => match refusal {
+            Refusal::Closed => Z_ERR_SESSION_CLOSED,
+            Refusal::ExceedsCapacity => Z_ERR_TRANSPORT_TX_FAILED,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
+        #[cfg(feature = "liveliness")]
+        Door::Token => refusal_code(refusal, Door::Keyexpr),
+        Door::Entity => match refusal {
+            Refusal::ExceedsCapacity => Z_ERR_TRANSPORT_TX_FAILED,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
         // A get pico has no room to hold pending is `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_pending_query_t *pq = _z_unsafe_liveliness_register_pending_query(zn);`),
         // one asked of a session that is closed is `_Z_ERR_SESSION_CLOSED`
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `return _z_session_is_closed(zn) ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK;`), and one larger
         // than the session's codec carries the generic error, as a publication of one is.
+        #[cfg(feature = "query")]
         Door::Get => match refusal {
             Refusal::Closed => Z_ERR_SESSION_CLOSED,
             Refusal::ExceedsCapacity => Z_ERR_GENERIC,
@@ -293,6 +322,7 @@ mod tests {
 
     /// A get pico has no room for is out of memory, one on a closed session is
     /// `Z_ERR_SESSION_CLOSED`, and a statement the engine does not carry out is wz's own code.
+    #[cfg(feature = "query")]
     #[test]
     fn each_refusal_of_a_get_answers_picos_code() {
         let at = |refusal| refusal_code(refusal, Door::Get);
@@ -305,6 +335,44 @@ mod tests {
                 wz_capi_port::StatementNotHonoured::TargetPeer
             )),
             WZ_EXT_ERR_UNSUPPORTED
+        );
+    }
+
+    /// A key's declaration and a token on a closed session are `Z_ERR_SESSION_CLOSED`, where an
+    /// entity's registration there is out of memory, as pico answers each; a full table is out of
+    /// memory at every one of them.
+    #[test]
+    fn each_refusal_of_a_declaration_answers_picos_code() {
+        for door in [Door::Keyexpr, Door::Entity] {
+            assert_eq!(
+                refusal_code(Refusal::TableFull, door),
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            );
+            assert_eq!(
+                refusal_code(Refusal::NoEntityId, door),
+                Z_ERR_SYSTEM_OUT_OF_MEMORY
+            );
+            assert_eq!(
+                refusal_code(Refusal::ExceedsCapacity, door),
+                Z_ERR_TRANSPORT_TX_FAILED
+            );
+            assert_eq!(
+                refusal_code(Refusal::NotBuilt, door),
+                WZ_EXT_ERR_UNSUPPORTED
+            );
+        }
+        assert_eq!(
+            refusal_code(Refusal::Closed, Door::Keyexpr),
+            Z_ERR_SESSION_CLOSED
+        );
+        #[cfg(feature = "liveliness")]
+        assert_eq!(
+            refusal_code(Refusal::Closed, Door::Token),
+            Z_ERR_SESSION_CLOSED
+        );
+        assert_eq!(
+            refusal_code(Refusal::Closed, Door::Entity),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }
 

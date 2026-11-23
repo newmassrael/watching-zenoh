@@ -7422,6 +7422,41 @@ mod matching_aggregate_tests {
         assert_eq!(declare(&shared), Err(Refusal::Closed));
     }
 
+    /// Through the engine port a declaration is refused by its cause: for want of an entity id,
+    /// and on a closed session, where the registry alone would still make it.
+    #[test]
+    fn the_port_refuses_a_declaration_by_its_cause() {
+        use wz_capi_port::{Refusal, SessionEngine};
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        let declare = |shared: &SharedSession| {
+            SessionEngine::declare_subscriber_on_wire(
+                shared,
+                "wz/decl/port",
+                WireKey::literal(),
+                wz_session_core::locality::Locality::Any,
+                None,
+                sink.clone(),
+            )
+        };
+        assert!(
+            declare(&shared).is_ok(),
+            "CONTROL: an open session with ids left declares"
+        );
+        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(declare(&shared), Err(Refusal::Closed));
+        assert_eq!(
+            SessionEngine::acquire_keyexpr(&shared, "wz/decl/key"),
+            Err(Refusal::Closed)
+        );
+    }
+
     /// Through the engine port a get asked of a closed session is refused as closed and mints no
     /// leg, where one asked of an open session with no face reaches nobody.
     #[cfg(feature = "query")]
@@ -10310,7 +10345,7 @@ mod face_up_order_tests {
             sink,
         );
         assert!(
-            matches!(limited, Ok(Some(_))),
+            limited.is_ok(),
             "a subscriber limited to a link is declared, not refused: {limited:?}"
         );
     }

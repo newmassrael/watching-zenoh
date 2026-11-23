@@ -1238,10 +1238,7 @@ pub(crate) fn declare_queryable_on(
             key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
             sink,
         )
-        // The session holds no more queryables: its table is at the limit it opened
-        // under, or its ids are spent. Every engine this build opens a session on
-        // answers queries when the build has queryables.
-        .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
     Ok((id, key))
 }
 

@@ -5449,16 +5449,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[cfg(feature = "ticker")]
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
-        let mut core = self.live()?;
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Declined> {
+        let mut core = self.live().ok_or(Declined::Closed)?;
         let id = self.next_local_id();
         let now_ms = core.0.clock.now_us() / 1000;
         // A table of the build's `MAX_TICKERS` rows, reserved at the open: a start past them is
-        // refused as a build with no periodic jobs refuses it.
-        core.0
-            .tickers
-            .start(id, period_ms, tick, now_ms)
-            .then_some(id)
+        // refused as a full table.
+        if core.0.tickers.start(id, period_ms, tick, now_ms) {
+            Ok(id)
+        } else {
+            Err(Declined::TableFull)
+        }
     }
 
     #[cfg(feature = "ticker")]
@@ -5655,17 +5656,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
-        let Some(mut guard) = self.live() else {
-            return self.next_entity_id();
-        };
+    ) -> Result<SubId, Declined> {
+        // A closed session declares nothing, and takes no id for what it does not declare.
+        let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
         // The subscriber is one row of the session core's table. A full table refuses it before
         // it takes an id, registers or sends anything; the sink goes with the refusal.
         if core.registry.borrow().app.subscribers.is_full() {
-            return None;
+            return Err(Declined::TableFull);
         }
-        let id = self.next_entity_id()?;
+        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
         // The row goes at the end of the table, where the replay finds it.
         let at = core.registry.borrow().app.subscribers.len();
         let row = SubscriberRow {
@@ -5684,9 +5684,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .app
                 .subscribers
                 .register_sink(keyexpr, allowed_origin, row);
-        if registered.is_err() {
-            return None;
-        }
+        registered?;
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
         let callback: SubscriberCallback = Arc::new(LiveCallback::new(sample_shown(
@@ -5721,7 +5719,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             self.deliver();
         }
-        Some(id)
+        Ok(id)
     }
 
     #[inline(never)]
@@ -5790,8 +5788,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[inline(never)]
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
-        let mut core = self.live()?;
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Declined> {
+        let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
         if let Some(entry) = core
             .keyexprs
@@ -5800,14 +5798,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .find(|e| e.keyexpr == keyexpr)
         {
             entry.holds += 1;
-            return Some(entry.id);
+            return Ok(entry.id);
         }
         // A key no declaration holds yet takes a row; a full table refuses it before an id is
-        // taken or anything is sent, and so does a key longer than the row holds.
+        // taken or anything is sent, and so does a key the session cannot hold.
         if core.keyexprs.borrow().free_slots() == 0 {
-            return None;
+            return Err(Declined::TableFull);
         }
-        let key = core.row_key(keyexpr)?;
+        let Some(key) = core.row_key(keyexpr) else {
+            return Err(core.key_refusal(keyexpr));
+        };
         // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
@@ -5820,17 +5820,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             None => id,
         };
         if id == 0 {
-            return None;
+            return Err(Declined::NoEntityId);
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
-        // made while a link is down, or that a replay has not reached, is sent in its turn.
+        // made while a link is down, or that a replay has not reached, is sent in its turn. A link
+        // refuses one it cannot carry.
         let taken = core.announce_or_undo(
             Kind::Keyexpr,
             |actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             |actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
-            return None;
+            return Err(Declined::ExceedsCapacity);
         }
         // And each group told the session's keyexprs, as a link is.
         #[cfg(feature = "group")]
@@ -5846,7 +5847,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 holds: 1,
             },
         );
-        Some(id)
+        Ok(id)
     }
 
     #[inline(never)]
@@ -6262,32 +6263,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Option<QblId> {
-        let mut guard = self.live()?;
+    ) -> Result<QblId, Declined> {
+        let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
         // A full table refuses the queryable before it takes an id, registers or sends anything;
         // the sink goes with the refusal.
         if core.queryables.free_slots() == 0 {
-            return None;
+            return Err(Declined::TableFull);
         }
-        // So does a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
-        let id = self.next_entity_id()?;
+        // So does a key the session cannot hold.
+        let Some(key) = core.row_key(keyexpr) else {
+            return Err(core.key_refusal(keyexpr));
+        };
+        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
         // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
         let plane = self.plane.clone();
-        let registration = core
-            .registry
-            .borrow_mut()
-            .app
-            .queryables
-            .register_sink(
-                keyexpr,
-                allowed_origin,
-                complete,
-                BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
-            )
-            .ok()?;
+        let registration = core.registry.borrow_mut().app.queryables.register_sink(
+            keyexpr,
+            allowed_origin,
+            complete,
+            BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
+        )?;
         let holder = Arc::new(CoopHolder {
             engine: self.this.clone(),
         });
@@ -6324,7 +6321,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(guard);
             self.deliver();
         }
-        Some(id)
+        Ok(id)
     }
 
     #[cfg(feature = "query")]
@@ -6704,24 +6701,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
+    ) -> Result<TokenId, Declined> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
-        let mut core = self.live()?;
+        let mut core = self.live().ok_or(Declined::Closed)?;
         let core = &mut core.0;
         // A full table refuses the token before it takes an id, registers or sends anything.
         if core.tokens.free_slots() == 0 {
-            return None;
+            return Err(Declined::TableFull);
         }
-        // So does a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
-        let id = self.next_entity_id()?;
+        // So does a key the session cannot hold.
+        let Some(key) = core.row_key(keyexpr) else {
+            return Err(core.key_refusal(keyexpr));
+        };
+        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
         core.registry
             .borrow_mut()
             .app
             .local_tokens
-            .register(u64::from(id), keyexpr)
-            .ok()?;
+            .register(u64::from(id), keyexpr)?;
         let entry = TokenEntry {
             id,
             keyexpr: key,
@@ -6743,7 +6741,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             allowed_origin: Locality::Any,
         });
         keep(&mut core.tokens, entry);
-        Some(id)
+        Ok(id)
     }
 
     #[cfg(feature = "liveliness")]
@@ -6778,19 +6776,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
-        let Some(mut guard) = self.live() else {
-            return self.next_entity_id();
-        };
+    ) -> Result<SubId, Declined> {
+        // A closed session declares nothing, and takes no id for what it does not declare.
+        let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
         // A full table refuses the subscriber before it takes an id, registers or asks anything;
         // the sink goes with the refusal.
         if core.live_subs.free_slots() == 0 {
-            return None;
+            return Err(Declined::TableFull);
         }
-        // So does a key longer than its row holds.
-        let key = core.row_key(keyexpr)?;
-        let id = self.next_entity_id()?;
+        // So does a key the session cannot hold.
+        let Some(key) = core.row_key(keyexpr) else {
+            return Err(core.key_refusal(keyexpr));
+        };
+        let id = self.next_entity_id().ok_or(Declined::NoEntityId)?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
             Target::Liveliness(Arc::new(Mutex::new(sink()))),
@@ -6817,12 +6816,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .liveliness_subscribers
                 .unregister(u64::from(id));
         }
-        // Refused by the observer, or with no room for its history, the declaration is refused,
-        // as a subscriber's is.
-        if registered.is_err() || !held {
+        // Refused by the observer, or with no room on the lane for its history, the declaration
+        // is refused, as a subscriber's is.
+        let refused = match registered {
+            Err(refused) => Some(Declined::from(refused)),
+            Ok(_) if !held => Some(Declined::TableFull),
+            Ok(_) => None,
+        };
+        if let Some(refused) = refused {
             drop(guard);
             drop(self.take_target(TargetKey::Liveliness(id)));
-            return None;
+            return Err(refused);
         }
         if history {
             core.registry
@@ -6844,7 +6848,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         keep(&mut core.live_subs, entry);
         drop(guard);
         self.deliver();
-        Some(id)
+        Ok(id)
     }
 }
 

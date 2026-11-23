@@ -141,11 +141,15 @@ pub struct Ticker {
 }
 
 impl Ticker {
-    /// Start `tick` on `engine` every `period_ms` ([`SessionEngine::start_ticker`]); `None` when
-    /// the engine has no periodic jobs in this build or is closed.
-    pub fn start(engine: &Arc<dyn SessionEngine>, period_ms: u64, tick: Tick) -> Option<Self> {
+    /// Start `tick` on `engine` every `period_ms` ([`SessionEngine::start_ticker`]), refused as
+    /// the engine refuses it.
+    pub fn start(
+        engine: &Arc<dyn SessionEngine>,
+        period_ms: u64,
+        tick: Tick,
+    ) -> Result<Self, Refusal> {
         let id = engine.start_ticker(period_ms, tick)?;
-        Some(Self {
+        Ok(Self {
             engine: Some(Arc::clone(engine)),
             id,
         })

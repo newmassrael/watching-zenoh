@@ -65,7 +65,11 @@ impl Counts {
     }
 }
 
-fn declare(engine: &super::Engine, key: &str, sink: SubscriberSink) -> Option<wz_capi_port::SubId> {
+fn declare(
+    engine: &super::Engine,
+    key: &str,
+    sink: SubscriberSink,
+) -> Result<wz_capi_port::SubId, Refusal> {
     engine.declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
 }
 
@@ -245,7 +249,7 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
     let held = Counts::default();
     declare("demo/drop/l2", &held).expect("the row given back");
     let refused = Counts::default();
-    assert_eq!(declare("demo/drop/l3", &refused), None);
+    assert_eq!(declare("demo/drop/l3", &refused), Err(Refusal::TableFull));
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
 
     SessionDrive::close(&*engine);
@@ -298,7 +302,7 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
     let held = Counts::default();
     declare("demo/drop/q2", &held).expect("the row given back");
     let refused = Counts::default();
-    assert_eq!(declare("demo/drop/q3", &refused), None);
+    assert_eq!(declare("demo/drop/q3", &refused), Err(Refusal::TableFull));
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
 
     SessionDrive::close(&*engine);

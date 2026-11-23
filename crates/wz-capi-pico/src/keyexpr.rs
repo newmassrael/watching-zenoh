@@ -486,12 +486,11 @@ impl DeclaredKeyexpr {
                 declaration: None,
             });
         }
-        // A session that holds no more declarations, its table at the limit it opened under or
-        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing; the key
-        // goes back with `text`.
-        let Some(id) = shared.acquire_keyexpr(prefix) else {
-            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
+        // A refused declaration sent nothing, and answers pico's code for its cause; the key goes
+        // back with `text`.
+        let id = shared.acquire_keyexpr(prefix).map_err(|refused| {
+            crate::result::refusal_code(refused, crate::result::Door::Keyexpr)
+        })?;
         Ok(Self {
             literal: text,
             declaration: Some(Arc::new(WireDeclaration {

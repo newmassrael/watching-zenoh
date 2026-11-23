@@ -9,6 +9,8 @@
 //! code in one table of its own; this crate names none, for the reason it names no result code
 //! at all (both ABIs typedef their result to `int8_t` and disagree about the values).
 
+use wz_session_core::registry_error::RegisterError;
+
 use crate::{LinksNotHonoured, StatementNotHonoured};
 
 /// Why an engine refused to declare an entity or to ask a request. By the time it is answered
@@ -43,6 +45,19 @@ impl From<StatementNotHonoured> for Refusal {
 impl From<LinksNotHonoured> for Refusal {
     fn from(links: LinksNotHonoured) -> Self {
         Self::NotHonoured(links.into())
+    }
+}
+
+/// A registration a table of the session refused is that declaration's refusal. A key outside
+/// a closed key set is one this build does not declare an entity on.
+impl From<RegisterError> for Refusal {
+    fn from(refused: RegisterError) -> Self {
+        match refused {
+            RegisterError::TableFull => Self::TableFull,
+            RegisterError::KeyexprTooLong => Self::KeyTooLong,
+            RegisterError::KeyNotInSet => Self::NotBuilt,
+            RegisterError::IdsExhausted => Self::NoEntityId,
+        }
     }
 }
 
@@ -88,6 +103,21 @@ mod tests {
                 "{text:?} is said twice"
             );
         }
+    }
+
+    /// Each way a table of the session refuses a registration is the declaration's own refusal.
+    #[test]
+    fn a_registration_refused_is_the_declarations_refusal() {
+        assert_eq!(Refusal::from(RegisterError::TableFull), Refusal::TableFull);
+        assert_eq!(
+            Refusal::from(RegisterError::KeyexprTooLong),
+            Refusal::KeyTooLong
+        );
+        assert_eq!(Refusal::from(RegisterError::KeyNotInSet), Refusal::NotBuilt);
+        assert_eq!(
+            Refusal::from(RegisterError::IdsExhausted),
+            Refusal::NoEntityId
+        );
     }
 
     /// A set of links an engine cannot honour is refused as that statement, by either name.
