@@ -54,7 +54,7 @@ use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
 use wz_session_core::multicast_tx::{
-    multicast_tx_conduit, multicast_tx_encoded_conduit, multicast_tx_push,
+    multicast_tx_bytes, multicast_tx_conduit, multicast_tx_encoded_conduit, multicast_tx_push,
     multicast_tx_push_batched, multicast_tx_push_encoded, MulticastBatch, MulticastTxDatagram,
     MulticastTxEncoded, MulticastTxItem, MulticastTxLanes, MulticastTxQueue,
 };
@@ -152,9 +152,14 @@ struct Lanes {
     rings: [LaneRing; Priority::NUM],
     /// The order the next datagram is queued in, across the lanes.
     order: u64,
-    /// How many datagrams found no room in their lane's storage and were lost.
-    refused: u32,
+    /// The run a push is let on a lane by: a record and a batch for its frame, and a record and a
+    /// drop marker behind it, which a chain that runs out of room ends with.
+    reserve: usize,
 }
+
+/// The most bytes a fragment chain's drop marker takes: its header, a sequence number of at most
+/// ten bytes, its marker and a QoS extension.
+const MARKER_BYTES: usize = 16;
 
 /// What the storage of a lane records of each datagram ahead of its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,20 +222,20 @@ impl Lanes {
     /// its lane whatever the lane holds, a batch for each reply `quota` lets the stage hold.
     fn of_group(params: &MulticastParams, quota: MaxMulticastRepliesHeld) -> Self {
         let bound = MulticastTxLanes::of_group(params);
-        let batch = usize::from(params.batch_size) + Record::BYTES;
+        let reserve = 2 * Record::BYTES + usize::from(params.batch_size) + MARKER_BYTES;
         let replies = match super::quota_count(quota.get()) {
             usize::MAX => 0,
             count => count,
         };
         let rings = core::array::from_fn(|at| {
             let lane = bound.own_lane_bytes(Priority::from_wire(at as u8));
-            LaneRing::new(lane.map_or(0, |bytes| bytes + batch * (1 + replies)))
+            LaneRing::new(lane.map_or(0, |bytes| bytes + reserve * (1 + replies)))
         });
         Self {
             bound,
             rings,
             order: 0,
-            refused: 0,
+            reserve,
         }
     }
 
@@ -276,6 +281,21 @@ impl Lanes {
         self.rings[lane].pop(Record::BYTES + len);
     }
 
+    /// Whether `priority`'s lane has storage for one more push: one run of its `reserve`.
+    fn ring_room(&self, priority: Priority) -> bool {
+        self.rings[self.bound.lane_index(priority)]
+            .cursor
+            .fits(1, self.reserve)
+    }
+
+    /// Whether `priority`'s lane has storage for a reply of `bytes`, one push's run for each
+    /// datagram it is cut into.
+    fn reply_room(&self, priority: Priority, bytes: usize, batch: usize) -> bool {
+        self.rings[self.bound.lane_index(priority)]
+            .cursor
+            .fits(bytes.div_ceil(batch.max(1)).max(1), self.reserve)
+    }
+
     /// Whether no lane holds a datagram.
     fn is_empty(&self) -> bool {
         self.rings.iter().all(LaneRing::is_empty)
@@ -287,6 +307,15 @@ impl Lanes {
 /// the storage starts again at its front.
 struct LaneRing {
     buf: alloc::vec::Vec<u8>,
+    cursor: Cursor,
+}
+
+/// Where a [`LaneRing`]'s runs lie, apart from its bytes, so a question of room can be tried on a
+/// copy.
+#[derive(Clone, Copy)]
+struct Cursor {
+    /// The storage's length.
+    len: usize,
     /// Where the oldest run starts.
     head: usize,
     /// Where the next run starts.
@@ -297,28 +326,14 @@ struct LaneRing {
     runs: usize,
 }
 
-impl LaneRing {
-    fn new(capacity: usize) -> Self {
-        Self {
-            buf: alloc::vec![0; capacity],
-            head: 0,
-            tail: 0,
-            wrap_end: None,
-            runs: 0,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.runs == 0
-    }
-
+impl Cursor {
     /// Where a run of up to `want` bytes can start, and whether it starts again at the front.
     fn room(&self, want: usize) -> Option<(usize, bool)> {
         if self.runs == 0 {
-            return (want <= self.buf.len()).then_some((0, false));
+            return (want <= self.len).then_some((0, false));
         }
         match self.wrap_end {
-            None if self.buf.len() - self.tail >= want => Some((self.tail, false)),
+            None if self.len - self.tail >= want => Some((self.tail, false)),
             None => (self.head >= want).then_some((0, true)),
             Some(_) => (self.head - self.tail >= want).then_some((self.tail, false)),
         }
@@ -336,14 +351,16 @@ impl LaneRing {
         self.runs += 1;
     }
 
-    /// The oldest run's bytes from its start, as far as they reach.
-    fn front(&self) -> Option<&[u8]> {
-        (self.runs > 0).then(|| &self.buf[self.head..])
-    }
-
-    /// `len` bytes of the oldest run, `skip` bytes in.
-    fn front_run(&self, skip: usize, len: usize) -> &[u8] {
-        &self.buf[self.head + skip..self.head + skip + len]
+    /// Whether `runs` more runs of `each` bytes fit, one after the other.
+    fn fits(&self, runs: usize, each: usize) -> bool {
+        let mut probe = *self;
+        (0..runs).all(|_| match probe.room(each) {
+            Some((at, wraps)) => {
+                probe.commit(at, each, wraps);
+                true
+            }
+            None => false,
+        })
     }
 
     /// The oldest run, of `len` bytes, has left.
@@ -360,6 +377,49 @@ impl LaneRing {
             self.tail = 0;
             self.wrap_end = None;
         }
+    }
+}
+
+impl LaneRing {
+    fn new(capacity: usize) -> Self {
+        Self {
+            buf: alloc::vec![0; capacity],
+            cursor: Cursor {
+                len: capacity,
+                head: 0,
+                tail: 0,
+                wrap_end: None,
+                runs: 0,
+            },
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.cursor.runs == 0
+    }
+
+    fn room(&self, want: usize) -> Option<(usize, bool)> {
+        self.cursor.room(want)
+    }
+
+    fn commit(&mut self, at: usize, len: usize, wraps: bool) {
+        self.cursor.commit(at, len, wraps);
+    }
+
+    /// The oldest run's bytes from its start, as far as they reach.
+    fn front(&self) -> Option<&[u8]> {
+        (self.cursor.runs > 0).then(|| &self.buf[self.cursor.head..])
+    }
+
+    /// `len` bytes of the oldest run, `skip` bytes in.
+    fn front_run(&self, skip: usize, len: usize) -> &[u8] {
+        let from = self.cursor.head + skip;
+        &self.buf[from..from + len]
+    }
+
+    /// The oldest run, of `len` bytes, has left.
+    fn pop(&mut self, len: usize) {
+        self.cursor.pop(len);
     }
 }
 
@@ -456,7 +516,17 @@ impl GroupTxStage {
     /// takes a reply slot, or is dropped and counted ([`Self::dropped`]) when none is free.
     pub(super) fn admit_reply(&self, item: MulticastTxItem) {
         let inner = &*self.inner;
-        if !self.quota.get().admits(inner.replies.get() + 1) {
+        // A lane's storage holds the replies the limit lets the stage hold; one its storage has no
+        // room for is past that limit, and is refused by it.
+        let room = {
+            let priority = multicast_tx_conduit(&item, &inner.params);
+            let bytes = multicast_tx_bytes(&item);
+            inner
+                .lanes
+                .borrow()
+                .reply_room(priority, bytes, usize::from(inner.params.batch_size))
+        };
+        if !room || !self.quota.get().admits(inner.replies.get() + 1) {
             inner.dropped.set(inner.dropped.get().saturating_add(1));
             // Freed here, with nothing of the stage borrowed.
             drop(item);
@@ -675,11 +745,9 @@ impl GroupTxStage {
         self.inner.writer.borrow().held.is_some()
     }
 
-    /// How many datagrams of the stage were lost: by a send the stack failed, whoever wrote them,
-    /// or for want of room in their lane's storage.
+    /// How many datagrams of the stage a send the stack failed lost, whoever wrote them.
     pub(super) fn lost(&self) -> u32 {
-        let refused = self.inner.lanes.borrow().refused;
-        self.inner.writer.borrow().lost.saturating_add(refused)
+        self.inner.writer.borrow().lost
     }
 
     /// The conduits as written: what the JOIN advertises. A member re-seeds what it expects from
@@ -778,17 +846,38 @@ struct StageQueue<'a> {
 }
 
 impl StageQueue<'_> {
+    /// What a push of `priority` asking with `wait` is answered before it waits: the lane's own
+    /// answer, and a wait where the lane has room and its storage has none, which only the writer
+    /// frees.
+    fn at_once(&self, priority: Priority, wait: RoomWait) -> Option<LinkRoom> {
+        let mut lanes = self.lanes.borrow_mut();
+        match lanes.bound.room_at_once(priority, wait) {
+            Some(LinkRoom::Free) if !lanes.ring_room(priority) => None,
+            answer => answer,
+        }
+    }
+
+    /// Whether `priority`'s lane takes another push: it holds less than its bound, and its
+    /// storage has a push's run free.
     fn has_room(&self, priority: Priority) -> bool {
-        self.lanes.borrow().bound.has_room(priority)
+        let lanes = self.lanes.borrow();
+        lanes.bound.has_room(priority) && lanes.ring_room(priority)
     }
 }
 
 impl MulticastTxQueue for StageQueue<'_> {
     fn wait_for_room(&mut self, priority: Priority, wait: RoomWait) -> RoomAnswer {
         let Some(pace) = self.pace else {
-            return RoomAnswer::at_once(LinkRoom::Free);
+            // A push that does not wait is let on whatever its lane holds, but not past its
+            // lane's storage: there it is a congestion drop, counted on its lane.
+            let room = if self.lanes.borrow().ring_room(priority) {
+                LinkRoom::Free
+            } else {
+                LinkRoom::Congested
+            };
+            return RoomAnswer::at_once(room);
         };
-        let mut at_once = self.lanes.borrow_mut().bound.room_at_once(priority, wait);
+        let mut at_once = self.at_once(priority, wait);
         // A lane answers congested at once on what its writer last did: a droppable message meets
         // the mark of a drop, or one that may not wait meets the lane full. A writer on a thread of
         // its own drains the moment its socket takes again, lowering the mark before the next
@@ -798,7 +887,7 @@ impl MulticastTxQueue for StageQueue<'_> {
         // A socket that is still full leaves the answer standing, with nothing run.
         if at_once == Some(LinkRoom::Congested) && !pace.ended() && pace.wait_writable(0) {
             pace.pass();
-            at_once = self.lanes.borrow_mut().bound.room_at_once(priority, wait);
+            at_once = self.at_once(priority, wait);
         }
         if let Some(room) = at_once {
             return RoomAnswer::at_once(room);
@@ -854,12 +943,13 @@ impl MulticastTxQueue for StageQueue<'_> {
                 slot.copy_from_slice(bytes);
                 Some(bytes.len())
             });
+        // Every datagram was let on by a push's run free in its lane's storage, and a reply by
+        // the runs of its datagrams (`GroupTxStage::admit_reply`): one finds room by the sizing.
+        debug_assert!(
+            queued,
+            "a datagram let on its lane finds room in its storage"
+        );
         if !queued {
-            // The lane's storage is its bound and more: only a reply past the replies it was sized
-            // for, or a fragment past a lane's room, finds none. It is lost, and the reply's slot
-            // is free again.
-            let mut lanes = self.lanes.borrow_mut();
-            lanes.refused = lanes.refused.saturating_add(1);
             self.reply = reply;
         }
     }
@@ -1213,6 +1303,93 @@ mod tests {
             0,
             "a lane with room is waited on by nothing"
         );
+    }
+
+    /// Fill the DEFAULT lane's storage of `stage` up to `left` free bytes with one datagram that
+    /// holds nothing of the lane's bound: the storage, and not the bound, is what a push then meets.
+    fn occupy(stage: &GroupTxStage, left: usize) {
+        let mut lanes = stage.inner.lanes.borrow_mut();
+        let lane = lanes.bound.lane_index(Priority::DEFAULT);
+        let ring = &mut lanes.rings[lane];
+        let len = ring.buf.len() - left;
+        Record {
+            order: 0,
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            reply: false,
+            len: len - Record::BYTES,
+        }
+        .write(&mut ring.buf[..Record::BYTES]);
+        ring.commit(0, len, false);
+    }
+
+    /// A push its lane's bound lets on and its lane's storage has no room for follows its
+    /// congestion control: a blocking one waits for the writer and is pushed once the writer frees
+    /// the storage, or is a congestion drop, counted, once its whole wait runs out; a droppable one
+    /// waits out its drop wait and is dropped and counted.
+    #[test]
+    fn a_push_its_lane_storage_has_no_room_for_follows_its_congestion_control() {
+        use wz_session_core::qos::CongestionControl;
+        let params = one_batch_lanes();
+        let push = wz_session_core::lent_push::literal_put("demo/stage", b"first").expect("a put");
+        let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| push.encode(sink);
+        let message = |congestion: CongestionControl| MulticastTxEncoded {
+            qos: wz_session_core::sample::QosLevel::DEFAULT.with_congestion(congestion),
+            reliable: true,
+            size: 64,
+            body: &body,
+        };
+
+        let stage = GroupTxStage::new(&params);
+        occupy(&stage, 0);
+        let pump = stage.clone();
+        let writes = move || while pump.take().is_some() {};
+        let mut freeing = FullHost::new(&writes);
+        freeing.writable = true;
+        assert_eq!(
+            stage.push_encoded(&message(CongestionControl::Block), &freeing),
+            Ok(PushOutcome::Pushed)
+        );
+        assert!(freeing.passes.get() > 0, "it waited for the writer");
+
+        let nothing = || {};
+        let stage = GroupTxStage::new(&params);
+        occupy(&stage, 0);
+        let host = FullHost::new(&nothing);
+        assert_eq!(
+            stage.push_encoded(&message(CongestionControl::Block), &host),
+            Ok(PushOutcome::Congested)
+        );
+        assert_eq!(host.now_us.get(), params.tx_queue.wait_before_close_us);
+        assert_eq!(stage.drops(Priority::DEFAULT), 1);
+
+        let stage = GroupTxStage::new(&params);
+        occupy(&stage, 0);
+        let host = FullHost::new(&nothing);
+        assert_eq!(
+            stage.push_encoded(&message(CongestionControl::Drop), &host),
+            Ok(PushOutcome::Congested)
+        );
+        assert_eq!(host.now_us.get(), params.tx_queue.wait_before_drop_us);
+        assert_eq!(stage.drops(Priority::DEFAULT), 1);
+    }
+
+    /// A reply its lane's storage has no room for is past the reply limit the storage is sized by,
+    /// and is refused by it: dropped and counted in `dropped`, no congestion drop, and nothing of
+    /// it queued.
+    #[test]
+    fn a_reply_its_lane_storage_has_no_room_for_is_refused_by_the_reply_limit() {
+        let stage = GroupTxStage::new(&one_batch_lanes());
+        occupy(&stage, 100);
+        stage.enqueue(put("third"));
+        assert_eq!(stage.dropped(), 1);
+        assert_eq!(stage.drops(Priority::DEFAULT), 0);
+        assert!(
+            stage.take().is_some(),
+            "the datagram that filled the storage"
+        );
+        assert!(stage.take().is_none(), "and nothing of the reply");
     }
 
     /// A lane's storage gives each datagram one contiguous run, takes a run that does not fit
