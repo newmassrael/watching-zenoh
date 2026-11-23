@@ -263,14 +263,34 @@ fn abi_reads_anyke(parameters: &[u8]) -> bool {
         && ReplyKeyExpr::from_parameter_bytes(Some(parameters)) == ReplyKeyExpr::Any
 }
 
+/// A text a query's marshal reads: where the view holds it, for the one call the marshal is handed
+/// to ([`QueryMarshal::new`]), or a copy of the marshal's own, for a query kept past it
+/// ([`QueryMarshal::deep_copy_deferred`]).
+enum QueryText<T: ?Sized> {
+    /// The view's, which outlives the marshal that reads it.
+    Lent(*const T),
+    /// The marshal's own.
+    Owned(Box<T>),
+}
+
+impl<T: ?Sized> QueryText<T> {
+    fn get(&self) -> &T {
+        match self {
+            // SAFETY: a lent text outlives the marshal that holds it (`QueryMarshal::new`).
+            Self::Lent(text) => unsafe { &**text },
+            Self::Owned(text) => text,
+        }
+    }
+}
+
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.
 ///
 /// Owns copies of the query's keyexpr / parameters / value payload so they
 /// outlive the wz [`QueryView`] borrow, caches the loaned views the accessors
 /// hand back, and accumulates the replies the callback asks for.
 pub(crate) struct QueryMarshal {
-    keyexpr: String,
-    parameters: Vec<u8>,
+    keyexpr: QueryText<str>,
+    parameters: QueryText<[u8]>,
     /// pico's `_anyke`: whether this query accepts replies under ANY key rather
     /// than only keys it covers. Derived from `parameters` at marshal time (see
     /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
@@ -365,11 +385,13 @@ impl QueryMarshal {
     /// # Safety
     /// The marshal is dropped before the borrow of `view` ends.
     unsafe fn new(view: &dyn QueryView) -> Self {
-        let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
+        // Read where the view holds them, as the payload is: the marshal is dropped before the
+        // view's borrow ends, and an escaped copy keeps copies of its own.
+        let parameters = view.parameters().unwrap_or_default();
         Self {
-            keyexpr: view.keyexpr().to_owned(),
-            anyke: abi_reads_anyke(&parameters),
-            parameters,
+            keyexpr: QueryText::Lent(view.keyexpr() as *const str),
+            anyke: abi_reads_anyke(parameters),
+            parameters: QueryText::Lent(parameters as *const [u8]),
             // Absence collapses to EMPTY here, not to a flag: the accessors
             // must hand C a pointer either way (see the field docs).
             payload: view
@@ -441,8 +463,8 @@ impl QueryMarshal {
         attachment: crate::bytes::ByteBuf,
     ) -> Self {
         Self {
-            keyexpr: self.keyexpr.clone(),
-            parameters: self.parameters.clone(),
+            keyexpr: QueryText::Owned(Box::from(self.keyexpr.get())),
+            parameters: QueryText::Owned(Box::from(self.parameters.get())),
             anyke: self.anyke,
             encoding: self
                 .encoding
@@ -497,7 +519,7 @@ impl QueryMarshal {
     /// invariant — bind at the final address.
     fn bind(&mut self) {
         self.loaned_keyexpr =
-            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.get().as_ptr(), self.keyexpr.get().len());
         self.loaned_payload.handle = &self.payload as *const crate::bytes::ByteBuf as *mut c_void;
         self.loaned_attachment.handle =
             &self.attachment as *const crate::bytes::ByteBuf as *mut c_void;
@@ -541,10 +563,10 @@ impl QueryMarshal {
 /// attachment reads as absent, as the view it was built from would.
 impl QueryView for QueryMarshal {
     fn keyexpr(&self) -> &str {
-        &self.keyexpr
+        self.keyexpr.get()
     }
     fn parameters(&self) -> Option<&[u8]> {
-        Some(&self.parameters)
+        Some(self.parameters.get())
     }
     fn attachment(&self) -> Option<&[u8]> {
         (!self.attachment.is_empty()).then_some(self.attachment.as_slice())
@@ -1428,7 +1450,10 @@ pub unsafe extern "C" fn z_query_parameters(
             return Z_OK;
         }
         let (start, len) = match query_marshal(query) {
-            Some(marshal) => (marshal.parameters.as_ptr(), marshal.parameters.len()),
+            Some(marshal) => (
+                marshal.parameters.get().as_ptr(),
+                marshal.parameters.get().len(),
+            ),
             None => (core::ptr::null(), 0),
         };
         (*parameters) = z_view_string_t {
@@ -1584,7 +1609,7 @@ pub unsafe extern "C" fn z_query_reply(
             Some(k) => k.to_owned(),
             None => return Z_ERR_NULL,
         };
-        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), &ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
         marshal.push_reply(PendingReply::Put {
@@ -1658,7 +1683,7 @@ pub unsafe extern "C" fn z_query_reply_del(
             Some(k) => k.to_owned(),
             None => return Z_ERR_NULL,
         };
-        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), &ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
         marshal.push_reply(PendingReply::Del { keyexpr: ke, meta });
@@ -2026,8 +2051,8 @@ mod tests {
         );
         assert_eq!(
             marshal.loaned_keyexpr._start as usize,
-            marshal.keyexpr.as_ptr() as usize,
-            "the cached keyexpr view must address THIS marshal's string buffer"
+            view.keyexpr.as_ptr() as usize,
+            "the cached keyexpr view must address the key where the view holds it, uncopied"
         );
 
         // The accessors built on those views resolve to the query's bytes.

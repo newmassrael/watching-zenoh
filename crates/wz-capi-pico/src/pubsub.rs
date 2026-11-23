@@ -240,15 +240,19 @@ impl KeyText {
 }
 
 impl SampleMarshal {
-    /// Build the marshal with its cached views still UNBOUND — [`Self::bind`]
-    /// must run once the value has reached its final address. See
-    /// [`crate::query::QueryMarshal::bind`] for why the split is load-bearing
-    /// (an earlier cut bound inside a by-value constructor and handed C a
-    /// pointer into the dead constructor frame). Its callers are a get's reply and a liveliness
-    /// event; a subscriber's sample goes through [`Self::lent`].
+    /// Build the marshal for `keyexpr`, read where the caller holds it for the one call the marshal
+    /// is handed to, with its cached views still UNBOUND — [`Self::bind`] must run once the value
+    /// has reached its final address. See [`crate::query::QueryMarshal::bind`] for why the split
+    /// is load-bearing (an earlier cut bound inside a by-value constructor and handed C a pointer
+    /// into the dead constructor frame). Its callers are a get's reply and a liveliness event; a
+    /// subscriber's sample goes through [`Self::lent`]. What is kept past the call is copied when
+    /// it is kept ([`Self::deep_copy`]).
+    ///
+    /// # Safety
+    /// The marshal is dropped before the borrow of `keyexpr` ends.
     #[cfg(any(feature = "query", feature = "liveliness"))]
-    pub(crate) fn new(keyexpr: String, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
-        Self::keyed(KeyText::Owned(keyexpr), payload, kind)
+    pub(crate) unsafe fn lent_key(keyexpr: &str, payload: ByteBuf, kind: z_sample_kind_t) -> Self {
+        Self::keyed(KeyText::Lent(keyexpr as *const str), payload, kind)
     }
 
     /// The marshal a subscriber's callback is handed for `view`: its key, its payload and its
@@ -623,11 +627,15 @@ pub(crate) fn make_liveliness_callback(
             Some(f) => f,
             None => return,
         };
-        let mut marshal = SampleMarshal::new(
-            sample.keyexpr.to_owned(),
-            ByteBuf::new(),
-            crate::liveliness::liveliness_kind_of(sample.kind),
-        );
+        // SAFETY: the marshal is dropped at the end of this call, inside the borrow of the event's
+        // key.
+        let mut marshal = unsafe {
+            SampleMarshal::lent_key(
+                sample.keyexpr,
+                ByteBuf::new(),
+                crate::liveliness::liveliness_kind_of(sample.kind),
+            )
+        };
         marshal.bind();
         let sample_ptr = marshal.as_loaned();
         // SAFETY + panic discipline identical to `make_subscriber_callback`:

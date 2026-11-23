@@ -282,7 +282,7 @@ impl ReplyMarshal {
             // reading `put_encoding` for an error answered the default encoding
             // whatever the peer sent (pico's answers what the error carried:
             // `vendor/zenoh-pico/src/api/api.c` @ `z_reply_err_encoding`).
-            sample: SampleMarshal::new(view.keyexpr().to_owned(), sample_payload, sample_kind)
+            sample: SampleMarshal::lent_key(view.keyexpr(), sample_payload, sample_kind)
                 .with_reply_metadata(
                     view.attachment(),
                     if is_ok {
