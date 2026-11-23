@@ -74,28 +74,29 @@ impl<'a> EndpointWriter<'a> {
     /// of both.
     #[inline(never)]
     fn write(&mut self, text: &str, listen: bool) -> Result<(), OpenError> {
-        let (written, as_open): (_, fn(EndpointRefusal) -> OpenError) = if listen {
-            (self.texts.write_listen(text), OpenError::Listen)
+        let written = if listen {
+            self.texts.write_listen(text)
         } else {
-            (self.texts.write_dial(text), OpenError::Unreachable)
+            self.texts.write_dial(text)
         };
         written
             .map(drop)
-            .map_err(|why| unwritten(text, why, as_open))
+            .map_err(|why| unwritten(text, why, listen))
     }
 }
 
 /// The open's refusal of the endpoint `text` that has no row: one longer than a row is refused as
-/// `as_open`'s endpoint, one to dial or one to listen on; one past the rows the open lent, which
-/// its config counted, as an arena that does not hold what the source wrote.
-fn unwritten(
-    text: &str,
-    why: EndpointTextRefused,
-    as_open: fn(EndpointRefusal) -> OpenError,
-) -> OpenError {
+/// an endpoint to listen on when `listen`, to dial otherwise; one past the rows the open lent,
+/// which its config counted, as an arena that does not hold what the source wrote.
+fn unwritten(text: &str, why: EndpointTextRefused, listen: bool) -> OpenError {
     match why {
         EndpointTextRefused::TooLong { .. } => {
-            as_open(EndpointRefusal::new(text, Refusal::TextTooLong))
+            let refusal = EndpointRefusal::new(text, Refusal::TextTooLong);
+            if listen {
+                OpenError::Listen(refusal)
+            } else {
+                OpenError::Unreachable(refusal)
+            }
         }
         EndpointTextRefused::Full => OpenError::Arena(ArenaRefused::TooLarge),
     }

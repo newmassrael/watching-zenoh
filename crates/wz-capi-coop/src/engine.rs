@@ -2129,9 +2129,9 @@ pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
     links: &impl SessionLinks,
     config: &CoopConfig<E>,
 ) -> Result<ArenaPlan, ArenaRefused> {
-    ArenaPlan::of(config, &resolve_limits(config))
-        .and_then(|plan| plan.holding_links(links.link_cell_bytes()))
-        .and_then(|plan| plan.holding_gates(CellRc::<LinkGate<C>>::cell_bytes()))
+    ArenaPlan::of(config, &resolve_limits(config)).and_then(|plan| {
+        plan.holding_cells(links.link_cell_bytes(), CellRc::<LinkGate<C>>::cell_bytes())
+    })
 }
 
 /// The session's id space over `keyexprs`, as its links and its faces' tables read it: a weak
@@ -3659,10 +3659,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
-        if let Some(cells) = arena.lend_link_cells(&plan).map_err(OpenError::Arena)? {
+        let (link_cells, gate_cells) = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
+        if let Some(cells) = link_cells {
             links.lend_cells(cells);
         }
-        let gate_cells = arena.lend_gate_cells(&plan).map_err(OpenError::Arena)?;
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));

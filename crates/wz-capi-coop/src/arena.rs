@@ -748,30 +748,21 @@ impl ArenaPlan {
         Ok(self)
     }
 
-    /// The plan with a cell for each of its links, `bytes` bytes each, which the links' drivers
-    /// are placed in (`wz_runtime_coop::link_cells`, the stack's `SessionLinks::link_cell_bytes`):
-    /// a link the session opens then takes a cell and no memory of the heap. Laid out before the
-    /// ABI's handle ([`Self::holding`]). `0` adds nothing, as a stack that places its links on
-    /// the heap asks.
-    pub fn holding_links(mut self, bytes: usize) -> Result<Self, ArenaRefused> {
-        if bytes == 0 || self.link_cell_bytes != 0 {
-            return Ok(self);
+    /// The plan with a cell for each of its links' drivers, `driver` bytes each, which the links
+    /// are placed in (`wz_runtime_coop::link_cells`, the stack's `SessionLinks::link_cell_bytes`),
+    /// and a cell for each link's gates, `gate` bytes each, which the session places them in when
+    /// it makes the link: a link the session opens then takes cells and no memory of the heap. Laid
+    /// out before the ABI's handle ([`Self::holding`]). A size of `0` adds no table, as a stack
+    /// that places its links on the heap asks.
+    pub fn holding_cells(mut self, driver: usize, gate: usize) -> Result<Self, ArenaRefused> {
+        if self.link_cell_bytes == 0 && driver != 0 {
+            self.link_cell_bytes = driver;
+            self.put_cells(["link cell flags", "link cells"], driver)?;
         }
-        self.link_cell_bytes = bytes;
-        self.put_cells(["link cell flags", "link cells"], bytes)?;
-        Ok(self)
-    }
-
-    /// The plan with a cell for each of its links' gates, `bytes` bytes each: the session's
-    /// gates over a link's pump, placed in the link's cell when the session makes the link and
-    /// given back when it goes, so a link the session makes takes no memory of the heap for them.
-    /// Laid out before the ABI's handle ([`Self::holding`]); `0` adds nothing.
-    pub fn holding_gates(mut self, bytes: usize) -> Result<Self, ArenaRefused> {
-        if bytes == 0 || self.gate_cell_bytes != 0 {
-            return Ok(self);
+        if self.gate_cell_bytes == 0 && gate != 0 {
+            self.gate_cell_bytes = gate;
+            self.put_cells(["link gate flags", "link gates"], gate)?;
         }
-        self.gate_cell_bytes = bytes;
-        self.put_cells(["link gate flags", "link gates"], bytes)?;
         Ok(self)
     }
 
@@ -1292,34 +1283,20 @@ impl SessionArena {
         Ok(EndpointTexts::over(self.lend(dials)?, self.lend(listens)?))
     }
 
-    /// Lend the cells `plan` lays out for its links' drivers ([`ArenaPlan::holding_links`]), none
-    /// for a plan with none. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_link_cells(
+    /// Lend the cells `plan` lays out for its links' drivers and for their gates
+    /// ([`ArenaPlan::holding_cells`]), each `None` for a plan with no such table. Refused only by
+    /// an arena reserved by another plan.
+    pub(crate) fn lend_cells(
         &mut self,
         plan: &ArenaPlan,
-    ) -> Result<Option<LentByteCells>, ArenaRefused> {
-        if plan.link_cell_bytes == 0 {
-            return Ok(None);
-        }
-        self.arena
-            .lend_byte_cells(plan.link_cell_bytes, plan.links)
-            .map(Some)
-            .map_err(ArenaRefused::Lend)
-    }
-
-    /// Lend the cells `plan` lays out for its links' gates ([`ArenaPlan::holding_gates`]), none
-    /// for a plan with none. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_gate_cells(
-        &mut self,
-        plan: &ArenaPlan,
-    ) -> Result<Option<LentByteCells>, ArenaRefused> {
-        if plan.gate_cell_bytes == 0 {
-            return Ok(None);
-        }
-        self.arena
-            .lend_byte_cells(plan.gate_cell_bytes, plan.links)
-            .map(Some)
-            .map_err(ArenaRefused::Lend)
+    ) -> Result<(Option<LentByteCells>, Option<LentByteCells>), ArenaRefused> {
+        let mut table = |bytes: usize| {
+            (bytes != 0)
+                .then(|| self.arena.lend_byte_cells(bytes, plan.links))
+                .transpose()
+                .map_err(ArenaRefused::Lend)
+        };
+        Ok((table(plan.link_cell_bytes)?, table(plan.gate_cell_bytes)?))
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
