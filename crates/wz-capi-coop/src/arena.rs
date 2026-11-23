@@ -154,7 +154,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 34;
+pub const ARENA_ROWS: usize = 35;
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
