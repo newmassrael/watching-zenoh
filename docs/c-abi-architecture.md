@@ -211,7 +211,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-229) and holds the register's lint cells (146) to its ratchet, which a paid row
+given (TD-229) and holds the register's lint cells (145) to its ratchet, which a paid row
 lowers in its own commit. The ratchet moves up only when a crate is brought under the lints, in a
 commit that adds that crate's rows and changes no code: `wz-session-mcu` came in so with TD-207 to
 TD-227, and `wz-capi-port` with TD-228 and TD-229. For the lints a text read decides (`unwrap_used`, `expect_used` and the panicking macros)
@@ -302,7 +302,6 @@ out; those of `wz-capi-port` over its default build and its build with every fea
 | TD-189 | `wz-capi-pico` | `segment_sender` | `arithmetic_side_effects` | 2 | in flight |
 | TD-194 | `wz-capi-pico` | `device_requires` | `arithmetic_side_effects` | 1 | in flight |
 | TD-196 | `wz-capi-pico` | `e2e_sender` | `arithmetic_side_effects` | 1 | in flight |
-| TD-197 | `wz-capi-pico` | `platform` | `indexing_slicing` | 1 | in flight |
 | TD-198 | `wz-capi-pico` | `stream_supervision` | `arithmetic_side_effects` | 1 | in flight |
 | TD-199 | `wz-capi-pico` | `time_base` | `arithmetic_side_effects` | 1 | in flight |
 | TD-200 | `wz-runtime-coop` | `stream_link` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |

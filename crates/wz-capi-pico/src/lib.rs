@@ -645,8 +645,6 @@ mod option_fields;
 // Totality debt TD-155 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod os;
-// Totality debt TD-197 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod platform;
 // The places of the objects a program holds that no session holds for it, reserved once for the
 // process: in every library without the tokio engine, and in one with it that has their doors.
