@@ -178,12 +178,6 @@ pub mod slot_querier;
 pub mod slot_active;
 // The application of that client, written once for every platform: its storage, its factory and
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
-// Totality debt TD-213 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_node;
 // The same node as a getter: it asks one query again and again and keeps the round trips, for
