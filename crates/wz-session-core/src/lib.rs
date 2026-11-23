@@ -562,8 +562,6 @@ mod feature_bits_generated;
 // so it exists where the target has a 64-bit atomic or the `no_std` feature brings
 // `portable-atomic` to provide one, as `hlc` does. Documented in its own `//!`.
 #[cfg(any(target_has_atomic = "64", feature = "no_std"))]
-// Totality debt TD-138 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod interval_meter;
 
 /// A1a — modular sequence-number arithmetic (zenoh-pico

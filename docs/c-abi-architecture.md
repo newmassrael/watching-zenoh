@@ -332,7 +332,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-135 | `wz-session-core` | `driver_loop` | `indexing_slicing` | 1 | open |
 | TD-136 | `wz-session-core` | `group_view` | `arithmetic_side_effects` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
-| TD-138 | `wz-session-core` | `interval_meter` | `indexing_slicing` | 1 | open |
 | TD-140 | `wz-session-core` | `json` | `arithmetic_side_effects` | 1 | open |
 | TD-141 | `wz-session-core` | `limit_corpus` | `panic` | 1 | open |
 | TD-144 | `wz-session-core` | `process_limits` | `panic` | 1 | open |
