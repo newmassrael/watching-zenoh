@@ -1025,7 +1025,7 @@ impl MulticastTxLanes {
     /// The index, by priority wire byte, of the lane a message of `priority` takes: its own on a
     /// QoS group, the DEFAULT one otherwise.
     pub fn lane_index(&self, priority: Priority) -> usize {
-        self.lane(priority)
+        usize::from(self.lane(priority).wire_byte())
     }
 
     /// The lane a message of `priority` takes: its own on a QoS group, the DEFAULT one otherwise.

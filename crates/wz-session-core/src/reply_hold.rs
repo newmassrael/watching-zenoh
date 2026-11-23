@@ -514,7 +514,7 @@ mod tests {
         }
     }
 
-    fn put(key: &str, payload: &'static [u8], time: u64) -> Stated<'_> {
+    fn put<'k>(key: &'k str, payload: &'static [u8], time: u64) -> Stated<'k> {
         Stated {
             key,
             kind: ReplyKind::Put,
