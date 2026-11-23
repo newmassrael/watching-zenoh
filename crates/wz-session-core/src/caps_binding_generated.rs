@@ -298,6 +298,30 @@ pub const HELD_PAYLOADS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::CONFIG_ENTRIES`] is bound.
+pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 255)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::CONFIG_TEXT_BYTES`] is bound.
+pub const CONFIG_TEXT_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 1048576)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_PENDING_LIVELINESS_GETS`] is bound.
 pub const MAX_PENDING_LIVELINESS_GETS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

@@ -145,6 +145,12 @@ pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;
 /// refuses, and `Z_EINVAL` for an argument it cannot read at all.
 pub const Z_ERR_CONFIG_INVALID_VALUE: ZResult = -89;
 
+/// A config's insert could not keep the value. Matches pico
+/// `_Z_ERR_CONFIG_FAILED_INSERT` (`vendor/zenoh-pico/include/zenoh-pico/utils/result.h` @
+/// `_Z_ERR_CONFIG_FAILED_INSERT = -95,`), which its insert answers when the value is not kept: here
+/// a new key past the config's rows or a value past its text.
+pub const Z_ERR_CONFIG_FAILED_INSERT: ZResult = -95;
+
 /// A wz door (`wz_ext.h`) was asked for something this build's policy does not
 /// allow: a get addressed to one node (`wz_ext_get_to_peer`) while the
 /// `targeted-query` policy is off. Nothing was sent. Not `Z_EINVAL`, which says
@@ -229,6 +235,7 @@ mod tests {
             Z_ERR_TRANSPORT_TX_FAILED,
             Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Z_ERR_CONFIG_INVALID_VALUE,
+            Z_ERR_CONFIG_FAILED_INSERT,
         ];
         let wz = [
             WZ_EXT_ERR_POLICY_OFF,
