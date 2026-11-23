@@ -203,8 +203,6 @@ pub mod byte_cells;
 /// type parameter, since one machine per sidecar (§2.1) means no
 /// per-instance capacity divergence. See the module docs for the
 /// const-vs-type-parameter rationale.
-// Totality debt TD-074 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod caps;
 
 /// The policies of a build: behaviour beyond upstream's, each a typed field of
