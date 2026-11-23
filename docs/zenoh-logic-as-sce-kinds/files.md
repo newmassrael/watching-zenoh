@@ -664,6 +664,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/action_trace.rs` | S3 | |
 | `crates/wz-session-core/src/admission_retry.rs` | S1 | |
 | `crates/wz-session-core/src/app_link_table.rs` | S12 | |
+| `crates/wz-session-core/src/app_link_table/remainder.rs` | S12 | |
 | `crates/wz-session-core/src/app_transport.rs` | S12 | |
 | `crates/wz-session-core/src/atomic_tx.rs` | S1 | |
 | `crates/wz-session-core/src/attachment.rs` | S2 | |
@@ -925,6 +926,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/tx_buf.rs` | S1 | |
 | `crates/wz-session-core/src/tx_deadline.rs` | S1 | |
 | `crates/wz-session-core/src/tx_lease.rs` | S1 | |
+| `crates/wz-session-core/src/unicast_rx.rs` | S1 | |
 | `crates/wz-session-core/src/unit_ext.rs` | S1 | |
 | `crates/wz-session-core/src/vle.rs` | S3 | |
 | `crates/wz-session-core/src/wire.rs` | S1 | |
