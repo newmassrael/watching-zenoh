@@ -606,6 +606,9 @@ struct Growth {
     /// (`CoopRuntime::opening`): a cell is added, of the task's own size, only for a task that no
     /// free cell fits, and none once it is sealed.
     doubling: bool,
+    /// The most cells the table holds: a table reserved while its open lasts adds none past it, so
+    /// what its open spawns is bounded as what it reserved is. Unbounded for a grown table.
+    most: usize,
 }
 
 impl ExecutorState {
@@ -638,21 +641,23 @@ impl ExecutorState {
             grow: TaskStore::grow,
             fit: fit_cell,
             doubling: true,
+            most: usize::MAX,
         });
         state
     }
 
-    /// `tasks` cells of `task_bytes` each, reserved now in one block, which an open adds cells
-    /// to while it lasts: a task no free cell fits takes a cell of its own size, kept for the next
-    /// task it fits. Once [`Self::seal`] is called the table is fixed, and a spawn that finds no
-    /// free cell it fits is refused, counted.
+    /// `tasks` cells of `task_bytes` each, reserved now in one block, which an open adds at most
+    /// `added` cells to while it lasts: a task no free cell fits takes a cell of its own size, kept
+    /// for the next task it fits. Once [`Self::seal`] is called the table is fixed, and a spawn
+    /// that finds no free cell it fits is refused, counted; so is one past the `added` cells.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    pub(crate) fn opening(tasks: usize, task_bytes: usize) -> Self {
+    pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
         let mut state = Self::over(Cells::Store(reserved_store(tasks, task_bytes)), None);
         state.growth = Some(Growth {
             grow: TaskStore::grow,
             fit: fit_cell,
             doubling: false,
+            most: tasks.saturating_add(added),
         });
         state
     }
@@ -705,8 +710,12 @@ impl ExecutorState {
         }
         match self.cells {
             Cells::Store(ref store) => {
+                let held = store.len();
+                if held >= growth.most {
+                    return None;
+                }
                 let count = if growth.doubling {
-                    store.len().max(FIRST_CHUNK)
+                    held.max(FIRST_CHUNK)
                 } else {
                     1
                 };

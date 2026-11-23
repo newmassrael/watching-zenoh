@@ -227,13 +227,15 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// [`Self::reserved`] for an engine whose open spawns tasks it cannot size before it opens (a
     /// group's session): until [`Self::seal`], a task that no free cell fits takes a cell of its
     /// own size, kept for the next task it fits, so what the open spawns is placed while it opens
-    /// and a task spawned again after it finds its cell. Once sealed the runtime is
-    /// [`Self::reserved`]'s: no spawn and no sleep allocates.
+    /// and a task spawned again after it finds its cell. At most `added` cells are added so, the
+    /// table never holding more than `rows.tasks + added`: a spawn past them is refused, counted,
+    /// as one past a reserved table's rows is. Once sealed the runtime is [`Self::reserved`]'s:
+    /// no spawn and no sleep allocates.
     #[cfg(not(feature = "session-slot"))]
-    pub fn opening(clock: C, rows: RuntimeRows) -> Self {
+    pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
         Self::over(
             clock,
-            ExecutorState::opening(rows.tasks, rows.task_bytes),
+            ExecutorState::opening(rows.tasks, rows.task_bytes, added),
             TimerQueue::reserved(rows.timers),
         )
     }

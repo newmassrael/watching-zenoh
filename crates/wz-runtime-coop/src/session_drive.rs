@@ -1903,7 +1903,9 @@ pub trait MakeRouter<R> {
 /// moved through the stack of the call that opens the session; only the maker, which holds what
 /// the Router is made of, is. The pump is dropped with the task, whether the session ended or the
 /// task was dropped before. A task the runtime refuses (a table reserved too small for it, or
-/// full) is counted by the runtime, and its handle reads `Err(RuntimeError::Shutdown)`.
+/// full) is counted by the runtime and answered with why, the maker and what it was to be made of
+/// dropped unmade: an engine that reserved its tables at its open tells its program the session
+/// has no room, where a handle that reads as a shut runtime would say the session ended.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
@@ -1913,7 +1915,7 @@ pub fn spawn_session_with_router<C, L, R, M, F>(
     config: SessionDriveConfig,
     make_router: M,
     on_event: F,
-) -> CoopLocalJoinHandle<DriverOutcome>
+) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
@@ -1922,21 +1924,19 @@ where
     F: EventSink + 'static,
 {
     let runtime = local.runtime().clone();
-    local
-        .spawn_local_with(move || RouterSessionTask {
-            parts: Some(PumpParts {
-                runtime,
-                link,
-                actions,
-                clock,
-                config,
-                make_router,
-            }),
-            place: InPlace::empty(),
-            on_event,
-            _pinned: core::marker::PhantomPinned,
-        })
-        .unwrap_or_else(|_refused| CoopLocalJoinHandle::refused())
+    local.spawn_local_with(move || RouterSessionTask {
+        parts: Some(PumpParts {
+            runtime,
+            link,
+            actions,
+            clock,
+            config,
+            make_router,
+        }),
+        place: InPlace::empty(),
+        on_event,
+        _pinned: core::marker::PhantomPinned,
+    })
 }
 
 /// The task a session runs as on the heap profile ([`spawn_session_with_router`]): a future of a
@@ -2865,7 +2865,8 @@ mod wake_budget_tests {
                 policy: wz_session_core::policy::SessionPolicy::defaults(),
             },
             ignore as fn(IterationEvent<'_, '_>),
-        );
+        )
+        .expect("a grown table takes every task");
         assert_eq!(made.get(), 0, "nothing is built before the task runs");
         local.run_until_idle();
         assert_eq!(
@@ -2913,7 +2914,7 @@ mod wake_budget_tests {
             let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
             let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
             let made = Rc::new(core::cell::Cell::new(0u32));
-            let task = spawn_session_with_router(
+            let spawned = spawn_session_with_router(
                 &local,
                 Rc::new(Recording::default()),
                 actions,
@@ -2930,12 +2931,100 @@ mod wake_budget_tests {
                 ignore as Sink,
             );
             local.run_until_idle();
-            assert_eq!(task.is_finished(), !fits, "a cell of {cell} bytes");
             assert_eq!(made.get(), u32::from(fits), "a refused task makes nothing");
             assert_eq!(runtime.task_refusals().too_large, u32::from(!fits));
-            task.abort();
-            local.run_until_idle();
+            match spawned {
+                Ok(task) => {
+                    assert!(
+                        fits,
+                        "a cell of {cell} bytes, too small, hosted the session"
+                    );
+                    assert!(!task.is_finished(), "the session runs in its cell");
+                    task.abort();
+                    local.run_until_idle();
+                }
+                Err(why) => {
+                    assert!(
+                        !fits,
+                        "a cell of {cell} bytes, which fits, refused the session"
+                    );
+                    assert_eq!(why, crate::executor::SpawnRefusal::TooLarge);
+                }
+            }
         }
+    }
+
+    /// The engine's shape of a session: a runtime reserved when the session opens and sealed, the
+    /// session's task on a local set, its pump holding a handle of the runtime. Letting go of every
+    /// handle outside the table lets go of the runtime, and its clock with it: the table keeps no
+    /// task past its set, so a task's handle does not keep the runtime that keeps the task.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_sealed_runtime_whose_session_task_holds_it_is_let_go_with_its_local_set() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        static RELEASED: AtomicU32 = AtomicU32::new(0);
+        /// A clock that counts its drops: the runtime that holds it is gone when it is.
+        struct Released;
+        impl ClockSource for Released {
+            fn now_us(&self) -> u64 {
+                1_000_000
+            }
+        }
+        impl Drop for Released {
+            fn drop(&mut self) {
+                RELEASED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        type Link = Rc<Recording>;
+        type Router = crate::reassembly_rx::CoopReassembly;
+        type Sink = fn(IterationEvent<'_, '_>);
+        let task_bytes = router_session_task_bytes::<Released, Link, Router, CountedRouter, Sink>();
+        let runtime = CoopRuntime::opening(
+            Released,
+            crate::RuntimeRows {
+                tasks: 1,
+                task_bytes,
+                timers: 1,
+            },
+            0,
+        );
+        runtime.seal();
+        let local = CoopLocalSet::new(&runtime);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let task = spawn_session_with_router(
+            &local,
+            Rc::new(Recording::default()),
+            actions,
+            clock,
+            SessionDriveConfig {
+                timeouts: SessionTimeouts::from_build(),
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+            CountedRouter {
+                made: Rc::new(core::cell::Cell::new(0u32)),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
+            },
+            ignore as Sink,
+        )
+        .expect("the cell reserved for the session");
+        local.run_until_idle();
+        assert!(!task.is_finished(), "the session runs");
+        drop(task);
+        drop(runtime);
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            0,
+            "the local set still holds the runtime"
+        );
+        drop(local);
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            1,
+            "the runtime went with the set its session's task was on, though the task held it"
+        );
     }
 
     #[test]

@@ -551,6 +551,7 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
             task_bytes: 64,
             timers: 0,
         },
+        1,
     );
     let local = CoopLocalSet::new(&runtime);
     let small = local.try_spawn_local(forever()).expect("the reserved cell");
@@ -596,6 +597,118 @@ fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
     small.abort();
     held.abort();
     local.run_until_idle();
+}
+
+/// An open adds no more cells than it was told it may: a task that finds every cell taken while
+/// the open lasts, the added ones too, is refused and counted as one past a reserved table's rows,
+/// and the table holds what it held.
+#[test]
+fn an_opening_runtime_adds_no_cell_past_the_ones_it_may_add() {
+    let runtime = CoopRuntime::opening(
+        Still,
+        RuntimeRows {
+            tasks: 1,
+            task_bytes: 64,
+            timers: 0,
+        },
+        1,
+    );
+    let local = CoopLocalSet::new(&runtime);
+    let small = local.try_spawn_local(forever()).expect("the reserved cell");
+    let added = local
+        .try_spawn_local(large([1; 256]))
+        .expect("the one cell the open may add");
+    assert_eq!(runtime.inner.executor.capacity(), 2);
+    let Err(past) = local.try_spawn_local(large([2; 256])) else {
+        panic!("the open added the one cell it may, and both are taken");
+    };
+    assert_eq!(
+        past.why,
+        SpawnRefusal::NoTaskCell,
+        "a task a cell fits waits"
+    );
+    assert_eq!(
+        runtime.inner.executor.capacity(),
+        2,
+        "no cell was added past the one"
+    );
+    assert_eq!(
+        runtime.task_refusals(),
+        Refusals {
+            no_task_cell: 1,
+            too_large: 0,
+        }
+    );
+    small.abort();
+    added.abort();
+    local.run_until_idle();
+}
+
+/// A clock that does not move and counts its drops into a static of the test: the runtime that
+/// holds it is gone when it is.
+struct Released(&'static AtomicU32);
+
+impl ClockSource for Released {
+    fn now_us(&self) -> u64 {
+        0
+    }
+}
+
+impl Drop for Released {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The table keeps no task past its local set, whichever way the table was made: a task that holds
+/// a handle of the runtime goes with its set, so the runtime, and its clock, go with the last
+/// handle outside the table. Were the table to keep the task, the task's handle would keep the
+/// runtime, and the runtime the task, for as long as the process.
+#[test]
+fn a_runtime_whose_task_holds_it_is_let_go_with_the_last_handle_outside_its_table() {
+    static RELEASED: AtomicU32 = AtomicU32::new(0);
+    const ROWS: RuntimeRows = RuntimeRows {
+        tasks: 2,
+        task_bytes: 256,
+        timers: 1,
+    };
+    let makers: [(&str, fn() -> CoopRuntime<Released>); 3] = [
+        ("grown", || CoopRuntime::new(Released(&RELEASED))),
+        ("reserved", || {
+            CoopRuntime::reserved(Released(&RELEASED), ROWS)
+        }),
+        ("opened and sealed", || {
+            let runtime = CoopRuntime::opening(Released(&RELEASED), ROWS, 0);
+            runtime.seal();
+            runtime
+        }),
+    ];
+    for (kind, make) in makers {
+        let before = RELEASED.load(Ordering::SeqCst);
+        let runtime = make();
+        let local = CoopLocalSet::new(&runtime);
+        let held = runtime.clone();
+        let task = local
+            .try_spawn_local(async move {
+                let _runtime = held;
+                forever().await;
+            })
+            .expect("a cell");
+        local.run_until_idle();
+        drop(task);
+        drop(runtime);
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            before,
+            "{kind}: the local set still holds the runtime"
+        );
+        drop(local);
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            before + 1,
+            "{kind}: the runtime went with the set its task was on, though the task held it"
+        );
+    }
 }
 
 /// A session's task holds a handle of the runtime, so the runtime's table alone would keep it, and
