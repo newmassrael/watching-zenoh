@@ -2551,8 +2551,6 @@ pub mod stream_activation {
 // `stream_activation` machine that says when they are judged. Gated as the machine is.
 // Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "e2e-supervision")]
-// Totality debt TD-047 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod stream_supervisor;
 
 /// SCE-generated replay serving statechart (the replay cache's publisher: whether it answers a

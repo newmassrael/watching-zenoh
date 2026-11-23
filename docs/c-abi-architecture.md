@@ -246,7 +246,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-044 | `wz-session-core` | `encoded_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | open |
 | TD-045 | `wz-session-core` | `pubsub` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 19 | in flight |
 | TD-046 | `wz-session-core` | `stats` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
-| TD-047 | `wz-session-core` | `stream_supervisor` | `indexing_slicing`, `arithmetic_side_effects` | 19 | open |
 | TD-048 | `wz-session-core` | `policy_document` | `indexing_slicing`, `arithmetic_side_effects` | 18 | open |
 | TD-049 | `wz-session-core` | `retry_period` | `indexing_slicing` | 18 | open |
 | TD-050 | `wz-session-core` | `session_slot_pool_mcu` | `indexing_slicing`, `arithmetic_side_effects` | 17 | generated |

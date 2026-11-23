@@ -335,7 +335,7 @@ pub const fn fixed_waits<const N: usize>(
     assert!(N > 0, "a schedule has a first wait");
     let mut waits = [0u64; N];
     let mut delay = period_init_ms;
-    let mut at = 0;
+    let mut at = 0usize;
     while at < N {
         waits[at] = delay;
         let next = clamp_to_ceiling(grown_ms_by_bits(delay, factor_bits), period_max_ms);
