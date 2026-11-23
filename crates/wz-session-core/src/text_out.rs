@@ -369,6 +369,9 @@ impl<const N: usize> Default for FixedText<N> {
 }
 
 impl<const N: usize> fmt::Write for FixedText<N> {
+    // Out of line: every piece a writer pushes is a call of this, and a body inlined at each
+    // would be a copy of it per separator and per number of a document.
+    #[inline(never)]
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let wanted = self.demanded.saturating_add(s.len());
         if wanted > N {
