@@ -392,8 +392,8 @@ fn a_token_past_its_table_is_refused_and_sends_nothing() {
     );
 }
 
-/// The liveliness subscribers' table at its limit refuses one more: no callback minted, no
-/// Interest asked.
+/// The liveliness subscribers' table at its limit refuses one more: its callback let go of with
+/// the refusal, no Interest asked.
 #[cfg(feature = "liveliness")]
 #[test]
 fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
@@ -403,17 +403,15 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
     let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
-    let sink = |minted: &Arc<AtomicUsize>| -> LivelinessSink {
-        let minted = minted.clone();
-        Arc::new(move || {
-            minted.fetch_add(1, Ordering::SeqCst);
-            Box::new(|_sample: LivelinessSample<'_>| {})
-                as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let sink = |dropped: &Arc<AtomicUsize>| {
+        let guard = Dropped(dropped.clone());
+        LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
+            let _held = &guard;
         })
     };
     let declare = |key: &str| {
-        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&minted))
+        engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
     };
     let first = declare("demo/ls/1").expect("a row is free");
     until(&engine, "the router to see the Interest", || {
@@ -424,9 +422,9 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
     assert_eq!(declare("demo/ls/2"), None);
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
+        dropped.load(Ordering::SeqCst),
         1,
-        "no callback for a refusal"
+        "the refused callback goes with the refusal, the declared one is held"
     );
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 

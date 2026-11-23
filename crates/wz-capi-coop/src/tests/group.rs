@@ -741,13 +741,10 @@ mod alive {
     fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
         let heard: Heard = Arc::default();
         let into = heard.clone();
-        let sink: LivelinessSink = Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: LivelinessSample<'_>| {
-                into.lock()
-                    .unwrap()
-                    .push((sample.kind, sample.keyexpr.to_owned()));
-            })
+        let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+            into.lock()
+                .unwrap()
+                .push((sample.kind, sample.keyexpr.to_owned()));
         });
         let id = engine
             .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)

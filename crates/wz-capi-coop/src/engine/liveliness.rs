@@ -19,9 +19,7 @@
 
 use alloc::sync::Arc;
 
-use wz_capi_port::os::Mutex;
-
-use wz_capi_port::{SubId, TokenId, WireKey};
+use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, LivelinessSample};
 use wz_session_core::declare_form::RetractionKey;
@@ -31,10 +29,10 @@ use crate::lane::SharedLane;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
-/// A liveliness subscriber's callback, as the ABI's sink minted it, locked while it runs as a
-/// subscriber's is.
-pub(super) type LivelinessCallback =
-    Arc<Mutex<Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>>>;
+/// A liveliness subscriber's callback, as the ABI handed it, shared by the table of callbacks and
+/// the deliveries that copied it out: called through a shared borrow with no lock, as a
+/// subscriber's is, and let go of with the last copy.
+pub(super) type LivelinessCallback = Arc<LivelinessSink>;
 
 /// A token the session holds: what its declaration says on the wire, kept to announce it again
 /// over a new link; holding the key also keeps alive what it holds.

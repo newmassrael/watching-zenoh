@@ -626,10 +626,7 @@ fn a_write_filters_interest_on_a_declared_link_names_the_declaration() {
 fn tokens_by(engine: &Engine, declared: ExprId) {
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-    let sink: wz_capi_port::LivelinessSink = Arc::new(|| {
-        Box::new(|_: LivelinessSample<'_>| {})
-            as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
-    });
+    let sink = wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {});
     engine
         .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
         .expect("the engine has liveliness");

@@ -158,9 +158,24 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId,
     StatementNotHonoured, SubId, TokenId, WireKey,
 };
+
+/// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
+/// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
+/// [`face_liveliness_sink`].
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+
+/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
+pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: LivelinessSample<'_>| sink.call(sample))
+    })
+}
 
 /// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
 /// each face's session registers a callback of its own. A port's callback

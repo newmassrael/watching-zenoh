@@ -1235,12 +1235,7 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
     let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(preset)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
-    let sink = || -> LivelinessSink {
-        Arc::new(|| {
-            Box::new(|_sample: LivelinessSample<'_>| {})
-                as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
-        })
-    };
+    let sink = || LivelinessSink::shared(|_sample: LivelinessSample<'_>| {});
     let declare = |key: &str| {
         engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink())
     };

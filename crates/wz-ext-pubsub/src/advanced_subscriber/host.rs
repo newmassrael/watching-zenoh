@@ -408,23 +408,13 @@ impl EngineSubscriber {
                 .map(|h| (h.sample_depth, h.max_age))
                 .unwrap_or((None, None));
             let lp_shared = Arc::clone(&shared);
-            let sink: LivelinessSink = Arc::new(
-                move || -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send> {
-                    let shared = Arc::clone(&lp_shared);
-                    Box::new(move |sample: LivelinessSample<'_>| {
-                        if shared.is_closing() {
-                            return;
-                        }
-                        on_late_publisher_detected(
-                            &shared,
-                            sample.kind,
-                            sample.keyexpr,
-                            depth,
-                            age,
-                        );
-                    })
-                },
-            );
+            let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                let shared = &lp_shared;
+                if shared.is_closing() {
+                    return;
+                }
+                on_late_publisher_detected(shared, sample.kind, sample.keyexpr, depth, age);
+            });
             Some(declare_liveliness_subscription(
                 engine, &keyexpr, &form, true, sink,
             )?)

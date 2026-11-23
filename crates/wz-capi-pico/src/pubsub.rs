@@ -591,12 +591,6 @@ pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 // `call` (a running callback holds a reference).
 unsafe impl Sync for CClosure {}
 
-/// Build the wz-side subscriber callback for ONE face from a shared C closure.
-///
-/// On each delivery it marshals the wz `SampleView` into a borrowed
-/// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
-/// borrowed keyexpr / payload) is valid only for the duration of that call —
-/// pico's contract, which is why the C side must copy anything it keeps.
 /// Marshal a wz LIVELINESS event into the borrowed `z_loaned_sample_t` a C
 /// sample closure expects.
 ///
@@ -607,33 +601,35 @@ unsafe impl Sync for CClosure {}
 /// going away is `DELETE`. Upstream's `z_sub_liveliness.c` switches on exactly
 /// that to print "Alive"/"Dropped".
 #[cfg(feature = "liveliness")]
-pub(crate) fn make_liveliness_callback(
-    closure: Arc<CClosure>,
-) -> impl FnMut(LivelinessSample<'_>) + Send + 'static {
-    move |sample: LivelinessSample<'_>| {
-        let call = match closure.call {
-            Some(f) => f,
-            None => return,
-        };
-        let mut marshal = SampleMarshal::new(
-            sample.keyexpr.to_owned(),
-            ByteBuf::new(),
-            crate::liveliness::liveliness_kind_of(sample.kind),
-        );
-        marshal.bind();
-        let sample_ptr = marshal.as_loaned();
-        // SAFETY + panic discipline identical to `make_subscriber_callback`:
-        // the marshal outlives the call, the borrowed sample is valid only for
-        // its duration, and an unwind out of the C callback would tear down the
-        // drive thread, so it is caught here.
-        let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
-        let _ = crate::ffi::catch(|| unsafe {
-            call(sample_ptr, ctx);
-        });
-    }
+pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) {
+    let call = match closure.call {
+        Some(f) => f,
+        None => return,
+    };
+    let mut marshal = SampleMarshal::new(
+        sample.keyexpr.to_owned(),
+        ByteBuf::new(),
+        crate::liveliness::liveliness_kind_of(sample.kind),
+    );
+    marshal.bind();
+    let sample_ptr = marshal.as_loaned();
+    // SAFETY + panic discipline identical to `make_subscriber_callback`:
+    // the marshal outlives the call, the borrowed sample is valid only for
+    // its duration, and an unwind out of the C callback would tear down the
+    // drive thread, so it is caught here.
+    let ctx = closure.context.0;
+    let _in_callback = crate::ffi::InCallback::enter();
+    let _ = crate::ffi::catch(|| unsafe {
+        call(sample_ptr, ctx);
+    });
 }
 
+/// Build the wz-side subscriber callback for ONE face from a shared C closure.
+///
+/// On each delivery it marshals the wz `SampleView` into a borrowed
+/// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
+/// borrowed keyexpr / payload) is valid only for the duration of that call —
+/// pico's contract, which is why the C side must copy anything it keeps.
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {

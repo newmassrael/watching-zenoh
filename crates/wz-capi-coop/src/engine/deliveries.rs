@@ -21,7 +21,7 @@
 //! a thread-local set keyed by engine would be, without a thread-local, which an MCU kernel does
 //! not give a Rust image.
 
-#[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+#[cfg(feature = "local-queryable")]
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
 
@@ -29,7 +29,7 @@ use portable_atomic::AtomicUsize;
 use wz_capi_port::os;
 use wz_capi_port::sync::Lock;
 
-#[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+#[cfg(feature = "local-queryable")]
 use super::TargetKey;
 #[allow(unused_imports)]
 use crate::prelude::*;
@@ -44,7 +44,7 @@ pub(super) struct Deliveries {
     /// The callbacks running on the owner's thread now, the innermost last. Read and written by
     /// that thread alone, from the exchange that gave it the word to the store that gives it
     /// back, which leaves it empty.
-    #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+    #[cfg(feature = "local-queryable")]
     owner_running: UnsafeCell<Vec<TargetKey>>,
     /// How many threads `others` holds: each thread counts itself in after it is put in and out
     /// before it is taken out, so a thread in the list always reads its own count in it.
@@ -60,7 +60,7 @@ pub(super) struct Deliveries {
 // compare-exchange that gave it the word (acquire) and the store that gives it back (release), so
 // no two threads reach it at once and each holder sees what the one before it left; every other
 // field is an atomic or behind its lock.
-#[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+#[cfg(feature = "local-queryable")]
 unsafe impl Sync for Deliveries {}
 
 /// A thread of [`Deliveries::others`].
@@ -69,16 +69,16 @@ struct Beside {
     /// Whether it delivers now; one that only runs a callback does not.
     delivering: bool,
     /// The callbacks running on it now, the innermost last.
-    #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+    #[cfg(feature = "local-queryable")]
     running: Vec<TargetKey>,
 }
 
 impl Beside {
     /// Whether nothing of the thread is kept: it delivers nothing and runs no callback.
     fn is_spent(&self) -> bool {
-        #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+        #[cfg(feature = "local-queryable")]
         let idle = self.running.is_empty();
-        #[cfg(not(any(feature = "liveliness", feature = "local-queryable")))]
+        #[cfg(not(feature = "local-queryable"))]
         let idle = true;
         !self.delivering && idle
     }
@@ -88,7 +88,7 @@ impl Deliveries {
     pub(super) fn new() -> Self {
         Self {
             owner: AtomicUsize::new(NO_THREAD),
-            #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+            #[cfg(feature = "local-queryable")]
             owner_running: UnsafeCell::new(Vec::new()),
             beside: AtomicUsize::new(0),
             others: Lock::new(Vec::new()),
@@ -129,7 +129,7 @@ impl Deliveries {
                 others.push(Beside {
                     word,
                     delivering: true,
-                    #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+                    #[cfg(feature = "local-queryable")]
                     running: Vec::new(),
                 });
                 true
@@ -146,7 +146,7 @@ impl Deliveries {
     }
 
     /// The callback of `key` runs on this thread until the guard drops, or unwinds.
-    #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+    #[cfg(feature = "local-queryable")]
     pub(super) fn run(&self, key: TargetKey) -> Running<'_> {
         let word = os::current_word();
         if self.owner.load(Ordering::Acquire) == word {
@@ -248,7 +248,7 @@ impl Drop for Delivering<'_> {
         if self.owner {
             // Every callback this thread ran inside the delivery has returned, its guard dropped
             // before this one; what is left is cleared so the next owner starts from nothing.
-            #[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+            #[cfg(feature = "local-queryable")]
             // SAFETY: this thread holds the owner's word until the store below.
             unsafe {
                 (*self.set.owner_running.get()).clear()
@@ -262,7 +262,7 @@ impl Drop for Delivering<'_> {
 }
 
 /// A callback running on this thread, from [`Deliveries::run`] to its return, or its unwinding.
-#[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+#[cfg(feature = "local-queryable")]
 pub(super) struct Running<'a> {
     set: &'a Deliveries,
     word: usize,
@@ -272,7 +272,7 @@ pub(super) struct Running<'a> {
     owner: bool,
 }
 
-#[cfg(any(feature = "liveliness", feature = "local-queryable"))]
+#[cfg(feature = "local-queryable")]
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         let key = self.key;

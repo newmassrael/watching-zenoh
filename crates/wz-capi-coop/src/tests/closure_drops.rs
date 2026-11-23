@@ -27,18 +27,17 @@ impl Drop for Dropped {
     }
 }
 
-/// What became of the callbacks one test handed out: how many a factory minted (the planes whose
-/// sink is a factory: liveliness subscribers and queryables), and how many callbacks were let go
-/// of.
+/// What became of the callbacks one test handed out: how many a factory minted (the plane whose
+/// sink is a factory: queryables), and how many callbacks were let go of.
 #[derive(Default)]
 struct Counts {
-    #[cfg(any(feature = "liveliness", feature = "queryable"))]
+    #[cfg(feature = "queryable")]
     minted: Arc<AtomicUsize>,
     callbacks_dropped: Arc<AtomicUsize>,
 }
 
 impl Counts {
-    #[cfg(any(feature = "liveliness", feature = "queryable"))]
+    #[cfg(feature = "queryable")]
     fn minted(&self) -> usize {
         self.minted.load(Ordering::SeqCst)
     }
@@ -191,7 +190,7 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
 }
 
 /// A liveliness subscriber's callback is let go of once on its undeclaration and once at the
-/// close, and a refused one mints none.
+/// close, and a refused one with the refusal.
 #[cfg(feature = "liveliness")]
 #[test]
 fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
@@ -201,15 +200,10 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
     let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let sink = |counts: &Counts| -> LivelinessSink {
-        let minted = counts.minted.clone();
-        let dropped = counts.callbacks_dropped.clone();
-        Arc::new(move || {
-            minted.fetch_add(1, Ordering::SeqCst);
-            let guard = Dropped(dropped.clone());
-            Box::new(move |_sample: LivelinessSample<'_>| {
-                let _held = &guard;
-            }) as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
+    let sink = |counts: &Counts| {
+        let guard = Dropped(counts.callbacks_dropped.clone());
+        LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
+            let _held = &guard;
         })
     };
     let declare = |key: &str, counts: &Counts| {
@@ -226,7 +220,7 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
     declare("demo/drop/l2", &held).expect("the row given back");
     let refused = Counts::default();
     assert_eq!(declare("demo/drop/l3", &refused), None);
-    assert_eq!(refused.minted(), 0, "no callback for a refusal");
+    assert_eq!(refused.callbacks_dropped(), 1, "let go of with the refusal");
 
     SessionDrive::close(&*engine);
     assert_eq!(held.callbacks_dropped(), 1);

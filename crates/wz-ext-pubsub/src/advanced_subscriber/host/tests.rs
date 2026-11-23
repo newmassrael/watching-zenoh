@@ -67,7 +67,7 @@ struct Script {
     /// What was declared and retracted, in order.
     events: Mutex<Vec<String>>,
     subscriptions: Mutex<Vec<(SubId, String, WireKey, Arc<SubscriberSink>)>>,
-    liveliness: Mutex<Vec<(SubId, String, bool, LivelinessSink)>>,
+    liveliness: Mutex<Vec<(SubId, String, bool, Arc<LivelinessSink>)>>,
     gets: Mutex<Vec<GetRecord>>,
     tickers: Mutex<Vec<(TickerId, u64, Tick)>>,
 }
@@ -263,7 +263,7 @@ impl SessionEngine for Script {
         self.liveliness
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), history, sink));
+            .push((id, keyexpr.to_owned(), history, Arc::new(sink)));
         Some(id)
     }
     fn get_on_wire(
@@ -669,8 +669,7 @@ fn a_late_publisher_has_its_cache_recovered() {
     script.end_leg(0, 0);
     let token = format!("demo/data/@adv/pub/{}/7/_", publisher_hex());
     let sink = Arc::clone(&script.liveliness.lock().unwrap()[0].3);
-    let mut on_token = sink();
-    on_token(LivelinessSample {
+    sink.call(LivelinessSample {
         kind: LivelinessSampleKind::Put,
         keyexpr: &token,
         token_id: 1,
@@ -686,7 +685,7 @@ fn a_late_publisher_has_its_cache_recovered() {
     assert_eq!(*delivered.lock().unwrap(), [10, 11]);
 
     // The same token again while it is in no get asks again; a departure asks nothing.
-    on_token(LivelinessSample {
+    sink.call(LivelinessSample {
         kind: LivelinessSampleKind::Delete,
         keyexpr: &token,
         token_id: 1,

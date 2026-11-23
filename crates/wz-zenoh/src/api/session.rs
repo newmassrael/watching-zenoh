@@ -1957,7 +1957,7 @@ mod tokio_engine {
     #[cfg(not(feature = "shared-memory"))]
     pub(super) use wz_capi_core::faces::no_shm_clients;
     use wz_capi_core::{
-        faces::{FanoutError, SubscriberSink, WireKey},
+        faces::{FanoutError, LivelinessSink, SubscriberSink, WireKey},
         runtime::{
             locality::Locality as EngineLocality,
             qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
@@ -1971,8 +1971,7 @@ mod tokio_engine {
     };
     use wz_capi_port::cancellation::CancellableFan;
     use wz_capi_port::{
-        HeldQuery, LivelinessSink, MatchingSink, QueryHolder, QueryableSink, ReplyCallback,
-        SessionEngine,
+        HeldQuery, MatchingSink, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::{

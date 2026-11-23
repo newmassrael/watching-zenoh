@@ -523,7 +523,7 @@ impl SessionEngine for SharedSession {
             keyexpr.to_owned(),
             wire,
             options,
-            sink,
+            crate::faces::face_liveliness_sink(sink),
         )
     }
 
@@ -670,7 +670,7 @@ impl SessionEngine for SharedSession {
             wire,
             options,
             links,
-            sink,
+            crate::faces::face_liveliness_sink(sink),
         ))
     }
 

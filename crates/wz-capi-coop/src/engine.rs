@@ -4392,8 +4392,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                             if let Some(Target::Liveliness(callback)) =
                                 self.target(TargetKey::Liveliness(id))
                             {
-                                let _running = self.deliveries.run(TargetKey::Liveliness(id));
-                                (lock(&callback))(sample.as_sample());
+                                callback.call(sample.as_sample());
                             }
                         }
                     }
@@ -4980,7 +4979,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             else {
                 return;
             };
-            (lock(&callback))(LivelinessSample {
+            callback.call(LivelinessSample {
                 kind: LivelinessSampleKind::Put,
                 keyexpr,
                 token_id,
@@ -6791,7 +6790,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = self.next_entity_id()?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
-            Target::Liveliness(Arc::new(Mutex::new(sink()))),
+            Target::Liveliness(Arc::new(sink)),
         ));
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),

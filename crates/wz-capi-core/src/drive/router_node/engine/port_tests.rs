@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
-use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
+use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::face::FaceEventKind;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -417,13 +417,10 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
                 "wz/port/live/**",
                 WireKey::literal(),
                 history,
-                Arc::new(move || {
-                    let sink = Arc::clone(&sink);
-                    Box::new(move |sample| {
-                        sink.lock()
-                            .unwrap()
-                            .push((sample.kind, sample.keyexpr.to_owned()));
-                    })
+                wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                    sink.lock()
+                        .unwrap()
+                        .push((sample.kind, sample.keyexpr.to_owned()));
                 }),
             )
             .expect("a node has liveliness subscriptions");

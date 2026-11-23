@@ -456,7 +456,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// Subscribe to the liveliness tokens the peers hold on `keyexpr`, asking for them as `wire`
-    /// names it, through callbacks `sink` mints; with `history`, the tokens already alive are
+    /// names it, through the callback `sink`; with `history`, the tokens already alive are
     /// delivered first. It is a subscriber like any other to retract
     /// ([`Self::undeclare_subscriber`]): the ids are one space. `None` from an engine with no
     /// liveliness in this build, which is the provided answer.

@@ -53,7 +53,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 
@@ -245,10 +244,81 @@ impl Drop for Ticker {
     }
 }
 
-/// Mints one liveliness-subscriber callback per face: each token a peer declares on the key is a
-/// `Put`, each it retracts a `Delete`.
-pub type LivelinessSink =
-    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+/// A liveliness subscriber's callback, as an ABI hands it to an engine: each token a peer declares
+/// on the key is a `Put`, each it retracts a `Delete`. Called through a shared borrow, from any
+/// thread and at any depth, and let go of once, after its last call, as [`SubscriberSink`] is.
+pub enum LivelinessSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawLivelinessCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedLivelinessFn>),
+}
+
+/// A Rust program's liveliness callback, as [`LivelinessSink::Shared`] shares it.
+pub type SharedLivelinessFn = dyn for<'a> Fn(LivelinessSample<'a>) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`LivelinessSink::Raw`]), as
+/// [`RawSampleCallback`] holds a subscriber's.
+#[derive(Clone, Copy)]
+pub struct RawLivelinessCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `LivelinessSink::raw`, whose
+// caller promises what the marker traits ask of it.
+unsafe impl Send for LivelinessSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for LivelinessSink {}
+
+impl LivelinessSink {
+    /// A C program's closure: `call` with `context` for each change, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// As [`SubscriberSink::raw`]'s.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawLivelinessCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl for<'a> Fn(LivelinessSample<'a>) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `sample` to the callback.
+    pub fn call(&self, sample: LivelinessSample<'_>) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+}
+
+impl Drop for LivelinessSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawLivelinessCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// Delivers ONE aggregated matching verdict to C.
 ///

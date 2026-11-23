@@ -482,7 +482,15 @@ impl SessionEngine for RouterState {
     ) -> Option<SubId> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id()?;
-        let face = self.liveliness.subscribe(keyexpr, history, sink());
+        let face = self.liveliness.subscribe(
+            keyexpr,
+            history,
+            Box::new(
+                move |sample: wz_session_core::declare::liveliness_sample::LivelinessSample<'_>| {
+                    sink.call(sample)
+                },
+            ),
+        );
         self.engine
             .subscriptions
             .lock()
