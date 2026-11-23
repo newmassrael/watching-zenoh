@@ -401,9 +401,9 @@ async fn serve_unicast(
                         Err(poisoned) => poisoned.into_inner(),
                     };
                     let now_ms = clock.now_monotonic_ms();
-                    let _ = obs.replies.sweep_timed_out(now_ms);
-                    let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
-                    for interest_id in obs.liveliness_gets.take_finalized() {
+                    let _ = obs.face().replies.sweep_timed_out(now_ms);
+                    let _ = obs.face().liveliness_gets.sweep_timed_out(now_ms);
+                    for interest_id in obs.face().liveliness_gets.take_finalized() {
                         actions.prune_liveliness_get_interest(interest_id);
                     }
                 }

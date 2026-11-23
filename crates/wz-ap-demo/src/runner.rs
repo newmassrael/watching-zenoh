@@ -3568,11 +3568,11 @@ pub(crate) async fn run_demo(
     #[cfg(feature = "switchboard")]
     {
         let mut obs = observer.lock().expect("observer mutex poisoned");
-        wz_ap_demo_app::register_bindings(&mut obs.switchboard);
+        obs.with_app(|app| wz_ap_demo_app::register_bindings(app.switchboard));
         log::info!(
             "wz-ap-demo: switchboard registered ({} rows from wz-ap-demo-app's \
              sidecar); app machine = sensor_monitor",
-            obs.switchboard.len()
+            obs.read_app(|app| app.switchboard.len())
         );
     }
     #[cfg(feature = "switchboard")]
@@ -3614,7 +3614,7 @@ pub(crate) async fn run_demo(
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let now_ms = sweep_clock.now_monotonic_ms();
-                let _ = obs.replies.sweep_timed_out(now_ms);
+                let _ = obs.face().replies.sweep_timed_out(now_ms);
                 // F3 — the liveliness-get pending table has the same
                 // deadline contract as the reply registry (registered with
                 // an absolute timeout, swept here so an unanswered get
@@ -3624,8 +3624,8 @@ pub(crate) async fn run_demo(
                 // contract: every staging site drains where it stages; a
                 // deferred drain could overflow the staging across
                 // un-flushed ticks and permanently re-leak a cache entry).
-                let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
-                for interest_id in obs.liveliness_gets.take_finalized() {
+                let _ = obs.face().liveliness_gets.sweep_timed_out(now_ms);
+                for interest_id in obs.face().liveliness_gets.take_finalized() {
                     actions_for_sweep.prune_liveliness_get_interest(interest_id);
                 }
             }
