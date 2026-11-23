@@ -627,8 +627,6 @@ pub mod message_catalog;
 // wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
 #[cfg(feature = "message-payload")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-182 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod message_payload;
 // The doors through which a program reserves the process pools itself and reads them: wz doors
 // (`wz_ext.h`) of the unstable surface.

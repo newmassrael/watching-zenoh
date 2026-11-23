@@ -607,7 +607,8 @@ unsafe fn copy_out(
     len: *mut usize,
 ) -> ZResult {
     let outcome = read.map(|bytes| {
-        let need = bytes.len() + usize::from(nul);
+        // A length at the top of the address space is past every capacity, so it is refused.
+        let need = bytes.len().saturating_add(usize::from(nul));
         if need > capacity {
             return Some((bytes.len(), need));
         }
