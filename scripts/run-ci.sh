@@ -12911,8 +12911,17 @@ layer_c1cf_reduced_features() {
 # does, and are graded on that digest alone. Every build, and the zenoh-pico reference, runs under
 # scripts/lib/build_normalization.py, so a reading carries no path or build time of the host that
 # made it, and a library that still holds a build path fails the lane.
+#
+# The hosted lane is a matrix of `WZ_C1CS_SHARDS` jobs, each building the cases the gate deals to
+# its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
+# of its 1200 s budget at run 45051019628. Each shard is a runner of its own, so the one-lane rule
+# above holds inside it. Unset, every case is built here, as before.
 layer_c1cs_capability_cost() {
-    python3 scripts/lib/capability_cost_gate.py --check || return 1
+    local c1cs_shard_args=()
+    if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
+        c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
+    fi
+    python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"} || return 1
 }
 
 # ─── Layer Z8 — upstream's own tests against the patched graph ──────────
