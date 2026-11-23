@@ -316,6 +316,23 @@ fn the_gate_reads_a_link_only_while_the_round_has_a_records_room() {
     );
 }
 
+/// While a source the gate does not hold back owes the round records (a lost face's tokens), the
+/// gate reads no link, an empty round's included, so what that source owes comes first. The
+/// CONTROL is the same round once nothing is owed.
+#[cfg(feature = "liveliness")]
+#[test]
+fn the_gate_reads_no_link_while_retractions_are_owed() {
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+
+    let round = round(1024, 4);
+    // SAFETY: this thread is the round's one writer.
+    let gate = unsafe { RoundGate::new(Quiet, round.clone(), room(32)) };
+    round.owe(true);
+    assert!(!gate.takes_input(), "owed, no link is read");
+    round.owe(false);
+    assert!(gate.takes_input(), "CONTROL: nothing owed");
+}
+
 /// A record the gate let through that holds its sender and finds no room is a defect: a debug
 /// build stops there, and a release build counts it apart.
 #[test]

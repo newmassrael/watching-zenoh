@@ -3116,7 +3116,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         let mut registry = self.registry.borrow_mut();
         registry.flush_declarations_on_link_loss(id);
-        registry.flush_liveliness_on_link_loss(id);
+        // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
+        #[cfg(feature = "liveliness")]
+        registry.lose_tokens(id);
         // The gets asked of the face went with its link: the peer that owed their Finals is gone,
         // so each pending entry is dropped, which ends its leg (`get`).
         #[cfg(feature = "query")]
@@ -3130,6 +3132,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
             }
         }
+        drop(registry);
+        #[cfg(feature = "liveliness")]
+        self.retract_owed();
+    }
+
+    /// Retract the tokens the peers of lost links declared, as many as the round of deliveries
+    /// takes now, and tell the round whether any is still owed: while one is, no link is read, so a
+    /// token's `Delete` comes before anything a link brings after its loss, and none is dropped.
+    /// Each `Delete` is a record of a token for every liveliness subscriber.
+    #[cfg(feature = "liveliness")]
+    fn retract_owed(&mut self) {
+        let round = Arc::clone(&self.lane);
+        let room = crate::round::ReadRoom {
+            bytes: 0,
+            callbacks: caps::MAX_LIVELINESS_SUBSCRIPTIONS.max(1),
+        };
+        // SAFETY: `Core` is reached under the session's lock alone.
+        let mut fits = || unsafe { round.has_room(room) };
+        let done = self.registry.borrow_mut().retract_owed(&mut fits);
+        round.owe(!done);
     }
 
     /// When the earliest pending get is due: a query's or a liveliness snapshot's, on any face.
@@ -4260,6 +4282,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // go on until one hands nothing, so a get its own queryables answer inside the call ends
         // there.
         while self.hand_out() {}
+        // The tokens of a lost link the round had no room for, retracted now the round is handed
+        // out, each round sealed as the session is let go of and handed out in turn.
+        #[cfg(feature = "liveliness")]
+        while self.samples.owes() {
+            let Some(mut core) = self.live() else {
+                break;
+            };
+            core.0.retract_owed();
+            drop(core);
+            if !self.hand_out() {
+                break;
+            }
+        }
         // The legs that are over, after every reply queued before their ends: each callback is
         // dropped here, with no lock held, which is how the C program learns it (the reply
         // closure's `drop(context)`). A round another delivery still hands out may hold a reply
@@ -4905,6 +4940,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
     /// does by that reading, which it returns; `None` once the session ended.
     fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
+        // What a lost link's peer is still owed comes before anything the links bring now.
+        #[cfg(feature = "liveliness")]
+        if self.samples.owes() {
+            core.retract_owed();
+        }
         core.local.run_until_idle();
         let now_us = core.now_us();
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,

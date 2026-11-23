@@ -1252,10 +1252,26 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         &mut self,
         peer: &mut PeerTokens<Q>,
     ) -> usize {
+        self.flush_peer_tokens_on_link_loss_while(peer, &mut || true)
+            .0
+    }
+
+    /// [`Self::flush_peer_tokens_on_link_loss`] for a caller whose subscribers take a bounded
+    /// number of samples at a time: before each token `room` says whether its `Delete` can be
+    /// taken now, and the tokens left when it says no stay in `peer` for a later call, in the
+    /// same order. How many were flushed, and whether none is left.
+    pub fn flush_peer_tokens_on_link_loss_while<Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool) {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
             while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
+                if !room() {
+                    return (flushed, false);
+                }
                 let Some(keyexpr) = peer.table.unbind(id) else {
                     break;
                 };
@@ -1270,12 +1286,12 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 );
                 flushed += 1;
             }
-            flushed
+            (flushed, true)
         }
         #[cfg(not(feature = "storage-profile"))]
         {
-            let _ = peer;
-            0
+            let _ = (peer, room);
+            (0, true)
         }
     }
 
@@ -2348,6 +2364,53 @@ mod tests {
             "the table is emptied, so a re-declare after reopen is a fresh Put \
              rather than a second one for a token the app was never told died"
         );
+    }
+
+    /// A link loss retracted while `room` allows stops where it says no: the
+    /// tokens left stay in the table, and a later call retracts them in the
+    /// same order, so no Delete is lost to a caller that had no room for it.
+    #[test]
+    fn link_loss_flushed_while_there_is_room_leaves_the_rest_for_later() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        for (id, ke) in [
+            (7u64, "liveliness/a"),
+            (3, "liveliness/b"),
+            (9, "liveliness/c"),
+        ] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        sink.lock().unwrap().clear();
+        let mut allowed = 1usize;
+        let mut once = || {
+            let fits = allowed > 0;
+            allowed = allowed.saturating_sub(1);
+            fits
+        };
+        assert_eq!(
+            reg.table
+                .flush_peer_tokens_on_link_loss_while(&mut reg.peer, &mut once),
+            (1, false),
+            "one Delete had room, the rest wait"
+        );
+        assert_eq!(reg.peer_token_count(), 2, "the rest stay in the table");
+        assert_eq!(
+            reg.table
+                .flush_peer_tokens_on_link_loss_while(&mut reg.peer, &mut || true),
+            (2, true)
+        );
+        let names: Vec<String> = sink.lock().unwrap().iter().map(|c| c.1.clone()).collect();
+        assert_eq!(
+            names,
+            ["liveliness/b", "liveliness/a", "liveliness/c"],
+            "the same order as one flush"
+        );
+        assert_eq!(reg.peer_token_count(), 0);
     }
 
     /// The negative arm: a flush with nothing registered is a no-op that fires

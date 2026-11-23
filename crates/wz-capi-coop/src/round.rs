@@ -565,7 +565,8 @@ impl Table {
     }
 
     /// Where `key` is read: where it lies in `lending`, where the table wrote it last when it is
-    /// that key again, or after the keys written before it; `None` when there is no room.
+    /// that key again, after the keys written before it, or in the area once the keys are full;
+    /// `None` when there is no room.
     fn place_key(&mut self, key: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
         if let Some(span) = self.lent(key, lending) {
             return Some(span);
@@ -575,12 +576,17 @@ impl Table {
                 return Some(span);
             }
         }
-        let span = Span {
-            at: u32::try_from(self.keys.len()).ok()?,
-            len: u32::try_from(key.len()).ok()?,
-            place: Place::Key,
+        let span = if self.keys.free_slots() >= key.len() {
+            let span = Span {
+                at: u32::try_from(self.keys.len()).ok()?,
+                len: u32::try_from(key.len()).ok()?,
+                place: Place::Key,
+            };
+            self.keys.extend_from_slice(key).ok()?;
+            span
+        } else {
+            self.write(key)?
         };
-        self.keys.extend_from_slice(key).ok()?;
         self.key = Some(span);
         Some(span)
     }
@@ -670,6 +676,10 @@ pub(crate) struct Round {
     /// Whether a record lies in the datagram a link lent ([`Self::lends_a_datagram`]): set by the
     /// session's writes, cleared as a delivery empties the table.
     lends: AtomicBool,
+    /// Whether a source the gate does not hold back owes the round records it had no room for (a
+    /// lost face's tokens, still to be retracted): no link is read until it has handed them, so
+    /// they come before anything the link brings after the loss ([`Self::owe`]).
+    owes: AtomicBool,
     /// Where the datagram lies that a link lends the session's step now, when the link leaves it
     /// where it lies until it is next asked to receive (`RoundGate::recv_with`): its first byte
     /// and its length. Written under the session's lock.
@@ -764,6 +774,7 @@ impl Round {
                 limits.delivery_lane_callbacks(),
             );
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
+            ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
@@ -792,6 +803,7 @@ impl Round {
             events: _,
             callbacks: _,
             lends: _,
+            owes: _,
             lending: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
@@ -1240,6 +1252,18 @@ impl Round {
         unsafe { *self.lending.get() = range };
     }
 
+    /// Whether a source the gate does not hold back still owes the round records (`owed`): the
+    /// links are read no further until it says it owes none.
+    #[cfg(feature = "liveliness")]
+    pub(crate) fn owe(&self, owed: bool) {
+        self.owes.store(owed, Ordering::Release);
+    }
+
+    /// Whether a source the gate does not hold back still owes the round records ([`Self::owe`]).
+    pub(crate) fn owes(&self) -> bool {
+        self.owes.load(Ordering::Acquire)
+    }
+
     /// Whether a record lies in the datagram a link lent: no link is read or serviced until its
     /// callbacks have returned. Asked by the session's step, which holds the session's lock.
     pub(crate) fn lends_a_datagram(&self) -> bool {
@@ -1247,8 +1271,9 @@ impl Round {
     }
 
     /// Whether the table takes the room `room` of one more record: empty, or filling with an
-    /// entry, the callbacks, a key and the bytes of a record written whole left. An empty table
-    /// takes any record, so a link is never stopped for good.
+    /// entry, the callbacks, a key (in the keys, or in the area past the record's bytes) and the
+    /// bytes of a record written whole left. An empty table takes any record, so a link is never
+    /// stopped for good.
     ///
     /// # Safety
     /// The caller holds the session's lock.
@@ -1258,12 +1283,13 @@ impl Round {
             FILLING => {
                 // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
                 let table = unsafe { &*self.table.get() };
+                let keys = table.keys.free_slots() >= caps::MAX_KEYEXPR_BYTES;
                 self.takes(table, room.callbacks)
-                    && table.keys.free_slots() >= caps::MAX_KEYEXPR_BYTES
                     && table
                         .area_bytes
                         .checked_sub(table.written)
-                        .is_some_and(|left| left >= room.bytes)
+                        .and_then(|left| left.checked_sub(room.bytes))
+                        .is_some_and(|spare| keys || spare >= caps::MAX_KEYEXPR_BYTES)
             }
             _ => false,
         }
@@ -1541,7 +1567,7 @@ pub(crate) unsafe fn takes_a_group_read(
     room: ReadRoom,
 ) -> impl Fn() -> bool + 'static {
     // SAFETY: the caller's contract: the session's lock is held whenever this is asked.
-    move || unsafe { round.has_room(room) }
+    move || !round.owes() && unsafe { round.has_room(room) }
 }
 
 /// `pump`, which gives the session nothing while the round has not the room one record can take
@@ -1563,10 +1589,11 @@ impl<P> RoundGate<P> {
         Self { pump, round, room }
     }
 
-    /// Whether the round has the room of a record.
+    /// Whether the round has the room of a record, and nothing a source outside the gate owes is
+    /// still to come before it.
     fn has_room(&self) -> bool {
         // SAFETY: asked by the session's step alone, under the session's lock (`Self::new`).
-        unsafe { self.round.has_room(self.room) }
+        !self.round.owes() && unsafe { self.round.has_room(self.room) }
     }
 
     /// Whether the link is held back from receiving: a record lies in the datagram it lent last
