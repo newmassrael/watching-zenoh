@@ -774,21 +774,111 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     assert!(tables.has_local_matching("a/c"));
     assert!(!tables.has_local_matching("b"));
-    let mut reached = std::vec::Vec::new();
+    let count = |sink: &mut Counted| sink.0 += 1;
+    assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
+    assert_eq!(heard(&tables, any.handle), 1);
+    assert_eq!(heard(&tables, remote.handle), 1);
+    assert_eq!(tables.fire_matching("a/b", true, false, count), 1);
+    assert_eq!(heard(&tables, any.handle), 2);
     assert_eq!(
-        tables.for_each_matching("a/b", false, &mut |id, _sink| reached.push(id)),
-        2
+        heard(&tables, remote.handle),
+        1,
+        "a subscriber of peers only does not hear the session"
     );
-    assert_eq!(reached, std::vec![u64::from(any.id), u64::from(remote.id)]);
-    reached.clear();
-    assert_eq!(
-        tables.for_each_matching("a/b", true, &mut |id, _sink| reached.push(id)),
-        1
-    );
-    assert_eq!(reached, std::vec![u64::from(any.id)]);
     let _ = tables.undeclare_subscriber(any.handle);
     assert_eq!(tables.epoch(), 3);
     assert!(!tables.has_local_matching("a/c"));
+}
+
+/// How many samples the subscriber `handle` names was handed.
+fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
+    tables.subscribers().get(handle).unwrap().callback().0
+}
+
+/// A key delivered again at the same epoch is answered from the match cache, the same function
+/// the subscriber table delivers through; a subscriber declared in the place an undeclared one
+/// left is reached, and the cache answers nothing it remembered from before.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_change() {
+    use crate::bounded::Heap;
+    use crate::pubsub::{LocalSubscribers, MATCH_SCANS};
+    let scans = || MATCH_SCANS.with(|count| count.get());
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks, Heap>::new();
+    tables.limit_memo_to(4);
+    assert_eq!(tables.memo_slot_count(), 4);
+    let first = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let start = scans();
+    for _ in 0..3 {
+        assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    }
+    assert_eq!(
+        scans() - start,
+        1,
+        "matched once, then answered from the cache"
+    );
+    let gone = tables.undeclare_subscriber(first.handle).unwrap();
+    assert_eq!(gone.row.unwrap().callback().0, 3);
+    let second = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    assert_eq!(
+        second.handle.to_bits().get() & 0xFFFF,
+        first.handle.to_bits().get() & 0xFFFF,
+        "the second subscriber takes the place the first left"
+    );
+    let start = scans();
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(
+        scans() - start,
+        1,
+        "the subscribers changed: matched afresh"
+    );
+    assert_eq!(
+        tables
+            .subscribers()
+            .get(second.handle)
+            .unwrap()
+            .callback()
+            .0,
+        1
+    );
+    tables.limit_memo_to(0);
+    assert_eq!(tables.memo_slot_count(), 0);
+    let start = scans();
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(scans() - start, 2, "no cache: every key is matched");
+}
+
+/// A subscriber undeclared while a call of its callback runs leaves every delivery at once, the
+/// cache's answers among them, and the session-local half of a matching verdict, while its row
+/// waits in its place for the last unpin.
+#[test]
+fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
+    use crate::pubsub::LocalSubscribers;
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks>::new();
+    let sub = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    assert_eq!(tables.fire_matching("a/x", true, false, count), 1);
+    assert!(tables.has_local_matching("a/x"));
+    let pinned = tables.pin_subscriber(sub.handle).unwrap();
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert!(undeclared.row.is_none(), "handed back by the last unpin");
+    assert_eq!(tables.fire_matching("a/x", true, false, count), 0);
+    assert_eq!(tables.fire_matching("a/x", false, true, count), 0);
+    assert!(!tables.has_local_matching("a/x"));
+    let row = tables.unpin_subscriber(pinned).unwrap();
+    assert_eq!(
+        row.callback().0,
+        1,
+        "delivered to once, before it was undeclared"
+    );
 }
 
 #[test]

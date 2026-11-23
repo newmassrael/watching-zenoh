@@ -519,6 +519,29 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         None
     }
 
+    /// One past the last slot there is: every row is at a place under it.
+    pub(crate) fn slot_end(&self) -> usize {
+        self.meta.len()
+    }
+
+    /// The live row at `place`, whatever its generation: what a reader that keeps places rather
+    /// than handles reads, one that is valid only while the table does not change (a match cache
+    /// kept against a count that moves with every insert and removal).
+    pub(crate) fn live_at(&self, place: usize) -> Option<&T> {
+        if self.meta.get(place)?.state != State::Live {
+            return None;
+        }
+        self.rows.get(place)?.as_ref()
+    }
+
+    /// [`Self::live_at`], to change.
+    pub(crate) fn live_at_mut(&mut self, place: usize) -> Option<&mut T> {
+        if self.meta.get(place)?.state != State::Live {
+            return None;
+        }
+        self.rows.get_mut(place)?.as_mut()
+    }
+
     /// Every live row, in slot order.
     pub fn iter(&self) -> impl Iterator<Item = (Handle<K>, &T)> + '_ {
         self.meta

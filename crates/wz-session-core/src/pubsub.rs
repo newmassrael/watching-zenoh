@@ -2316,7 +2316,7 @@ const _: () = assert!(
 /// Written once for both storage policies: the slots are a [`BoundedVec`], so a heap table fills
 /// `MATCH_MEMO_SLOTS` of them and a fixed table holds `MATCH_MEMO_FIXED_SLOTS` inline, and a
 /// fixed table with none holds nothing at all.
-struct MatchMemo<P: Storage> {
+pub(crate) struct MatchMemo<P: Storage> {
     slots: BoundedVec<Option<MemoSlot<P>>, { caps::MATCH_MEMO_FIXED_SLOTS }, P>,
     /// How many times a slot was written. A repeated key may be answered from the slot the key
     /// before it was, but only while no slot has been written since.
@@ -2328,7 +2328,7 @@ struct MatchMemo<P: Storage> {
 
 impl<P: Storage> MatchMemo<P> {
     /// A memory of `memo_slots::<P>(stated)` empty slots.
-    fn new(stated: usize) -> Self {
+    pub(crate) fn new(stated: usize) -> Self {
         let mut slots = BoundedVec::default();
         for _ in 0..memo_slots::<P>(stated) {
             // A fixed table's capacity is its slot count, so this never refuses.
@@ -2343,7 +2343,7 @@ impl<P: Storage> MatchMemo<P> {
 
     /// How many slots the memory holds: the count it was made with. A fixed table's is the
     /// build's, decided when the build is compiled.
-    fn slot_count(&self) -> usize {
+    pub(crate) fn slot_count(&self) -> usize {
         memo_slots::<P>(self.slots.len())
     }
 
@@ -2361,7 +2361,88 @@ impl<P: Storage> MatchMemo<P> {
     }
 }
 
-/// Deliver a key to the subscribers it matches, over the subscriber table alone so that a caller
+/// A subscriber's row as the matcher reads it: its pattern, what [`KeyFacts`] read of the pattern
+/// when it was registered, and the origins it hears.
+pub(crate) struct RowRef<'a> {
+    pub(crate) pattern: &'a str,
+    pub(crate) facts: KeyFacts,
+    pub(crate) origin: crate::locality::Locality,
+}
+
+/// The rows of a table of the session's subscribers, by position, as the receive path reads them:
+/// the matcher (`scan_subscribers`), the match cache (`fire_into_memoized`), whose slots keep
+/// positions, and the session-local half of a matching verdict (`any_local_match`). The
+/// subscriber table's list and the table set's slot map both implement it, so both deliver
+/// through the same functions, each compiled for its own rows (`docs/c-abi-l3-tables.md`).
+pub(crate) trait SubscriberRows {
+    /// The sink a matched row is handed a sample through.
+    type Sink: SampleSink;
+
+    /// One past the last position a row may be at. A position under it may hold no row.
+    fn end(&self) -> usize;
+
+    /// The row at `position`, `None` where none is.
+    fn row(&self, position: usize) -> Option<RowRef<'_>>;
+
+    /// The row at `position` and its sink, `None` where none is.
+    fn row_mut(&mut self, position: usize) -> Option<(RowRef<'_>, &mut Self::Sink)>;
+}
+
+impl<C: SampleSink, P: Storage> SubscriberRows
+    for BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>
+{
+    type Sink = C;
+
+    fn end(&self) -> usize {
+        self.len()
+    }
+
+    fn row(&self, position: usize) -> Option<RowRef<'_>> {
+        let subscriber = self.get(position)?;
+        Some(RowRef {
+            pattern: &*subscriber.pattern,
+            facts: subscriber.pattern_facts,
+            origin: subscriber.allowed_origin,
+        })
+    }
+
+    fn row_mut(&mut self, position: usize) -> Option<(RowRef<'_>, &mut C)> {
+        let subscriber = self.get_mut(position)?;
+        Some((
+            RowRef {
+                pattern: &*subscriber.pattern,
+                facts: subscriber.pattern_facts,
+                origin: subscriber.allowed_origin,
+            },
+            &mut subscriber.sink,
+        ))
+    }
+}
+
+/// Whether a row of `rows` that hears what the session itself publishes intersects `key`: the
+/// session-local half of a publisher's matching verdict. The key is read only once a row that
+/// hears the session is found, so a publisher with no subscriber in its own process, which asks
+/// this once per message, is answered without taking the key apart.
+pub(crate) fn any_local_match<R: SubscriberRows>(rows: &R, key: &str) -> bool {
+    let mut key_facts = None;
+    for position in 0..rows.end() {
+        let Some(row) = rows.row(position) else {
+            continue;
+        };
+        if !row.origin.allows_local() {
+            continue;
+        }
+        let facts = *key_facts.get_or_insert_with(|| KeyFacts::of(key));
+        // On the fixed backing a keyexpr or a pattern deeper than the chunk bound matches
+        // nothing; the facts say so and the matcher applies the bound.
+        if keyexpr_intersects_text_with(row.pattern, row.facts, key, facts) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Deliver a key to the subscribers it matches, over a table's rows alone so that a caller
 /// holding other fields of the registry borrowed (the in-place delivery, whose keyexpr may be the
 /// peer table's own literal) can fire with them still borrowed. A key remembered at this epoch
 /// is delivered to the subscribers it matched without being matched again; any other key is
@@ -2375,18 +2456,18 @@ impl<P: Storage> MatchMemo<P> {
 /// from a slot and no slot has been written nor the table changed since, this one is answered
 /// from the same slot without hashing the key or comparing it again; anything else is looked up
 /// as usual.
-fn fire_into_memoized<C: SampleSink, P: Storage>(
-    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
+    rows: &mut R,
     memo: &mut MatchMemo<P>,
     epoch: u64,
     key: &str,
     is_remote: bool,
     repeats_previous: bool,
-    mut deliver: impl FnMut(&mut C),
+    mut deliver: impl FnMut(&mut R::Sink),
 ) -> usize {
     // No slots: the memory is out, and the message is matched by the scan alone.
     if memo.slot_count() == 0 {
-        return scan_subscribers(subscribers, key, is_remote, deliver, |_| {}).unwrap_or(0);
+        return scan_subscribers(rows, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
         if let Some((at, writes)) = memo.last {
@@ -2394,8 +2475,8 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
                 if let Some(slot) = &memo.slots[at] {
                     if slot.epoch == epoch && slot.remote == is_remote {
                         for position in slot.hits.iter() {
-                            if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
-                                deliver(&mut subscriber.sink);
+                            if let Some((_, sink)) = rows.row_mut(usize::from(*position)) {
+                                deliver(sink);
                             }
                         }
                         return slot.hits.len();
@@ -2410,8 +2491,8 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
             for position in slot.hits.iter() {
-                if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
-                    deliver(&mut subscriber.sink);
+                if let Some((_, sink)) = rows.row_mut(usize::from(*position)) {
+                    deliver(sink);
                 }
             }
             return slot.hits.len();
@@ -2422,7 +2503,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     // remembered.
     let mut hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P> = BoundedVec::default();
     let mut every_hit_noted = true;
-    let Some(fired) = scan_subscribers(subscribers, key, is_remote, deliver, |position| {
+    let Some(fired) = scan_subscribers(rows, key, is_remote, deliver, |position| {
         // A slot keeps a position in 16 bits. A heap table can grow past that, and a position
         // cut to fit would name another subscriber, so a key that matched one there is
         // delivered by this scan and not remembered (a table of a fixed-capacity build never
@@ -2464,11 +2545,11 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
 ///
 /// Every route to a subscriber reaches it: the borrowed delivery, the plain one and the
 /// receive match cache's refill, so what a message reaches does not depend on which.
-fn scan_subscribers<C: SampleSink, P: Storage>(
-    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+fn scan_subscribers<R: SubscriberRows>(
+    rows: &mut R,
     keyexpr: &str,
     is_remote: bool,
-    mut deliver: impl FnMut(&mut C),
+    mut deliver: impl FnMut(&mut R::Sink),
     mut hit: impl FnMut(usize),
 ) -> Option<usize> {
     #[cfg(test)]
@@ -2504,11 +2585,14 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
     {
         return None;
     }
-    for (position, subscriber) in subscribers.iter_mut().enumerate() {
+    for position in 0..rows.end() {
+        let Some((row, sink)) = rows.row_mut(position) else {
+            continue;
+        };
         let pass = if is_remote {
-            subscriber.allowed_origin.allows_remote()
+            row.origin.allows_remote()
         } else {
-            subscriber.allowed_origin.allows_local()
+            row.origin.allows_local()
         };
         if !pass {
             continue;
@@ -2516,16 +2600,11 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
         // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
         // applies the fixed backing's depth bound to it, the same defensive
         // over-depth skip every scan inherits from the one seam.
-        if keyexpr_intersects_text_with(
-            &subscriber.pattern,
-            subscriber.pattern_facts,
-            keyexpr,
-            facts,
-        ) {
+        if keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
-            // no projection step). On MCU `C` is a closed `enum`
+            // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
-            deliver(&mut subscriber.sink);
+            deliver(sink);
             hit(position);
             fired = fired.saturating_add(1);
         }
@@ -2674,7 +2753,7 @@ pub fn sample_of_push(
 // match cache is not scanned, one that is not answered from it is. A test reads the difference.
 #[cfg(test)]
 std::thread_local! {
-    static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    pub(crate) static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
@@ -2705,21 +2784,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// `ctx->allow_local` (`filtering.c:66`, `:127`).
     #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, publish_keyexpr: &str) -> bool {
-        // Nothing here a local publish could reach: answer before the key is taken apart. A
-        // publisher with no subscriber in its own process asks this once per message.
-        if !self
-            .subscribers
-            .iter()
-            .any(|subscriber| subscriber.allowed_origin.allows_local())
-        {
-            return false;
-        }
-        // On the fixed backing a keyexpr or a pattern deeper than the
-        // chunk bound matches nothing; the matcher applies that bound.
-        self.subscribers.iter().any(|subscriber| {
-            subscriber.allowed_origin.allows_local()
-                && keyexpr_intersects(&subscriber.pattern, publish_keyexpr)
-        })
+        any_local_match(&self.subscribers, publish_keyexpr)
     }
 
     /// R227 — self-publish loopback entry point. Routes `sample`
@@ -4028,6 +4093,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 /// subscriber table of both storage profiles ([`SubscriberTable`]) and by the session's one table
 /// set ([`crate::session_tables::SessionTables`]), so a path written over it serves either.
 pub trait LocalSubscribers {
+    /// The sink a matching subscription is handed a sample through.
+    type Sink: SampleSink;
+
     /// A count that moves after every registration and retirement: an answer read off the
     /// subscriptions while this read the same still holds.
     fn epoch(&self) -> u64;
@@ -4059,27 +4127,26 @@ pub trait LocalSubscribers {
     /// Whether a subscription that hears what the session itself publishes intersects `key`.
     fn has_local_matching(&self, key: &str) -> bool;
 
-    /// Hand `f` the id and the sink of each subscription whose pattern intersects `key` and whose
-    /// origins admit a sample from the session itself (`local`) or from a peer: how many.
-    fn for_each_matching(
+    /// Hand `deliver` the sink of each subscription whose pattern intersects `key` and whose
+    /// origins admit a sample from the session itself (`local`) or from a peer, in the table's
+    /// order: how many. The match is the receive path's: a key that came before at this
+    /// [`Self::epoch`] is answered from what it matched then, and `repeats_previous` is the
+    /// caller's word that `key` is the key of the call just before. No key gate is asked: a table
+    /// that closes its key set gates and selects a peer's message before it matches one.
+    fn fire_matching<D: FnMut(&mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
-        f: &mut dyn FnMut(u64, &mut dyn SampleSink),
-    ) -> usize;
-}
-
-/// Whether a subscription that hears `origin` hears a sample from the session itself (`local`)
-/// or from a peer.
-fn hears(origin: crate::locality::Locality, local: bool) -> bool {
-    if local {
-        origin.allows_local()
-    } else {
-        origin.allows_remote()
-    }
+        repeats_previous: bool,
+        deliver: D,
+    ) -> usize
+    where
+        Self: Sized;
 }
 
 impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
+    type Sink = C;
+
     fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -4127,27 +4194,25 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
     }
 
     fn has_local_matching(&self, key: &str) -> bool {
-        self.subscribers.iter().any(|subscriber| {
-            subscriber.allowed_origin.allows_local() && keyexpr_intersects(&subscriber.pattern, key)
-        })
+        any_local_match(&self.subscribers, key)
     }
 
-    fn for_each_matching(
+    fn fire_matching<D: FnMut(&mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
-        f: &mut dyn FnMut(u64, &mut dyn SampleSink),
+        repeats_previous: bool,
+        deliver: D,
     ) -> usize {
-        let mut reached = 0usize;
-        for subscriber in self.subscribers.iter_mut() {
-            if hears(subscriber.allowed_origin, local)
-                && keyexpr_intersects(&subscriber.pattern, key)
-            {
-                f(subscriber.id.as_u64(), &mut subscriber.sink);
-                reached = reached.saturating_add(1);
-            }
-        }
-        reached
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            key,
+            !local,
+            repeats_previous,
+            deliver,
+        )
     }
 }
 
@@ -9161,16 +9226,66 @@ mod local_subscribers_tests {
             ]
         );
         assert!(LocalSubscribers::has_local_matching(&table, "a/c"));
-        let mut reached = std::vec::Vec::new();
+        assert!(!LocalSubscribers::has_local_matching(&table, "b"));
+        let mut calls = 0usize;
         assert_eq!(
-            table.for_each_matching("a/b", false, &mut |id, _sink| reached.push(id)),
+            table.fire_matching("a/b", false, false, |_sink: &mut BoxedSink| calls += 1),
             2
         );
-        reached.clear();
+        assert_eq!(calls, 2, "from a peer, both subscriptions hear it");
         assert_eq!(
-            table.for_each_matching("a/b", true, &mut |id, _sink| reached.push(id)),
+            table.fire_matching("a/b", true, false, |_sink: &mut BoxedSink| calls += 1),
             1
         );
-        assert_eq!(reached, std::vec![any.as_u64()]);
+        assert_eq!(
+            calls, 3,
+            "from the session, only the one that hears any origin"
+        );
+    }
+
+    /// The delivery the trait offers is the receive path's: each subscription it reaches is
+    /// handed the sample through its own sink, and a subscription that hears only peers is not
+    /// reached by what the session publishes.
+    #[test]
+    fn a_local_sample_reaches_only_the_sinks_that_hear_the_session() {
+        use crate::sample::{Reliability, SampleKind};
+        use crate::sink::BorrowedSample;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let mut table = SubscriberTable::<BoxedSink>::new();
+        let any_heard = Arc::new(AtomicUsize::new(0));
+        let remote_heard = Arc::new(AtomicUsize::new(0));
+        let heard = any_heard.clone();
+        table
+            .register("a/b", move |_| {
+                heard.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        let heard = remote_heard.clone();
+        table
+            .register_with_locality("a/b", Locality::Remote, move |_| {
+                heard.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        let sample = BorrowedSample {
+            keyexpr: "a/b",
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        assert_eq!(
+            table.fire_matching("a/b", true, false, |sink: &mut BoxedSink| sink
+                .deliver(&sample)),
+            1
+        );
+        assert_eq!(any_heard.load(Ordering::Relaxed), 1);
+        assert_eq!(remote_heard.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            table.fire_matching("a/b", false, false, |sink: &mut BoxedSink| sink
+                .deliver(&sample)),
+            2
+        );
+        assert_eq!(any_heard.load(Ordering::Relaxed), 2);
+        assert_eq!(remote_heard.load(Ordering::Relaxed), 1);
     }
 }
