@@ -1885,14 +1885,25 @@ where
     ))
 }
 
+/// What writes a session's reassembly Router in its pump's field
+/// ([`SessionPump::with_router_in`]): a value of a type that can be named, which is what lets an
+/// engine name the task its session runs as ([`RouterSessionTask`]), and so the bytes of the
+/// task's cell.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+pub trait MakeRouter<R> {
+    /// Write the Router in `place` and lend it back.
+    fn make_in(self, place: &mut MaybeUninit<R>) -> &mut R;
+}
+
 /// [`spawn_session`] over a reassembly Router its maker builds: a session whose fragment chains
 /// stage into buffers its session's arena lent.
 ///
-/// The pump is built in the task's own future when the task first runs
-/// ([`SessionPump::with_router_in`]), and `make_router` writes the Router in the pump's field, so
-/// neither is moved through the stack of the call that opens the session; only the maker, which
-/// holds what the Router is made of, is. The pump is dropped with the task, whether the session
-/// ended or the task was dropped before.
+/// The task is a [`RouterSessionTask`] made in its cell, which builds the pump in its own memory
+/// when it first runs, and `make_router` writes the Router in the pump's field, so neither is
+/// moved through the stack of the call that opens the session; only the maker, which holds what
+/// the Router is made of, is. The pump is dropped with the task, whether the session ended or the
+/// task was dropped before. A task the runtime refuses (a table reserved too small for it, or
+/// full) is counted by the runtime, and its handle reads `Err(RuntimeError::Shutdown)`.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
@@ -1901,28 +1912,122 @@ pub fn spawn_session_with_router<C, L, R, M, F>(
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
-    mut on_event: F,
+    on_event: F,
 ) -> CoopLocalJoinHandle<DriverOutcome>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: PumpRouter + 'static,
-    M: FnOnce(&mut MaybeUninit<R>) -> &mut R + 'static,
-    F: FnMut(IterationEvent<'_, '_>) + 'static,
+    M: MakeRouter<R> + 'static,
+    F: EventSink + 'static,
 {
     let runtime = local.runtime().clone();
-    local.spawn_local(async move {
-        let mut place = InPlace::<SessionPump<C, L, dyn BoxedLinkDriver, R>>::empty();
-        let pump = place.build(|slot| {
-            SessionPump::with_router_in(slot, runtime, link, actions, clock, config, make_router)
-        });
-        loop {
-            if let Some(outcome) = pump.step(&mut on_event) {
-                return outcome;
-            }
-            yield_now().await;
+    local
+        .spawn_local_with(move || RouterSessionTask {
+            parts: Some(PumpParts {
+                runtime,
+                link,
+                actions,
+                clock,
+                config,
+                make_router,
+            }),
+            place: InPlace::empty(),
+            on_event,
+            _pinned: core::marker::PhantomPinned,
+        })
+        .unwrap_or_else(|_refused| CoopLocalJoinHandle::refused())
+}
+
+/// The task a session runs as on the heap profile ([`spawn_session_with_router`]): a future of a
+/// type an engine can name, so the bytes of its cell are a constant of the types it is made of
+/// ([`router_session_task_bytes`]) and a runtime can reserve cells of that size before the session
+/// opens. It builds the session's pump in its own memory at its first poll, then steps the session
+/// once each poll and yields, as a loop of [`SessionPump::step`] and [`yield_now`] does.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+pub struct RouterSessionTask<C, L, R, M, F>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: PumpRouter + 'static,
+{
+    /// What the pump is made of, until the task first runs.
+    parts: Option<PumpParts<C, L, M>>,
+    place: InPlace<SessionPump<C, L, dyn BoxedLinkDriver, R>>,
+    on_event: F,
+    /// The pump is built in `place` and points into itself: the task stays where it is polled.
+    _pinned: core::marker::PhantomPinned,
+}
+
+/// What a [`RouterSessionTask`] builds its pump of.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+struct PumpParts<C: ClockSource + 'static, L, M> {
+    runtime: CoopRuntime<C>,
+    link: L,
+    actions: SessionHandle<C>,
+    clock: CoopTime<C>,
+    config: SessionDriveConfig,
+    make_router: M,
+}
+
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+impl<C, L, R, M, F> core::future::Future for RouterSessionTask<C, L, R, M, F>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: PumpRouter + 'static,
+    M: MakeRouter<R>,
+    F: EventSink,
+{
+    type Output = DriverOutcome;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<DriverOutcome> {
+        // SAFETY: nothing is moved out of the pinned task but `parts`, which nothing points
+        // into; the pump is built in `place` and stays there, as the task does (`PhantomPinned`).
+        let this = unsafe { self.get_unchecked_mut() };
+        if let Some(parts) = this.parts.take() {
+            let PumpParts {
+                runtime,
+                link,
+                actions,
+                clock,
+                config,
+                make_router,
+            } = parts;
+            this.place.build(|slot| {
+                SessionPump::with_router_in(slot, runtime, link, actions, clock, config, |router| {
+                    make_router.make_in(router)
+                })
+            });
         }
-    })
+        match this.place.get_mut().step(&mut this.on_event) {
+            Some(outcome) => core::task::Poll::Ready(outcome),
+            None => {
+                // Yield: the task is ready again at once, after the executor has gone round.
+                cx.waker().wake_by_ref();
+                core::task::Poll::Pending
+            }
+        }
+    }
+}
+
+/// The bytes of the cell that holds the task of a session over these types
+/// ([`RouterSessionTask`]) and its outcome: the size a runtime reserved before the session opens
+/// gives its cells, so that a layer that grows is a number that follows and not a spawn that is
+/// refused ([`crate::executor::SpawnRefusal::TooLarge`]).
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+pub const fn router_session_task_bytes<C, L, R, M, F>() -> usize
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: PumpRouter + 'static,
+    M: MakeRouter<R>,
+    F: EventSink,
+{
+    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F>>()
 }
 
 /// A value built where its holder lies and dropped with it: the place a task's future keeps its
@@ -1959,6 +2064,13 @@ impl<T> InPlace<T> {
         self.built = true;
         // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing a
         // `T` there (`MaybeUninit::write`).
+        unsafe { self.value.assume_init_mut() }
+    }
+
+    /// The value built here. Asked only once it is built.
+    fn get_mut(&mut self) -> &mut T {
+        assert!(self.built, "the place is built before it is read");
+        // SAFETY: `built` is set only once `build` saw the value written here.
         unsafe { self.value.assume_init_mut() }
     }
 }
@@ -2698,25 +2810,45 @@ mod wake_budget_tests {
         );
     }
 
+    /// A test's Router maker: it counts its runs and builds a Router that stages its own chains.
+    #[cfg(feature = "reassembly")]
+    struct CountedRouter {
+        made: Rc<core::cell::Cell<u32>>,
+        policy: wz_session_core::policy::SessionPolicy,
+    }
+
+    #[cfg(feature = "reassembly")]
+    impl MakeRouter<crate::reassembly_rx::CoopReassembly> for CountedRouter {
+        fn make_in(
+            self,
+            place: &mut MaybeUninit<crate::reassembly_rx::CoopReassembly>,
+        ) -> &mut crate::reassembly_rx::CoopReassembly {
+            self.made.set(self.made.get() + 1);
+            crate::reassembly_rx::CoopReassembly::init_in(
+                place,
+                crate::reassembly_rx::mcu_reassembly_config(&self.policy),
+                wz_session_core::chain_staging::BuildsOwnStorage::new(),
+            )
+        }
+    }
+
+    /// The event sink of a test's session, a type that can be named.
+    #[cfg(feature = "reassembly")]
+    fn ignore(_event: IterationEvent<'_, '_>) {}
+
     /// A session spawned over a Router its maker writes in the pump: the maker runs once, when the
     /// task first runs and not before; the pump it was written in steps its link; and the pump,
     /// with the handle to the session it holds, goes with its task when the task is dropped.
     #[cfg(feature = "reassembly")]
     #[test]
     fn a_session_spawned_over_a_router_made_in_place_runs_and_goes_with_its_task() {
-        use crate::reassembly_rx::{mcu_reassembly_config, CoopReassembly};
-        use core::cell::Cell;
-        use wz_session_core::chain_staging::BuildsOwnStorage;
-
         let runtime = CoopRuntime::new(Stopped);
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
         let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
         let link = Rc::new(Recording::default());
-        let made = Rc::new(Cell::new(0u32));
-        let counted = Rc::clone(&made);
-        let policy = wz_session_core::policy::SessionPolicy::defaults();
+        let made = Rc::new(core::cell::Cell::new(0u32));
         let before = Rc::strong_count(&actions);
         let task = spawn_session_with_router(
             &local,
@@ -2728,15 +2860,11 @@ mod wake_budget_tests {
                 role: SessionRole::Acceptor,
                 max_iters: None,
             },
-            move |place| {
-                counted.set(counted.get() + 1);
-                CoopReassembly::init_in(
-                    place,
-                    mcu_reassembly_config(&policy),
-                    BuildsOwnStorage::new(),
-                )
+            CountedRouter {
+                made: Rc::clone(&made),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
             },
-            |_event: IterationEvent<'_, '_>| {},
+            ignore as fn(IterationEvent<'_, '_>),
         );
         assert_eq!(made.get(), 0, "nothing is built before the task runs");
         local.run_until_idle();
@@ -2758,6 +2886,56 @@ mod wake_budget_tests {
             Rc::strong_count(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
+    }
+
+    /// The bytes of a session's task are a constant of its types: a runtime reserved with cells of
+    /// exactly that size hosts the session, and one with a byte less refuses it, counted, without
+    /// running its maker.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_runtime_reserved_with_a_session_tasks_bytes_hosts_the_session_and_one_byte_less_does_not()
+    {
+        type Link = Rc<Recording>;
+        type Router = crate::reassembly_rx::CoopReassembly;
+        type Sink = fn(IterationEvent<'_, '_>);
+        let bytes = router_session_task_bytes::<Stopped, Link, Router, CountedRouter, Sink>();
+        for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
+            let runtime = CoopRuntime::reserved(
+                Stopped,
+                crate::RuntimeRows {
+                    tasks: 1,
+                    task_bytes: cell,
+                    timers: 0,
+                },
+            );
+            let local = CoopLocalSet::new(&runtime);
+            let clock = CoopTime::new(&runtime);
+            let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+            let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+            let made = Rc::new(core::cell::Cell::new(0u32));
+            let task = spawn_session_with_router(
+                &local,
+                Rc::new(Recording::default()),
+                actions,
+                clock,
+                SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
+                CountedRouter {
+                    made: Rc::clone(&made),
+                    policy: wz_session_core::policy::SessionPolicy::defaults(),
+                },
+                ignore as Sink,
+            );
+            local.run_until_idle();
+            assert_eq!(task.is_finished(), !fits, "a cell of {cell} bytes");
+            assert_eq!(made.get(), u32::from(fits), "a refused task makes nothing");
+            assert_eq!(runtime.task_refusals().too_large, u32::from(!fits));
+            task.abort();
+            local.run_until_idle();
+        }
     }
 
     #[test]

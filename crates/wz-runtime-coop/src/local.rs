@@ -50,6 +50,11 @@ impl<T> CoopLocalJoinHandle<T> {
         }
     }
 
+    /// The handle of a spawn the runtime refused: it reads `Err(RuntimeError::Shutdown)`.
+    pub(crate) fn refused() -> Self {
+        Self::new(TaskJoin::refused())
+    }
+
     /// Abort the local task. Same two-step cooperative semantic as
     /// [`crate::CoopJoinHandle::abort`]: the next [`CoopLocalSet::run_until_idle`]
     /// drops the task body, and this handle resolves to `JoinCancelled` at once.
@@ -196,7 +201,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     {
         match self.try_spawn_local(fut) {
             Ok(handle) => handle,
-            Err(_refused) => CoopLocalJoinHandle::new(TaskJoin::refused()),
+            Err(_refused) => CoopLocalJoinHandle::refused(),
         }
     }
 

@@ -224,6 +224,20 @@ impl<C: ClockSource> CoopRuntime<C> {
         )
     }
 
+    /// [`Self::reserved`] for an engine whose open spawns tasks it cannot size before it opens (a
+    /// group's session): until [`Self::seal`], a task that no free cell fits takes a cell of its
+    /// own size, kept for the next task it fits, so what the open spawns is placed while it opens
+    /// and a task spawned again after it finds its cell. Once sealed the runtime is
+    /// [`Self::reserved`]'s: no spawn and no sleep allocates.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn opening(clock: C, rows: RuntimeRows) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::opening(rows.tasks, rows.task_bytes),
+            TimerQueue::reserved(rows.timers),
+        )
+    }
+
     #[cfg(not(feature = "session-slot"))]
     fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
         Self {
@@ -461,6 +475,13 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// Cells of the task table that hold a task, or a result no handle has read.
     pub fn live_task_count(&self) -> usize {
         self.inner.executor.live_task_count()
+    }
+
+    /// The open is over: a runtime made by [`CoopRuntime::opening`] takes no more memory, and a
+    /// spawn that finds no free cell it fits is refused, counted. Nothing for any other runtime.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn seal(&self) {
+        self.inner.executor.seal();
     }
 }
 

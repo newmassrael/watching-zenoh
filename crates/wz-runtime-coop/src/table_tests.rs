@@ -524,6 +524,80 @@ fn dropping_the_runtime_drops_its_tasks_and_their_handles_read_cancelled() {
     ));
 }
 
+/// A task too large for a cell the open did not size for: what an engine spawns while it opens
+/// and cannot name beforehand.
+#[allow(clippy::manual_async_fn)]
+fn large(bytes: [u8; 256]) -> impl Future<Output = u8> {
+    async move {
+        yield_now().await;
+        bytes[0]
+    }
+}
+
+#[allow(clippy::manual_async_fn)]
+fn larger(bytes: [u8; 1024]) -> impl Future<Output = u8> {
+    async move {
+        yield_now().await;
+        bytes[0]
+    }
+}
+
+#[test]
+fn an_opening_runtime_places_what_its_open_spawns_and_nothing_once_sealed() {
+    let runtime = CoopRuntime::opening(
+        Still,
+        RuntimeRows {
+            tasks: 1,
+            task_bytes: 64,
+            timers: 0,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    let small = local.try_spawn_local(forever()).expect("the reserved cell");
+    let first = local
+        .try_spawn_local(large([3; 256]))
+        .expect("while the open lasts, a cell of its own size");
+    assert_eq!(local.block_on_local(first).expect("ran"), 3);
+    assert_eq!(runtime.task_refusals(), Refusals::default());
+    runtime.seal();
+    let (again, made) = allocations(|| {
+        let handle = local
+            .try_spawn_local(large([4; 256]))
+            .expect("the cell added for it while the open lasted");
+        local.block_on_local(handle).expect("ran")
+    });
+    assert_eq!((again, made), (4, 0), "a sealed runtime takes no memory");
+    let held = local
+        .try_spawn_local(large([5; 256]))
+        .expect("the added cell, free again");
+    let Err(full) = local.try_spawn_local(forever()) else {
+        panic!("both cells are taken and the runtime is sealed");
+    };
+    assert_eq!(
+        full.why,
+        SpawnRefusal::NoTaskCell,
+        "a task a cell fits waits"
+    );
+    let Err(too_large) = local.try_spawn_local(larger([6; 1024])) else {
+        panic!("no cell fits it and the runtime is sealed");
+    };
+    assert_eq!(
+        too_large.why,
+        SpawnRefusal::TooLarge,
+        "a task no cell fits never will"
+    );
+    assert_eq!(
+        runtime.task_refusals(),
+        Refusals {
+            no_task_cell: 1,
+            too_large: 1,
+        }
+    );
+    small.abort();
+    held.abort();
+    local.run_until_idle();
+}
+
 /// A session's task holds a handle of the runtime, so the runtime's table alone would keep it, and
 /// what it reads with, for good: its set's last handle takes it, and another set's tasks stay.
 #[test]
