@@ -197,7 +197,8 @@ fn ipv6_address(text: &[u8]) -> Option<([u16; 8], usize)> {
     let mut tail = [0u16; 7];
     let limit = head.len() - (head_size + 1);
     let (tail_size, _, tail_used) = ipv6_groups(&text[used..], &mut tail[..limit]);
-    head[head.len() - tail_size..].copy_from_slice(&tail[..tail_size]);
+    let at = head.len() - tail_size;
+    head[at..].copy_from_slice(&tail[..tail_size]);
     Some((head, used + tail_used))
 }
 

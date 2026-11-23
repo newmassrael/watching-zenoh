@@ -14031,7 +14031,9 @@ layer_c1m_session_lwip() {
     # and the dial reader's bracketed IPv6 address (`dial::parse_tests`, which `dial` compiles).
     # 57 -> 61, printed: main at `b58b71c19` already printed 61 on one machine, so the source
     # counts above missed four; the limits rounds add none to this leg.
-    _runci_guarded_test "C1m mcu adminspace-write" 61 \
+    # 61 -> 62, counted from the source: the dial reader's IPv6 form held to `SocketAddrV6`'s
+    # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
+    _runci_guarded_test "C1m mcu adminspace-write" 62 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14062,7 +14064,8 @@ layer_c1m_session_lwip() {
     # 67 -> 72, printed: main at `b58b71c19` printed 71 on one machine (four the source counts
     # missed), and the limits rounds add one, an admin node's observer held to its session's limits.
     # 72 -> 73, printed: one more with main at `0e24b2486` (Round 4581) merged in.
-    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
+    # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
+    _runci_guarded_test "C1m mcu adminspace read+write" 74 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
