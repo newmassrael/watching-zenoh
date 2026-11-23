@@ -46,6 +46,7 @@ use core::cell::RefCell;
 
 use wz_admin::admin_config_space::write_config_space_pattern;
 use wz_admin::adminspace::admin_queryable_key;
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -76,7 +77,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     local: &'a CoopLocalSet<C>,
     links: Rc<L>,
@@ -121,7 +122,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     /// A node that listens on `listen_port`, answers as `identity`, applies
     /// writes to `control` and reports through `status`, over the network `links`.

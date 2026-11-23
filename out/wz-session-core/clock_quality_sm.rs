@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 371f055b6110e2268c001482da22d62c7ca3ad9a91ae3c57aeed939e983c2fc5
+// source-hash: 912a0f98ccfb59c7b382ab46609715a29b11094f11a06810ab54625dfddf24f3
 // source: clock_quality.scxml
 
 
@@ -851,10 +851,14 @@ compile_error!("feature `query-target` requires `query-get`, which this build le
 compile_error!("feature `query-timeout` requires `query-get`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "reassembly", not(feature = "codec-frame")))]
 compile_error!("feature `reassembly` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "reply-egress-gate", not(feature = "alloc")))]
+compile_error!("feature `reply-egress-gate` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "routing-namespace", not(feature = "alloc")))]
 compile_error!("feature `routing-namespace` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "routing-namespace", not(feature = "keyexpr-prefix")))]
 compile_error!("feature `routing-namespace` requires `keyexpr-prefix`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "rx-in-place", not(feature = "codec-frame")))]
+compile_error!("feature `rx-in-place` requires `codec-frame`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "rx-shared-bytes", not(feature = "alloc")))]
 compile_error!("feature `rx-shared-bytes` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-extauth", not(feature = "alloc")))]
@@ -887,6 +891,8 @@ compile_error!("feature `session-reconnect` requires `alloc`, which this build l
 compile_error!("feature `session-slot` requires `bounded-heapless`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "rx-lent-control")))]
 compile_error!("feature `session-slot` requires `rx-lent-control`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "session-slot", not(feature = "session-fixed-storage")))]
+compile_error!("feature `session-slot` requires `session-fixed-storage`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "storage-profile")))]
 compile_error!("feature `session-slot` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "tx-lend-only")))]
@@ -899,6 +905,8 @@ compile_error!("feature `session-unicast-accept` requires `rx-push`, which this 
 compile_error!("feature `session-unicast-accept` requires `rx-response`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "shared-key-ids", not(feature = "alloc")))]
 compile_error!("feature `shared-key-ids` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "south-subregions", not(feature = "alloc")))]
+compile_error!("feature `south-subregions` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "switchboard", not(feature = "codec-push")))]
 compile_error!("feature `switchboard` requires `codec-push`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-compose", not(feature = "alloc")))]

@@ -79,11 +79,23 @@
                               raises slot.release itself
     reset_slot              — return the staging to the arena, clear the chain
 -->
+<!--
+  Queue depth: a full queue stops the engine, so each queue is sized by what can fill it.
+  The INTERNAL queue is the generator's: nothing this document does puts an event on it, and
+  the generator proves the depth 0 (SCE ADR 0076). The EXTERNAL queue is the host's statement:
+  the dispatcher puts one event on it and runs the machine at once, every time
+  (`crates/wz-session-core/src/reassembly_dispatch.rs` `Slot::drive`: `process_event`, which
+  raises the event and steps; `Slot::drive_chunk`: `raise_fragment_chunk` then `step`), and
+  a step runs every queued event to the end, so the queue holds one event at most. Declared at
+  1: a machine that declares nothing gets the runtime's depth of 64, in the engine every
+  reassembly slot holds.
+-->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="statechart"
+       sce:capacity="1"
        name="reassembly_slot"
        version="1.0"
        datamodel="ecmascript"

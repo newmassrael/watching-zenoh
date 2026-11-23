@@ -18,7 +18,7 @@
 //! `wz-ap-demo`, and the `fixture_session_init_params` test-support
 //! builder) resolve unchanged. A DP3 leaf out of `session_glue.rs`.
 
-#[cfg(not(feature = "session-slot"))]
+#[cfg(not(feature = "session-fixed-storage"))]
 use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
@@ -30,11 +30,11 @@ use crate::signing_key::SigningKey;
 pub use crate::session_zid::{SessionZid, ZidError, ZID_MAX};
 
 /// The longest cookie a session keeps on the `session-slot` profile, in bytes: the build's
-/// `HANDSHAKE_COOKIE_BYTES` limit, 128 unless it says otherwise. It is the node's own bound and not
+/// `HANDSHAKE_COOKIE_BYTES` limit, 176 unless it says otherwise. It is the node's own bound and not
 /// the codec's: the INIT body declares a cookie of up to [`COOKIE_FIELD_MAX`] (`sce:max-size` of the
 /// generated `InitBody`) and the OPEN body declares none, so a cookie the decoder accepts may be
-/// longer than this, and the fixed form then keeps none (see [`session_bytes`]). The growable
-/// profile keeps any length and does not read it.
+/// longer than this: the in-place read refuses it (`inbound::read_control`), and the fixed form
+/// keeps none (see [`session_bytes`]). The growable profile keeps any length and does not read it.
 pub const COOKIE_MAX: usize = crate::caps::HANDSHAKE_COOKIE_BYTES;
 
 /// The capacity the generated `InitBody` declares for its cookie field
@@ -51,7 +51,7 @@ const _: () = assert!(
     COOKIE_MAX >= 1 && COOKIE_MAX <= COOKIE_FIELD_MAX,
     "HANDSHAKE_COOKIE_BYTES is in 1..=65535, the INIT cookie field's capacity"
 );
-#[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
+#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast-accept"))]
 const _: () = assert!(
     COOKIE_MAX >= crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES,
     "HANDSHAKE_COOKIE_BYTES is at least the widest cookie an accepting node issues"
@@ -59,24 +59,24 @@ const _: () = assert!(
 
 /// Bytes a session keeps for the length of one handshake: a zid, a cookie.
 ///
-/// A growable vector on every profile but `session-slot`, which is the
-/// heap-free per-session profile (fixed-memory step S5): there it is an array
-/// of `N` bytes held in the session's own storage, and a value that does not
-/// fit is refused rather than grown into.
-#[cfg(not(feature = "session-slot"))]
+/// A growable vector on the heap profile. An array of `N` bytes held in the session's own
+/// storage, where a value that does not fit is refused rather than grown into, where the session's
+/// storage is fixed at its open (`session-fixed-storage`, which `session-slot` and the C
+/// library's cooperative presets turn on): a session there holds no handshake byte on the heap.
+#[cfg(not(feature = "session-fixed-storage"))]
 pub type SessionBytes<const N: usize> = Vec<u8>;
 /// See the growable form of this alias.
-#[cfg(feature = "session-slot")]
+#[cfg(feature = "session-fixed-storage")]
 pub type SessionBytes<const N: usize> = heapless::Vec<u8, N>;
 
 /// Copy `src` into session bytes, or `None` when `N` cannot hold it (which only
 /// the fixed form can say: the growable one always fits).
 pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(feature = "session-fixed-storage"))]
     {
         Some(src.to_vec())
     }
-    #[cfg(feature = "session-slot")]
+    #[cfg(feature = "session-fixed-storage")]
     {
         heapless::Vec::from_slice(src).ok()
     }
@@ -893,9 +893,9 @@ mod cookie_bound_tests {
         assert!((1..=COOKIE_FIELD_MAX).contains(&COOKIE_MAX));
         assert!(session_bytes::<8>(&[7; 8]).is_some());
         let too_long = session_bytes::<8>(&[7; 9]);
-        #[cfg(feature = "session-slot")]
+        #[cfg(feature = "session-fixed-storage")]
         assert!(too_long.is_none());
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         assert_eq!(too_long.map(|b| b.len()), Some(9));
     }
 }

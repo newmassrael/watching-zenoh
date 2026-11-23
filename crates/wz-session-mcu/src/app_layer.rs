@@ -527,7 +527,6 @@ mod tests {
     };
     use wz_runtime_coop::session_drive::SessionDatagramLink;
     use wz_session_core::driver_loop::DriverLoopOutcome;
-    use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::NetworkMessage;
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::signing_key::SigningKey;
@@ -603,7 +602,7 @@ mod tests {
 
         let runtime = CoopRuntime::new(FrozenClock);
         let clock = CoopTime::new(&runtime);
-        let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
+        let sink = driver.clone().into_sink();
         let actions =
             SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                 sink,
@@ -720,7 +719,7 @@ mod tests {
             let peer_at = SocketAddr::from(([10, 0, 0, 2], 7474));
             let driver = net.bind(node_at, Some(peer_at)).expect("bind node end");
             let runtime = CoopRuntime::new(FrozenClock);
-            let sink: Rc<dyn BoxedLinkDriver> = driver;
+            let sink = driver.into_sink();
             let actions =
                 SessionLinkActions::<CoopRuntime<FrozenClock>, CoopTime<FrozenClock>>::new_generic(
                     sink,

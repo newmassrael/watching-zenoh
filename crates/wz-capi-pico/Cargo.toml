@@ -136,6 +136,7 @@ engine-coop = [
     "wz-capi-coop/tx-lend-only",
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
+    "wz-session-core/session-fixed-storage",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
 # own sockets, kernel tick and random source (`wz-runtime-zephyr`, `src/coop_host.rs`), the host
@@ -153,6 +154,7 @@ os-zephyr = [
     "wz-capi-coop/tx-lend-only",
     "wz-session-core/no_std",
     "wz-session-core/limits-lent-at-open",
+    "wz-session-core/session-fixed-storage",
 ]
 # `os-posix`: the library on a POSIX host without `std`, the MCU build plus an OS layer
 # (`docs/c-abi-engine-and-memory.md`, E4 and phase P4). The cooperative engine over the host's
@@ -176,6 +178,7 @@ os-posix = [
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
+    "wz-session-core/session-fixed-storage",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",
@@ -204,6 +207,7 @@ os-windows = [
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
     "wz-session-core/limits-lent-at-open",
+    "wz-session-core/session-fixed-storage",
     # The advanced plane's lock and the node clock's wall clock, where `advanced` builds them.
     "wz-ext-pubsub?/host-sync",
     "wz-node-time?/host-sync",

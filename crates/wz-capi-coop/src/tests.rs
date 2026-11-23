@@ -979,6 +979,46 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     );
 }
 
+/// The session's step ends a chain of its one reassembly Router once the chain is past its
+/// deadline, though no link's receive sweeps it, and not before: a step at once leaves a chain
+/// staged now on the Router's epoch open, as one measured on another epoch would not be. The
+/// CONTROL is the chain, open when it is begun.
+#[test]
+fn the_sessions_step_ends_a_chain_past_its_deadline() {
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome};
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let begun = engine.with_chain_router(|reassembly, now_ms| {
+        reassembly.ingest(
+            Fragment {
+                peer_key: &[0x5a; 16],
+                reliable: true,
+                sn: 1,
+                more: 1,
+                payload: b"part",
+                priority: Priority::DEFAULT,
+                markers: FragmentMarkers::NONE,
+            },
+            wz_session_core::sn::mask_from_res(0x02),
+            now_ms,
+            |_| {},
+        )
+    });
+    assert_eq!(begun, IngestOutcome::Begun);
+    let open_chains = || engine.with_chain_router(|reassembly, _| reassembly.active_chains());
+    assert_eq!(open_chains(), 1, "CONTROL: the chain is open");
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        open_chains(),
+        1,
+        "a step before the deadline leaves the chain open"
+    );
+    until(&engine, "the step to end the chain", || open_chains() == 0);
+}
+
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
 /// subscriber's callback where they lie: the samples of each datagram are handed on through the
 /// delivery lane, which has no lock, as one record, its payloads read in the datagram, which is
@@ -2103,10 +2143,10 @@ fn a_build_without_groups_refuses_a_session_that_joins_one() {
     .err();
     assert_eq!(
         refused,
-        Some(OpenError::Group(EndpointRefusal {
-            endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
-            why: Refusal::GroupsNotBuilt,
-        }))
+        Some(OpenError::Group(EndpointRefusal::new(
+            "udp/239.7.7.7:7447#iface=lan7",
+            Refusal::GroupsNotBuilt,
+        )))
     );
 }
 
@@ -2119,13 +2159,7 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
     use wz_runtime_coop::session_drive::LinkOpenError;
     use wz_session_mcu::connect_manager::DialRefused;
 
-    let refusal = |endpoint: &str, why| {
-        EndpointRefusal {
-            endpoint: endpoint.to_owned(),
-            why,
-        }
-        .to_string()
-    };
+    let refusal = |endpoint: &str, why| EndpointRefusal::new(endpoint, why).to_string();
     assert_eq!(
         refusal("udp/239.7.7.7:7447", Refusal::GroupsNotBuilt),
         "udp/239.7.7.7:7447: joining a group is not built"
@@ -2154,6 +2188,101 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
         "tcp/127.0.0.1:7447: the handshake ended: Generic"
     );
     assert_eq!(refusal("", Refusal::LinkLost), "the link was lost");
+    assert_eq!(
+        refusal("tcp/127.0.0.1:7447", Refusal::TextTooLong),
+        "tcp/127.0.0.1:7447: the endpoint is longer than MAX_LOCATOR_LEN"
+    );
+    // A text longer than a row keeps the whole characters that fit in one, and no more.
+    let long = format!(
+        "tcp/{}",
+        "\u{e9}".repeat(wz_session_core::caps::MAX_LOCATOR_LEN)
+    );
+    let kept = EndpointRefusal::new(&long, Refusal::TextTooLong).endpoint;
+    assert!(
+        long.starts_with(kept.as_str()),
+        "a cut at a character's end"
+    );
+    assert!(kept.len() <= wz_session_core::caps::MAX_LOCATOR_LEN);
+    assert!(
+        kept.len() + 2 > wz_session_core::caps::MAX_LOCATOR_LEN,
+        "every whole character that fits is kept"
+    );
+}
+
+/// The open writes each endpoint's text into a row of the session's arena: one longer than a row
+/// is refused by name, an endpoint to dial as unreachable and one to listen on as a port not
+/// listened on, and more endpoints than the build's rows refuse the arena. A face attached after
+/// the open keeps its endpoint's text in a row's length too, and one longer is refused before any
+/// dial. The CONTROL is the open of the same config with a text that fits.
+#[test]
+fn an_endpoint_text_longer_than_a_row_is_refused_by_name() {
+    use crate::arena::ArenaRefused;
+    use crate::{EndpointRefusal, OpenError, Refusal};
+    use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+
+    let router = Router::start(CatchAll::None);
+    let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![long.clone()],
+        ..config(&router)
+    });
+    assert_eq!(
+        refused,
+        Some(OpenError::Unreachable(EndpointRefusal::new(
+            &long,
+            Refusal::TextTooLong
+        )))
+    );
+    let refused = open_with_result(CoopConfig {
+        listen: vec![long.clone()],
+        max_faces: 1,
+        accept_pending: 1,
+        ..config(&router)
+    });
+    assert_eq!(
+        refused,
+        Some(OpenError::Listen(EndpointRefusal::new(
+            &long,
+            Refusal::TextTooLong
+        )))
+    );
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![router.endpoint(); MAX_STATIC_CONNECT + 1],
+        ..config(&router)
+    });
+    assert!(
+        matches!(
+            refused,
+            Some(OpenError::Arena(ArenaRefused::Limit {
+                limit: "MAX_STATIC_CONNECT",
+                ..
+            }))
+        ),
+        "{refused:?}"
+    );
+    // A face is attached beside the dial role's only in a build that adds faces (`listen`).
+    #[cfg(feature = "listen")]
+    {
+        let engine = open(&router);
+        assert_eq!(
+            engine.attach_face(&long).err(),
+            Some(OpenError::Unreachable(EndpointRefusal::new(
+                &long,
+                Refusal::TextTooLong
+            )))
+        );
+    }
+}
+
+/// What the open of `config` was refused with, `None` when it opened.
+fn open_with_result(config: CoopConfig) -> Option<crate::OpenError> {
+    Engine::open(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        config,
+    )
+    .err()
 }
 
 /// The open with the config's maker answers what the open with the config answers, the maker run
@@ -2305,6 +2434,7 @@ mod plain_put;
 mod program_clock;
 #[cfg(feature = "queryable")]
 mod queryable;
+mod redial_heap;
 mod redial_wait;
 mod replay;
 mod round;
@@ -2321,3 +2451,5 @@ mod snapshot;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
+#[cfg(feature = "listen")]
+mod tx_pool;

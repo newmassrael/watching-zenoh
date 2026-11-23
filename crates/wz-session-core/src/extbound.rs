@@ -100,15 +100,23 @@ impl Bound {
 /// `0x7` in another encoding is an unknown extension and is skipped, as
 /// upstream's codec skips it.
 pub fn peer_remote_bound(extensions: &[ExtEntryOwned]) -> Result<Option<Bound>, InvalidBound> {
+    peer_remote_bound_in(extensions)
+}
+
+/// [`peer_remote_bound`] over the entries a chain yields, held or read where its message lies
+/// (`crate::inbound::ExtChainRef`).
+pub fn peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
+    extensions: impl IntoIterator<Item = E>,
+) -> Result<Option<Bound>, InvalidBound> {
     let want = crate::ext_header::ext_eid(REMOTE_BOUND_EXT_HEADER);
     for ext in extensions {
-        if crate::ext_header::ext_eid(ext.header) != want {
+        if ext.eid() != want {
             continue;
         }
-        let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body else {
+        let Some(value) = ext.zint() else {
             continue;
         };
-        return Bound::from_wire(z.value).map(Some);
+        return Bound::from_wire(value).map(Some);
     }
     Ok(None)
 }

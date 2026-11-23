@@ -441,6 +441,14 @@ rx-lent-only = []
 # `os-zephyr`) as `rx-lent-only` is, so a heap engine's sessions keep the whole range the
 # declaration states.
 limits-lent-at-open = []
+# A session's storage is fixed at its open: the bytes it holds for the length of a handshake (the
+# cookies, `session_init_params::SessionBytes`), its staged handshake extension chains
+# (`ext_chain::ExtChainBuf`) and its cookie key (`signing_key::SigningKey`) are arrays of the
+# build's sizes in the session's own storage, and a value past one is refused by name, never grown
+# into. `session-slot` turns it on; a heap engine's sessions keep their growable forms. A SELECTOR,
+# named by the final build of a C library on the cooperative engine (`wz-capi-pico`'s
+# `engine-coop`, `os-posix`, `os-windows`, `os-zephyr`) and by no dependency line.
+session-fixed-storage = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
@@ -1233,7 +1241,13 @@ tx-lend-only = ["transport-tx-lend"]
 # the multilink aggregation API is not compiled (a build that selects every
 # feature at once must still build; an image that turns this selector on does
 # not turn multilink on).
-session-slot = ["bounded-heapless", "tx-lend-only", "storage-profile", "rx-lent-control"]
+session-slot = [
+    "bounded-heapless",
+    "tx-lend-only",
+    "storage-profile",
+    "rx-lent-control",
+    "session-fixed-storage",
+]
 
 # Item 895 — `transport_compose`: transport messages WRITTEN from explicit
 # fields, for a caller that says every field itself (the transport build door

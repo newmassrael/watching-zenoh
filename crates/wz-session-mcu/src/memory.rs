@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use core::net::{IpAddr, SocketAddr};
 
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::link_storage::{TxLender, TxStore};
 use wz_runtime_coop::session_drive::{
     LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
@@ -115,7 +116,7 @@ impl MemoryNetwork {
         self: &Rc<Self>,
         local: SocketAddr,
         peer: Option<SocketAddr>,
-    ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
+    ) -> Result<CellRc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
         if queues.contains_key(&local) {
             return Err(LinkOpenError::Exhausted);
@@ -131,7 +132,7 @@ impl MemoryNetwork {
         self: &Rc<Self>,
         addr: IpAddr,
         peer: Option<SocketAddr>,
-    ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
+    ) -> Result<CellRc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
         let port = self
             .next_unclaimed_port(&queues, addr)
@@ -146,7 +147,7 @@ impl MemoryNetwork {
         queues: &mut Queues,
         local: SocketAddr,
         peer: Option<SocketAddr>,
-    ) -> Rc<MemoryEnd> {
+    ) -> CellRc<MemoryEnd> {
         queues.insert(local, VecDeque::new());
         let end = MemoryEnd {
             net: self.clone(),
@@ -159,7 +160,7 @@ impl MemoryNetwork {
             tx: TxLender::new(MemoryTx::new()),
         };
         end.note_endpoints();
-        Rc::new(end)
+        CellRc::boxed(end)
     }
 
     /// The next port on `addr`, from the ephemeral range, that `queues` does not
@@ -329,16 +330,18 @@ impl MemoryLinks {
         &self.net
     }
 
-    fn opened(end: Rc<MemoryEnd>) -> OpenedLink<Rc<MemoryEnd>> {
+    fn opened(end: CellRc<MemoryEnd>) -> OpenedLink<CellRc<MemoryEnd>> {
         OpenedLink {
-            sink: end.clone(),
+            sink: end.clone().into_sink(),
             pump: end,
         }
     }
 }
 
 impl SessionLinks for MemoryLinks {
-    type Pump = Rc<MemoryEnd>;
+    type Pump = CellRc<MemoryEnd>;
+
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let end = self.net.bind(SocketAddr::new(self.host, port), None)?;
@@ -490,7 +493,7 @@ mod tests {
             .open_initiator(to_acceptor)
             .expect("open");
 
-        let send = |from: &OpenedLink<Rc<MemoryEnd>>, bytes: &[u8]| {
+        let send = |from: &OpenedLink<CellRc<MemoryEnd>>, bytes: &[u8]| {
             std::assert!(matches!(
                 from.sink.send_blocking(bytes, Reliability::Reliable),
                 LinkSendOutcome::Sent

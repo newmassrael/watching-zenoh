@@ -289,7 +289,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_ms: u64,
     ) -> TurnEnd {
         let owed = self.sequence_len();
-        self.faces[at].replay.begin(owed, now_ms);
+        self.links.faces_mut()[at].replay.begin(owed, now_ms);
         self.replay_turn(at, actions, now_ms)
     }
 
@@ -303,7 +303,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         actions: &McuActions<C>,
         now_ms: u64,
     ) -> TurnEnd {
-        let replay = &self.faces[at].replay;
+        let replay = &self.links.faces()[at].replay;
         if replay.cursor.finished() || now_ms < replay.next_turn_ms {
             return TurnEnd::Kept;
         }
@@ -319,7 +319,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             told = true;
         }
-        self.faces[at].replay.settle(cursor, told, refused, now_ms)
+        self.links.faces_mut()[at]
+            .replay
+            .settle(cursor, told, refused, now_ms)
     }
 
     /// A declaration takes `place` in the replay's order: tell the peer of each
@@ -337,7 +339,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         send: impl Fn(&McuActions<C>) -> bool,
         undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        announce_on(&mut self.faces, place, on_refusal, send, undo)
+        announce_on(self.links.faces_mut(), place, on_refusal, send, undo)
     }
 
     /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
@@ -356,7 +358,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let registry = &self.registry;
         let tables = &self.tables;
         announce_on(
-            &mut self.faces,
+            self.links.faces_mut(),
             place,
             OnRefusal::Forget,
             |actions| {
@@ -421,7 +423,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let place = self.token_place(handle);
         let tables = &self.tables;
         announce_on(
-            &mut self.faces,
+            self.links.faces_mut(),
             place,
             OnRefusal::Forget,
             |actions| {
@@ -449,7 +451,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Call it once, before the removal.
     pub(super) fn retract_at(&mut self, place: usize) -> Vec<Rc<McuActions<C>>> {
         let mut links = Vec::new();
-        for face in &mut self.faces {
+        for face in self.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
@@ -463,8 +465,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written.
-fn announce_on<C: ClockSource + 'static>(
-    faces: &mut [Face<C>],
+fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
+    faces: &mut [Face<C, L>],
     place: usize,
     on_refusal: OnRefusal,
     send: impl Fn(&McuActions<C>) -> bool,

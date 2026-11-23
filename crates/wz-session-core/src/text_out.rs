@@ -54,41 +54,14 @@ pub trait TextOut: fmt::Write {
     /// code that an image with no other formatting caller would not carry.
     fn push_u64(&mut self, n: u64) {
         let mut digits = [0u8; 20];
-        let mut at = digits.len();
-        let mut rest = n;
-        loop {
-            at -= 1;
-            digits[at] = b'0' + (rest % 10) as u8;
-            rest /= 10;
-            if rest == 0 {
-                break;
-            }
-        }
-        // The bytes are ASCII digits, so they are valid text.
-        if let Ok(text) = core::str::from_utf8(&digits[at..]) {
-            self.push_str(text);
-        }
+        self.push_str(decimal(n, &mut digits));
     }
 
     /// Append `n` in lowercase hexadecimal with no leading zeros, as `{n:x}` prints it, without
     /// going through `core::fmt`.
     fn push_hex_u128(&mut self, n: u128) {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut nibbles = [0u8; 32];
-        let mut at = nibbles.len();
-        let mut rest = n;
-        loop {
-            at -= 1;
-            nibbles[at] = DIGITS[(rest & 0xf) as usize];
-            rest >>= 4;
-            if rest == 0 {
-                break;
-            }
-        }
-        // The bytes are ASCII hex digits, so they are valid text.
-        if let Ok(text) = core::str::from_utf8(&nibbles[at..]) {
-            self.push_str(text);
-        }
+        self.push_str(hexadecimal(n, &mut nibbles));
     }
 
     /// Append `ip` as `{ip}` prints it, without going through `core::fmt`: dotted decimal for
@@ -108,13 +81,14 @@ pub trait TextOut: fmt::Write {
                 let groups = v6.segments();
                 // The first longest run of zero groups: a later run of the same length keeps the
                 // first, as `Display` keeps it.
-                let (mut best_at, mut best_len, mut run_at, mut run_len) = (0, 0, 0, 0);
+                let (mut best_at, mut best_len, mut run_at, mut run_len) =
+                    (0usize, 0usize, 0usize, 0usize);
                 for (at, &group) in groups.iter().enumerate() {
                     if group == 0 {
                         if run_len == 0 {
                             run_at = at;
                         }
-                        run_len += 1;
+                        run_len = run_len.saturating_add(1);
                         if run_len > best_len {
                             (best_at, best_len) = (run_at, run_len);
                         }
@@ -123,9 +97,10 @@ pub trait TextOut: fmt::Write {
                     }
                 }
                 if best_len > 1 {
-                    push_groups(self, &groups[..best_at]);
+                    push_groups(self, groups.get(..best_at).unwrap_or_default());
                     self.push_str("::");
-                    push_groups(self, &groups[best_at + best_len..]);
+                    let after = best_at.saturating_add(best_len);
+                    push_groups(self, groups.get(after..).unwrap_or_default());
                 } else {
                     push_groups(self, &groups);
                 }
@@ -139,16 +114,16 @@ pub trait TextOut: fmt::Write {
         match at {
             SocketAddr::V4(v4) => push_ipv4(self, *v4.ip()),
             SocketAddr::V6(v6) => {
-                self.push('[');
+                self.push_str("[");
                 self.push_ip(IpAddr::V6(*v6.ip()));
                 if v6.scope_id() != 0 {
-                    self.push('%');
+                    self.push_str("%");
                     self.push_u64(u64::from(v6.scope_id()));
                 }
-                self.push(']');
+                self.push_str("]");
             }
         }
-        self.push(':');
+        self.push_str(":");
         self.push_u64(u64::from(at.port()));
     }
 }
@@ -157,7 +132,7 @@ pub trait TextOut: fmt::Write {
 fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
     for (at, octet) in ip.octets().into_iter().enumerate() {
         if at > 0 {
-            out.push('.');
+            out.push_str(".");
         }
         out.push_u64(u64::from(octet));
     }
@@ -168,10 +143,53 @@ fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
 fn push_groups<W: TextOut + ?Sized>(out: &mut W, groups: &[u16]) {
     for (at, &group) in groups.iter().enumerate() {
         if at > 0 {
-            out.push(':');
+            out.push_str(":");
         }
         out.push_hex_u128(u128::from(group));
     }
+}
+
+/// `n` in decimal, as `{n}` prints it, written at the end of `digits`: the text of the digits.
+/// One body for every sink, out of line, so what a sink's [`TextOut::push_u64`] carries is a call
+/// and a write. A separator is written as text and not as a `char` for the same reason: a `char`
+/// is encoded as UTF-8 in each sink that is handed one.
+#[inline(never)]
+fn decimal(mut n: u64, digits: &mut [u8; 20]) -> &str {
+    let mut start = digits.len();
+    for slot in digits.iter_mut().rev() {
+        // A remainder of ten is below ten, so the byte is an ASCII digit.
+        *slot = b'0'.wrapping_add((n % 10) as u8);
+        n /= 10;
+        start = start.saturating_sub(1);
+        if n == 0 {
+            break;
+        }
+    }
+    ascii(digits.get(start..))
+}
+
+/// `n` in lowercase hexadecimal with no leading zeros, as `{n:x}` prints it, written at the end
+/// of `nibbles`: the text of the digits. Out of line, as [`decimal`] is.
+#[inline(never)]
+fn hexadecimal(mut n: u128, nibbles: &mut [u8; 32]) -> &str {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut start = nibbles.len();
+    for slot in nibbles.iter_mut().rev() {
+        // A nibble is below sixteen, so it names one of the digits.
+        *slot = DIGITS.get((n & 0xf) as usize).copied().unwrap_or(b'0');
+        n >>= 4;
+        start = start.saturating_sub(1);
+        if n == 0 {
+            break;
+        }
+    }
+    ascii(nibbles.get(start..))
+}
+
+/// The digits a writer above wrote, as text: they are ASCII, so they always are; an empty text
+/// stands for what no writer above hands it.
+fn ascii(digits: Option<&[u8]>) -> &str {
+    core::str::from_utf8(digits.unwrap_or_default()).unwrap_or_default()
 }
 
 #[cfg(feature = "alloc")]
@@ -351,6 +369,9 @@ impl<const N: usize> Default for FixedText<N> {
 }
 
 impl<const N: usize> fmt::Write for FixedText<N> {
+    // Out of line: every piece a writer pushes is a call of this, and a body inlined at each
+    // would be a copy of it per separator and per number of a document.
+    #[inline(never)]
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let wanted = self.demanded.saturating_add(s.len());
         if wanted > N {

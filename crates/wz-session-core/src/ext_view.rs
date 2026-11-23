@@ -128,7 +128,41 @@ pub fn walked<
         &sce_forge_runtime::codec::Bounded<sce_forge_runtime::codec::ListView<'a, W, K>, MAX, MIN>,
     >,
 ) -> impl Iterator<Item = W::Entry<'a>> + 'a {
-    chain.map(|list| list.inner().iter()).into_iter().flatten()
+    Walked(chain.map(|list| list.inner().iter()))
+}
+
+/// The walk [`walked`] answers: the list's own walk, or none. A step is the list's step, where a
+/// flattened option would carry the bookkeeping of a front and a back walk into every one of the
+/// walks a build compiles.
+struct Walked<'a, W: sce_forge_runtime::codec::ListWalk<K>, const K: usize>(
+    Option<sce_forge_runtime::codec::ListIter<'a, W, K>>,
+);
+
+impl<'a, W: sce_forge_runtime::codec::ListWalk<K>, const K: usize> Iterator for Walked<'a, W, K> {
+    type Item = W::Entry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.as_mut()?.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.as_ref().map_or((0, Some(0)), Iterator::size_hint)
+    }
+}
+
+/// A walk of a received chain's entries handed to a reader as a trait object: its one step.
+/// What a reader that serves the walks of several documents takes, so it is compiled once and the
+/// object's table holds the step alone, not the provided methods an `Iterator` object's table
+/// carries for each walk.
+pub trait EntryWalk<'a> {
+    /// The next entry, or `None` at the end of the chain.
+    fn next_entry(&mut self) -> Option<wz_codecs::ext_entry::ExtEntryView<'a>>;
+}
+
+impl<'a, I: Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>> EntryWalk<'a> for I {
+    fn next_entry(&mut self) -> Option<wz_codecs::ext_entry::ExtEntryView<'a>> {
+        self.next()
+    }
 }
 
 /// [`find_by_eid`] over the entries a chain yields, by value or by reference: the first whose

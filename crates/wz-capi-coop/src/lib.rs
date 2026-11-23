@@ -119,6 +119,8 @@ pub mod arena;
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;
+// What an open reads its session's config from, and how the endpoints' texts reach its rows.
+pub mod open_source;
 // What the session hands its callbacks after its lock: one table a round, read where the records lie.
 pub mod round;
 #[cfg(feature = "scout")]
