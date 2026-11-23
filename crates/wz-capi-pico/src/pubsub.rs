@@ -300,8 +300,12 @@ impl SampleMarshal {
     }
 
     /// Attach the metadata a [`SampleView`] carried besides its attachment, which
-    /// [`Self::lent`] reads where it lies.
-    fn with_metadata(mut self, view: &dyn SampleView) -> Self {
+    /// [`Self::lent`] reads where it lies. The encoding's schema is read where the view holds it
+    /// too.
+    ///
+    /// # Safety
+    /// As [`Self::lent`]: the marshal is dropped before the borrow of `view` ends.
+    unsafe fn with_metadata(mut self, view: &dyn SampleView) -> Self {
         // Read where the view holds them first: a view of the session's delivery lane carries no
         // hint, only the parts.
         self.timestamp = view
@@ -310,14 +314,11 @@ impl SampleMarshal {
             .or_else(|| view.timestamp().map(timestamp_of));
         self.encoding = view
             .encoding_parts()
-            .map(
-                |(packed_id, schema)| wz_session_core::sample::EncodingHint {
-                    packed_id,
-                    schema: schema.map(<[u8]>::to_vec),
-                },
-            )
-            .or_else(|| view.encoding().cloned())
-            .map(|hint| crate::encoding::EncodingState { hint });
+            .or_else(|| {
+                view.encoding()
+                    .map(|hint| (hint.packed_id, hint.schema.as_deref()))
+            })
+            .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema));
         // R311y559 — the three fields the census found unreachable from C. All
         // three were already on the seam; nothing decoded them into the ABI.
         self.qos = view.qos();
@@ -337,7 +338,8 @@ impl SampleMarshal {
     /// value with no attachment line under it.
     ///
     /// # Safety
-    /// The marshal is dropped before the borrow of `attachment` ends, as the reply's is.
+    /// The marshal is dropped before the borrows of `attachment` and `encoding` end, as the
+    /// reply's is.
     #[cfg(feature = "query")]
     pub(crate) unsafe fn with_reply_metadata(
         mut self,
@@ -349,12 +351,8 @@ impl SampleMarshal {
         // Read where the reply holds it, as a subscriber's sample's is ([`Self::lent`]).
         self.attachment = attachment.map(|attachment| ByteBuf::lent(attachment));
         self.timestamp = timestamp.map(|(time, zid)| timestamp_from(time, zid));
-        self.encoding = encoding.map(|(packed_id, schema)| crate::encoding::EncodingState {
-            hint: wz_session_core::sample::EncodingHint {
-                packed_id,
-                schema: schema.map(<[u8]>::to_vec),
-            },
-        });
+        self.encoding = encoding
+            .map(|(packed_id, schema)| crate::encoding::EncodingState::lent(packed_id, schema));
         // R311y562 — the FOURTH field, and it went missing for the same reason
         // the other three once did: this function is the reply plane's separate
         // copy of `with_metadata`, so a field added to the sample side does not
@@ -428,9 +426,7 @@ impl SampleMarshal {
             encoding: self
                 .encoding
                 .as_ref()
-                .map(|state| crate::encoding::EncodingState {
-                    hint: state.hint.clone(),
-                }),
+                .map(crate::encoding::EncodingState::kept),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
@@ -3585,10 +3581,12 @@ mod tests {
             "the encoding lies in the marshal, not in a box of its own"
         );
         // SAFETY: as above.
-        let hint = unsafe { crate::encoding::encoding_hint(loaned) }.expect("bound");
+        let hint = unsafe { crate::encoding::encoding_view(loaned) }.expect("bound");
+        assert_eq!((hint.packed_id, hint.schema), (7, Some(&b"utf8"[..])));
         assert_eq!(
-            (hint.packed_id, hint.schema.as_deref()),
-            (7, Some(&b"utf8"[..]))
+            hint.schema.map(<[u8]>::as_ptr),
+            Some(view.schema.as_ptr()),
+            "the schema is read where the view holds it, not copied"
         );
         let mut kept = marshal.deep_copy().expect("room for the copy");
         drop(marshal);
@@ -3596,10 +3594,15 @@ mod tests {
         // SAFETY: the kept copy, bound at its final address.
         let kept_loaned = unsafe { z_sample_encoding(kept.as_loaned()) };
         // SAFETY: the loaned encoding of the live copy.
-        let kept_hint = unsafe { crate::encoding::encoding_hint(kept_loaned) }.expect("kept");
+        let kept_hint = unsafe { crate::encoding::encoding_view(kept_loaned) }.expect("kept");
         assert_eq!(
-            (kept_hint.packed_id, kept_hint.schema.as_deref()),
+            (kept_hint.packed_id, kept_hint.schema),
             (7, Some(&b"utf8"[..]))
+        );
+        assert_ne!(
+            kept_hint.schema.map(<[u8]>::as_ptr),
+            Some(view.schema.as_ptr()),
+            "a kept sample's schema is its own"
         );
 
         let plain = HeldView {

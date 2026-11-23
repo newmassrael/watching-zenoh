@@ -185,7 +185,22 @@ pub fn hint_to_bytes(hint: &EncodingHint) -> alloc::vec::Vec<u8> {
 
 /// The rendering of `hint` in `dialect`, as the bytes that library hands out.
 pub fn hint_to_bytes_in(hint: &EncodingHint, dialect: EncodingDialect) -> alloc::vec::Vec<u8> {
-    let id = (hint.packed_id >> 1) as usize;
+    parts_to_bytes_in(hint.packed_id, hint.schema.as_deref(), dialect)
+}
+
+/// [`hint_to_bytes`] of an encoding read where it lies: its packed id and its schema's bytes, as
+/// a received message or a C program's encoding holds them, with no hint made for them.
+pub fn parts_to_bytes(packed_id: u32, schema: Option<&[u8]>) -> alloc::vec::Vec<u8> {
+    parts_to_bytes_in(packed_id, schema, EncodingDialect::Pico)
+}
+
+/// [`parts_to_bytes`] in `dialect`: the one rendering every form of an encoding goes through.
+pub fn parts_to_bytes_in(
+    packed_id: u32,
+    schema: Option<&[u8]>,
+    dialect: EncodingDialect,
+) -> alloc::vec::Vec<u8> {
+    let id = (packed_id >> 1) as usize;
     let mut out = alloc::vec::Vec::new();
     let unknown = dialect == EncodingDialect::ZenohC && id == usize::from(ENCODING_ID_UNKNOWN);
     if !unknown {
@@ -193,7 +208,7 @@ pub fn hint_to_bytes_in(hint: &EncodingHint, dialect: EncodingDialect) -> alloc:
             out.extend_from_slice(prefix.as_bytes());
         }
     }
-    if let Some(schema) = hint.schema.as_deref() {
+    if let Some(schema) = schema {
         if !schema.is_empty() {
             if !unknown {
                 let mut sep = [0u8; 4];
@@ -295,5 +310,36 @@ mod tests {
         let text = hint_from_parts(4, "utf8");
         assert_eq!(text.schema_text(), Some("utf8"));
         assert_eq!(hint_to_bytes(&text), b"text/plain;utf8".to_vec());
+    }
+
+    /// An encoding read where it lies renders as the hint of the same parts does, in each
+    /// dialect: with no schema, an empty one, a UTF-8 one and one that is not UTF-8.
+    #[test]
+    fn parts_render_as_the_hint_of_the_same_parts() {
+        let raw: &[u8] = &[0xFF, 0xFE, b'x'];
+        let cases: [(u32, Option<&[u8]>); 5] = [
+            (4 << 1, None),
+            (4 << 1, Some(&[][..])),
+            ((4 << 1) | 1, Some(&b"utf8"[..])),
+            ((4 << 1) | 1, Some(raw)),
+            ((u32::from(ENCODING_ID_UNKNOWN) << 1) | 1, Some(raw)),
+        ];
+        for (packed_id, schema) in cases {
+            let hint = EncodingHint {
+                packed_id,
+                schema: schema.map(<[u8]>::to_vec),
+            };
+            for dialect in [EncodingDialect::Pico, EncodingDialect::ZenohC] {
+                assert_eq!(
+                    parts_to_bytes_in(packed_id, schema, dialect),
+                    hint_to_bytes_in(&hint, dialect),
+                    "{packed_id} {schema:?}"
+                );
+            }
+        }
+        assert_eq!(
+            parts_to_bytes((4 << 1) | 1, Some(&b"utf8"[..])),
+            b"text/plain;utf8".to_vec()
+        );
     }
 }

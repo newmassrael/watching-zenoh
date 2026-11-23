@@ -32,6 +32,10 @@
 //! an unpacked intermediate would be a second representation to keep in step;
 //! and a schema-present flag that disagreed with the schema actually stored is
 //! unrepresentable when the flag is derived at pack time.
+//!
+//! A received message's encoding is not copied into a hint: its state keeps the packed word and
+//! reads the schema where the message holds it ([`EncodingState::lent`]), and a copy is made only
+//! where a program keeps the sample, the reply or the query.
 
 use core::ffi::{c_char, c_void, CStr};
 
@@ -72,20 +76,146 @@ pub use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 /// same SSOT as the table it indexes.
 use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 
-/// Behind a `z_owned_encoding_t`: the wire projection, in the SAME shape the
-/// decode path produces.
+/// Behind a `z_owned_encoding_t`, and behind the loaned encoding a sample, a reply or a query
+/// hands out: the packed wire word and where the schema lies.
 pub(crate) struct EncodingState {
-    pub(crate) hint: EncodingHint,
+    packed_id: u32,
+    schema: Schema,
 }
 
-impl EncodingState {
+/// Where an encoding's schema lies.
+enum Schema {
+    /// The encoding carries none.
+    Absent,
+    /// Bytes of the encoding's own: one a program built or kept.
+    Owned(Vec<u8>),
+    /// Bytes a received message holds, read where they lie for as long as the marshal that holds
+    /// this state does ([`EncodingState::lent`]).
+    Lent { start: *const u8, len: usize },
+}
+
+// SAFETY: a lent schema is its message's, valid and unchanged for as long as the state lives
+// (`EncodingState::lent`), and nothing writes through the pointer, so it is shared between threads
+// as the message's own borrow would be; an owned one is a `Vec`.
+unsafe impl Send for Schema {}
+unsafe impl Sync for Schema {}
+
+/// An encoding as its readers see it: the packed wire word and the schema's bytes, wherever the
+/// state keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EncodingView<'a> {
+    pub(crate) packed_id: u32,
+    pub(crate) schema: Option<&'a [u8]>,
+}
+
+impl EncodingView<'_> {
+    /// The hint of these parts, its schema a copy: what an encoding a program keeps holds.
+    pub(crate) fn to_hint(self) -> EncodingHint {
+        EncodingHint {
+            packed_id: self.packed_id,
+            schema: self.schema.map(<[u8]>::to_vec),
+        }
+    }
+
     /// Render as pico's `_z_encoding_convert_into_string` does: the id's table
     /// entry, then `;schema` when a schema is present, the schema copied as the
     /// bytes it is (UTF-8 or not). An id past the table renders as the empty
     /// prefix, which is pico's behaviour too (its bounds check leaves `prefix`
     /// NULL and `prefix_len` 0).
-    pub(crate) fn to_bytes(hint: &EncodingHint) -> Vec<u8> {
-        wz_session_core::encoding_hint::hint_to_bytes(hint)
+    pub(crate) fn to_bytes(self) -> Vec<u8> {
+        wz_session_core::encoding_hint::parts_to_bytes(self.packed_id, self.schema)
+    }
+}
+
+impl EncodingState {
+    /// The state of an encoding of its own.
+    pub(crate) fn owned(hint: EncodingHint) -> Self {
+        Self {
+            packed_id: hint.packed_id,
+            schema: match hint.schema {
+                Some(schema) => Schema::Owned(schema),
+                None => Schema::Absent,
+            },
+        }
+    }
+
+    /// A well-known encoding: its id, no schema.
+    const fn constant(id: u16) -> Self {
+        Self {
+            // The wire word is `(id << 1) | has_schema`, and a constant never carries a schema, so
+            // bit 0 is clear by construction rather than by a second field agreeing with the first.
+            packed_id: (id as u32) << 1,
+            schema: Schema::Absent,
+        }
+    }
+
+    /// The encoding a received message carried, its schema read where the message holds it, as
+    /// zenoh-pico hands its callback the encoding its receive decoded: nothing is copied for it.
+    ///
+    /// # Safety
+    /// The state is dropped before the borrow of `schema` ends.
+    pub(crate) unsafe fn lent(packed_id: u32, schema: Option<&[u8]>) -> Self {
+        Self {
+            packed_id,
+            schema: match schema {
+                Some(schema) => Schema::Lent {
+                    start: schema.as_ptr(),
+                    len: schema.len(),
+                },
+                None => Schema::Absent,
+            },
+        }
+    }
+
+    /// The encoding as its readers see it.
+    pub(crate) fn view(&self) -> EncodingView<'_> {
+        let schema = match &self.schema {
+            Schema::Absent => None,
+            Schema::Owned(schema) => Some(schema.as_slice()),
+            // SAFETY: a lent schema outlives the state that holds it (`Self::lent`), and a slice's
+            // start is never null.
+            Schema::Lent { start, len } => {
+                Some(unsafe { core::slice::from_raw_parts(*start, *len) })
+            }
+        };
+        EncodingView {
+            packed_id: self.packed_id,
+            schema,
+        }
+    }
+
+    /// A state of its own with the same encoding: what a sample, a reply or a query kept past its
+    /// callback holds, whose message's bytes it may outlive.
+    pub(crate) fn kept(&self) -> Self {
+        Self::owned(self.view().to_hint())
+    }
+
+    /// The encoding as a hint, the schema moved out of an owned state rather than copied.
+    fn into_hint(self) -> EncodingHint {
+        let packed_id = self.packed_id;
+        match self.schema {
+            Schema::Owned(schema) => EncodingHint {
+                packed_id,
+                schema: Some(schema),
+            },
+            schema => {
+                let state = Self { packed_id, schema };
+                state.view().to_hint()
+            }
+        }
+    }
+
+    /// Replace the schema with `bytes`, the flag of the wire word following it; empty bytes take
+    /// the schema away.
+    fn set_schema(&mut self, bytes: &[u8]) {
+        let id = self.packed_id >> 1;
+        let has_schema = !bytes.is_empty();
+        self.packed_id = (id << 1) | u32::from(has_schema);
+        self.schema = if has_schema {
+            Schema::Owned(bytes.to_vec())
+        } else {
+            Schema::Absent
+        };
     }
 }
 
@@ -153,16 +283,16 @@ impl_handle_ownership7!(
 /// Store a hint into a caller-provided owned encoding slot.
 pub(crate) unsafe fn store_encoding(dst: *mut z_owned_encoding_t, hint: EncodingHint) {
     *dst = z_owned_encoding_t {
-        handle: Box::into_raw(Box::new(EncodingState { hint })) as *mut c_void,
+        handle: Box::into_raw(Box::new(EncodingState::owned(hint))) as *mut c_void,
         _pad: [core::ptr::null_mut(); 4],
     };
 }
 
-/// Read the hint behind a loaned encoding.
-pub(crate) unsafe fn encoding_hint<'a>(
+/// Read the encoding behind a loaned encoding, where its state keeps it.
+pub(crate) unsafe fn encoding_view<'a>(
     ptr: *const z_loaned_encoding_t,
-) -> Option<&'a EncodingHint> {
-    handle_ref::<z_loaned_encoding_t, EncodingState>(ptr).map(|state| &state.hint)
+) -> Option<EncodingView<'a>> {
+    handle_ref::<z_loaned_encoding_t, EncodingState>(ptr).map(EncodingState::view)
 }
 
 /// Consume a moved encoding, returning its hint and nulling the source so the
@@ -182,7 +312,7 @@ pub(crate) unsafe fn take_moved_encoding(moved: *mut c_void) -> Option<EncodingH
         return None;
     }
     *slot = core::ptr::null_mut();
-    Some(Box::from_raw(handle as *mut EncodingState).hint)
+    Some(Box::from_raw(handle as *mut EncodingState).into_hint())
 }
 
 // --- exports ---------------------------------------------------------------
@@ -254,8 +384,8 @@ pub unsafe extern "C" fn z_encoding_to_string(
         if string.is_null() {
             return Z_ERR_NULL;
         }
-        let rendered = match encoding_hint(encoding) {
-            Some(hint) => EncodingState::to_bytes(hint),
+        let rendered = match encoding_view(encoding) {
+            Some(view) => view.to_bytes(),
             None => ENCODING_ID_TO_STR[usize::from(ENCODING_ID_DEFAULT)]
                 .as_bytes()
                 .to_vec(),
@@ -271,11 +401,7 @@ pub unsafe extern "C" fn z_encoding_equals(
     left: *const z_loaned_encoding_t,
     right: *const z_loaned_encoding_t,
 ) -> bool {
-    match (encoding_hint(left), encoding_hint(right)) {
-        (Some(a), Some(b)) => a.packed_id == b.packed_id && a.schema == b.schema,
-        (None, None) => true,
-        _ => false,
-    }
+    encoding_view(left) == encoding_view(right)
 }
 
 /// Replace an encoding's schema from a NUL-terminated string (pico
@@ -318,10 +444,7 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
         } else {
             core::slice::from_raw_parts(schema as *const u8, len)
         };
-        let id = (*state).hint.packed_id >> 1;
-        let has_schema = !bytes.is_empty();
-        (*state).hint.packed_id = (id << 1) | u32::from(has_schema);
-        (*state).hint.schema = has_schema.then(|| bytes.to_vec());
+        (*state).set_schema(bytes);
         Z_OK
     })
 }
@@ -377,16 +500,7 @@ macro_rules! encoding_constant {
         /// nothing to release.
         #[no_mangle]
         pub extern "C" fn $fname() -> *const z_loaned_encoding_t {
-            static STATE: EncodingState = EncodingState {
-                hint: EncodingHint {
-                    // The wire word is `(id << 1) | has_schema`, and a constant
-                    // never carries a schema — so bit 0 is clear by
-                    // construction rather than by a second field agreeing with
-                    // the first.
-                    packed_id: ($id as u32) << 1,
-                    schema: None,
-                },
-            };
+            static STATE: EncodingState = EncodingState::constant($id);
             static VIEW: StaticLoanedEncoding = static_view(&STATE);
             &VIEW.0 as *const z_loaned_encoding_t
         }
@@ -477,9 +591,9 @@ pub unsafe extern "C" fn z_encoding_clone(
             return Z_ERR_NULL;
         }
         *dst = z_owned_encoding_t::null_value();
-        match encoding_hint(this_) {
-            Some(hint) => {
-                store_encoding(dst, hint.clone());
+        match encoding_view(this_) {
+            Some(view) => {
+                store_encoding(dst, view.to_hint());
                 Z_OK
             }
             // A null / spent source clones to a null destination, which is the
@@ -533,7 +647,8 @@ mod tests {
 
     /// What `z_encoding_to_string` hands back for `hint`, read as text.
     fn rendered(hint: &EncodingHint) -> String {
-        String::from_utf8(EncodingState::to_bytes(hint)).expect("a UTF-8 encoding renders as text")
+        String::from_utf8(wz_session_core::encoding_hint::hint_to_bytes(hint))
+            .expect("a UTF-8 encoding renders as text")
     }
 
     /// Every constant renders through the SAME table the wire codec uses, so a
@@ -555,10 +670,10 @@ mod tests {
         ];
         for (view, id) in cases {
             // SAFETY: a `'static` view this module minted.
-            let hint = unsafe { encoding_hint(view) }.expect("a constant is never absent");
+            let hint = unsafe { encoding_view(view) }.expect("a constant is never absent");
             assert_eq!(hint.packed_id >> 1, id, "wire id");
             assert_eq!(hint.packed_id & 1, 0, "a constant carries no schema");
-            let text = rendered(hint);
+            let text = rendered(&hint.to_hint());
             assert_eq!(
                 text, ENCODING_ID_TO_STR[id as usize],
                 "a constant renders as its table entry"
@@ -594,8 +709,8 @@ mod tests {
             assert!(z_internal_encoding_check(&owned));
             let loaned = z_encoding_loan(&owned);
             assert_eq!(
-                encoding_hint(loaned).expect("cloned").packed_id,
-                encoding_hint(z_encoding_text_plain())
+                encoding_view(loaned).expect("cloned").packed_id,
+                encoding_view(z_encoding_text_plain())
                     .expect("constant")
                     .packed_id
             );
@@ -604,7 +719,7 @@ mod tests {
             // The constant is still readable, which a handle copy would have
             // made false.
             assert_eq!(
-                encoding_hint(z_encoding_text_plain())
+                encoding_view(z_encoding_text_plain())
                     .expect("the constant survived its clone's drop")
                     .packed_id
                     >> 1,
@@ -629,10 +744,7 @@ mod tests {
             assert!(!z_internal_encoding_check(&src), "source emptied");
             assert!(src._pad.iter().all(|p| p.is_null()), "all four pad slots");
             assert_eq!(
-                encoding_hint(z_encoding_loan(&dst))
-                    .expect("moved")
-                    .schema
-                    .as_deref(),
+                encoding_view(z_encoding_loan(&dst)).expect("moved").schema,
                 Some(&b"utf8"[..])
             );
             z_encoding_drop(z_encoding_move(&mut dst));
@@ -695,13 +807,65 @@ mod tests {
                 ),
                 Z_OK
             );
-            let hint = encoding_hint(z_encoding_loan(&owned)).expect("set");
-            assert_eq!(hint.schema.as_deref(), Some(raw));
+            let hint = encoding_view(z_encoding_loan(&owned)).expect("set");
+            assert_eq!(hint.schema, Some(raw));
             let mut want = b"text/plain;".to_vec();
             want.extend_from_slice(raw);
-            assert_eq!(EncodingState::to_bytes(hint), want);
+            assert_eq!(hint.to_bytes(), want);
             z_encoding_drop(z_encoding_move(&mut owned));
         }
+    }
+
+    /// A received encoding's schema is read where the message holds it, not copied; a kept copy
+    /// owns its bytes and reads the same after the message is gone; a schema set on the received
+    /// encoding is the encoding's own; one with no schema reads as none.
+    #[test]
+    fn a_received_schema_is_read_where_it_lies_and_kept_as_a_copy() {
+        let message = b"utf8".to_vec();
+        // SAFETY: the state is dropped before `message`.
+        let mut received = unsafe { EncodingState::lent((4 << 1) | 1, Some(message.as_slice())) };
+        let view = received.view();
+        assert_eq!(view.packed_id, (4 << 1) | 1);
+        assert_eq!(
+            view.schema.map(<[u8]>::as_ptr),
+            Some(message.as_ptr()),
+            "the schema is the message's own bytes"
+        );
+        assert_eq!(view.to_bytes(), b"text/plain;utf8".to_vec());
+
+        let kept = received.kept();
+        let kept_schema = kept.view().schema.expect("kept");
+        assert_ne!(
+            kept_schema.as_ptr(),
+            message.as_ptr(),
+            "a kept copy owns its bytes"
+        );
+        assert_eq!(kept_schema, b"utf8");
+
+        received.set_schema(b"other");
+        let set = received.view().schema.expect("set");
+        assert_ne!(
+            set.as_ptr(),
+            message.as_ptr(),
+            "a set schema is the state's own"
+        );
+        assert_eq!(set, b"other");
+        received.set_schema(&[]);
+        assert_eq!(
+            received.view(),
+            EncodingView {
+                packed_id: 4 << 1,
+                schema: None
+            }
+        );
+        drop(received);
+        drop(message);
+        assert_eq!(kept.view().to_bytes(), b"text/plain;utf8".to_vec());
+        assert_eq!(kept.into_hint(), parsed("text/plain;utf8"));
+
+        // SAFETY: a state of no schema borrows nothing.
+        let bare = unsafe { EncodingState::lent(4 << 1, None) };
+        assert_eq!(bare.view().schema, None);
     }
 
     /// Round trip through the rendering, for the shapes the attachment

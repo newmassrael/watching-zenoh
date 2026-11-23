@@ -380,12 +380,11 @@ impl QueryMarshal {
                 .attachment()
                 .map(|attachment| crate::bytes::ByteBuf::lent(attachment))
                 .unwrap_or_default(),
-            // R311y529 — owned, for the same reason the payload is: the view's
-            // borrow ends when the dispatch returns and the C callback holds
-            // its borrowed query for the whole call.
-            encoding: view
-                .encoding()
-                .map(|hint| crate::encoding::EncodingState { hint: hint.clone() }),
+            // Read where the view holds it, as the payload is: the marshal is dropped before the
+            // view's borrow ends, and an escaped copy keeps a copy of its own.
+            encoding: view.encoding().map(|hint| {
+                crate::encoding::EncodingState::lent(hint.packed_id, hint.schema.as_deref())
+            }),
             // R311y559 — carried through the SAME projection the sample plane
             // uses, so a `(zid, eid, sn)` read off a query and one read off a
             // sample cannot render differently.
@@ -448,9 +447,7 @@ impl QueryMarshal {
             encoding: self
                 .encoding
                 .as_ref()
-                .map(|state| crate::encoding::EncodingState {
-                    hint: state.hint.clone(),
-                }),
+                .map(crate::encoding::EncodingState::kept),
             source_info: self.source_info,
             payload,
             attachment,
@@ -2290,11 +2287,8 @@ mod tests {
             "the encoding lies in the marshal, not in a box of its own"
         );
         // SAFETY: as above.
-        let hint = unsafe { crate::encoding::encoding_hint(loaned) }.expect("bound");
-        assert_eq!(
-            (hint.packed_id, hint.schema.as_deref()),
-            (7, Some(&b"utf8"[..]))
-        );
+        let hint = unsafe { crate::encoding::encoding_view(loaned) }.expect("bound");
+        assert_eq!((hint.packed_id, hint.schema), (7, Some(&b"utf8"[..])));
 
         let held: Box<dyn HeldQuery> = Box::new(NoHold);
         let payload = marshal.payload.try_clone().expect("room for the copy");
@@ -2306,9 +2300,9 @@ mod tests {
         // SAFETY: the kept copy, bound at its final address.
         let kept_loaned = unsafe { z_query_encoding(kept_query) };
         // SAFETY: the loaned encoding of the live copy.
-        let kept_hint = unsafe { crate::encoding::encoding_hint(kept_loaned) }.expect("kept");
+        let kept_hint = unsafe { crate::encoding::encoding_view(kept_loaned) }.expect("kept");
         assert_eq!(
-            (kept_hint.packed_id, kept_hint.schema.as_deref()),
+            (kept_hint.packed_id, kept_hint.schema),
             (7, Some(&b"utf8"[..]))
         );
 
