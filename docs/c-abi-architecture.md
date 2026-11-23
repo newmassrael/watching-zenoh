@@ -342,7 +342,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-146 | `wz-session-core` | `put_payload` | `arithmetic_side_effects` | 1 | open |
 | TD-148 | `wz-session-core` | `rx_profile` | `arithmetic_side_effects` | 1 | open |
 | TD-149 | `wz-session-core` | `scout_responder` | `expect_used` | 1 | open |
-| TD-150 | `wz-session-core` | `scout_static` | `indexing_slicing` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
 | TD-154 | `wz-capi-coop` | `lane` | `indexing_slicing`, `arithmetic_side_effects` | 76 | open |
 | TD-155 | `wz-capi-pico` | `os` | `indexing_slicing`, `arithmetic_side_effects` | 59 | in flight |

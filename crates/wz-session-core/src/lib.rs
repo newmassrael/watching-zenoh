@@ -661,8 +661,6 @@ pub mod multicast_params;
 // MCU profile. The `alloc`-only surface (the `ScoutingMode` deploy-string
 // parser) is gated per-item inside the module.
 #[cfg(feature = "scouting-static")]
-// Totality debt TD-150 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod scout_static;
 
 // R311er — mode-agnostic locator parsing (`proto/addr:port` ->
