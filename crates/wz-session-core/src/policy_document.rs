@@ -1598,7 +1598,7 @@ mod from_json5 {
     use super::KeyIdsReason;
     use super::{
         compose_document, Base, DocumentLayers, LimitStatement, Origin, Overrides, Reason, Refusal,
-        Refusals, Resolved, Statement,
+        Refusals, Resolved, Stated, StatedLimits, Statement,
     };
     use crate::json5::{number_as_u64, Json5Value};
     use crate::limit_binding::{LimitValue, UNBOUNDED};
