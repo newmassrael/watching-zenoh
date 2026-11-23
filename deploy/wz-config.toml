@@ -2762,7 +2762,7 @@ answers out of memory and leaves its payload null.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant. A payload takes a slot from the constructor or clone that makes it until it is moved into a put, a reply or a writer, or dropped; a held sample's or reply's payload is part of that object and takes none. zenoh-pico's programs hold three at once at the most (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), a writer's result coming after the three are moved into it and a put's payload moved as it is sent. Thirty-two, more than ten such sets, is room for a host program whose threads each build theirs at once; the pico preset holds zenoh-pico's own three."
 
 [limit.pico_preset]
 value = 3
