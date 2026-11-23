@@ -119,7 +119,7 @@ pub use wz_runtime_coop::app_link;
 mod tests;
 
 pub use engine::{
-    ClockMovesWord, CoopConfig, CoopEngine, EndpointRefusal, KeyWireFormRefused, OpenError,
+    ClockMovesWord, CoopConfig, CoopDrive, CoopEngine, EndpointRefusal, KeyWireFormRefused, OpenError,
     OpenKeyIds, Refusal, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES,
 };
 #[cfg(feature = "time-base")]

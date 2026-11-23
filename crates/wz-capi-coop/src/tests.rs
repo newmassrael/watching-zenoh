@@ -1679,6 +1679,26 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     SessionDrive::close(&*engine);
 }
 
+/// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
+/// the one it holds, and letting go of it closes the session while the engine itself lives on in
+/// the other holders, as an entity declared on a session that is dropped finds it closed.
+#[test]
+fn a_drive_is_the_engines_own_allocation_and_its_drop_closes_the_session() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let drive: crate::CoopDrive = engine.clone().into_drive();
+    assert!(
+        core::ptr::addr_eq(Arc::as_ptr(&drive.engine()), Arc::as_ptr(&engine)),
+        "the drive hands out the engine it holds, no copy of it"
+    );
+    assert!(!drive.is_closed());
+    drop(drive);
+    assert!(
+        SessionDrive::is_closed(&*engine),
+        "the handle's drop closes the session"
+    );
+}
+
 /// A peer that was told an id names it. A zenoh router sends a subscriber the samples it routes
 /// to it by the key expression the subscriber declared to it (the receiver's id space, `M=0`),
 /// not by the literal, and a session that cannot resolve the id drops the sample: the engine

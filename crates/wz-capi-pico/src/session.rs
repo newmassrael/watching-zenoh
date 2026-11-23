@@ -521,12 +521,19 @@ fn memory_basis(
     }
 }
 
+/// The session as the handle holds it. The tokio engine boxes its session out of line so that the
+/// session's drop glue stays in that engine's crate (`SessionState::into_drive`); the cooperative
+/// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type HeldDrive = Box<dyn wz_capi_port::SessionDrive>;
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) type HeldDrive = wz_capi_coop::CoopDrive;
+
 /// What a C session handle points at: the engine's session, behind the port, and what this ABI
 /// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
 pub(crate) struct PicoSessionHandle {
-    /// The session as the engine runs it. Made by the engine (`into_drive`), so its drop glue is
-    /// the engine crate's and not a second copy here.
-    pub(crate) drive: Box<dyn wz_capi_port::SessionDrive>,
+    /// The session as the engine runs it, made by the engine (`into_drive`).
+    pub(crate) drive: HeldDrive,
     /// The session's role, clock, connectivity listeners and admin space.
     pub(crate) ext: crate::session_ext::PicoSessionExt,
     /// The release latches of the closures the program declared with no handle to undeclare them
@@ -539,10 +546,7 @@ pub(crate) struct PicoSessionHandle {
 }
 
 impl PicoSessionHandle {
-    pub(crate) fn new(
-        drive: Box<dyn wz_capi_port::SessionDrive>,
-        ext: crate::session_ext::PicoSessionExt,
-    ) -> Self {
+    pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
         Self {
             drive,
             ext,
@@ -1800,8 +1804,7 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         }
         let val = (*obj)._this._val;
         if !val.is_null() {
-            // The engine's session closes as it drops (idempotent), through the
-            // drop glue its own crate holds: the drive is the engine's trait object.
+            // The engine's session closes as its drive drops (idempotent).
             crate::object_slot::release(val as *mut PicoSessionHandle);
             (*obj)._this = z_owned_session_t::null_value();
         }

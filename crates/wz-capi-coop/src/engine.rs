@@ -6620,71 +6620,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
-    /// This session as the C handle's drive. Made HERE (out of line), so the session's drop glue
-    /// is this crate's and not a second copy in the ABI crate that holds the handle, as the tokio
-    /// engine's `SessionState::into_drive` is.
-    #[inline(never)]
-    pub fn into_drive(self: Arc<Self>) -> Box<dyn SessionDrive> {
-        Box::new(Drive(self))
+    /// This session as the C handle's drive: the engine's own allocation, which the handle holds
+    /// as one of its `Arc`s, so the open makes nothing more for it.
+    pub fn into_drive(self: Arc<Self>) -> CoopDrive {
+        CoopDrive(self)
     }
 }
 
-/// The C handle's hold on an engine: the engine is shared with the entities declared on it and
-/// with its read task, so the handle holds it as one of its `Arc`s.
-struct Drive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>(Arc<CoopEngine<L, C>>);
+/// The C handle's hold on a session of this engine, kept by value in the handle: the engine is
+/// shared with the entities declared on it and with its read task, so the handle holds one of its
+/// `Arc`s, seen as the port's [`SessionDrive`].
+///
+/// The engine's own type is not named here because the links it is opened over are the build's to
+/// compose (the host's sockets, with a secure channel or groups as the build adds them, or the
+/// program's transport), and an ABI that opens over two kinds of links keeps sessions of both in
+/// one handle.
+pub struct CoopDrive(Arc<dyn SessionDrive>);
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for Drive<L, C> {
-    fn engine(&self) -> Arc<dyn SessionEngine> {
-        self.0.clone()
-    }
+impl Deref for CoopDrive {
+    type Target = dyn SessionDrive;
 
-    fn engine_ref(&self) -> &dyn SessionEngine {
-        &*self.0
-    }
-
-    fn close(&self) {
-        SessionDrive::close(&*self.0)
-    }
-
-    fn is_closed(&self) -> bool {
-        SessionDrive::is_closed(&*self.0)
-    }
-
-    fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
-        self.0.start_read_task()
-    }
-
-    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
-        self.0.stop_read_task()
-    }
-
-    fn read_task_is_running(&self) -> bool {
-        self.0.read_task_is_running()
-    }
-
-    fn read(&self, single: bool) -> Result<(), SessionClosed> {
-        self.0.read(single)
-    }
-
-    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        self.0.send_keep_alive()
-    }
-
-    fn spin_once(&self) -> bool {
-        self.0.spin_once()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        &*self.0
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for Drive<L, C> {
+impl Drop for CoopDrive {
     /// The C program let go of its session (zenoh-pico's `z_session_drop`), which closes it: the
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
     fn drop(&mut self) {
-        SessionDrive::close(&*self.0);
+        self.0.close();
     }
 }
 
