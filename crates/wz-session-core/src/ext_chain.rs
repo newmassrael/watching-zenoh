@@ -349,9 +349,9 @@ impl ChainHeaders for ReceivedExtChain {
 /// judged by its header for the message `mid` names and not kept, so the chain's storage does
 /// not grow with its length.
 ///
-/// The loop is generic over the walk, which is a type of its own for each message's document; what
-/// it does with an entry is one function out of line (`keep_handshake_entry`), so that the four
-/// messages' decodes share one copy of it and each holds only its own walk.
+/// The walk is a type of its own for each message's document, and is handed on as a trait object
+/// (`collect_walk`), so the four messages' decodes share one copy of the loop and of what it does
+/// with an entry (`keep_handshake_entry`).
 ///
 /// An entry's own body is a separate matter: an owned entry carries its bytes
 /// in the SCE default storage, so an extension whose body is a byte string (the
@@ -366,7 +366,24 @@ impl ChainHeaders for ReceivedExtChain {
 ))]
 pub(crate) fn collect_handshake_ext_chain<'a>(
     mid: u8,
-    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    entries: &mut ExtChainOwned,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    collect_walk(mid, &mut walked, entries)
+}
+
+/// [`collect_handshake_ext_chain`] over the walk as a trait object, compiled once for the four
+/// handshake documents' walks.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive"
+))]
+#[inline(never)]
+fn collect_walk<'a>(
+    mid: u8,
+    walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     entries: &mut ExtChainOwned,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     for entry in walked {
@@ -459,7 +476,29 @@ pub(crate) fn collect_ext_chain<'a>(
     )
 ))]
 pub(crate) fn check_ext_chain<'a>(
-    walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+) -> Result<(), crate::parse_error::InboundParseError> {
+    check_walk(&mut walked)
+}
+
+/// [`check_ext_chain`] over the walk as a trait object: each message's document has a walk type
+/// of its own, and the check is compiled once for all of them. A chain is a few entries at most,
+/// so a call through the table per entry costs nothing a receive can see.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-frame",
+    any(
+        feature = "session-unicast",
+        all(
+            feature = "session-multicast",
+            feature = "codec-join",
+            feature = "codec-close"
+        )
+    )
+))]
+#[inline(never)]
+fn check_walk<'a>(
+    walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     for entry in walked {
         let mut lent = wz_codecs::lent::ExtEntry::default();
