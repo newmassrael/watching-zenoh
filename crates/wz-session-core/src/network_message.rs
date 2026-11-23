@@ -3095,11 +3095,10 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
 fn put_payload_size<S: wz_codecs::msg_put::MsgPutStorage>(
     put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> usize {
-    crate::put_payload::payload_len(put)
-        + zbuf_ext_len(
-            Some(crate::put_payload::chain(put)),
-            crate::ext_header::body_eid::PUT_ATTACHMENT,
-        )
+    crate::put_payload::payload_len(put).saturating_add(zbuf_ext_len(
+        Some(crate::put_payload::chain(put)),
+        crate::ext_header::body_eid::PUT_ATTACHMENT,
+    ))
 }
 
 /// See [`put_payload_size`].
@@ -3243,8 +3242,9 @@ where
 /// reports none.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 fn query_payload_size(extensions: Option<&[crate::wire::parts::QueryExtEntryOwned]>) -> usize {
-    crate::ext_view::query_value_payload_len(extensions.unwrap_or_default())
-        + zbuf_ext_len(extensions, crate::ext_header::body_eid::QUERY_ATTACHMENT)
+    crate::ext_view::query_value_payload_len(extensions.unwrap_or_default()).saturating_add(
+        zbuf_ext_len(extensions, crate::ext_header::body_eid::QUERY_ATTACHMENT),
+    )
 }
 
 /// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto
