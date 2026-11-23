@@ -1865,8 +1865,6 @@ pub mod dissect_schema;
 /// A reproducible source of message-shaped bytes, for the property tests that
 /// walk every shape the dissection can produce.
 #[cfg(feature = "dissect")]
-// Totality debt TD-152 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod wire_noise;
 
 // R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
