@@ -700,8 +700,6 @@ pub mod replay_publisher;
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
-// Totality debt TD-173 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
