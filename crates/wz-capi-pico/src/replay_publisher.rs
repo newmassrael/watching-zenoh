@@ -22,7 +22,9 @@
 //! # Storage, session and publisher
 //!
 //! The rings are the program's byte area, `wz_ext_replay_publisher_storage_size` long, which the
-//! cache writes when it is made and owns until it is dropped. The cache is bound to the session it
+//! cache writes when it is made and owns until it is dropped. Past the rings the same area holds
+//! what an answer is copied into, so an answer allocates nothing: the order of the cells, a copy of
+//! every frame and one frame's room for the release of the held sends. The cache is bound to the session it
 //! is made on and to the publisher it puts the message on; the program keeps both until it drops
 //! the cache, and drops the cache before it undeclares the publisher or drops the session.
 //!
@@ -37,9 +39,8 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
+use core::mem::{align_of, size_of};
 
 use wz_app_frame::segment_sender::{Rollover, SegmentSender, SplitError};
 use wz_session_core::policy::ReplayReplyShape;
@@ -170,7 +171,8 @@ struct Shared {
     live_segments: Mutex<Option<SegmentSender>>,
     chunk_bytes: Mutex<usize>,
     shape: ReplayReplyShape,
-    frame_max: usize,
+    /// The region of the program's storage an answer is copied into, one answer at a time.
+    answer: Mutex<AnswerArea<'static>>,
     /// The program's publisher, as its loan reads.
     publisher: z_loaned_publisher_t,
 }
@@ -182,6 +184,83 @@ unsafe impl Send for Shared {}
 // SAFETY: as for `Send`: the only field read without a lock is the publisher's handle, which no
 // door writes.
 unsafe impl Sync for Shared {}
+
+/// The region of the program's storage past the rings that an answer is copied into, and the held
+/// frames are released through: the order of the ring cells an answer lists, the length of each
+/// frame it copies, a copy of every frame in that order, and one frame's room. The replies go out
+/// after the cache's lock is let go, while a record may write the rings, so the answer reads its
+/// copy; it lies in the storage the program sized (`wz_ext_replay_publisher_storage_size`), so an
+/// answer allocates nothing. One answer at a time holds it.
+struct AnswerArea<'a> {
+    order: &'a mut [usize],
+    lens: &'a mut [usize],
+    frames: &'a mut [u8],
+    release: &'a mut [u8],
+    frame_max: usize,
+}
+
+impl<'a> AnswerArea<'a> {
+    /// The bytes an area for `shape` takes, with the slack that aligns its words wherever the
+    /// program's storage starts; `None` when the count overflows.
+    fn bytes(shape: &Shape) -> Option<usize> {
+        let cells = shape.instances.checked_mul(shape.depth)?;
+        let words = cells.checked_mul(2)?.checked_mul(size_of::<usize>())?;
+        let copies = cells.checked_add(1)?.checked_mul(shape.frame_max)?;
+        words
+            .checked_add(copies)?
+            .checked_add(align_of::<usize>() - 1)
+    }
+
+    /// The area over `bytes`, at least [`Self::bytes`] of `shape` long, which it zeroes.
+    fn over(bytes: &'a mut [u8], shape: &Shape) -> Self {
+        bytes.fill(0);
+        let cells = shape.ring_cells();
+        let pad = (bytes.as_ptr() as usize).wrapping_neg() % align_of::<usize>();
+        let (_, aligned) = bytes.split_at_mut(pad);
+        let (words, copies) = aligned.split_at_mut(2 * cells * size_of::<usize>());
+        // SAFETY: `words` starts aligned for a `usize` and holds `2 * cells` of them, every byte
+        // zero, which is a `usize`; nothing else reaches those bytes while the area lives.
+        let words: &'a mut [usize] = unsafe {
+            core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<usize>(), 2 * cells)
+        };
+        let (order, lens) = words.split_at_mut(cells);
+        let (frames, release) = copies.split_at_mut(cells * shape.frame_max);
+        Self {
+            order,
+            lens,
+            frames,
+            release: &mut release[..shape.frame_max],
+            frame_max: shape.frame_max,
+        }
+    }
+
+    /// Begin an answer of `cache` and copy each frame it lists into the area, in its order: how
+    /// many.
+    fn snapshot(&mut self, cache: &mut ReplayPublisher<'_>) -> usize {
+        let listed = cache.begin_answer(self.order);
+        for (slot, &cell) in self.order[..listed].iter().enumerate() {
+            let frame = cache.frame(cell);
+            let at = slot * self.frame_max;
+            self.frames[at..at + frame.len()].copy_from_slice(frame);
+            self.lens[slot] = frame.len();
+        }
+        listed
+    }
+
+    /// The copy of the `slot`th frame of the last snapshot.
+    fn frame(&self, slot: usize) -> &[u8] {
+        let at = slot * self.frame_max;
+        &self.frames[at..at + self.lens[slot]]
+    }
+}
+
+/// The bytes of storage a cache of `shape` takes: the rings and the answer's area; `None` when the
+/// count overflows.
+fn storage_bytes_of(shape: &Shape) -> Option<usize> {
+    shape
+        .storage_bytes()?
+        .checked_add(AnswerArea::bytes(shape)?)
+}
 
 /// Behind a handle: the shared state, the session it was made on, and the queryable once it
 /// serves.
@@ -318,14 +397,13 @@ impl Shared {
     /// An answer is over: end it, and when it was the last, send what was held, oldest first,
     /// until nothing is left. The lock is let go for each put, so a send in between is held
     /// behind what is still waiting.
-    fn end_answer(&self) {
+    fn end_answer(&self, out: &mut [u8]) {
         if let Some(cache) = locked(&self.cache).as_mut() {
             cache.end_answer();
         }
-        let mut out = vec![0u8; self.frame_max];
         loop {
             let next = match locked(&self.cache).as_mut() {
-                Some(cache) => cache.next_held(&mut out),
+                Some(cache) => cache.next_held(out),
                 None => None,
             };
             let Some(len) = next else {
@@ -340,17 +418,14 @@ impl Shared {
     /// # Safety
     /// `query` is the loaned query the queryable's callback was handed.
     unsafe fn answer(&self, query: *const z_loaned_query_t) {
-        let frames: Vec<Vec<u8>> = {
+        let mut area = locked(&self.answer);
+        let area = &mut *area;
+        let listed = {
             let mut cache = locked(&self.cache);
             let Some(cache) = cache.as_mut() else {
                 return;
             };
-            let mut order = vec![0usize; cache.shape().ring_cells()];
-            let listed = cache.begin_answer(&mut order);
-            order[..listed]
-                .iter()
-                .map(|&cell| cache.frame(cell).to_vec())
-                .collect()
+            area.snapshot(cache)
         };
         let keyexpr = z_query_keyexpr(query);
         let reply = |bytes: &[u8]| -> Result<(), ZResult> {
@@ -363,8 +438,8 @@ impl Shared {
         };
         match self.shape {
             ReplayReplyShape::FramePerSample => {
-                for frame in &frames {
-                    if reply(frame.as_slice()).is_err() {
+                for slot in 0..listed {
+                    if reply(area.frame(slot)).is_err() {
                         break;
                     }
                 }
@@ -373,15 +448,15 @@ impl Shared {
                 let chunk = *locked(&self.chunk_bytes);
                 let mut segments = locked(&self.segments);
                 if let Some(sender) = segments.as_mut() {
-                    for frame in &frames {
-                        if sender.split(frame, chunk, &reply).is_err() {
+                    for slot in 0..listed {
+                        if sender.split(area.frame(slot), chunk, &reply).is_err() {
                             break;
                         }
                     }
                 }
             }
         }
-        self.end_answer();
+        self.end_answer(area.release);
     }
 }
 
@@ -413,7 +488,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
         if shape.depth == 0 || shape.instances == 0 || shape.frame_max == 0 {
             return 0;
         }
-        shape.storage_bytes().unwrap_or(0)
+        storage_bytes_of(&shape).unwrap_or(0)
     })
 }
 
@@ -467,8 +542,28 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
         let shape = shape_of(&*shape);
         let area: &'static mut [u8] = core::slice::from_raw_parts_mut(storage, storage_len);
         let depth_max = quota_of_count(facts.replay_depth_max);
-        let cache = match ReplayPublisher::new(area, shape, depth_max, policy.serve_holds_sends) {
-            Ok(cache) => cache,
+        // The rings' bytes, when the storage holds the rings and the answer's area.
+        let fits = |rings: usize| {
+            storage_bytes_of(&shape)
+                .is_some_and(|total| total <= storage_len)
+                .then_some(rings)
+        };
+        let made = match shape.storage_bytes().and_then(fits) {
+            Some(rings) => {
+                let (rings, answer) = area.split_at_mut(rings);
+                ReplayPublisher::new(rings, shape, depth_max, policy.serve_holds_sends)
+                    .map(|cache| (cache, answer))
+            }
+            // Storage short of the rings and the answer's area, or a shape whose size overflows:
+            // the reason is the one the cache gives over no storage, which names a fault of the
+            // shape first and writes nothing.
+            _ => match ReplayPublisher::new(&mut [], shape, depth_max, policy.serve_holds_sends) {
+                Err(why) => Err(why),
+                Ok(_) => Err(CreateRefused::StorageShort),
+            },
+        };
+        let (cache, answer) = match made {
+            Ok(made) => made,
             Err(why) => {
                 write_refusal(refusal, create_text(why));
                 return Z_ERR_CONFIG_INVALID_VALUE;
@@ -480,7 +575,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
             live_segments: Mutex::new(None),
             chunk_bytes: Mutex::new(0),
             shape: policy.reply_shape,
-            frame_max: shape.frame_max,
+            answer: Mutex::new(AnswerArea::over(answer, &shape)),
             // The loan's words, copied as a C program copies the struct its header declares.
             publisher: core::ptr::read(publisher),
         });
@@ -848,6 +943,49 @@ pub unsafe extern "C" fn wz_ext_internal_replay_publisher_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
+    use wz_session_core::limit_binding::Quota;
+
+    /// An answer is copied into the area past the rings, in the cache's order, and nowhere else:
+    /// every copy and the release's room lie in the program's storage, aligned wherever that
+    /// storage starts. Turned red by an answer copied anywhere but the program's storage.
+    #[test]
+    fn an_answer_is_copied_into_the_programs_storage_in_order() {
+        let shape = Shape {
+            depth: 2,
+            instances: 2,
+            frame_max: 8,
+        };
+        let rings = shape.storage_bytes().expect("a shape that fits");
+        let total = storage_bytes_of(&shape).expect("a shape that fits");
+        let mut storage = alloc::vec![0xAA_u8; total + align_of::<usize>()];
+        let recorded: [(usize, &[u8]); 3] = [(1, b"one"), (0, b"two"), (1, b"three")];
+        let expected: [&[u8]; 3] = [b"one", b"two", b"three"];
+        for offset in 0..align_of::<usize>() {
+            let program = &mut storage[offset..offset + total];
+            let span = program.as_ptr_range();
+            let (ring_bytes, answer_bytes) = program.split_at_mut(rings);
+            let mut cache = ReplayPublisher::new(ring_bytes, shape, Quota::at_most(2), false)
+                .expect("a cache over its rings");
+            for (time, (instance, frame)) in recorded.iter().enumerate() {
+                cache
+                    .record(*instance, time as u64, frame)
+                    .expect("recorded");
+            }
+            let mut area = AnswerArea::over(answer_bytes, &shape);
+            assert_eq!(area.snapshot(&mut cache), 3, "offset {offset}");
+            let copies: Vec<&[u8]> = (0..3).map(|slot| area.frame(slot)).collect();
+            assert_eq!(copies, expected, "offset {offset}");
+            for copy in &copies {
+                assert!(
+                    span.contains(&copy.as_ptr()),
+                    "offset {offset}: a copy outside the program's storage"
+                );
+            }
+            assert_eq!(area.release.len(), shape.frame_max);
+            assert!(span.contains(&area.release.as_ptr()));
+        }
+    }
 
     #[test]
     fn every_dispatch_has_a_code_of_its_own() {
@@ -870,18 +1008,26 @@ mod tests {
         );
     }
 
+    /// The storage a cache takes is the model's rings and the answer's area past them. Turned red
+    /// by a size that leaves the area out.
     #[test]
-    fn the_storage_size_is_the_model_s_and_zero_for_a_shape_refused() {
+    fn the_storage_size_is_the_rings_and_the_answers_area_and_zero_for_a_shape_refused() {
         let shape = wz_ext_replay_shape_t {
             frame_max: 12,
             depth: 3,
             instances: 2,
         };
+        let model = shape_of(&shape);
+        // Two words of each of the six cells, six copies and one frame's room, and the slack.
+        assert_eq!(
+            AnswerArea::bytes(&model),
+            Some(12 * size_of::<usize>() + 7 * 12 + align_of::<usize>() - 1)
+        );
         // SAFETY: a local shape, and a null one.
         unsafe {
             assert_eq!(
                 wz_ext_replay_publisher_storage_size(&shape),
-                shape_of(&shape).storage_bytes().unwrap()
+                model.storage_bytes().unwrap() + AnswerArea::bytes(&model).unwrap()
             );
             assert_eq!(wz_ext_replay_publisher_storage_size(core::ptr::null()), 0);
             let none = wz_ext_replay_shape_t { depth: 0, ..shape };
