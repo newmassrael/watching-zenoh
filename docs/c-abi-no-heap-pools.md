@@ -492,11 +492,18 @@ suites (C1co, Layer Z) unchanged.
     no list is made (a buffer of every face would be MAX_FACES rows on the stack); a Rust caller
     collects them through `PeerLists`. Left: the methods returning `Vec` that only the
     connectivity and admin planes and the Rust API read (`face_snapshots`, whose rows own their
-    links' text, `listen_locators`, `linkstate_regions`, `keyexpr_declarations`); and the
-    dispatch, which stays through the trait object because the engine's type is
-    `CoopEngine<L, C>` over the links the build composes (the host's, with a secure channel or
-    groups as features add them, and the program's transport beside them with `app-transport`),
-    so a build has one engine type only once its links are one type.
+    links' text, `listen_locators`, `linkstate_regions`, `keyexpr_declarations`).
+    The dispatch is static where the build has one engine: the ABI's `Engine` is
+    `CoopEngine<HostLinks, SessionClockOf>`, the links named as the open composes them
+    (`ComposedLinks` over the host's, a secure channel and groups), and the handle's drive is
+    `CoopDrive<L, C>`, whose operations call the engine's by name, so no table of the engine's
+    functions is made and what the build never calls is not linked. A build with `app-transport`
+    opens over the host's links or the program's: its drive is an enum of the two (`PicoDrive`),
+    and its entities still keep the engine as the port's trait object, because the engine is made
+    in its own `Arc` and an enum of two engines would be a second allocation; one engine type
+    there needs the links to be one type (an enum of the two at `SessionLinks` and its pump, in
+    `wz-runtime-coop`'s traits). What serves any engine keeps the trait object, an open set: the
+    advanced plane's host and its periodic job (`port_engine`), and the admin space's weak hold.
 12. **U11. The static runtime under the engine.** `wz-runtime-coop` `local.rs`, `executor.rs`,
     `runtime_impl.rs`, `session_runtime.rs`, `wz-capi-coop` `engine/ticker.rs`. Family: idle
     step. Tests: the session's tasks placed at open; a timer table at its limit.

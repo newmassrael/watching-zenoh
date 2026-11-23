@@ -1772,7 +1772,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
 fn a_drive_is_the_engines_own_allocation_and_its_drop_closes_the_session() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let drive: crate::CoopDrive = engine.clone().into_drive();
+    let drive: crate::CoopDrive<PosixLinks, PosixClock> = engine.clone().into_drive();
     assert!(
         core::ptr::addr_eq(Arc::as_ptr(&drive.engine()), Arc::as_ptr(&engine)),
         "the drive hands out the engine it holds, no copy of it"

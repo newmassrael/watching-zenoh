@@ -1081,7 +1081,7 @@ unsafe fn declare_subscriber_state(
         let miss = miss.clone();
         let mut inner = crate::pubsub::make_subscriber_callback(cclosure);
         EngineSubscriber::declare_with_miss_listener(
-            &engine,
+            &crate::session::port_engine(&engine),
             ke.clone(),
             opts,
             // The advanced subscriber hands an OWNED `Sample`; the existing marshal

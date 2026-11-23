@@ -527,10 +527,10 @@ mod tests {
             assert_eq!(wz_ext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
             let session = listening(Some(&time_base));
             let engine = engine_of(&session);
-            let opened = engine.now_ms();
+            let opened = wz_capi_port::SessionEngine::now_ms(&*engine);
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert_eq!(
-                engine.now_ms(),
+                wz_capi_port::SessionEngine::now_ms(&*engine),
                 opened,
                 "the wall clock moved the session's time"
             );
@@ -539,7 +539,10 @@ mod tests {
                 wz_ext_time_base_advanced(wz_ext_time_base_loan(&time_base)),
                 Z_OK
             );
-            assert_eq!(engine.now_ms(), opened + 1_500);
+            assert_eq!(
+                wz_capi_port::SessionEngine::now_ms(&*engine),
+                opened + 1_500
+            );
             drop(engine);
             close(session);
             wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
@@ -554,10 +557,10 @@ mod tests {
         unsafe {
             let session = listening(None);
             let engine = engine_of(&session);
-            let opened = engine.now_ms();
+            let opened = wz_capi_port::SessionEngine::now_ms(&*engine);
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(
-                engine.now_ms() >= opened + 100,
+                wz_capi_port::SessionEngine::now_ms(&*engine) >= opened + 100,
                 "the system's clock did not move with the wall clock"
             );
             drop(engine);

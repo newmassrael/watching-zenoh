@@ -524,11 +524,155 @@ fn memory_basis(
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
 /// session's drop glue stays in that engine's crate (`SessionState::into_drive`); the cooperative
-/// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it.
+/// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it,
+/// and it is the engine's own type: the one engine of the build, or with `app-transport` either of
+/// the two the build opens ([`PicoDrive`]).
 #[cfg(feature = "engine-tokio")]
 pub(crate) type HeldDrive = Box<dyn wz_capi_port::SessionDrive>;
-#[cfg(not(feature = "engine-tokio"))]
-pub(crate) type HeldDrive = wz_capi_coop::CoopDrive;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
+pub(crate) type HeldDrive = wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>;
+#[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
+pub(crate) type HeldDrive = PicoDrive;
+
+/// The clock a cooperative session runs on: the program's time base where the build takes one,
+/// which may also be the host's (`crate::time_base::SessionClock`), else the host's.
+#[cfg(all(not(feature = "engine-tokio"), feature = "time-base"))]
+pub(crate) type SessionClockOf = crate::time_base::SessionClock;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "time-base")))]
+pub(crate) type SessionClockOf = crate::coop_host::Clock;
+
+/// The host's links, over a secure channel where the build has one.
+#[cfg(all(not(feature = "engine-tokio"), feature = "tls-mbedtls"))]
+type SecuredLinks = <crate::coop_host::Links as wz_capi_coop::ComposedLinks>::WithTls<
+    wz_capi_coop::tls::HostTls<crate::coop_host::TcpDial, SessionClockOf>,
+>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "tls-mbedtls")))]
+type SecuredLinks = crate::coop_host::Links;
+
+/// The links a cooperative session opens over the host's sockets, as [`open_on_coop`] composes
+/// them: the host's, over a secure channel and joining groups where the build does either.
+#[cfg(all(not(feature = "engine-tokio"), feature = "multicast-transport"))]
+pub(crate) type HostLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<
+    wz_capi_coop::host_group::HostGroups<crate::coop_host::Multicast>,
+>;
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
+pub(crate) type HostLinks = SecuredLinks;
+
+/// The session of a build that opens over the host's sockets or the program's transport: one of
+/// two engines, a closed set, each held as its own type and reached by a match, not through a
+/// table of functions.
+#[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
+pub(crate) enum PicoDrive {
+    /// Over the host's sockets.
+    Host(wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>),
+    /// Over the program's transport.
+    App(wz_capi_coop::CoopDrive<wz_capi_coop::app_link::AppLinks, SessionClockOf>),
+}
+
+#[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
+impl PicoDrive {
+    /// The engine the session's entities keep.
+    pub(crate) fn engine(&self) -> alloc::sync::Arc<Engine> {
+        match self {
+            Self::Host(drive) => drive.engine(),
+            Self::App(drive) => drive.engine(),
+        }
+    }
+
+    /// The engine, borrowed for the length of one call.
+    pub(crate) fn engine_ref(&self) -> &Engine {
+        match self {
+            Self::Host(drive) => drive.engine_ref(),
+            Self::App(drive) => drive.engine_ref(),
+        }
+    }
+
+    /// The place the session's arena lent the handle.
+    pub(crate) fn handle_place(&self) -> Option<wz_capi_coop::arena::HandlePlace> {
+        match self {
+            Self::Host(drive) => drive.handle_place(),
+            Self::App(drive) => drive.handle_place(),
+        }
+    }
+
+    /// The session's own zid, zero-padded to 16 bytes.
+    pub(crate) fn zid(&self) -> [u8; 16] {
+        match self {
+            Self::Host(drive) => drive.zid(),
+            Self::App(drive) => drive.zid(),
+        }
+    }
+
+    /// Close the session.
+    pub(crate) fn close(&self) {
+        match self {
+            Self::Host(drive) => drive.close(),
+            Self::App(drive) => drive.close(),
+        }
+    }
+
+    /// Whether the session is closed.
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Self::Host(drive) => drive.is_closed(),
+            Self::App(drive) => drive.is_closed(),
+        }
+    }
+
+    /// Start the read task.
+    #[cfg(feature = "multi-thread")]
+    pub(crate) fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        match self {
+            Self::Host(drive) => drive.start_read_task(),
+            Self::App(drive) => drive.start_read_task(),
+        }
+    }
+
+    /// Stop the read task.
+    #[cfg(feature = "multi-thread")]
+    pub(crate) fn stop_read_task(&self) -> Result<(), wz_capi_port::CalledFromReadTask> {
+        match self {
+            Self::Host(drive) => drive.stop_read_task(),
+            Self::App(drive) => drive.stop_read_task(),
+        }
+    }
+
+    /// Whether the read task runs.
+    #[cfg(feature = "multi-thread")]
+    pub(crate) fn read_task_is_running(&self) -> bool {
+        match self {
+            Self::Host(drive) => drive.read_task_is_running(),
+            Self::App(drive) => drive.read_task_is_running(),
+        }
+    }
+
+    /// Read what the session's links hold.
+    #[cfg(not(feature = "multi-thread"))]
+    pub(crate) fn read(&self, single: bool) -> Result<(), wz_capi_port::SessionClosed> {
+        match self {
+            Self::Host(drive) => drive.read(single),
+            Self::App(drive) => drive.read(single),
+        }
+    }
+
+    /// Send a keep-alive on each link.
+    #[cfg(not(feature = "multi-thread"))]
+    pub(crate) fn send_keep_alive(&self) -> Result<(), wz_capi_port::SessionClosed> {
+        match self {
+            Self::Host(drive) => drive.send_keep_alive(),
+            Self::App(drive) => drive.send_keep_alive(),
+        }
+    }
+
+    /// Run one turn of the session's work.
+    #[cfg(not(feature = "multi-thread"))]
+    pub(crate) fn spin_once(&self) -> bool {
+        match self {
+            Self::Host(drive) => drive.spin_once(),
+            Self::App(drive) => drive.spin_once(),
+        }
+    }
+}
 
 /// What a C session handle points at: the engine's session, behind the port, and what this ABI
 /// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
@@ -682,7 +826,12 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// name no engine (`docs/capi-pico-on-coop-engine.md`, decision D1).
 ///
 /// [`SessionEngine`]: wz_capi_port::SessionEngine
+#[cfg(any(feature = "engine-tokio", feature = "app-transport"))]
 pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
+/// A build of one engine reaches it as its own type, every call to it resolved when the build is
+/// made: no table of its functions is made, so the operations the build never calls are not linked.
+#[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
+pub(crate) type Engine = wz_capi_coop::CoopEngine<HostLinks, SessionClockOf>;
 
 /// The engine behind a session handle, to keep: what an entity declared on the session holds for
 /// its own life. The engine hands itself out, so this crate never turns an engine's own type into
@@ -695,6 +844,15 @@ pub(crate) fn engine_of(handle: &PicoSessionHandle) -> alloc::sync::Arc<Engine> 
 /// engine without touching its reference count.
 pub(crate) fn engine_ref(handle: &PicoSessionHandle) -> &Engine {
     handle.drive.engine_ref()
+}
+
+/// The engine as the port's trait object, for what serves any engine (the advanced plane's host
+/// and its periodic jobs, an open set): a clone of the entity's hold.
+#[cfg(feature = "advanced")]
+pub(crate) fn port_engine(
+    engine: &alloc::sync::Arc<Engine>,
+) -> alloc::sync::Arc<dyn wz_capi_port::SessionEngine> {
+    engine.clone()
 }
 
 // --- z_open / z_close ------------------------------------------------------
@@ -1626,7 +1784,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             &wz_capi_coop::arena::AllocatorMemory,
             Some(SessionPlace::LAYOUT),
         )
-        .map(wz_capi_coop::CoopEngine::into_drive),
+        .map(|engine| PicoDrive::App(engine.into_drive())),
         None => wz_capi_coop::CoopEngine::open_made_in(
             links.waited_by_owner(),
             clock,
@@ -1637,7 +1795,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             &wz_capi_coop::arena::AllocatorMemory,
             Some(SessionPlace::LAYOUT),
         )
-        .map(wz_capi_coop::CoopEngine::into_drive),
+        .map(|engine| PicoDrive::Host(engine.into_drive())),
     };
     #[cfg(not(feature = "app-transport"))]
     let opened = wz_capi_coop::CoopEngine::open_made_in(
@@ -3276,5 +3434,31 @@ mod session_place_tests {
             assert!(copy._val.is_null(), "dropping the copy lets go of nothing");
             drop(engine);
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "engine-tokio"), not(feature = "app-transport")))]
+mod static_dispatch_tests {
+    use core::any::TypeId;
+
+    use super::{Engine, HeldDrive, HostLinks, SessionClockOf};
+
+    /// A build of one engine reaches it as its own type: the engine an entity keeps and the drive
+    /// the handle holds are the cooperative engine over the links the open composes, not the
+    /// port's trait objects, so no table of the engine's functions is made.
+    #[test]
+    fn a_build_of_one_engine_reaches_it_as_its_own_type() {
+        assert_eq!(
+            TypeId::of::<Engine>(),
+            TypeId::of::<wz_capi_coop::CoopEngine<HostLinks, SessionClockOf>>()
+        );
+        assert_ne!(
+            TypeId::of::<Engine>(),
+            TypeId::of::<dyn wz_capi_port::SessionEngine>()
+        );
+        assert_eq!(
+            TypeId::of::<HeldDrive>(),
+            TypeId::of::<wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>>()
+        );
     }
 }

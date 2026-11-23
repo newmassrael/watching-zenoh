@@ -6668,7 +6668,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// This session as the C handle's drive: the engine's own allocation, which the handle holds
     /// as one of its `Arc`s, so the open makes nothing more for it.
-    pub fn into_drive(self: Arc<Self>) -> CoopDrive {
+    pub fn into_drive(self: Arc<Self>) -> CoopDrive<L, C> {
         let handle_place = self.handle_place;
         CoopDrive {
             engine: self,
@@ -6679,42 +6679,100 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
 /// The C handle's hold on a session of this engine, kept by value in the handle: the engine is
 /// shared with the entities declared on it and with its read task, so the handle holds one of its
-/// `Arc`s, seen as the port's [`SessionDrive`].
-///
-/// The engine's own type is not named here because the links it is opened over are the build's to
-/// compose (the host's sockets, with a secure channel or groups as the build adds them, or the
-/// program's transport), and an ABI that opens over two kinds of links keeps sessions of both in
-/// one handle.
-pub struct CoopDrive {
-    engine: Arc<dyn SessionDrive>,
+/// `Arc`s. Its operations are the port's [`SessionDrive`] of this engine, called by name, so an
+/// ABI built over one kind of links reaches its session through no table of functions, and the
+/// engine it hands out is the engine's own type.
+pub struct CoopDrive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: Arc<CoopEngine<L, C>>,
     handle_place: Option<HandlePlace>,
 }
 
-impl CoopDrive {
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
+    /// The engine the session's entities keep.
+    pub fn engine(&self) -> Arc<CoopEngine<L, C>> {
+        self.engine.clone()
+    }
+
+    /// The engine, borrowed for the length of one call.
+    pub fn engine_ref(&self) -> &CoopEngine<L, C> {
+        &self.engine
+    }
+
     /// The place the session's arena lent the ABI's handle (`open_made_in`'s `handle`), `None`
     /// for a session opened without one. It stands while the engine does.
     pub fn handle_place(&self) -> Option<HandlePlace> {
         self.handle_place
     }
-}
 
-impl Deref for CoopDrive {
-    type Target = dyn SessionDrive;
+    /// The session's own zid, zero-padded to 16 bytes ([`SessionEngine::zid`]).
+    pub fn zid(&self) -> [u8; 16] {
+        SessionEngine::zid(&*self.engine)
+    }
 
-    fn deref(&self) -> &Self::Target {
-        // Named, not coerced: a coercion of `&Arc<dyn SessionDrive>` to `&dyn SessionDrive` is
-        // read as an unsizing of the `Arc`, which is no drive.
-        Arc::as_ref(&self.engine)
+    /// [`SessionDrive::close`].
+    pub fn close(&self) {
+        SessionDrive::close(&*self.engine)
+    }
+
+    /// [`SessionDrive::is_closed`].
+    pub fn is_closed(&self) -> bool {
+        SessionDrive::is_closed(&*self.engine)
+    }
+
+    /// [`SessionDrive::start_read_task`].
+    pub fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+        SessionDrive::start_read_task(&*self.engine)
+    }
+
+    /// [`SessionDrive::stop_read_task`].
+    pub fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        SessionDrive::stop_read_task(&*self.engine)
+    }
+
+    /// [`SessionDrive::read_task_is_running`].
+    pub fn read_task_is_running(&self) -> bool {
+        SessionDrive::read_task_is_running(&*self.engine)
+    }
+
+    /// [`SessionDrive::read`].
+    pub fn read(&self, single: bool) -> Result<(), SessionClosed> {
+        SessionDrive::read(&*self.engine, single)
+    }
+
+    /// [`SessionDrive::send_keep_alive`].
+    pub fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        SessionDrive::send_keep_alive(&*self.engine)
+    }
+
+    /// [`SessionDrive::spin_once`].
+    pub fn spin_once(&self) -> bool {
+        SessionDrive::spin_once(&*self.engine)
     }
 }
 
-impl Drop for CoopDrive {
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopDrive<L, C> {
     /// The C program let go of its session (zenoh-pico's `z_session_drop`), which closes it: the
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
     fn drop(&mut self) {
-        self.engine.close();
+        SessionDrive::close(&*self.engine);
     }
+}
+
+/// What the builders of [`IpLinks`](wz_runtime_coop::ip_stack::IpLinks) turn links into: the links
+/// `with_tls` makes over a secure channel `S`, and those `with_groups` makes joining groups by
+/// `J`. An ABI names with it the links it opens its sessions over, and so the engine's type,
+/// whatever its build adds to the host's.
+pub trait ComposedLinks {
+    /// The links `with_tls` makes.
+    type WithTls<S>;
+    /// The links `with_groups` makes.
+    type WithGroups<J>;
+}
+
+impl<U, D, L, G> ComposedLinks for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G> {
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J>;
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {

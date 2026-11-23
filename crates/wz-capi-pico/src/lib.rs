@@ -95,6 +95,9 @@ mod prelude {
     pub(crate) use alloc::string::{String, ToString};
     pub(crate) use alloc::vec;
     pub(crate) use alloc::vec::Vec;
+    // The operations of the session's engine, which a build of one engine reaches as its own
+    // type rather than as a trait object.
+    pub(crate) use wz_capi_port::SessionEngine as _;
 }
 
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
