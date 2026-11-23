@@ -927,8 +927,6 @@ pub mod lease;
 /// as `Unknown { mid: 0x07 }`. Re-exported from [`multicast_join`], so that
 /// module remains the JOIN wire SSOT for a participant reader.
 #[cfg(feature = "codec-join")]
-// Totality debt TD-139 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod join_decode;
 
 // R311y607 — the SCOUTING message namespace, which is NOT the transport one.
