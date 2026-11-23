@@ -2194,6 +2194,32 @@ where
     ))
 }
 
+/// [`spawn_multicast_session_seeded`], or why the runtime's task table refused the task: a table
+/// reserved when its session opened has a cell for each task the session may run, and a group's
+/// task past them is told to the caller, which opened the group for nothing, rather than read as
+/// a session that ended. The task is made in its cell, so the seed is not moved through this
+/// frame again; a refusal drops it, which closes its group socket.
+#[cfg(not(feature = "session-slot"))]
+pub fn try_spawn_multicast_session_seeded<C, T, F, G, H, const MAX_PEERS: usize>(
+    local: &CoopLocalSet<C>,
+    seed: MulticastSessionSeed<T, MAX_PEERS>,
+    on_event: F,
+    next_tx: G,
+    should_stop: H,
+) -> Result<CoopLocalJoinHandle<MulticastOutcome>, wz_runtime_coop::executor::SpawnRefusal>
+where
+    C: ClockSource + 'static,
+    T: GroupTransport + 'static,
+    F: FnMut(IterationEvent<'_, '_>) + 'static,
+    G: FnMut() -> Option<MulticastTxOffer<'static>> + 'static,
+    H: FnMut() -> bool + 'static,
+{
+    let runtime = local.runtime().clone();
+    local.spawn_local_with(move || {
+        multicast_session_task_seeded(runtime, seed, on_event, next_tx, should_stop)
+    })
+}
+
 // ─────────── the multicast pump in a cell of a table the image declares ───────────
 //
 // Fixed-memory step S9c. The multicast session is the peer table (`MAX_PEERS`

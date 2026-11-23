@@ -1,203 +1,161 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `CoopLocalSet` — the `!Send` task pool that lets the MCU session ride
-//! the cooperative executor.
+//! `CoopLocalSet`: the runtime's task table taking futures that need not be `Send`.
 //!
-//! ## Why this module exists
+//! The MCU session's action bundle is `Rc`-backed and `!Send` on purpose (that `Rc` is what
+//! reaches ARMv6-M, where `alloc::sync::Arc` does not exist), so the `Runtime::spawn` contract,
+//! whose futures are `Send`, cannot host a session. A cell of the task table
+//! ([`crate::executor`]) holds a future as bytes and its type is not part of the cell, so there is
+//! ONE pool: `spawn_local` writes a future that need not be `Send` into the same table
+//! `Runtime::spawn` writes one that is, and one pass of [`CoopLocalSet::run_until_idle`] polls
+//! both. What keeps a local task local is the set itself, which is `!Send` and whose handles are
+//! `!Send`: nothing that can move a `!Send` future across threads can reach it.
 //!
-//! [`wz_runtime_core::Runtime::spawn`] requires `F: Future + Send +
-//! 'static`, and that bound is not negotiable: the trait is
-//! `Runtime: Send + Sync`, so every `Runtime`-generic call site may move a
-//! spawned task across threads and the AP profile actually does.
-//!
-//! The MCU session bundle, however, is `!Send` **by construction** and
-//! deliberately so — this crate's `session_runtime` module (behind the
-//! `session-unicast` feature, hence named here rather than linked) binds
-//! `LinkSink = Rc<dyn BoxedLinkDriver>` and
-//! `ActionsHandle<T> = Rc<SessionLinkActions<..>>`
-//! because the single-task profile never sends the bundle anywhere and
-//! `alloc::sync::Arc` needs `target_has_atomic = "ptr"`, which ARMv6-M
-//! (Cortex-M0/M0+) does not have. Making the bundle `Send` to satisfy
-//! `spawn` would wall the MCU session off the very targets the `Rc`
-//! choice exists to reach.
-//!
-//! So the two ends are both right and simply do not meet. The consequence
-//! before this module: the MCU session could not be a task at all. It ran
-//! as a caller-owned synchronous pump that *called* `run_until_idle`
-//! rather than running *inside* it, so the executor hosted keepalive
-//! workers and timers while the session — the one thing the profile
-//! exists to run — stayed outside. The AP sibling carries the whole
-//! session on `TokioRuntime::spawn` by contrast.
-//!
-//! ## The shape
-//!
-//! `CoopLocalSet` is the well-established answer to exactly this split:
-//! tokio solves the same `!Send`-future problem with a `LocalSet` carrying
-//! its own `spawn_local`. The local set is itself `!Send` (it holds
-//! `Rc<RefCell<..>>`), which is what lets its task slots drop the `Send`
-//! bound without touching the `Runtime` contract or the `Send + Sync`
-//! bound on `CoopRuntime`. A `!Send` handle can only ever be used from the
-//! one task that owns it, so a `!Send` future parked in it can never be
-//! polled from a second thread — the invariant `Send` was protecting is
-//! preserved structurally rather than by a bound.
-//!
-//! [`CoopLocalSet::run_until_idle`] drives the runtime's shared (`Send`)
-//! pool first — timers, then Send tasks — and then its own local tasks, so
-//! ONE pump call advances everything and a local task that spawns a `Send`
-//! task still sees it polled. That ordering is the same "deadlines before
-//! the tasks they wake" rule [`CoopRuntime::run_until_idle`] documents,
-//! extended one slot further.
-//!
-//! ## What is deliberately NOT here
-//!
-//! - **No `Runtime` trait impl.** `spawn_local` is an inherent method on a
-//!   concrete `!Send` type, not a trait extension. Putting it on `Runtime`
-//!   would oblige every profile to answer "what is a local task here?",
-//!   and for the multi-threaded AP profile the honest answer needs tokio's
-//!   whole `LocalSet` scheduling machinery. Profile-side capability, like
-//!   [`crate::CoopJoinHandle::abort`] already is.
-//! - **No slot recycling**, for the same re-entrancy reason
-//!   [`crate::executor`] gives: a task polled from inside `run_until_idle`
-//!   has its slot temporarily vacated, so a re-entrant `spawn_local`
-//!   choosing a `None` slot would be overwritten by the Pending-restore.
+//! A table that cannot take a task (a fixed one that is full, or a task too large for its cells)
+//! refuses it, counted. On the slot profile `spawn_local` hands the refusal back
+//! ([`SpawnRefused`]); on the heap profile, whose callers were written against a table that
+//! always grew, `spawn_local` answers a handle that reads `Err(Shutdown)` as `Runtime::spawn`
+//! does, and [`CoopLocalSet::try_spawn_local`] hands the refusal back.
 
-use alloc::boxed::Box;
-use alloc::rc::Rc;
-use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::future::Future;
+use core::marker::PhantomData;
 use core::pin::Pin;
-use core::task::{Context, Poll, Waker};
+use core::task::{Context, Poll};
 
 use wz_runtime_core::RuntimeError;
 
-use crate::atomic::{Arc, AtomicBool, Ordering};
-use crate::executor::make_waker;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::rc::Rc;
+
+use crate::atomic::{AtomicBool, Ordering};
+use crate::executor::{flag_waker, SpawnRefusal, SpawnRefused, TaskJoin};
 use crate::runtime_impl::CoopRuntime;
 use crate::time::ClockSource;
 
-/// Type-erased local task body. The `Send`-free twin of
-/// [`crate::executor::BoxFuture`] — that is the whole point of the module.
-type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
-
-struct LocalTaskSlot {
-    fut: LocalBoxFuture,
-    wake_flag: Arc<AtomicBool>,
-    cancel_flag: Arc<AtomicBool>,
-}
-
-/// Completion / waker slot shared between a local spawn wrapper and the
-/// handle the caller holds.
-///
-/// `Rc<RefCell<..>>`, not the `Arc<critical_section::Mutex<RefCell<..>>>`
-/// the `Send` sibling uses: a local task and its handle live in the same
-/// single task by construction, so there is no interrupt or thread to lock
-/// against and an atomic refcount would be pure waste — the same reasoning
-/// that put `Rc` in the `session_runtime` binding, and the same reason it
-/// reaches ARMv6-M.
-struct LocalJoinState<T> {
-    result: Option<Result<T, RuntimeError>>,
-    waker: Option<Waker>,
-}
-
-impl<T> LocalJoinState<T> {
-    fn new() -> Self {
-        Self {
-            result: None,
-            waker: None,
-        }
-    }
-}
-
 /// Handle returned by [`CoopLocalSet::spawn_local`]. Implements
 /// `Future<Output = Result<T, RuntimeError>>`, mirroring
-/// [`crate::CoopJoinHandle`] — but with NO `T: Send` bound, which is
-/// exactly the difference that lets a local task return a `!Send` value
-/// (e.g. anything carrying an `Rc`).
+/// [`crate::CoopJoinHandle`], with NO `T: Send` bound, and `!Send` itself.
 pub struct CoopLocalJoinHandle<T> {
-    state: Rc<RefCell<LocalJoinState<T>>>,
-    cancel_flag: Arc<AtomicBool>,
+    join: TaskJoin<T>,
+    /// A local handle stays on the thread of its set.
+    local: PhantomData<*const ()>,
 }
 
 impl<T> CoopLocalJoinHandle<T> {
-    /// Abort the local task. Same two-step cooperative semantic as
-    /// [`crate::CoopJoinHandle::abort`]: set the shared cancel flag so the
-    /// next [`CoopLocalSet::run_until_idle`] sweep drops the task body, and
-    /// synchronously write `Err(RuntimeError::JoinCancelled)` so an
-    /// awaiting consumer resolves without waiting for that sweep.
-    ///
-    /// Idempotent and race-safe against natural completion via the
-    /// `result.is_none()` guard — the first result that landed is the one
-    /// the handle returns.
-    pub fn abort(&self) {
-        self.cancel_flag.store(true, Ordering::Release);
-        let mut s = self.state.borrow_mut();
-        if s.result.is_none() {
-            s.result = Some(Err(RuntimeError::JoinCancelled));
-            if let Some(w) = s.waker.take() {
-                w.wake();
-            }
+    fn new(join: TaskJoin<T>) -> Self {
+        Self {
+            join,
+            local: PhantomData,
         }
     }
 
-    /// True once the task has produced a result (natural completion or
-    /// abort) that no poll has taken yet. Lets a synchronous driver ask
-    /// "is it done?" without consuming the value.
+    /// The handle of a spawn the runtime refused: it reads `Err(RuntimeError::Shutdown)`.
+    pub(crate) fn refused() -> Self {
+        Self::new(TaskJoin::refused())
+    }
+
+    /// Abort the local task. Same two-step cooperative semantic as
+    /// [`crate::CoopJoinHandle::abort`]: the next [`CoopLocalSet::run_until_idle`]
+    /// drops the task body, and this handle resolves to `JoinCancelled` at once.
+    pub fn abort(&self) {
+        self.join.abort();
+    }
+
+    /// True once the task has produced a result (natural completion or abort)
+    /// that no poll has taken yet, and for a spawn the table refused.
     pub fn is_finished(&self) -> bool {
-        self.state.borrow().result.is_some()
+        self.join.is_finished()
     }
 }
 
 impl<T> Future for CoopLocalJoinHandle<T> {
     type Output = Result<T, RuntimeError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.state.borrow_mut();
-        if let Some(result) = state.result.take() {
-            state.waker = None;
-            Poll::Ready(result)
-        } else {
-            state.waker = Some(cx.waker().clone());
-            Poll::Pending
-        }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.join.poll_join(cx)
     }
 }
 
-/// A `!Send` task pool bound to one [`CoopRuntime`].
+impl<T> Unpin for CoopLocalJoinHandle<T> {}
+
+/// A `!Send` task pool bound to one [`CoopRuntime`]: a view of the runtime's task
+/// table that takes futures that need not be `Send`.
 ///
-/// Construct with [`CoopLocalSet::new`], spawn `!Send` futures with
-/// [`CoopLocalSet::spawn_local`], and pump with
-/// [`CoopLocalSet::run_until_idle`] (which also drives the runtime's
-/// shared pool and timer queue) or [`CoopLocalSet::block_on_local`].
-///
-/// The type holds `Rc` and is therefore `!Send` / `!Sync`. That is the
-/// load-bearing property, not an incidental one — see the module doc.
+/// On the heap profile the set's tasks go when the set's last handle does, as they did when a set
+/// kept its own list of them: a session task holds a handle of the runtime, so a task kept by the
+/// runtime's table alone would keep itself, its link and its socket, for as long as the process.
+/// The slot profile's runtime is a `static` that never ends, and its tasks stay.
 pub struct CoopLocalSet<C: ClockSource> {
     runtime: CoopRuntime<C>,
-    tasks: Rc<RefCell<Vec<Option<LocalTaskSlot>>>>,
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    owner: Rc<SetOwner<C>>,
+    local: PhantomData<*const ()>,
 }
 
-/// A second handle to the same task pool, on the same thread (the type stays `!Send`): what is
-/// spawned through either is polled by a pass of either. A holder that must let the pool's tasks
-/// run while it waits, with no reference to the set's owner, keeps one.
+/// What every handle of one local set shares: its number, and the runtime whose table its tasks
+/// lie in, so the last handle to go drops them.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct SetOwner<C: ClockSource> {
+    runtime: CoopRuntime<C>,
+    set: u32,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<C: ClockSource> Drop for SetOwner<C> {
+    fn drop(&mut self) {
+        self.runtime.inner.executor.drop_tasks_of(self.set);
+    }
+}
+
+/// The number the tasks of the slot profile's local sets are marked with: there is no set to
+/// drop them with, so every set has the one number.
+#[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+const STATIC_SET: u32 = 1;
+
+/// A second handle to the same local set, on the same thread (the type stays `!Send`): what is
+/// spawned through either is polled by a pass of either, and the set's tasks stay while either
+/// does. A holder that must let the pool's tasks run while it waits, with no reference to the
+/// set's owner, keeps one.
 impl<C: ClockSource> Clone for CoopLocalSet<C> {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            tasks: Rc::clone(&self.tasks),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            owner: Rc::clone(&self.owner),
+            local: PhantomData,
         }
     }
 }
 
 impl<C: ClockSource> CoopLocalSet<C> {
-    /// Bind a local task pool to `runtime`. The runtime handle is cloned
-    /// (it is `Arc`-backed), so the local set and any other holder of the
-    /// same runtime share one executor and one timer queue.
+    /// Bind a local task pool to `runtime`. The runtime handle is copied, so the
+    /// local set and any other holder of the same runtime share one task table and
+    /// one timer table.
     pub fn new<D: ?Sized>(runtime: &CoopRuntime<C, D>) -> Self {
+        let runtime: CoopRuntime<C> = runtime.with_driver();
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        let owner = Rc::new(SetOwner {
+            set: runtime.inner.executor.new_local_set(),
+            runtime: runtime.clone(),
+        });
         Self {
-            runtime: runtime.with_driver(),
-            tasks: Rc::new(RefCell::new(Vec::new())),
+            runtime,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            owner,
+            local: PhantomData,
+        }
+    }
+
+    /// The number this set's tasks are marked with.
+    fn set(&self) -> u32 {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        {
+            self.owner.set
+        }
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        {
+            STATIC_SET
         }
     }
 
@@ -206,156 +164,95 @@ impl<C: ClockSource> CoopLocalSet<C> {
         &self.runtime
     }
 
-    /// Spawn a `!Send` future as a local task, returning a handle that
-    /// resolves to its output.
+    /// Spawn a `!Send` future as a local task, returning a handle that resolves to
+    /// its output, or the future back when no cell takes it.
     ///
-    /// The `'static` bound is the same one `Runtime::spawn` carries and for
-    /// the same reason: a detached task cannot borrow from the caller's
-    /// stack. `Send` is the only bound dropped.
+    /// The `'static` bound is the same one `Runtime::spawn` carries and for the
+    /// same reason: a detached task cannot borrow from the caller's stack.
+    pub fn try_spawn_local<F>(
+        &self,
+        fut: F,
+    ) -> Result<CoopLocalJoinHandle<F::Output>, SpawnRefused<F>>
+    where
+        F: Future + 'static,
+    {
+        let cell = self.runtime.inner.executor.spawn(fut, self.set())?;
+        Ok(CoopLocalJoinHandle::new(TaskJoin::attached(cell)))
+    }
+
+    /// Spawn a `!Send` future as a local task: [`Self::try_spawn_local`], the slot profile's
+    /// one form.
+    #[cfg(feature = "session-slot")]
+    pub fn spawn_local<F>(&self, fut: F) -> Result<CoopLocalJoinHandle<F::Output>, SpawnRefused<F>>
+    where
+        F: Future + 'static,
+    {
+        self.try_spawn_local(fut)
+    }
+
+    /// Spawn a `!Send` future as a local task, returning a handle that resolves to
+    /// its output. A spawn the table refuses (a reserved table that is full) is counted, its
+    /// future dropped, and its handle reads `Err(RuntimeError::Shutdown)`, as a refused
+    /// `Runtime::spawn` does; a grown table never refuses.
+    #[cfg(not(feature = "session-slot"))]
     pub fn spawn_local<F>(&self, fut: F) -> CoopLocalJoinHandle<F::Output>
     where
         F: Future + 'static,
     {
-        let state: Rc<RefCell<LocalJoinState<F::Output>>> =
-            Rc::new(RefCell::new(LocalJoinState::new()));
-        let state_for_wrapper = state.clone();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_flag_for_handle = cancel_flag.clone();
-
-        // Wrapper drives the user future and publishes its output. The
-        // `is_none()` guard preserves whichever of natural completion /
-        // abort landed first, exactly as the Send sibling does.
-        let wrapper = async move {
-            let output = fut.await;
-            let mut s = state_for_wrapper.borrow_mut();
-            if s.result.is_none() {
-                s.result = Some(Ok(output));
-                if let Some(w) = s.waker.take() {
-                    w.wake();
-                }
-            }
-        };
-
-        let slot = LocalTaskSlot {
-            fut: Box::pin(wrapper),
-            // Initially ready so the first pump polls it.
-            wake_flag: Arc::new(AtomicBool::new(true)),
-            cancel_flag,
-        };
-        self.tasks.borrow_mut().push(Some(slot));
-
-        CoopLocalJoinHandle {
-            state,
-            cancel_flag: cancel_flag_for_handle,
+        match self.try_spawn_local(fut) {
+            Ok(handle) => handle,
+            Err(_refused) => CoopLocalJoinHandle::refused(),
         }
     }
 
-    /// One executor pass: the runtime's timer queue and `Send` task pool
-    /// first (via [`CoopRuntime::run_until_idle`]), then every ready local
-    /// task at most once.
-    ///
-    /// Tasks spawned re-entrantly from inside a polled future are appended
-    /// past this pass's snapshot and picked up by the next call — the same
-    /// single-pass fairness model the `Send` pool in [`crate::executor`]
-    /// uses, and for the same anti-recursion reason.
+    /// Spawn the task `make` builds, made in its cell: the way to spawn a future that is large,
+    /// since no frame holds it and a refusal gives nothing back but its reason. `make` runs only
+    /// when a cell is free; a refusal drops it with what it captured.
+    pub fn spawn_local_with<F>(
+        &self,
+        make: impl FnOnce() -> F,
+    ) -> Result<CoopLocalJoinHandle<F::Output>, SpawnRefusal>
+    where
+        F: Future + 'static,
+    {
+        let cell = self.runtime.inner.executor.spawn_with(make, self.set())?;
+        Ok(CoopLocalJoinHandle::new(TaskJoin::attached(cell)))
+    }
+
+    /// One executor pass: the runtime's timer table first, then every ready task
+    /// at most once ([`CoopRuntime::run_until_idle`]).
     pub fn run_until_idle(&self) {
         self.runtime.run_until_idle();
-
-        let task_count = self.tasks.borrow().len();
-        for idx in 0..task_count {
-            // Cancel-first sweep. `abort()` has already published
-            // `JoinCancelled` to the handle, so this side only releases
-            // the task body and its captured resources.
-            let cancelled = {
-                let mut tasks = self.tasks.borrow_mut();
-                match tasks.get_mut(idx) {
-                    Some(slot) => {
-                        let is_cancelled = slot
-                            .as_ref()
-                            .map(|t| t.cancel_flag.load(Ordering::Acquire))
-                            .unwrap_or(false);
-                        if is_cancelled {
-                            slot.take()
-                        } else {
-                            None
-                        }
-                    }
-                    None => None,
-                }
-            };
-            if let Some(taken) = cancelled {
-                drop(taken);
-                continue;
-            }
-
-            // Ready snapshot + slot vacate. The borrow is released before
-            // `poll` so a re-entrant `spawn_local` from inside the polled
-            // future does not hit a `RefCell` double-borrow panic.
-            let entry = {
-                let mut tasks = self.tasks.borrow_mut();
-                match tasks.get_mut(idx) {
-                    Some(slot) => {
-                        let was_ready = slot
-                            .as_ref()
-                            .map(|t| t.wake_flag.swap(false, Ordering::AcqRel))
-                            .unwrap_or(false);
-                        if was_ready {
-                            slot.take()
-                        } else {
-                            None
-                        }
-                    }
-                    None => None,
-                }
-            };
-            if let Some(mut e) = entry {
-                let waker = make_waker(e.wake_flag.clone());
-                let mut cx = Context::from_waker(&waker);
-                match e.fut.as_mut().poll(&mut cx) {
-                    Poll::Ready(()) => {
-                        // Slot stays vacated; the wrapper has already
-                        // published the result into the join state.
-                    }
-                    Poll::Pending => {
-                        if let Some(slot) = self.tasks.borrow_mut().get_mut(idx) {
-                            *slot = Some(e);
-                        }
-                    }
-                }
-            }
-        }
     }
 
-    /// Count of live local task slots. Diagnostic + test helper, the local
-    /// twin of `ExecutorState::live_task_count`.
+    /// Count of this runtime's local tasks that have not ended; a result waiting for its
+    /// handle is not one.
     pub fn live_local_task_count(&self) -> usize {
-        self.tasks.borrow().iter().filter(|s| s.is_some()).count()
+        self.runtime.inner.executor.running_local_count()
     }
 
-    /// True if any local task slot has its wake flag set.
+    /// True if any task that is waiting has its wake flag set.
     pub fn any_local_ready(&self) -> bool {
-        self.tasks.borrow().iter().any(|s| {
-            s.as_ref()
-                .map(|t| t.wake_flag.load(Ordering::Acquire))
-                .unwrap_or(false)
-        })
+        self.runtime.inner.executor.any_ready()
     }
 
-    /// Drive local + shared tasks until `handle` resolves, returning the
-    /// local task's output. The `!Send` counterpart of
-    /// [`CoopRuntime::block_on`], and the synchronous entry point a deploy
-    /// `main()` or a host test uses to run a local task to completion.
+    /// Drive the pool until `handle` resolves, returning the task's output. The
+    /// synchronous entry point a deploy `main()` or a host test uses to run a
+    /// local task to completion. Allocates nothing.
     ///
-    /// Panics if the handle is Pending while nothing can possibly wake it —
-    /// no ready local task, no live local task, and no pending timer. That
-    /// is the deadlock shape [`CoopRuntime::block_on`] panics on, surfaced
-    /// here for the local pool; on a real MCU the equivalent is a `wfi()`
-    /// that never returns.
+    /// Panics if the handle is Pending while nothing can possibly wake it: no
+    /// ready task, no live task and no pending timer.
     pub fn block_on_local<T>(&self, handle: CoopLocalJoinHandle<T>) -> Result<T, RuntimeError> {
-        let mut handle = handle;
-        let flag = Arc::new(AtomicBool::new(true));
-        let waker = make_waker(flag.clone());
+        // The handle's wake flag is a local of this call, which a waker may point at only while
+        // the call lasts. The handle is consumed here and stores the waker only while it is
+        // Pending; it clears it on every path out of its poll that answers, and on its drop,
+        // which are the only ways out of this function.
+        let flag = AtomicBool::new(true);
+        // SAFETY: the waker is handed only to `handle`, which gives it up before `flag` goes
+        // (above).
+        let waker = unsafe { flag_waker(&flag) };
         let mut cx = Context::from_waker(&waker);
+        let mut handle = handle;
         loop {
             if flag.swap(false, Ordering::AcqRel) {
                 if let Poll::Ready(out) = Pin::new(&mut handle).poll(&mut cx) {
@@ -370,7 +267,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
             {
                 panic!(
                     "CoopLocalSet::block_on_local: handle Pending with no \
-                     live local tasks, no wakers, and no pending timers — \
+                     live tasks, no wakers, and no pending timers — \
                      deadlocked future?"
                 );
             }
@@ -378,7 +275,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
 mod tests {
     use super::CoopLocalSet;
     use crate::runtime_impl::CoopRuntime;
@@ -393,7 +290,7 @@ mod tests {
     }
 
     /// A clone of a local set is the same pool: a task spawned through one is run by a pass of
-    /// the other, and its slot is free after.
+    /// the other, and it no longer counts as running after.
     #[test]
     fn a_clone_runs_the_tasks_of_the_set_it_was_cloned_from() {
         let runtime = CoopRuntime::new(Still);
@@ -401,8 +298,10 @@ mod tests {
         let other = local.clone();
         let task = local.spawn_local(async { 7u8 });
         assert!(!task.is_finished(), "nothing ran it yet");
+        assert_eq!(local.live_local_task_count(), 1);
         other.run_until_idle();
         assert!(task.is_finished(), "the clone's pass ran it");
         assert_eq!(local.live_local_task_count(), 0);
+        assert_eq!(local.block_on_local(task).expect("not cancelled"), 7);
     }
 }

@@ -1886,9 +1886,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
 }
 
 /// The code a refused open of the cooperative engine answers, as pico answers the same refusal.
-/// An arena the memory cannot give is pico's out of memory, and a limit over the build's value is a
-/// value the build refuses; either way the engine bound and dialled nothing, and reserved no place
-/// for the handle, which its arena holds.
+/// An arena the memory cannot give is pico's out of memory, and so is a runtime whose task cells,
+/// reserved at the open, have none for the session's link or group; a limit over the build's value
+/// is a value the build refuses. Either way the engine bound and dialled nothing, and reserved no
+/// place for the handle, which its arena holds.
 #[cfg(not(feature = "engine-tokio"))]
 fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
     use wz_capi_coop::arena::ArenaRefused;
@@ -1901,7 +1902,8 @@ fn coop_open_refusal(refused: &wz_capi_coop::OpenError) -> ZResult {
         OpenError::Arena(ArenaRefused::Limit { .. }) => crate::result::Z_ERR_CONFIG_INVALID_VALUE,
         OpenError::Arena(
             ArenaRefused::TooLarge | ArenaRefused::NoMemory { .. } | ArenaRefused::Lend(_),
-        ) => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        )
+        | OpenError::NoTask(_) => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
         _ => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     }
 }
@@ -1935,6 +1937,21 @@ mod coop_open_refusal_tests {
                     left: 0,
                 }
             ))),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A runtime with no task cell for the session's link, or none that fits its task, is out of
+    /// memory as an arena that cannot be reserved is: the cells are the open's reservation.
+    #[test]
+    fn a_runtime_with_no_task_for_the_session_is_out_of_memory() {
+        use wz_capi_coop::SpawnRefusal;
+        assert_eq!(
+            coop_open_refusal(&OpenError::NoTask(SpawnRefusal::NoTaskCell)),
+            Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+        assert_eq!(
+            coop_open_refusal(&OpenError::NoTask(SpawnRefusal::TooLarge)),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }

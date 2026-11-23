@@ -1,68 +1,40 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Deadline-keyed timer queue — R311bc.
+//! The deadline-keyed timer queue: one table of entries for every profile of this runtime.
 //!
-//! Replaces R311av's `cx.waker().wake_by_ref()` busy-poll pattern with
-//! a wake-on-deadline registration. A [`crate::time::SleepFuture`] or
-//! [`crate::time::TimeoutFuture`] that has not yet elapsed registers
-//! its waker with the queue along with the absolute deadline (in
-//! microseconds, as reported by [`crate::time::ClockSource::now_us`]).
-//! On every [`crate::CoopRuntime::run_until_idle`] pass the runtime
-//! calls [`TimerQueue::pop_expired`] first; entries whose deadline has
-//! elapsed have their waker invoked and are removed from the queue.
-//! Pending entries stay in the heap until their deadline elapses.
+//! A [`crate::time::SleepFuture`] or [`crate::time::TimeoutFuture`] that has not yet elapsed
+//! registers its waker with the queue along with its absolute deadline (in microseconds, as
+//! [`crate::time::ClockSource::now_us`] reports it). On every [`crate::CoopRuntime::run_until_idle`]
+//! pass the runtime calls [`TimerQueue::pop_expired`] first, which wakes every entry whose
+//! deadline has passed and frees it. The executor pass is then genuinely idle when no task is
+//! ready and no deadline has passed, so a deploy loop can sleep (`wfi()`) until the next one.
 //!
-//! ## Why this matters (north star — composable framework MCU truth)
+//! ## Where the table lies
 //!
-//! The R311av self-wake pattern was correct but wasted power: every
-//! `run_until_idle` pass re-polled the sleep future, the future re-
-//! checked the clock, the future re-armed its own wake, ad infinitum.
-//! On a battery-powered MCU the executor loop never went quiet so the
-//! deploy could never `wfi()`-sleep between IRQs.
+//! - In a `static` the image declares (`TimerTable`, `session-slot`).
+//! - Reserved once, when the runtime is made (`CoopRuntime::reserved`): `timers` entries.
+//! - Grown by one entry whenever every entry is taken (`CoopRuntime::new`); an entry that comes
+//!   free is reused, so the table is as long as the most deadlines that ever waited at once.
 //!
-//! With a real timer queue the executor pass is genuinely idle when
-//! no task is ready and no timer has elapsed; the deploy main loop
-//! can call `wfi()` and the next wake-up is driven by a SysTick or
-//! HAL-timer ISR that crosses the next-deadline boundary. This is the
-//! shape every MCU async runtime (embassy, RTIC, FreeRTOS) follows
-//! for the same power-budget reason.
+//! A sleep that finds a fixed table full is NOT lost: [`TimerQueue::register`] answers `false`
+//! and counts the refusal, and the future falls back to waking itself for the next pass, which
+//! is exactly as correct, only not idle. The next poll tries to register again, so the sleep moves
+//! into the table as soon as an entry is free.
 //!
-//! ## Ordering
-//!
-//! `BinaryHeap<Reverse<TimerEntry>>` gives a min-heap by deadline.
-//! Ties (multiple registrations at the same deadline) break by a
-//! monotonic sequence number so the heap maintains a strict order
-//! (required for `Ord`) and a deterministic wake order across
-//! identical deadlines (FIFO by registration time).
-//!
-//! ## Drop semantics
-//!
-//! Dropping a [`crate::time::SleepFuture`] before its deadline does
-//! NOT remove the entry from the heap. When the deadline eventually
-//! elapses the registered waker fires harmlessly — the task is by
-//! then past that sleep call, so the wake simply re-polls the task,
-//! which finds no pending work and returns Pending again. The heap
-//! size therefore tracks "long-lived dropped sleeps in flight",
-//! bounded by `(poll-rate × max-deadline-distance)` for any deploy.
-//! A per-entry cancellation flag (`Arc<AtomicBool>` checked during
-//! `pop_expired`) is a deliberate R311bd+ refinement if a profile
-//! ever reports growing heap retention as a real issue.
-//!
-//! ## Critical section discipline
-//!
-//! Both `register` and `pop_expired` take the inner
-//! `critical_section::Mutex<RefCell<..>>` exactly once per call —
-//! peek+pop is collapsed into a single CS window so the IRQ-disable
-//! cost is amortised over each expired entry. Wakers are invoked
-//! *outside* the CS so a user wake() impl that does its own work
-//! (or even calls back into the runtime) does not deadlock.
+//! Ties between entries at one deadline wake in registration order (a sequence number breaks
+//! them). Wakers fire outside the critical section, so a wake that re-enters the runtime does not
+//! deadlock. A sleep dropped before its deadline leaves its entry, which wakes its task once for
+//! nothing when the deadline passes and is freed then.
 
-use alloc::collections::BinaryHeap;
-use core::cell::RefCell;
-use core::cmp::Reverse;
+use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use critical_section::Mutex;
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::boxed::Box;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::vec::Vec;
+use critical_section::{CriticalSection, Mutex};
 
 struct TimerEntry {
     deadline_us: u64,
@@ -70,123 +42,225 @@ struct TimerEntry {
     waker: Waker,
 }
 
-// Ord/Eq derive: order by (deadline, seq). Waker is excluded from
-// comparison because it does not implement Eq + Ord; seq monotonicity
-// guarantees no two entries collide on the (deadline, seq) tuple, so
-// the synthetic ordering is strict regardless of waker identity.
-impl PartialEq for TimerEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline_us == other.deadline_us && self.seq == other.seq
+/// One entry of the table: empty, or a deadline waiting. The table is borrowed whole, once, inside
+/// a critical section, so an entry carries no lock of its own.
+pub struct TimerSlot(Option<TimerEntry>);
+
+impl TimerSlot {
+    const fn new() -> Self {
+        Self(None)
     }
 }
 
-impl Eq for TimerEntry {}
+/// A table's entries behind the runtime's critical section, of a length the table's type states:
+/// what `critical_section::Mutex` is for a value whose size is known.
+#[cfg(feature = "session-slot")]
+struct Entries<T: ?Sized>(RefCell<T>);
 
-impl PartialOrd for TimerEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
+// SAFETY: the entries are borrowed only through `Entries::borrow`, which asks for a critical
+// section, so one context at a time reaches them; what they hold (deadlines and wakers) may be
+// handed between contexts.
+#[cfg(feature = "session-slot")]
+unsafe impl<T: ?Sized + Send> Sync for Entries<T> {}
+
+#[cfg(feature = "session-slot")]
+impl<T: ?Sized> Entries<T> {
+    fn borrow<'cs>(&'cs self, _cs: CriticalSection<'cs>) -> &'cs RefCell<T> {
+        &self.0
     }
 }
 
-impl Ord for TimerEntry {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        (self.deadline_us, self.seq).cmp(&(other.deadline_us, other.seq))
-    }
+/// The timer table an image declares: `TIMERS` entries in a `static`, which the
+/// runtime's cell (`RuntimeCell`) holds.
+#[cfg(feature = "session-slot")]
+pub struct TimerTable<const TIMERS: usize> {
+    entries: Entries<[TimerSlot; TIMERS]>,
 }
 
-struct TimerQueueInner {
-    heap: BinaryHeap<Reverse<TimerEntry>>,
-    next_seq: u64,
-}
-
-/// Deadline-keyed wake registry. Held inside `Arc<RuntimeInner<C>>`
-/// (see [`crate::runtime_impl`]) so [`crate::time::CoopTime`] and
-/// the spawned-task layer share the same queue.
-pub struct TimerQueue {
-    inner: Mutex<RefCell<TimerQueueInner>>,
-}
-
-impl TimerQueue {
-    /// Construct an empty queue. Allocation happens lazily on the
-    /// first `register` call.
-    pub fn new() -> Self {
+#[cfg(feature = "session-slot")]
+impl<const TIMERS: usize> TimerTable<TIMERS> {
+    /// A table of empty entries.
+    pub const fn new() -> Self {
         Self {
-            inner: Mutex::new(RefCell::new(TimerQueueInner {
-                heap: BinaryHeap::new(),
-                next_seq: 0,
-            })),
+            entries: Entries(RefCell::new([const { TimerSlot::new() }; TIMERS])),
         }
     }
 
-    /// Register `waker` to be woken when wall-clock micros reach
-    /// `deadline_us`. Multiple wakers may register on the same
-    /// deadline; FIFO by registration sequence within a deadline.
-    ///
-    /// Always `true`: the heap grows. The answer is the static form's
-    /// (`session-slot`), whose table can be full, and is here so the callers are
-    /// written once.
+    pub(crate) fn queue(&'static self) -> TimerQueue {
+        TimerQueue::over(Slots::Table(&self.entries))
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<const TIMERS: usize> Default for TimerTable<TIMERS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Where a queue's entries are.
+enum Slots {
+    /// A `static` table the image declares.
+    #[cfg(feature = "session-slot")]
+    Table(&'static Entries<[TimerSlot]>),
+    /// A table reserved when the runtime was made.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    Reserved(Mutex<RefCell<Box<[TimerSlot]>>>),
+    /// A table that grows by an entry when every entry is taken.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    Growing(Mutex<RefCell<Vec<TimerSlot>>>),
+}
+
+/// Deadline-keyed wake registry over a table of entries. Held inside the runtime
+/// so [`crate::time::CoopTime`] and the task pool share the same queue.
+pub struct TimerQueue {
+    slots: Slots,
+    next_seq: Mutex<Cell<u64>>,
+    refused: Mutex<Cell<u32>>,
+}
+
+impl TimerQueue {
+    fn over(slots: Slots) -> Self {
+        Self {
+            slots,
+            next_seq: Mutex::new(Cell::new(0)),
+            refused: Mutex::new(Cell::new(0)),
+        }
+    }
+
+    /// A table that grows by an entry when every entry is taken.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn growing() -> Self {
+        Self::over(Slots::Growing(Mutex::new(RefCell::new(Vec::new()))))
+    }
+
+    /// `timers` entries, reserved now: a deadline past them is refused, counted, and none
+    /// allocates.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn reserved(timers: usize) -> Self {
+        Self::over(Slots::Reserved(Mutex::new(RefCell::new(
+            (0..timers).map(|_| TimerSlot::new()).collect(),
+        ))))
+    }
+
+    /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
+    /// runs no code but this module's: a waker it takes out is woken or dropped after.
+    fn with_slots<R>(&self, cs: CriticalSection<'_>, f: impl FnOnce(&mut [TimerSlot]) -> R) -> R {
+        match &self.slots {
+            #[cfg(feature = "session-slot")]
+            Slots::Table(entries) => f(&mut entries.borrow(cs).borrow_mut()),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            Slots::Reserved(slots) => f(&mut slots.borrow(cs).borrow_mut()),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            Slots::Growing(grown) => f(&mut grown.borrow(cs).borrow_mut()),
+        }
+    }
+
+    /// Register `waker` to be woken when wall-clock micros reach `deadline_us`.
+    /// `false` when a fixed table has every entry taken: the refusal is counted
+    /// ([`Self::refusals`]) and nothing is registered, so the caller wakes itself
+    /// instead. A grown table adds an entry and answers `true`.
     pub fn register(&self, deadline_us: u64, waker: Waker) -> bool {
         crate::cs::with(|cs| {
-            let mut q = self.inner.borrow(cs).borrow_mut();
-            let seq = q.next_seq;
-            q.next_seq = q.next_seq.wrapping_add(1);
-            q.heap.push(Reverse(TimerEntry {
+            let seq = {
+                let next = self.next_seq.borrow(cs);
+                let seq = next.get();
+                next.set(seq.wrapping_add(1));
+                seq
+            };
+            let entry = TimerEntry {
                 deadline_us,
                 seq,
                 waker,
-            }));
-        });
-        true
-    }
-
-    /// Wake every entry whose `deadline_us <= now_us`. Wakers fire
-    /// outside the critical section so a wake() that re-enters
-    /// runtime APIs (e.g. setting a per-task atomic flag) does not
-    /// deadlock against the CS-mutex.
-    pub fn pop_expired(&self, now_us: u64) {
-        loop {
-            let entry = crate::cs::with(|cs| {
-                let mut q = self.inner.borrow(cs).borrow_mut();
-                match q.heap.peek() {
-                    Some(Reverse(top)) if top.deadline_us <= now_us => {
-                        q.heap.pop().map(|Reverse(e)| e)
+            };
+            let unplaced = self.with_slots(cs, |slots| {
+                match slots.iter_mut().find(|slot| slot.0.is_none()) {
+                    Some(slot) => {
+                        slot.0 = Some(entry);
+                        None
                     }
-                    _ => None,
+                    None => Some(entry),
                 }
             });
-            match entry {
-                Some(e) => e.waker.wake(),
+            let Some(entry) = unplaced else {
+                return true;
+            };
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            if let Slots::Growing(grown) = &self.slots {
+                grown.borrow(cs).borrow_mut().push(TimerSlot(Some(entry)));
+                return true;
+            }
+            // The entry was not placed: its waker goes with it.
+            drop(entry);
+            let refused = self.refused.borrow(cs);
+            refused.set(refused.get().saturating_add(1));
+            false
+        })
+    }
+
+    /// Wake every entry whose `deadline_us <= now_us`, earliest first. Wakers fire
+    /// outside the critical section.
+    pub fn pop_expired(&self, now_us: u64) {
+        loop {
+            let due = crate::cs::with(|cs| {
+                self.with_slots(cs, |slots| {
+                    let (index, _) = earliest(slots, now_us)?;
+                    slots[index].0.take()
+                })
+            });
+            match due {
+                Some(entry) => entry.waker.wake(),
                 None => return,
             }
         }
     }
 
-    /// Diagnostic: number of entries currently registered. Used by
-    /// [`crate::CoopRuntime::block_on`] to distinguish "deadlocked
-    /// future, no wake source" (panic) from "pending timer, clock
-    /// will eventually advance" (legitimate wait state).
+    /// Diagnostic: number of entries currently registered.
     pub fn pending_count(&self) -> usize {
-        crate::cs::with(|cs| self.inner.borrow(cs).borrow().heap.len())
+        crate::cs::with(|cs| {
+            self.with_slots(cs, |slots| {
+                slots.iter().filter(|slot| slot.0.is_some()).count()
+            })
+        })
     }
 
-    /// Diagnostic: earliest deadline currently registered, or `None`
-    /// if the queue is empty. A deploy main loop may inspect this to
-    /// size its `wfi()`-sleep budget against a HAL timer; the
-    /// runtime itself does not require the deploy to do so.
+    /// Diagnostic: earliest deadline currently registered, or `None` if the table
+    /// is empty.
     pub fn next_deadline_us(&self) -> Option<u64> {
         crate::cs::with(|cs| {
-            self.inner
-                .borrow(cs)
-                .borrow()
-                .heap
-                .peek()
-                .map(|Reverse(e)| e.deadline_us)
+            self.with_slots(cs, |slots| {
+                earliest(slots, u64::MAX).map(|(_, deadline_us)| deadline_us)
+            })
         })
+    }
+
+    /// How many sleeps were refused an entry (each woke itself for the next pass
+    /// instead). A grown table refuses none.
+    pub fn refusals(&self) -> u32 {
+        crate::cs::with(|cs| self.refused.borrow(cs).get())
+    }
+
+    /// The entry count of the table: for a grown one, the entries it has grown to so far.
+    pub fn capacity(&self) -> usize {
+        crate::cs::with(|cs| self.with_slots(cs, |slots| slots.len()))
     }
 }
 
-impl Default for TimerQueue {
-    fn default() -> Self {
-        Self::new()
+/// The entry of `slots` due first at `until_us` or before, ties in registration order: its index
+/// and its deadline. One body for the pass that wakes what is due and for the look at what is next.
+#[inline(never)]
+fn earliest(slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if let Some(entry) = &slot.0 {
+            if entry.deadline_us <= until_us
+                && best.map_or(true, |(_, deadline, seq)| {
+                    (entry.deadline_us, entry.seq) < (deadline, seq)
+                })
+            {
+                best = Some((index, entry.deadline_us, entry.seq));
+            }
+        }
     }
+    best.map(|(index, deadline_us, _)| (index, deadline_us))
 }

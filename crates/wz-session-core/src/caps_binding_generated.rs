@@ -521,7 +521,7 @@ pub const MAX_TASKS: LimitBinding = LimitBinding {
     range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
-    binding_heap: None,
+    binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
@@ -533,7 +533,19 @@ pub const MAX_TIMERS: LimitBinding = LimitBinding {
     range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
-    binding_heap: None,
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_TICKERS`] is bound.
+pub const MAX_TICKERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };

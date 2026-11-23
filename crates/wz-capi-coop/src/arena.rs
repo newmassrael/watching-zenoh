@@ -924,8 +924,9 @@ fn faces_of(config: &CoopConfig) -> Option<usize> {
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as
 /// `max_faces` admits (each a link it attaches or accepts), and for a listener as many in their
-/// handshake as `accept_pending` admits. `None` past the address space.
-fn links_of(config: &CoopConfig) -> Option<usize> {
+/// handshake as `accept_pending` admits. `None` past the address space. The runtime's task cells
+/// are reserved for as many (`engine::RuntimeTables`), a link's session being one task.
+pub(crate) fn links_of(config: &CoopConfig) -> Option<usize> {
     let handshakes = if config.listen.is_empty() {
         0
     } else {

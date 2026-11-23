@@ -34,12 +34,10 @@
 //! Every item exported under the `alloc` feature is a real
 //! implementation:
 //!
-//! - `CoopRuntime::spawn` heap-allocates a `Pin<Box<dyn Future +
-//!   Send>>` wrapper that captures the user future + a JoinState
-//!   handle, pushes it into the executor's task vector, and returns
-//!   a real `CoopJoinHandle<T>` whose `poll` checks the shared
-//!   `JoinState<T>` and registers a waker if the task has not yet
-//!   completed.
+//! - `CoopRuntime::spawn` writes the user future into a cell of the
+//!   runtime's task table and returns a real `CoopJoinHandle<T>`
+//!   whose `poll` reads the output the task left in that cell, or
+//!   registers a waker if the task has not yet completed.
 //! - [`CoopRuntime::run_until_idle`] is a real polling loop: it
 //!   atomic-swaps each task's `wake_flag` to false, polls every
 //!   task that was ready, and re-stores Pending futures. Tasks that
@@ -83,17 +81,13 @@
 //! ## What R311bd closes
 //!
 //! - **`CoopJoinHandle::abort()`**: AP/MCU parity with
-//!   `wz_runtime_tokio::TokioJoinHandle::abort`. Each spawned task
-//!   slot carries a `cancel_flag: Arc<AtomicBool>` shared with the
-//!   returned `CoopJoinHandle`. `abort()` writes the flag (the
-//!   next `run_until_idle` sweeps the cancelled slots and drops
-//!   their futures) AND synchronously writes
-//!   `Err(RuntimeError::JoinCancelled)` into the shared
-//!   `JoinState` so an awaiting handle resolves immediately
-//!   without needing the executor pass to land. Race against
-//!   natural completion resolves by "first result wins" via the
-//!   `JoinState::result.is_none()` guard on both write paths;
-//!   idempotent under repeated abort calls.
+//!   `wz_runtime_tokio::TokioJoinHandle::abort`. `abort()` raises
+//!   the task cell's cancel flag (the next `run_until_idle` sweeps
+//!   the cancelled cells and drops their futures) AND marks the
+//!   cell aborted, so an awaiting handle resolves to
+//!   `Err(RuntimeError::JoinCancelled)` at once without needing the
+//!   executor pass to land. A task that already ended keeps its
+//!   result; idempotent under repeated abort calls.
 //!
 //! ## Layer G.4 / G.4-alloc cross-compile gate
 //!
@@ -170,75 +164,28 @@ pub mod sync;
 #[cfg(feature = "runtime")]
 pub(crate) mod atomic;
 
-// Fixed-memory step S6 -- under `session-slot` the task pool, its handles, the
-// local set and the timer queue are the STATIC forms in the `static_*` files: the
-// same modules under the same names with the same surface, over tables the image
-// declares instead of a heap (see `runtime_impl::RuntimeCell`). Every other build
-// keeps the heap forms exactly.
-//
-// Each pair is declared under two DIFFERENT names and the public name is an alias
-// of whichever the build keeps, because two `mod` declarations of one name in one
-// scope are a defect under every feature combination (rustc says so only for a
-// build that enables both, and `duplicate_module_lint` says so for the tree). The
-// two forms are `#[doc(hidden)]`: the module the crate documents and its users
-// name is `executor`, `join_handle`, `local` and `timer`.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[doc(hidden)]
-#[path = "executor.rs"]
-pub mod executor_heap;
-#[cfg(feature = "session-slot")]
-#[doc(hidden)]
-#[path = "static_executor.rs"]
-pub mod executor_static;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use executor_heap as executor;
-#[cfg(feature = "session-slot")]
-pub use executor_static as executor;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[doc(hidden)]
-#[path = "join_handle.rs"]
-pub mod join_handle_heap;
-#[cfg(feature = "session-slot")]
-#[doc(hidden)]
-#[path = "static_join_handle.rs"]
-pub mod join_handle_static;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use join_handle_heap as join_handle;
-#[cfg(feature = "session-slot")]
-pub use join_handle_static as join_handle;
-// The `!Send` task pool. Separate from `executor` (the `Send` pool) because
-// the two differ in exactly one bound and that bound is what makes the AP
-// contract and the MCU session bundle incompatible — see the module doc.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[doc(hidden)]
-#[path = "local.rs"]
-pub mod local_heap;
-#[cfg(feature = "session-slot")]
-#[doc(hidden)]
-#[path = "static_local.rs"]
-pub mod local_static;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use local_heap as local;
-#[cfg(feature = "session-slot")]
-pub use local_static as local;
+// One task pool and one timer queue for every profile: tables of cells and of entries, in a
+// `static` the image declares (`session-slot`), reserved when the runtime is made, or grown on
+// demand (the heap profile). The handles, the local set and the wakers are references to the task
+// cells (see the `executor` module doc).
+#[cfg(feature = "runtime")]
+pub mod executor;
+#[cfg(feature = "runtime")]
+pub mod join_handle;
+// The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —
+// see the module doc.
+#[cfg(feature = "runtime")]
+pub mod local;
 #[cfg(feature = "runtime")]
 pub mod runtime_impl;
 #[cfg(all(test, feature = "session-slot"))]
 mod static_tests;
+#[cfg(all(test, feature = "alloc", not(feature = "session-slot")))]
+mod table_tests;
 #[cfg(feature = "runtime")]
 pub mod time;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[doc(hidden)]
-#[path = "timer.rs"]
-pub mod timer_heap;
-#[cfg(feature = "session-slot")]
-#[doc(hidden)]
-#[path = "static_timer.rs"]
-pub mod timer_static;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use timer_heap as timer;
-#[cfg(feature = "session-slot")]
-pub use timer_static as timer;
+#[cfg(feature = "runtime")]
+pub mod timer;
 #[cfg(feature = "runtime")]
 mod yield_now;
 
@@ -250,6 +197,8 @@ pub use local::{CoopLocalJoinHandle, CoopLocalSet};
 pub use runtime_impl::CoopRuntime;
 #[cfg(feature = "session-slot")]
 pub use runtime_impl::RuntimeCell;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub use runtime_impl::RuntimeRows;
 #[cfg(feature = "runtime")]
 pub use time::{ClockSource, CoopTime};
 #[cfg(feature = "runtime")]

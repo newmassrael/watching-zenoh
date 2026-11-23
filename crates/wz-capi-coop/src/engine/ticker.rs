@@ -24,16 +24,30 @@ struct Entry {
     tick: Tick,
 }
 
-/// The session's periodic jobs.
-#[derive(Default)]
+/// The session's periodic jobs, in a table whose rows are reserved when the session opens.
 pub(super) struct Tickers {
     entries: Vec<Entry>,
+    /// The jobs the table holds at once, which its memory was reserved for.
+    rows: usize,
 }
 
 impl Tickers {
+    /// A table of `rows` jobs, reserved now: no start takes memory after it.
+    pub(super) fn reserved(rows: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(rows),
+            rows,
+        }
+    }
+
     /// Hold a job `id`, first due `period_ms` after `now_ms`. A period under a millisecond is
-    /// raised to one.
-    pub(super) fn start(&mut self, id: TickerId, period_ms: u64, tick: Tick, now_ms: u64) {
+    /// raised to one. `false`, holding nothing, when every row of the table holds a job: a start
+    /// past them is refused, as an engine with no periodic jobs refuses one.
+    #[must_use]
+    pub(super) fn start(&mut self, id: TickerId, period_ms: u64, tick: Tick, now_ms: u64) -> bool {
+        if self.entries.len() >= self.rows {
+            return false;
+        }
         let period_ms = period_ms.max(1);
         self.entries.push(Entry {
             id,
@@ -41,6 +55,7 @@ impl Tickers {
             due_ms: now_ms.saturating_add(period_ms),
             tick,
         });
+        true
     }
 
     /// Let go of job `id`; one that is not held (ended, or never started) is left alone.
@@ -79,5 +94,43 @@ impl Tickers {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
             entry.due_ms = now_ms.saturating_add(entry.period_ms);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A job that goes on.
+    fn job() -> Tick {
+        alloc::sync::Arc::new(|| true)
+    }
+
+    /// A start past the rows is refused and holds nothing; a row let go of takes a job again.
+    #[test]
+    fn a_start_past_the_tables_rows_is_refused_and_a_row_let_go_is_taken_again() {
+        let mut tickers = Tickers::reserved(2);
+        assert!(tickers.start(1, 10, job(), 0));
+        assert!(tickers.start(2, 20, job(), 0));
+        assert!(!tickers.start(3, 5, job(), 0), "both rows hold a job");
+        assert_eq!(
+            tickers.next_due_ms(),
+            Some(10),
+            "the refused job holds no row"
+        );
+        tickers.stop(1);
+        assert!(
+            tickers.start(3, 5, job(), 0),
+            "the row let go of is taken again"
+        );
+        assert_eq!(tickers.next_due_ms(), Some(5));
+    }
+
+    /// A table of no rows refuses every start.
+    #[test]
+    fn a_table_of_no_rows_refuses_every_start() {
+        let mut tickers = Tickers::reserved(0);
+        assert!(!tickers.start(1, 10, job(), 0));
+        assert_eq!(tickers.next_due_ms(), None);
     }
 }

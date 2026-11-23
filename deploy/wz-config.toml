@@ -3199,18 +3199,21 @@ driven = "local"
 default = 8
 storage = "capacity"
 scope = "runtime"
-binding_heap = "none"
+binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The most tasks the runtime of a fixed-memory image may hold: a ceiling on
-the task table the image declares, which the image is checked against when
-it compiles.
+The most tasks a runtime holds: a ceiling on the task table a fixed-memory
+image declares, which the image is checked against when it compiles, and on
+the task cells a session of the C ABI's cooperative engine reserves when it
+opens, one for each link and group its configuration admits. A link or a
+group past them is refused, at the open as out of memory and after it as a
+link past the faces the session admits.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a fixed-memory wz image."
+reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a wz runtime whose tables are fixed."
 
 [[limit]]
 id = "MAX_TIMERS"
@@ -3220,17 +3223,42 @@ driven = "local"
 default = 16
 storage = "capacity"
 scope = "runtime"
-binding_heap = "none"
+binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The most timers the runtime of a fixed-memory image may hold: a ceiling on
-the timer table the image declares, checked as the task ceiling is.
+The most timers a runtime holds: a ceiling on the timer table a
+fixed-memory image declares, checked as the task ceiling is, and the entries
+of the timer table a session of the C ABI's cooperative engine reserves when
+it opens. A sleep past them is refused an entry and counted, and ends by
+polling.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration states it: it is a ceiling on the timer table of a fixed-memory wz image."
+reason = "No key of upstream's configuration states it: it is a ceiling on the timer table of a wz runtime whose tables are fixed."
+
+[[limit]]
+id = "MAX_TICKERS"
+kconfig = "WZ_LIMIT_MAX_TICKERS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The periodic jobs a session of the C ABI's cooperative engine runs at once
+(an advanced publisher's heartbeat is one): the rows of the table the
+session reserves when it opens. Starting one more is refused, as an engine
+with no periodic jobs refuses it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen is MAX_PUBLISHERS's default, a heartbeat for each publisher of a session."
 
 [[limit]]
 id = "MAX_LOCATOR_LEN"

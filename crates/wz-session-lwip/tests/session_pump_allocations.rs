@@ -618,7 +618,8 @@ impl Costs {
 
     /// A window that must cost the heap nothing on the slot profile and is only
     /// printed on the heap profile, where nothing requires it to spend: a KeepAlive
-    /// and a Close, which no build of this file copies off the link.
+    /// and a Close, which no build of this file copies off the link, and a task's
+    /// end, read or sweep, which both profiles' task tables do in the task's cell.
     fn check_slot(&mut self, what: &str, allocations: usize) {
         println!("{what}: {allocations} allocation(s)");
         #[cfg(feature = "session-slot")]
@@ -862,7 +863,9 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         pass(&local);
         local.block_on_local(sleeper)
     });
-    costs.check("the deadline fires, the task ends, its handle is read", n);
+    // The heap profile's task table keeps the task's cell and the handle reads it there, so this
+    // window, like the two below, is free on both profiles and is only held on the slot one.
+    costs.check_slot("the deadline fires, the task ends, its handle is read", n);
     assert_eq!(woken.expect("not cancelled"), 7);
     let ((), n) = m.count("an aborted task", || {
         let forever = placing::spawn_future(&local, async {
@@ -874,7 +877,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         forever.abort();
         pass(&local);
     });
-    costs.check("a task spawned, aborted and swept", n);
+    costs.check_slot("a task spawned, aborted and swept", n);
     NOW_US.store(0, Ordering::SeqCst);
 
     // CLOSE.
@@ -893,7 +896,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         "the acceptor's session ended on the Close it read"
     );
     let (outcome, n) = m.count("join", || local.block_on_local(acceptor_task));
-    costs.check("the acceptor's join handle read", n);
+    costs.check_slot("the acceptor's join handle read", n);
     assert!(outcome.is_ok(), "the acceptor's task was not cancelled");
 
     // The initiator's task and every table: nothing is left held once the handles

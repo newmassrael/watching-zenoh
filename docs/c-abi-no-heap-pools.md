@@ -44,8 +44,11 @@ Nothing here invents a second fixed-memory mechanism. What exists, and is reused
   frames encoded into a slot the link lends (`crates/wz-runtime-coop/src/link_storage.rs`,
   `TxStore`), a link's buffers handed in as parameters (`IpDriver`, shared by both profiles), the
   reassembly pool generated with a fixed size (`out/wz-runtime-coop/reassembly_pool_mcu.rs`).
-- **The static runtime** (`static_executor.rs`, `static_timer.rs`, `static_local.rs` of
-  `wz-runtime-coop`): tasks and timers from fixed tables (`MAX_TASKS`, `MAX_TIMERS`).
+- **The task and timer tables** (`executor.rs`, `timer.rs`, `local.rs` of `wz-runtime-coop`):
+  one executor for both profiles, its tasks and timers in tables that lie in a `static` the image
+  declares (`RuntimeCell`), are reserved when the runtime is made (`CoopRuntime::reserved`,
+  `RuntimeRows`) or grow on demand (`CoopRuntime::new`); a waker is a reference to its task's
+  cell.
 - **The ABI's object pools** (`crates/wz-capi-pico/src/object_pool.rs`, `object_slot.rs`): one
   pool per kind of handle object, slot classes from 16 bytes to 16 KiB, a full pool answering
   `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having declared or opened nothing, the counts held to the session
@@ -312,15 +315,27 @@ payloads).
 
 ### 4.11 Runtime: tasks, timers, wakers
 
-`LocalSet`'s boxed futures (`local.rs`), `Arc<AtomicBool>` wake and cancel flags
-(`executor.rs`), the group face's task, the ticker's jobs.
+The session's tasks (one for each face, each group face), the deadlines they wait on, the ticker's
+jobs. Before U11 the heap profile boxed each task's future and gave it an `Rc` join state and
+two `Arc<AtomicBool>` flags, and its timers grew a `BinaryHeap`; the executor is now one for both
+profiles (`executor.rs`, `timer.rs`), and a spawn writes the future into a cell of the table.
 
-- Bound: `MAX_TASKS`, `MAX_TIMERS`, per session.
-- Form: the static runtime's tables (`static_executor.rs`, `static_timer.rs`), lent from the
-  arena; a waker points at its task's slot.
-- Exhausted: cannot happen after open: the tasks a session runs are known at open (the
-  session, each group face, the ticker) and are placed then; an open that needs more answers
-  `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
+- Bound: `MAX_TASKS` and `MAX_TIMERS`, per session (`RuntimeRows`); the bytes of a link's cell
+  are those of the task a link's session runs as (`RouterSessionTask`), a constant of its types
+  and no limit; `MAX_TICKERS` for the ticker's jobs.
+- Form: a table of task cells and one of timer entries, reserved when the runtime is made
+  (`CoopRuntime::reserved`), one block for the cells; a waker points at its task's cell and holds
+  a count on the table (no allocation), so a waker kept past the session still points at memory.
+  A grown table (`CoopRuntime::new`) keeps each cell's bytes for the next task that fits them, so
+  it allocates only when the session holds more tasks or deadlines at once than it ever did.
+- Exhausted: the engine reserves its runtime at open (`CoopRuntime::opening`): a cell for each
+  link its config admits (the dial role's, each face `max_faces` admits, each handshake
+  `accept_pending` admits) in the bytes of a link's session task, and a cell added while the open
+  lasts for each group it joins, together at most `MAX_TASKS`; the open seals the table once it
+  is over. An open whose link or group finds no cell answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+  (`OpenError::NoTask`); a link accepted after it is closed unread, as one past `max_faces` is;
+  a sleep past `MAX_TIMERS` is refused an entry, counted, and ends by polling; a periodic job
+  past `MAX_TICKERS` is refused, as an engine with no periodic jobs refuses it.
 
 ### 4.12 Callbacks' closures, handlers, latches
 
@@ -590,6 +605,24 @@ suites (C1co, Layer Z) unchanged.
 12. **U11. The static runtime under the engine.** `wz-runtime-coop` `local.rs`, `executor.rs`,
     `runtime_impl.rs`, `session_runtime.rs`, `wz-capi-coop` `engine/ticker.rs`. Family: idle
     step. Tests: the session's tasks placed at open; a timer table at its limit.
+    Done in part. One executor for both profiles (`executor.rs`, `local.rs`, `join_handle.rs`):
+    the slot profile's static table, a table reserved when the runtime is made
+    (`CoopRuntime::reserved` over `RuntimeRows`: tasks, the bytes of a task's cell, timers) and
+    a grown one (`CoopRuntime::new`); a spawn writes the future into a cell and its output after
+    it, a waker is a reference to the cell, and none allocates where a cell or an entry is free.
+    One timer table for both (`timer.rs`), reserved or grown the same way. The Zephyr OS layer's
+    `k_mutex`, `k_condvar` and read-task record and stack come from pools the image sizes
+    (`CONFIG_WZ_OS_MUTEXES`, `CONFIG_WZ_OS_CONDVARS`, `CONFIG_WZ_OS_THREADS`), none from the
+    kernel heap. Tests: `wz-runtime-coop` `table_tests` (a grown table spawns again with no
+    allocation, a reserved runtime allocates when made and never after, each table refuses one
+    past its rows, counted) and `static_tests`, unchanged, for the slot profile. The engine makes
+    its runtime at open with `CoopRuntime::opening` over `RuntimeTables` (`MAX_TASKS`,
+    `MAX_TIMERS`), a link's cell in the bytes of the session's named task (`RouterSessionTask`
+    over `FaceDispatch`), and seals it when the open is over; the ticker's jobs are a table of
+    `MAX_TICKERS` rows reserved at open. A local set's tasks go with its last handle, so a task
+    that holds a handle of the runtime does not keep the runtime through its table. Remaining,
+    each a seam of another unit: the link's readiness box and the read task's boxed body are the
+    port's and the links' (U10, U2).
 13. **U12. The group.** `wz-capi-coop` `engine/group.rs`, `host_group.rs`, `wz-session-mcu`
     `group_drive.rs`, `group_drive/stage.rs`, `wz-session-core` `multicast_*`. Family: group.
     Tests: a Join past MAX_GROUP_MEMBERS refused and counted.
@@ -657,7 +690,7 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
 units on the track so far (U0, U1, U2, U4 in part, U5 with the observer's watcher lists, U8, U9,
 U14 with the document's key ids, U15's scouting window and the time base's wait, the peer-written
-tables of section 4.5, the links' reassembly of section 4.9 and the hosts' half of U11), read from the source and to be confirmed by the symbol diff of the library, and the
+tables of section 4.5, the links' reassembly of section 4.9 and U11, the Zephyr kernel objects and the hosts' half), read from the source and to be confirmed by the symbol diff of the library, and the
 unit that takes each away:
 
 | what | where | taken away by |
@@ -673,7 +706,6 @@ unit that takes each away:
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
 | a config object (one block of the build's size) and a hello a program clones | `wz-capi-pico` `config.rs`, `scout.rs` | U9: their slots in the process pools |
 | the Hello a scout hands `z_open`'s lookup (`scout_first`'s `ScoutedHello`, its locators a `Vec<String>`), and the list a host window makes of a member it lost | `wz-capi-coop` `scout.rs`, `scout_datagram.rs`; `wz-capi-pico` `scout.rs` (`locators_by_scout`); `wz-runtime-posix` `scouting.rs` (`ScoutMembers::drain`) | U15's remainder: the open's locators borrowed from the table's row |
-| the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
 | the OS layer of a host library without `std` (`os-posix`, `os-windows`): a thread's start record, its boxed body and its end flag (the read task's and a reception supervisor's polling task's), the start record of each `z_task_init` on Windows, and the list of sockets each wait over several links named to the system | `wz-host-sync` `lib.rs` (`spawn_fn`), `wz-capi-port` `os.rs` (`sys::spawn`), `wz-capi-pico` `os/windows.rs` (`task_spawn`), `wz-runtime-posix` `net.rs` and `windows/mod.rs` (`wait_ready_among`) | done (U11, the hosts' half, one structure on both systems): a thread's body and the word its end sets lie in a record of a static pool of `wz_host_sync::THREADS`, given back at the join or, for a thread dropped unjoined, when its body returns, a spawn past them refused as one the system refuses; a program's task takes its function and argument from the spawning frame, which waits until it has; a wait's set lies on the waiting stack, `WAIT_SET_SOCKETS` sockets as zenoh-pico's Windows wait is an `fd_set` of 64 there, a wait over more the bounded look. The locks and condition variables were one word of their owner's already, with no system object of their own, and a thread's stack is the system's, as zenoh-pico's tasks' are |
 | a host link's waits handed to the session: the boxed duplicate of its socket (`FdReadiness`, `SocketReadiness`) that each dial and each accepted link makes, the `Arc` the engine makes of it, and a wait for room as well (`AndRoom::of`) for each wait on a link that owes a write; the scouting window's list of its members' sockets for each wait (`ScoutMembers::wait`, `wait_readable_any`) | `wz-runtime-posix` `net.rs`, `windows/mod.rs`, `scouting.rs`; `wz-runtime-coop` `session_drive.rs`; `wz-capi-coop` `engine.rs` | U10's and U11's remainder: the wait a value the link lends (`SessionDatagramLink::readiness`) and not a box, the set of the session's waits kept in its arena; the window's under U15 |
 
@@ -703,11 +735,11 @@ heap's own header of each block, not a measurement.
 | the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
-| a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
+| a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | none from the heap: blocks of two memory slabs of `CONFIG_WZ_OS_MUTEXES` and `CONFIG_WZ_OS_CONDVARS` in `.noinit` (20 to 30 bytes a block, estimate) | done (U11) |
 | the session's handle, in a place of the session's arena, and its drive, the engine's own `Arc` kept in the handle | open | none beyond the arena | done (U9, U10) |
 | the config (`ConfigState`: `CONFIG_ENTRIES` rows of 16 bytes and `CONFIG_TEXT_BYTES` of text, one block written in place; `arm_w.conf` states 2 and 72) | before the open, dropped by it | about 110, alive while the arena is reserved (about 200 while it was a `BTreeMap<u8, String>` of the mode and the locator, and about 400 at the pico preset's 8 and 256) | U14 done; its pool slot U9 |
 | a link's setup: the entropy source's `Arc` (`SharedEntropy`; the box inside holds a source of no size, which allocates nothing), the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
-| the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
+| the read task: its stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` and its `struct wz_os_thread` are a static array of `CONFIG_WZ_OS_THREADS` (1 in `arm_w_mt.conf`, 0 in the st cells), as zenoh-pico places its tasks' stacks (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | the flag and the body, some tens (estimate) | the stack and the record done (U11); the flag and the body U10 |
 | a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; `acquire_keyexpr` and `declare_write_filter` take the key as a borrow (U10) | each declaration | about 250 kept | U9, U6, U11 |
 | a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key canonized as a `String`, which the port takes as a borrow (U10) | each declaration | about 350 kept | U7, U6, U5 |
 | `z_bytes_clone`: the payload's place (`box_bytes`) | each put of the put cell | 24, freed by the put | U9 |
