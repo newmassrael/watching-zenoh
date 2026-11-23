@@ -17383,7 +17383,7 @@ fn batch_keyexprs(outcome: &wz_session_core::driver_loop::DriverLoopOutcome) -> 
         wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } => messages
             .iter()
             .map(|m| {
-                crate::interceptor::keyexpr::resolve_governed_keyexpr(m, &empty)
+                crate::interceptor::keyexpr::resolve_governed_keyexpr(m.view(), &empty)
                     .expect("fixture keyexprs are literal")
             })
             .collect(),

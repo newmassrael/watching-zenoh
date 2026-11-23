@@ -3670,7 +3670,7 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
     )
 ))]
 pub type ReplyEgressGate =
-    alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
+    alloc::boxed::Box<dyn Fn(crate::network_message::MessageRef<'_>) -> bool + Send + Sync>;
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
@@ -8445,8 +8445,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// shape as the lowlatency / compression merges above. Monotonically
     /// non-increasing, so a second Init cannot raise a level a first one
     /// lowered.
-    // Out of line: a handshake step's, which the receive of every message would carry inlined.
-    #[inline(never)]
     pub fn negotiate_patch_against_peer(&self, peer_patch: u8) {
         R::with_mutex_mut(&self.negotiated_patch, |s| {
             // The first Init starts from wz's OWN announcement (R121f1 puts
@@ -8846,8 +8844,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the caller reads the chain ONCE — [`crate::extpatch::peer_patch`] is
     /// also what feeds [`Self::negotiate_patch_against_peer`] on the very next
     /// step, and a rejected level must never reach that `min()`.
-    // Out of line: a handshake step's, which the receive of every message would carry inlined.
-    #[inline(never)]
     pub fn init_ack_patch_acceptable(&self, peer_patch: u8) -> bool {
         crate::extpatch::init_ack_patch_acceptable(self.advertised_patch(), peer_patch)
     }
@@ -10006,8 +10002,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// what makes the slot behave like the stack value -- the next handshake
     /// draws its own at InitAck ([`Self::draw_cookie_nonce`]).
     #[cfg(feature = "codec-open-body")]
-    // Out of line: a handshake step's, which the receive of every message would carry inlined.
-    #[inline(never)]
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
         #[cfg(feature = "session-unicast-accept")]
         {
@@ -10145,8 +10139,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// initiator's caps come off the InitAck and are held, so its seed has
     /// nothing to wait for but admission.
     #[cfg(feature = "codec-open-body")]
-    // Out of line: a handshake step's, which the receive of every message would carry inlined.
-    #[inline(never)]
     pub(crate) fn admit_open_ack(&self, lease: u64, initial_sn: u64) {
         R::with_mutex_mut(&self.awaiting_open_ack, |s| *s = false);
         // R311ke — pico captures `_initial_sn_rx` from either Open body
@@ -10832,8 +10824,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// then drives the FSM's `framing.error` arm, which closes with
     /// `CloseReason::Invalid`, upstream's reason for this check.
     #[cfg(feature = "codec-init-body")]
-    // Out of line: a handshake step's, which the receive of every message would carry inlined.
-    #[inline(never)]
     pub fn init_ack_zid_acceptable(&self, init_ack_zid: &[u8]) -> bool {
         // A `match`, not `is_none_or`: that method is stable since 1.82 and
         // this crate builds with 1.81.
@@ -14347,8 +14337,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// `None`, with nothing sent, where the owned message is what goes out
     /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]): a session that rewrites the keys it
-    /// originates, a build whose network counters classify a message by its owned form, and
-    /// metadata that starts a timestamp stack.
+    /// originates, and a build whose network counters classify a message by its owned form.
     #[cfg(all(
         feature = "codec-push",
         feature = "alloc",
@@ -14374,10 +14363,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-stats"))]
         {
             if self.rewrites_originated_keys() {
-                return None;
-            }
-            #[cfg(feature = "pubsub-ts-stack")]
-            if meta.ts_stack.is_some() {
                 return None;
             }
             let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
@@ -15454,22 +15439,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // governs, still ends the peer's Interest. A build with no egress gate
         // (`reply-egress-gate`) asks nothing.
         #[cfg(feature = "reply-egress-gate")]
-        let declare = if self
+        if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
+            && !self.reply_gate_admits(crate::network_message::MessageRef::Declare(&declare))
         {
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
-                return;
-            }
-            match message {
-                crate::network_message::NetworkMessage::Declare(declare) => *declare,
-                _ => return,
-            }
-        } else {
-            declare
-        };
+            return;
+        }
         // §5.21 routing-namespace — the answer to an interest is a `Declare` like any other
         // the node makes, and upstream's decorator gives it the prefix whatever the interest id
         // (`handle_declare_egress` reads none). This dispatch is below the egress arm, so it is
@@ -15515,9 +15491,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let Some(declare) = owned() else {
                 return;
             };
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(crate::network_message::MessageRef::Declare(&declare)) {
                 return;
             }
         }
@@ -16829,10 +16803,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// bytes the owned builder writes for the same description.
     ///
     /// The owned `Request` goes out instead where the session needs that message itself: a
-    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), a build
-    /// whose network counters classify a message by its owned form (`transport-stats`), and a
-    /// query that starts a timestamp stack. A build with no allocator has no owned message, and
-    /// refuses such a query as `FeatureDisabled`.
+    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), and a
+    /// build whose network counters classify a message by its owned form (`transport-stats`). A
+    /// build with no allocator has no owned message, and refuses such a query as `FeatureDisabled`.
     ///
     /// Reliable, as every query is: a Query lost on the way would leave the asker waiting for
     /// answers and a final that never come. Routed at the band its QoS names, and an express one
@@ -16842,12 +16815,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         parts: crate::query_parts::GetParts<'_>,
     ) -> Result<(), SendWireError> {
-        let writer = crate::lent_request::RequestWriter::new(parts).filter(|_| {
-            !crate::lent_request::COUNTED_FROM_OWNED && !self.rewrites_originated_keys()
-        });
-        let Some(writer) = writer else {
+        if crate::lent_request::COUNTED_FROM_OWNED || self.rewrites_originated_keys() {
             return self.send_owned_get(parts);
-        };
+        }
+        let writer = crate::lent_request::RequestWriter::new(parts);
         let qos = parts.query.qos;
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
         // Request has no size constant, and the link lends a slot of this size. A query the
@@ -17064,15 +17035,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 return Some(response);
             }
-            let message =
-                crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(crate::network_message::MessageRef::Response(&response)) {
                 return None;
             }
-            match message {
-                crate::network_message::NetworkMessage::Response(response) => Some(*response),
-                _ => None,
-            }
+            Some(response)
         }
         // A build with no egress gate admits every reply.
         #[cfg(not(feature = "reply-egress-gate"))]
@@ -17130,9 +17096,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber"
         )
     ))]
-    fn reply_gate_admits(&self, message: &crate::network_message::NetworkMessage) -> bool {
+    fn reply_gate_admits(&self, reply: crate::network_message::MessageRef<'_>) -> bool {
         R::with_mutex_mut(&self.egress_reply_gate, |slot| {
-            slot.as_ref().map_or(true, |gate| gate(message))
+            slot.as_ref().map_or(true, |gate| gate(reply))
         })
     }
 

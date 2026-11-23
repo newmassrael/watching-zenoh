@@ -1189,7 +1189,12 @@ pub enum FragmentBody<'a> {
 
 /// The body encoder a lent chain re-runs per fragment, as a trait object so a
 /// chain over any message type is one function and not one per message type.
-#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+/// Named in every build: a group's lent push (`multicast_tx::MulticastTxEncoded`) carries one
+/// whether or not its build lends slots or cuts chains.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "transport-fragmentation", feature = "transport-tx-lend")
+))]
 pub type BodyEncoder<'f> = dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'f;
 
 /// Write ONE fragment of `body` (the range `span` names) into `buf`: the header

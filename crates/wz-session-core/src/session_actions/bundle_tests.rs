@@ -297,7 +297,7 @@ mod reply_egress_gate {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::bundle;
-    use crate::network_message::NetworkMessage;
+    use crate::network_message::MessageRef;
     use crate::response_build::build_response_reply;
     use crate::session_actions::ReplyEgressGate;
     use crate::wire::ResponseOwned;
@@ -321,9 +321,9 @@ mod reply_egress_gate {
         fn installed(&self) -> ReplyEgressGate {
             let asked = Arc::clone(&self.asked);
             let admits = Arc::clone(&self.admits);
-            Box::new(move |message: &NetworkMessage| {
+            Box::new(move |reply: MessageRef<'_>| {
                 asked.fetch_add(1, Ordering::SeqCst);
-                matches!(message, NetworkMessage::Response(_)) && admits.load(Ordering::SeqCst)
+                matches!(reply, MessageRef::Response(_)) && admits.load(Ordering::SeqCst)
             })
         }
 

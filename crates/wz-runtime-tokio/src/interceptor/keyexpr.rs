@@ -28,7 +28,7 @@ use hashbrown::HashMap;
 
 use wz_codecs::wireexpr::WireexprOwned;
 use wz_session_core::declare_ext_keyexpr::resolve_ext_keyexpr;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::MessageRef;
 use wz_session_core::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant};
 use wz_session_core::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 
@@ -53,7 +53,7 @@ use wz_session_core::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 /// session that holds both spaces calls [`resolve_governed_keyexpr_in`].
 #[cfg(any(feature = "routing-router-hat", test))]
 pub(crate) fn resolve_governed_keyexpr(
-    msg: &NetworkMessage,
+    msg: MessageRef<'_>,
     keyexpr_table: &HashMap<u64, String>,
 ) -> Option<String> {
     resolve_governed_keyexpr_in(msg, MappingSpaces::peer_only(keyexpr_table))
@@ -70,23 +70,21 @@ pub(crate) fn resolve_governed_keyexpr(
 /// above), so an egress policy that read our aliases out of the peer's table refused every put
 /// on a declared key, the key the policy names or not.
 pub(crate) fn resolve_governed_keyexpr_in(
-    msg: &NetworkMessage,
+    msg: MessageRef<'_>,
     spaces: MappingSpaces<'_>,
 ) -> Option<String> {
     match msg {
-        NetworkMessage::Push(p) => resolve_wireexpr_in(&p.keyexpr.body, spaces),
-        NetworkMessage::Request(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
-        NetworkMessage::Response(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
-        NetworkMessage::Declare(d) => declare_governed_keyexpr(d, spaces),
+        MessageRef::Push(p) => resolve_wireexpr_in(&p.keyexpr.body, spaces),
+        MessageRef::Request(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
+        MessageRef::Response(r) => resolve_wireexpr_in(&r.keyexpr.body, spaces),
+        MessageRef::Declare(d) => declare_governed_keyexpr(d, spaces),
         // An Interest carries its keyexpr in the body zenoh writes only when the
         // mode is not Final (`zenoh-codec network/interest.rs:69-73`), so a Final
         // Interest answers `None` here — and is ungoverned at the action arm, the
         // same place zenoh leaves it unfiltered.
-        NetworkMessage::Interest(i) => {
-            wz_session_core::interest_build::interest_body(&i.header_c_or_f)
-                .and_then(|b| b.keyexpr.as_ref())
-                .and_then(|we| resolve_wireexpr_in(&we.body, spaces))
-        }
+        MessageRef::Interest(i) => wz_session_core::interest_build::interest_body(&i.header_c_or_f)
+            .and_then(|b| b.keyexpr.as_ref())
+            .and_then(|we| resolve_wireexpr_in(&we.body, spaces)),
         _ => None,
     }
 }

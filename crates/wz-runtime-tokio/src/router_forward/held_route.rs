@@ -285,9 +285,9 @@ impl InterceptorContext for HeldFaceContext<'_> {
 
     /// A literal Push's key, and `None` for anything else, which a governed kind is denied on: no
     /// alias table is read, because none of this face's aliases can name what a held route sends.
-    fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
+    fn full_keyexpr(&self, msg: MessageRef<'_>) -> Option<String> {
         match msg {
-            NetworkMessage::Push(push) => literal_key(push).map(str::to_owned),
+            MessageRef::Push(push) => literal_key(push).map(str::to_owned),
             _ => None,
         }
     }
@@ -331,8 +331,11 @@ mod tests {
         let message = |push: PushOwned| NetworkMessage::Push(Box::new(push));
         let literal = message(build_push_literal("demo/a", b"x").expect("build literal push"));
         let aliased = message(build_push_aliased(5, None, b"x").expect("build aliased push"));
-        assert_eq!(context.full_keyexpr(&literal).as_deref(), Some("demo/a"));
-        assert_eq!(context.full_keyexpr(&aliased), None);
+        assert_eq!(
+            context.full_keyexpr(literal.view()).as_deref(),
+            Some("demo/a")
+        );
+        assert_eq!(context.full_keyexpr(aliased.view()), None);
         assert_eq!(context.subject(), Some(peer));
     }
 
