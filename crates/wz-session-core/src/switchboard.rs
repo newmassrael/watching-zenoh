@@ -227,7 +227,7 @@ mod alloc_impl {
         /// single chunk, `**` zero-or-more chunks, `$*` intra-chunk substring);
         /// the pattern is canonicalized (so the stored text agrees with the
         /// wire form a peer emits) before being stored. A structurally invalid
-        /// pattern is stored raw with a `log::warn!`, matching
+        /// pattern is stored raw with a warning (`diag_warn!`), matching
         /// [`crate::pubsub::SubscriberRegistry::register_sink`] — the
         /// matcher still operates, the build-time cross-check is the
         /// authoritative guard.
@@ -288,7 +288,7 @@ mod alloc_impl {
             let pattern = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
                 Ok(canon) => String::from(canon.as_str()),
                 Err(err) => {
-                    log::warn!(
+                    crate::diag_warn!(
                         "SwitchboardRegistry::register: keyexpr `{raw}` is not canonical \
                          ({err}); storing raw form. The matcher still operates but the \
                          stored chunks may drift from the canonical form a peer emits."
