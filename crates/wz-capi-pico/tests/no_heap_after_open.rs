@@ -97,8 +97,10 @@ const NO_ROUND: usize = usize::MAX;
 static SITES_ON: AtomicBool = AtomicBool::new(false);
 /// The round whose counted rounds are running, as its place in `Round::ALL`, or `NO_ROUND`.
 static SITE_ROUND: AtomicUsize = AtomicUsize::new(NO_ROUND);
-/// How many allocations each round made at each site: the round's place and the site.
-static SITES: Mutex<BTreeMap<(usize, String), u64>> = Mutex::new(BTreeMap::new());
+/// The stack of each recorded allocation and the place of its round, read only once every round
+/// has run: reading a stack's symbols takes far longer than capturing it, and a round that took
+/// that long would not see its traffic cross within the wait.
+static SITES: Mutex<Vec<(usize, Backtrace)>> = Mutex::new(Vec::new());
 
 thread_local! {
     /// Whether this thread is recording a site, whose own allocations are not recorded. A `const`
@@ -145,12 +147,11 @@ fn record_site() {
         return;
     }
     RECORDING.with(|recording| recording.set(true));
-    let site = site_of(&Backtrace::force_capture().to_string());
-    *SITES
+    let stack = Backtrace::force_capture();
+    SITES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .entry((round, site))
-        .or_insert(0) += 1;
+        .push((round, stack));
     RECORDING.with(|recording| recording.set(false));
 }
 
@@ -257,7 +258,7 @@ enum Round {
     SubscriberDeclare,
     QueryableDeclare,
     MatchingListener,
-    LivelinessSub,
+    LivelinessSubscriber,
     QuerierDeclare,
     QuerierGet,
     ConfigClone,
@@ -1237,7 +1238,13 @@ fn allocations_after_open_are_counted_per_operation_family() {
     // With the sites recorded, a window's count holds the records' own allocations too, so the
     // reading is not printed: what is printed is each round's allocations a round, at each site.
     if SITES_ON.load(Ordering::SeqCst) {
-        let sites = std::mem::take(&mut *SITES.lock().unwrap_or_else(PoisonError::into_inner));
+        let stacks = std::mem::take(&mut *SITES.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut sites: BTreeMap<(usize, String), u64> = BTreeMap::new();
+        for (round, stack) in stacks {
+            *sites
+                .entry((round, site_of(&stack.to_string())))
+                .or_insert(0) += 1;
+        }
         let mut lines: Vec<(usize, u64, String)> = sites
             .into_iter()
             .map(|((round, site), count)| (round, count, site))
