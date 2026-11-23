@@ -1733,6 +1733,10 @@ struct FilterEntry {
     /// move it (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h` @
     /// `return ctx->state == WRITE_FILTER_ACTIVE;`).
     peers: Cell<Option<(u64, bool)>>,
+    /// How a write of the filter's entity that brings nothing of its own goes the plain way: the
+    /// facts it is sent from and the declaration that names its key, stated once by the entity
+    /// that declared the filter (`keep_write_filter_plain`). `None` sends it the general way.
+    plain: Cell<Option<(PlainPutParams, ExprId)>>,
 }
 
 /// One Interest the session holds open, and how many hold it.
@@ -5317,6 +5321,65 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .is_some_and(|f| !Self::filter_matches(core, f))
     }
 
+    /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
+    /// every link, once the write filter let it through: `NotPlain`, with nothing sent, when a
+    /// subscriber of the session, a group or a link that rewrites keys wants it the general way.
+    fn put_plain_in(
+        core: &Core<L, C>,
+        keyexpr: &str,
+        mapping_id: ExprId,
+        payload: &[u8],
+        params: &PlainPutParams,
+    ) -> FilteredPut {
+        // A put one of the session's own subscribers wants is not plain: the general publish
+        // sends it and delivers it there.
+        #[cfg(feature = "local-subscriber")]
+        if params.destination.allows_local()
+            && core
+                .registry
+                .borrow()
+                .app
+                .subscribers
+                .has_local_matching(keyexpr)
+        {
+            return FilteredPut::NotPlain;
+        }
+        if !params.destination.allows_remote() {
+            return FilteredPut::Sent(Ok(0));
+        }
+        // A group is sent a put by the general publish, which pushes it onto the group's stage.
+        #[cfg(feature = "group")]
+        if !core.groups.is_empty() {
+            return FilteredPut::NotPlain;
+        }
+        // Asked of every link before any is sent to, so the put goes plain to all of them or to
+        // none: a link that rewrites what it originates (a routing namespace) takes the general
+        // publish for the whole of it. Its namespace is installed before the session sends
+        // anything, so no link answers otherwise below.
+        if core.ups().any(|actions| actions.rewrites_originated_keys()) {
+            return FilteredPut::NotPlain;
+        }
+        let suffix = (mapping_id == 0).then_some(keyexpr);
+        let mut outcome = Ok(0);
+        for actions in core.ups() {
+            let sent = leg(actions
+                .send_plain_put_qos(
+                    mapping_id,
+                    suffix,
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+                .unwrap_or(Err(SendWireError::FeatureDisabled)));
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        FilteredPut::Sent(outcome)
+    }
+
     /// [`Self::filter_active_in`], except on a session that holds a group the filter does not
     /// ask: such a group is sent a write whatever the filter says, as the tokio engine sends one
     /// (`GroupDeclarations::asks_for_filters`), since on it zenoh-pico sends what its filter would
@@ -6083,6 +6146,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 asked: ask.is_some(),
                 count_local,
                 peers: Cell::new(None),
+                plain: Cell::new(None),
             },
         );
         Ok(id)
@@ -6141,53 +6205,57 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if Self::holds_back_in(core, filter) {
             return FilteredPut::Suppressed;
         }
-        // A put one of the session's own subscribers wants is not plain: the general publish
-        // sends it and delivers it there.
-        #[cfg(feature = "local-subscriber")]
-        if params.destination.allows_local()
-            && core
-                .registry
-                .borrow()
-                .app
-                .subscribers
-                .has_local_matching(keyexpr)
-        {
-            return FilteredPut::NotPlain;
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, params)
+    }
+
+    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
+        let Some(core) = self.live() else {
+            return;
+        };
+        if let Some(entry) = core.0.filters.iter().find(|entry| entry.id == filter) {
+            entry.plain.set(plain);
         }
-        if !params.destination.allows_remote() {
-            return FilteredPut::Sent(Ok(0));
-        }
-        // A group is sent a put by the general publish, which pushes it onto the group's stage.
-        #[cfg(feature = "group")]
-        if !core.groups.is_empty() {
-            return FilteredPut::NotPlain;
-        }
-        // Asked of every link before any is sent to, so the put goes plain to all of them or to
-        // none: a link that rewrites what it originates (a routing namespace) takes the general
-        // publish for the whole of it. Its namespace is installed before the session sends
-        // anything, so no link answers otherwise below.
-        if core.ups().any(|actions| actions.rewrites_originated_keys()) {
-            return FilteredPut::NotPlain;
-        }
-        let suffix = (mapping_id == 0).then_some(keyexpr);
-        let mut outcome = Ok(0);
-        for actions in core.ups() {
-            let sent = leg(actions
-                .send_plain_put_qos(
-                    mapping_id,
-                    suffix,
-                    payload,
-                    params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
-                )
-                .unwrap_or(Err(SendWireError::FeatureDisabled)));
-            if sent.is_err() {
-                outcome = sent;
+    }
+
+    #[inline(never)]
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        if let Some(opts) = opts {
+            if self.write_filter_holds_back(filter) {
+                return FilteredPut::Suppressed;
             }
+            return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
         }
-        FilteredPut::Sent(outcome)
+        // A write that brings nothing of its own: the filter's answer and the plain form its row
+        // keeps, read under one take of the session.
+        let Some(core) = self.live() else {
+            return FilteredPut::Sent(Ok(0));
+        };
+        let core = &core.0;
+        if Self::holds_back_in(core, filter) {
+            return FilteredPut::Suppressed;
+        }
+        let Some((params, mapping_id)) = core
+            .filters
+            .iter()
+            .find(|entry| entry.id == filter)
+            .and_then(|entry| entry.plain.get())
+        else {
+            return FilteredPut::NotPlain;
+        };
+        // A link that names keys its own way is sent the general way, which names the key as
+        // its form says: no declared id goes to every link at once.
+        #[cfg(feature = "shared-key-ids")]
+        if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+            return FilteredPut::NotPlain;
+        }
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
     /// Each group the session joined opens a window too, and is counted as a link is: a group's

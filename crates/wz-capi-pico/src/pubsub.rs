@@ -52,7 +52,7 @@ use crate::result::{
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FanoutError, FilterPlane, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
@@ -1359,6 +1359,14 @@ impl PlainPublisher {
             &wire,
             declared.counts_local(),
         )?;
+        // How a put that brings nothing of its own is sent plain, worked out once from the QoS it
+        // was declared with, when a declaration names the whole key: the filter's row keeps it.
+        filter.keep_plain(
+            (wire.mapping_id != 0 && wire.suffix.is_none())
+                .then(|| declared.apply(put_options()).plain_put_params())
+                .flatten()
+                .map(|params| (params, wire.mapping_id)),
+        );
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1377,19 +1385,31 @@ impl PlainPublisher {
     /// (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`). A session that holds a multicast group
     /// sends whatever the filter says, as upstream's multicast transport does. The engine
-    /// judges the filter and the plain way in the one step that sends ([`WriteFilter::publish`]).
-    pub(crate) fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
+    /// judges the filter in the step that sends ([`WriteFilter::publish`]). `None` is a put that
+    /// brings nothing of its own, which goes the plain way the filter's row keeps.
+    pub(crate) fn publish(&self, payload: &[u8], opts: Option<PublishOptions>) -> ZResult {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
         if self.shared.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        let opts = self.declared.apply(opts);
-        publish_code(
-            self.filter
-                .publish(self.key.literal(), &self.wire, payload, &opts),
-        )
+        let opts = opts.map(|opts| self.declared.apply(opts));
+        match self
+            .filter
+            .publish(self.key.literal(), &self.wire, payload, opts.as_ref())
+        {
+            FilteredPut::Suppressed => Z_OK,
+            FilteredPut::Sent(sent) => publish_code(sent),
+            // The filter let a bare put through and it is not plain on this node (no plain form
+            // kept, a subscriber of the session, a group or a link that rewrites keys).
+            FilteredPut::NotPlain => publish_code(self.shared.publish_on_wire_all(
+                self.key.literal(),
+                &self.wire,
+                payload,
+                &self.declared.apply(put_options()),
+            )),
+        }
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -1439,7 +1459,7 @@ impl PublisherState {
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
-    fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
+    fn publish(&self, payload: &[u8], opts: Option<PublishOptions>) -> ZResult {
         self.core.publish(payload, opts)
     }
 
@@ -2605,7 +2625,7 @@ pub unsafe extern "C" fn z_publisher_delete(
                 opts = opts.with_source_info(si);
             }
         }
-        state.publish(&[], opts)
+        state.publish(&[], Some(opts))
     })
 }
 
@@ -2752,10 +2772,7 @@ pub unsafe extern "C" fn z_publisher_put(
         // subscriber reported `encoding: zenoh/bytes` with no attachment and no
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
-        state.publish(
-            &buf,
-            publisher_put_options(options).unwrap_or_else(put_options),
-        )
+        state.publish(&buf, publisher_put_options(options))
     })
 }
 

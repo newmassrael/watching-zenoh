@@ -48,7 +48,7 @@
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::{FilterId, FilterPlane, MatchId, MatchingSink, Refusal, WireKey};
+use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
@@ -214,16 +214,28 @@ impl WriteFilter {
         self.shared.write_filter_holds_back(self.id)
     }
 
-    /// A put or a delete of the entity this filter is for, sent unless the filter holds it
-    /// back, which answers `Ok(0)` as pico answers a suppressed write: the engine's one entry
-    /// for it (`publish_filtered`), which also judges whether it goes the plain way.
+    /// State how a write of this filter's entity that brings nothing of its own goes the plain
+    /// way, once, at the entity's declare: the filter's row in the engine keeps it.
+    pub(crate) fn keep_plain(
+        &self,
+        plain: Option<(
+            wz_session_core::publish_options::PlainPutParams,
+            wz_session_core::wire_id::ExprId,
+        )>,
+    ) {
+        self.shared.keep_write_filter_plain(self.id, plain);
+    }
+
+    /// A put or a delete of the entity this filter is for, unless the filter holds it back: the
+    /// engine's one entry for it (`publish_filtered`). A write with no options of its own goes
+    /// the plain way the row keeps ([`Self::keep_plain`]), or comes back `NotPlain`.
     pub(crate) fn publish(
         &self,
         keyexpr: &str,
         wire: &WireKey,
         payload: &[u8],
-        opts: &wz_session_core::publish_options::PublishOptions,
-    ) -> Result<usize, wz_capi_port::FanoutError> {
+        opts: Option<&wz_session_core::publish_options::PublishOptions>,
+    ) -> FilteredPut {
         self.shared
             .publish_filtered(self.id, keyexpr, wire, payload, opts)
     }

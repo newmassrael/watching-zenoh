@@ -1326,9 +1326,10 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
-/// The one entry a declared entity's write goes through (`publish_filtered`) holds a put back
-/// while its filter says nothing matches, answering it sent to no one, and sends it once a
-/// subscriber opens the filter.
+/// The one entry a declared entity's write goes through (`publish_filtered`) holds a write back
+/// while its filter says nothing matches, and once a subscriber opens the filter sends one with
+/// options the general way and one with none the plain way its row keeps, or answers `NotPlain`
+/// with nothing sent when the row keeps none.
 #[test]
 fn a_filtered_publish_is_held_back_then_sent() {
     let router = Router::start(CatchAll::None);
@@ -1350,10 +1351,16 @@ fn a_filtered_publish_is_held_back_then_sent() {
         router.seen(|s| s.interests) > 0
     });
     let opts = PublishOptions::put();
+    let literal = WireKey::literal();
     assert_eq!(
-        engine.publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", &opts),
-        Ok(0),
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", Some(&opts)),
+        FilteredPut::Suppressed,
         "no subscriber yet: the put is held back"
+    );
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::Suppressed,
+        "a bare put is held back the same"
     );
     for _ in 0..20 {
         let _ = SessionDrive::read(&*engine, false);
@@ -1368,11 +1375,26 @@ fn a_filtered_publish_is_held_back_then_sent() {
     until(&engine, "the filter to open", || {
         !engine.write_filter_active(filter)
     });
-    assert!(engine
-        .publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", &opts)
-        .is_ok());
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", Some(&opts)),
+        FilteredPut::Sent(Ok(_))
+    ));
     until(&engine, "the router to receive the put", || {
         router.seen(|s| s.pushes) == 1
+    });
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::NotPlain,
+        "a row that keeps no plain form sends nothing itself"
+    );
+    let params = opts.plain_put_params().expect("a plain put");
+    engine.keep_write_filter_plain(filter, Some((params, 0)));
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &literal, b"v", None),
+        FilteredPut::Sent(Ok(_))
+    ));
+    until(&engine, "the router to receive the plain put", || {
+        router.seen(|s| s.pushes) == 2
     });
     SessionDrive::close(&*engine);
 }
