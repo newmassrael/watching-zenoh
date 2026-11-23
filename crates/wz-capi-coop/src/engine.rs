@@ -89,7 +89,7 @@ use wz_session_core::declare::matching::BoxedMatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
 use wz_session_core::driver_loop::{DriverOutcome, EventSink, IterationEvent};
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
@@ -5123,7 +5123,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core: &mut Core<L, C>,
         plane: FilterPlane,
         keyexpr: &str,
-        form: &InterestForm,
+        form: InterestAsk<'_>,
     ) -> Result<(), Declined> {
         if let Some(hold) = core
             .interests
@@ -5147,7 +5147,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Err(Declined::NoEntityId);
         };
         // The rest of the key the form names is read from the row's own key, not copied.
-        let suffix_at = suffix_place(keyexpr, form.suffix.as_deref());
+        let suffix_at = suffix_place(keyexpr, form.suffix);
         let hold = InterestHold {
             plane,
             keyexpr: key,
@@ -5157,7 +5157,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 suffix: if suffix_at.is_some() {
                     None
                 } else {
-                    form.suffix.clone()
+                    form.suffix.map(String::from)
                 },
                 aggregate: form.aggregate,
             },
@@ -5996,9 +5996,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core,
             plane,
             keyexpr,
-            &InterestForm {
+            InterestAsk {
                 mapping_id: 0,
-                suffix: Some(keyexpr.to_owned()),
+                suffix: Some(keyexpr),
                 aggregate: false,
             },
         )?;
@@ -6076,7 +6076,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
         count_local: bool,
@@ -6110,7 +6110,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let mut spent = None;
         // A filter whose Interest the session cannot hold, or that finds no id left, is refused
         // and spends no filter id.
-        match &ask {
+        match ask {
             Some(form) => {
                 let before = core.interests.len();
                 self.acquire_interest(core, plane, keyexpr, form)?;

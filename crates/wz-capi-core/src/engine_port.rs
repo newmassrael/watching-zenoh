@@ -12,7 +12,7 @@ use wz_capi_port::{
     PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -392,7 +392,7 @@ impl SessionEngine for SharedSession {
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A closed session declares nothing: a filter on it would hold every write back for good.

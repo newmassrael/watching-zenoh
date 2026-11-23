@@ -1304,7 +1304,7 @@ impl Engine {
                         wz_capi_core::faces::FilterPlane::Subscribers,
                         key,
                         &wire,
-                        ask,
+                        ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
                     .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?;
@@ -1511,7 +1511,7 @@ impl Engine {
                         },
                         key,
                         &wire,
-                        ask,
+                        ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
                     .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?;

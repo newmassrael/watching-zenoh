@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
@@ -350,13 +350,14 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// zenoh-pico's does (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `intr._id = _z_get_entity_id(zn);`), so it is refused once the session has handed out every
     /// id ([`Self::next_entity_id`]): a filter that could not ask would hold every write back. A
-    /// refused filter answers why, with nothing held, asked or numbered.
+    /// refused filter answers why, with nothing held, asked or numbered. `ask` is lent: an engine
+    /// copies the rest of the key it names only where it keeps one of its own.
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Result<FilterId, Refusal>;
 

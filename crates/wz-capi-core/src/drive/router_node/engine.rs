@@ -26,7 +26,7 @@ use wz_capi_port::{
     StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -366,7 +366,7 @@ impl SessionEngine for RouterState {
         _plane: FilterPlane,
         _keyexpr: &str,
         _wire: &WireKey,
-        _ask: Option<InterestForm>,
+        _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks

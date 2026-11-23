@@ -17,7 +17,7 @@ use wz_capi_port::{
     Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link::RxBytes;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -207,7 +207,7 @@ impl SessionEngine for Script {
         _plane: FilterPlane,
         _keyexpr: &str,
         _wire: &WireKey,
-        _ask: Option<InterestForm>,
+        _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         Ok(0)

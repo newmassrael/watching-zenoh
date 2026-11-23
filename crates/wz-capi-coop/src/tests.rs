@@ -22,7 +22,7 @@ use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
@@ -1282,9 +1282,9 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1340,9 +1340,9 @@ fn a_filtered_publish_is_held_back_then_sent() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1434,9 +1434,9 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
             plane,
             "demo/q",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/q".to_owned()),
+                suffix: Some("demo/q"),
                 aggregate: false,
             }),
             false,
@@ -1473,9 +1473,9 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let ask = || {
-        Some(InterestForm {
+        Some(InterestAsk {
             mapping_id: 0,
-            suffix: Some("demo/q".to_owned()),
+            suffix: Some("demo/q"),
             aggregate: false,
         })
     };
@@ -1575,9 +1575,9 @@ fn a_listener_declared_on_a_match_is_told_once() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,
@@ -1641,9 +1641,9 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
             FilterPlane::Subscribers,
             "demo/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/x".to_owned()),
+                suffix: Some("demo/x"),
                 aggregate: false,
             }),
             false,

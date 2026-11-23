@@ -122,6 +122,7 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
 use wz_session_core::admission_retry::AdmissionRetry;
 use wz_session_core::atomic_tx::{decide, AllOrNone, LegRoom};
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_restriction::{LinkRestriction, LinkSlot};
 use wz_session_core::policy::SessionPolicy;
@@ -6514,10 +6515,10 @@ impl SharedSession {
         })
     }
 
-    /// The question a write filter on `keyexpr` asks every face, `form` being how its caller
-    /// names the key: a publisher's under the `aggregation/publishers` aggregate that includes
+    /// The question a write filter on `keyexpr` asks every face, `ask` being how its caller
+    /// names the key, kept as a form of the filter's own: a publisher's under the `aggregation/publishers` aggregate that includes
     /// the key, else as asked. See [`FilterAsk`].
-    fn filter_ask(&self, plane: FilterPlane, keyexpr: &str, form: InterestForm) -> FilterAsk {
+    fn filter_ask(&self, plane: FilterPlane, keyexpr: &str, ask: InterestAsk<'_>) -> FilterAsk {
         let aggregate = match plane {
             FilterPlane::Subscribers => self.aggregation.publisher_aggregate(keyexpr),
             FilterPlane::Queryables { .. } => None,
@@ -6533,7 +6534,7 @@ impl SharedSession {
             },
             None => FilterAsk {
                 key: keyexpr.to_owned(),
-                form,
+                form: ask.to_form(),
             },
         }
     }
@@ -6573,7 +6574,7 @@ impl SharedSession {
         plane: FilterPlane,
         keyexpr: String,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Option<FilterId> {
         let mut guard = self.lock();

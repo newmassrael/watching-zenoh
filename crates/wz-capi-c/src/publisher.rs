@@ -910,9 +910,9 @@ pub(crate) unsafe fn declare_publisher_stated(
                 wz_capi_core::faces::FilterPlane::Subscribers,
                 keyexpr.clone(),
                 &wz_capi_core::faces::WireKey::literal(),
-                Some(wz_session_core::declare_form::InterestForm {
+                Some(wz_session_core::declare_form::InterestAsk {
                     mapping_id: 0,
-                    suffix: Some(keyexpr.clone()),
+                    suffix: Some(keyexpr.as_str()),
                     aggregate: false,
                 }),
                 base.allowed_destination.allows_local(),

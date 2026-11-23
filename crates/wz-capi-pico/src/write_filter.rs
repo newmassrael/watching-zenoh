@@ -51,7 +51,7 @@ use wz_capi_port::os::Mutex;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
 use crate::ffi::{LatchList, ReleaseLatch};
@@ -159,7 +159,7 @@ impl WriteFilter {
         count_local: bool,
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
-        let ask = interest_form(&shared, session.mode, key, wire);
+        let ask = interest_ask(&shared, session.mode, key, wire);
         let keyexpr = key.share_text();
         let id = shared
             .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
@@ -259,23 +259,23 @@ impl Drop for WriteFilter {
 }
 
 /// How the entity's Interest is put, or `None` for none — pico's rules, see the
-/// module doc.
-fn interest_form(
+/// module doc. The key is lent from the entity's own declaration and wire form.
+fn interest_ask<'a>(
     shared: &Arc<Engine>,
     mode: WhatAmI,
-    key: &DeclaredKeyexpr,
-    wire: &WireKey,
-) -> Option<InterestForm> {
+    key: &'a DeclaredKeyexpr,
+    wire: &'a WireKey,
+) -> Option<InterestAsk<'a>> {
     let client = mode == WhatAmI::Client;
     if !client && !shared.has_router_peer() {
         return None;
     }
     let (mapping_id, suffix) = if wire.mapping_id == 0 {
-        (0, Some(key.literal().to_owned()))
+        (0, Some(key.literal()))
     } else {
-        (wire.mapping_id, wire.suffix.clone())
+        (wire.mapping_id, wire.suffix.as_deref())
     };
-    Some(InterestForm {
+    Some(InterestAsk {
         mapping_id,
         suffix,
         aggregate: client,

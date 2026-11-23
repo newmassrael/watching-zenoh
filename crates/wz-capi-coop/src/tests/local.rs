@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, WireKey};
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
@@ -174,9 +174,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
                 FilterPlane::Subscribers,
                 "demo/l/x",
                 &WireKey::literal(),
-                Some(InterestForm {
+                Some(InterestAsk {
                     mapping_id: 0,
-                    suffix: Some("demo/l/x".to_owned()),
+                    suffix: Some("demo/l/x"),
                     aggregate: false,
                 }),
                 count_local,

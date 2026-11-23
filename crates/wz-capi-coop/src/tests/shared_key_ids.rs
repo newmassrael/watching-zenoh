@@ -15,7 +15,7 @@ use wz_capi_port::{
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::{KeyWireForm, SessionPolicy};
@@ -595,7 +595,7 @@ fn filter_by(engine: &Engine, declared: ExprId) {
             FilterPlane::Subscribers,
             ASKED,
             &WireKey::aliased(declared, None),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: declared,
                 suffix: None,
                 aggregate: false,
