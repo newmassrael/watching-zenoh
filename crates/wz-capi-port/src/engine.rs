@@ -36,9 +36,9 @@ use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick,
-    TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink,
+    MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink,
+    Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -414,15 +414,10 @@ pub trait SessionEngine: Send + Sync + 'static {
         true
     }
 
-    /// Open a batch window on the session's links (zenoh-pico `zp_batch_start`): how many opened.
-    fn batch_start_all(&self) -> usize;
-
-    /// Flush the open batch windows (zenoh-pico `zp_batch_flush`): how many flushed.
-    fn batch_flush_all(&self) -> usize;
-
-    /// Close the batch windows, sending what they hold (zenoh-pico `zp_batch_stop`): how many
-    /// closed.
-    fn batch_stop_all(&self) -> usize;
+    /// Take `step` on the batch window of each of the session's links (zenoh-pico's
+    /// `zp_batch_start`, `zp_batch_flush` and `zp_batch_stop`): how many windows took it. One
+    /// walk of the links for the three steps.
+    fn batch_all(&self, step: BatchStep) -> usize;
 
     /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
     /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`

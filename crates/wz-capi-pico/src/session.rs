@@ -88,7 +88,7 @@ use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, Sessi
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
 #[cfg(feature = "multi-thread")]
-use wz_capi_port::ReadTaskStartRefused;
+use wz_capi_port::{BatchStep, ReadTaskStartRefused};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
@@ -2423,14 +2423,6 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
     batch_door(zs, BatchStep::Stop)
 }
 
-/// What a `zp_batch_*` door asks of every batch window of the session.
-#[derive(Clone, Copy)]
-enum BatchStep {
-    Start,
-    Flush,
-    Stop,
-}
-
 /// The body the three batch doors share, out of line so that none of them holds a copy of the
 /// session's lookup and the transport check. pico answers a null session as a closed one for all
 /// three (`if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);`), and a session with no
@@ -2446,11 +2438,7 @@ unsafe fn batch_door(zs: *const z_loaned_session_t, step: BatchStep) -> ZResult 
             if !engine.has_transport() {
                 return Z_ERR_TRANSPORT_NOT_AVAILABLE;
             }
-            match step {
-                BatchStep::Start => engine.batch_start_all(),
-                BatchStep::Flush => engine.batch_flush_all(),
-                BatchStep::Stop => engine.batch_stop_all(),
-            };
+            engine.batch_all(step);
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,

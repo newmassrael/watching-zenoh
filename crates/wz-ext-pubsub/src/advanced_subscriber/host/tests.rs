@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
@@ -248,13 +249,7 @@ impl SessionEngine for Script {
             None => FilteredPut::NotPlain,
         }
     }
-    fn batch_start_all(&self) -> usize {
-        0
-    }
-    fn batch_flush_all(&self) -> usize {
-        0
-    }
-    fn batch_stop_all(&self) -> usize {
+    fn batch_all(&self, _step: BatchStep) -> usize {
         0
     }
     fn declare_liveliness_token_on_wire(

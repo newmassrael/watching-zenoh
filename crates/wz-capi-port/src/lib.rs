@@ -368,6 +368,18 @@ impl core::fmt::Display for LinksNotHonoured {
 
 impl core::error::Error for LinksNotHonoured {}
 
+/// What a `zp_batch_*` call asks of every batch window of a session
+/// ([`SessionEngine::batch_all`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchStep {
+    /// Open a window (zenoh-pico `zp_batch_start`).
+    Start,
+    /// Write what the open windows hold and keep them open (zenoh-pico `zp_batch_flush`).
+    Flush,
+    /// Close the windows, writing what they hold (zenoh-pico `zp_batch_stop`).
+    Stop,
+}
+
 /// What a put through a write filter did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilteredPut {

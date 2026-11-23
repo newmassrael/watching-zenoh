@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink,
-    PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
     StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
@@ -420,15 +420,7 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn batch_start_all(&self) -> usize {
-        0
-    }
-
-    fn batch_flush_all(&self) -> usize {
-        0
-    }
-
-    fn batch_stop_all(&self) -> usize {
+    fn batch_all(&self, _step: BatchStep) -> usize {
         0
     }
 

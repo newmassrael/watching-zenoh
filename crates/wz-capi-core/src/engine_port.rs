@@ -8,9 +8,9 @@
 use std::any::Any;
 
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive, SessionEngine, SubId,
-    SubscriberSink, WireKey,
+    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId,
+    MatchingSink, PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive,
+    SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
@@ -469,16 +469,12 @@ impl SessionEngine for SharedSession {
         !self.face_set().is_empty() || !SharedSession::listen_locators(self).is_empty()
     }
 
-    fn batch_start_all(&self) -> usize {
-        SharedSession::batch_start_all(self)
-    }
-
-    fn batch_flush_all(&self) -> usize {
-        SharedSession::batch_flush_all(self)
-    }
-
-    fn batch_stop_all(&self) -> usize {
-        SharedSession::batch_stop_all(self)
+    fn batch_all(&self, step: BatchStep) -> usize {
+        match step {
+            BatchStep::Start => SharedSession::batch_start_all(self),
+            BatchStep::Flush => SharedSession::batch_flush_all(self),
+            BatchStep::Stop => SharedSession::batch_stop_all(self),
+        }
     }
 
     #[cfg(feature = "queryable")]

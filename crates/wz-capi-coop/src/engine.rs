@@ -60,8 +60,8 @@ use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyAsk,
-    KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
+    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
+    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
     SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
@@ -6265,64 +6265,34 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
-    /// Each group the session joined opens a window too, and is counted as a link is: a group's
+    /// Each group the session joined takes the step too, and is counted as a link is: a group's
     /// window holds what the session sends on the group, as pico's batch holds what it sends on
-    /// its multicast transport.
-    fn batch_start_all(&self) -> usize {
+    /// its multicast transport, and is written by a flush or a stop on the caller's thread, as a
+    /// link's is.
+    fn batch_all(&self, step: BatchStep) -> usize {
         self.live().map_or(0, |core| {
             let links = core
                 .0
                 .ups()
-                .filter(|actions| actions.batch_start().is_ok())
+                .filter(|actions| {
+                    match step {
+                        BatchStep::Start => actions.batch_start(),
+                        BatchStep::Flush => actions.batch_flush(),
+                        BatchStep::Stop => actions.batch_stop(),
+                    }
+                    .is_ok()
+                })
                 .count();
             #[cfg(feature = "group")]
             let groups = core
                 .0
                 .groups
                 .iter()
-                .filter(|group| group.batch_start())
-                .count();
-            #[cfg(not(feature = "group"))]
-            let groups = 0;
-            links + groups
-        })
-    }
-
-    /// Each group's window is written by this call, on the caller's thread, as a link's is.
-    fn batch_flush_all(&self) -> usize {
-        self.live().map_or(0, |core| {
-            let links = core
-                .0
-                .ups()
-                .filter(|actions| actions.batch_flush().is_ok())
-                .count();
-            #[cfg(feature = "group")]
-            let groups = core
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.batch_flush())
-                .count();
-            #[cfg(not(feature = "group"))]
-            let groups = 0;
-            links + groups
-        })
-    }
-
-    /// Each group's window is closed and what it held written by this call.
-    fn batch_stop_all(&self) -> usize {
-        self.live().map_or(0, |core| {
-            let links = core
-                .0
-                .ups()
-                .filter(|actions| actions.batch_stop().is_ok())
-                .count();
-            #[cfg(feature = "group")]
-            let groups = core
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.batch_stop())
+                .filter(|group| match step {
+                    BatchStep::Start => group.batch_start(),
+                    BatchStep::Flush => group.batch_flush(),
+                    BatchStep::Stop => group.batch_stop(),
+                })
                 .count();
             #[cfg(not(feature = "group"))]
             let groups = 0;
