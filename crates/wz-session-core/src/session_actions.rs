@@ -8556,7 +8556,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// @ `other_bound: match open_syn.ext_remote_bound {`). A refused value
     /// leaves the slot untouched.
     pub fn admit_peer_remote_bound(&self, extensions: &[ExtEntryOwned]) -> bool {
-        match crate::extbound::peer_remote_bound(extensions) {
+        self.admit_peer_remote_bound_in(extensions)
+    }
+
+    /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
+    /// message lies (`crate::inbound::ExtChainRef`).
+    pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
+        &self,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> bool {
+        match crate::extbound::peer_remote_bound_in(extensions) {
             Ok(bound) => {
                 R::with_mutex_mut(&self.peer_remote_bound, |s| *s = bound);
                 true
@@ -8751,7 +8760,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the initiator the InitAck's — the both-sides shape
     /// [`Self::negotiate_patch_against_peer`] has.
     pub fn admit_peer_region(&self, extensions: &[ExtEntryOwned]) -> bool {
-        match crate::extregion::peer_region(extensions) {
+        self.admit_peer_region_in(extensions)
+    }
+
+    /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
+    /// message lies (`crate::inbound::ExtChainRef`).
+    pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
+        &self,
+        extensions: impl IntoIterator<Item = E>,
+    ) -> bool {
+        match crate::extregion::peer_region_in(extensions) {
             Ok(region) => {
                 R::with_mutex_mut(&self.peer_region, |s| *s = region);
                 true

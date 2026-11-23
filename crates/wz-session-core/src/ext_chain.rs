@@ -478,7 +478,7 @@ pub(crate) fn check_ext_chain<'a>(
     feature = "codec-keep-alive",
     feature = "alloc"
 ))]
-fn received_entry(
+pub(crate) fn received_entry(
     entry: &wz_codecs::ext_entry::ExtEntryView<'_>,
 ) -> Result<ExtEntryOwned, crate::parse_error::InboundParseError> {
     use crate::parse_error::InboundParseError;
