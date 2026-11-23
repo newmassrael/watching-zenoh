@@ -205,7 +205,7 @@ the declarations owed it (`id_map.rs`, `declaration_sync.rs`, `peer_table.rs`,
 
 The engine's `Core` (faces, listeners, groups, admission), `McuActions` behind `Rc`, the link
 admission registry, reconnect state, the handshake's cookie and signing key, the zid, the
-`Arc<CoopEngine>` the ABI holds, the `Box<dyn SessionDrive>`.
+`Arc<CoopEngine>` the ABI holds (its drive, a `Box<dyn SessionDrive>` until U10, is that `Arc`).
 
 - Bound: one dial face; NEW MAX_FACES for a listening session (today `CoopConfig::max_faces`,
   default 1000) and NEW MAX_ACCEPT_PENDING (today `DEFAULT_ACCEPT_PENDING`, 100);
@@ -466,10 +466,30 @@ suites (C1co, Layer Z) unchanged.
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
     `z_bytes_copy_from_buf` past HELD_PAYLOAD_BYTES answers the code and leaves the source; every
     pool's count after a drop.
+    The session's own place is not a process pool's in a build without the pool doors: a table of
+    HELD_SESSIONS places would be a count the program states nowhere for such a library, and every
+    session of the cooperative engine already has its reservation, its arena. The form is the
+    arena lending the handle's place (a row of the handle's layout in `ArenaPlan`), the handle
+    written there by `z_open` and dropped in place by `z_session_drop`, the memory going back
+    with the arena; a generation beside the place answers a handle kept past its drop.
 11. **U10. The port without heap types.** `wz-capi-port` `engine.rs`, `drive.rs`, `lib.rs`:
     methods returning `Vec` write into a caller's buffer, `Arc<dyn SessionEngine>` becomes the
     session's slot and generation, `Box<dyn SessionDrive>` the session object itself. Families:
     `z_open`, close. Tests: a handle kept past `z_close` is refused, not read.
+    Taken: the cooperative engine hands its own `Arc` as the handle's drive (`CoopDrive`, kept by
+    value in `PicoSessionHandle`, its drop the close), so the open makes no box for it; and every
+    key a `SessionEngine` method takes is `&str`, so a declaration hands the engine its own text
+    and the engine copies it into its key arena, where it was copied already. The tokio engine
+    keeps its boxed drive, which holds its session's drop glue in its own crate. Left: the methods
+    returning `Vec` (`peer_identities`, `group_member_zids`, `face_snapshots`,
+    `listen_locators`, `linkstate_regions`, `keyexpr_declarations`), read only by the info,
+    connectivity and admin doors, whose form is a read by index under the session's lock, each id
+    copied out before the C callback runs (a buffer of every face would be MAX_FACES rows on the
+    stack, and a visitor would run the callback under the lock, which section 4 refuses); and the
+    dispatch, which stays through the trait object because the engine's type is
+    `CoopEngine<L, C>` over the links the build composes (the host's, with a secure channel or
+    groups as features add them, and the program's transport beside them with `app-transport`),
+    so a build has one engine type only once its links are one type.
 12. **U11. The static runtime under the engine.** `wz-runtime-coop` `local.rs`, `executor.rs`,
     `runtime_impl.rs`, `session_runtime.rs`, `wz-capi-coop` `engine/ticker.rs`. Family: idle
     step. Tests: the session's tasks placed at open; a timer table at its limit.
@@ -511,8 +531,8 @@ unit that takes each away:
 | the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
 | the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
 | a payload's place (`box_bytes`: a `Box<ByteBuf>` for each `z_bytes_clone` and each copy, as a build with no thread-local cache keeps none) and its bytes (`Backing::Owned`, an `Arc` over a `Vec`) | `wz-capi-pico` `bytes.rs` | U9: the pools and a block pool of HELD_PAYLOAD_BYTES. `object-pool` implies `unstable-api`, whose layouts a program built without `Z_FEATURE_UNSTABLE_API` (the speed matrix's) does not compile against, so such a build needs the pools apart from their doors |
-| the place of each handle object of a build without the pools (`Slot::take`, a `Box`) | `wz-capi-pico` `object_slot.rs` | U9, as above |
-| an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, the `String` each port call takes and drops, an Interest form's suffix, a subscriber's wire anchor | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs`; `wz-capi-port` `engine.rs` | U6, and U10 for the port's arguments (`&str`) |
+| the place of each handle object of a build without the pools (`Slot::take`, a `Box`), the session's included; its drive is no longer boxed (U10) | `wz-capi-pico` `object_slot.rs` | U9, as above; the session's place from its arena (section 6, U9) |
+| an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, an Interest form's suffix, a subscriber's wire anchor (the port's arguments are `&str` since U10, so no call makes a copy for the engine) | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs` | U6 |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
@@ -544,12 +564,12 @@ heap's own header of each block, not a measurement.
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
-| the session's handle (`Slot::take`, a `Box` without the pools) and its drive (`Box<dyn SessionDrive>`) | open | some hundreds | U9, U10 |
+| the session's handle (`Slot::take`, a `Box` without the pools); its drive is the engine's own `Arc`, kept in the handle (U10) | open | some hundreds | U9 |
 | the config (`ConfigState`, a `BTreeMap<u8, String>` of the mode and the locator) | before the open, dropped by it | about 200, alive while the arena is reserved | U14 |
-| a link's setup: the entropy source's box, the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
+| a link's setup: the entropy source's `Arc` (`SharedEntropy`; the box inside holds a source of no size, which allocates nothing), the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
 | the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
-| a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; and, dropped within the call, the key handed to `acquire_keyexpr` and to `declare_write_filter` | each declaration | about 250 kept, two keys dropped | U9, U6, U10, U11 |
-| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key as `String` | each declaration | about 350 kept | U7, U6, U10, U5 |
+| a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; `acquire_keyexpr` and `declare_write_filter` take the key as a borrow (U10) | each declaration | about 250 kept | U9, U6, U11 |
+| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key canonized as a `String`, which the port takes as a borrow (U10) | each declaration | about 350 kept | U7, U6, U5 |
 | `z_bytes_clone`: the payload's place (`box_bytes`) | each put of the put cell | 24, freed by the put | U9 |
 | `z_bytes_copy_from_buf`: the place, the `Arc<Backing>` and the copied bytes | each round trip of the rtt cell | 56 and the payload, freed by the put | U9 |
 | `z_publisher_put` on a publisher declared with no options of its own beyond the congestion control: `publish_plain`, `put_plain_filtered`, `send_plain_put_qos` into a slot the arena lent | each put | none, read from the source | done (U2) |
