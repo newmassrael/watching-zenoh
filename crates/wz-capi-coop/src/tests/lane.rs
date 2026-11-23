@@ -1431,3 +1431,230 @@ fn a_sample_behind_what_the_lane_holds_goes_through_the_lane() {
         "both went through the lane, in the order they came"
     );
 }
+
+/// The changes a liveliness callback a test holds is handed: its tag, the key and the token.
+#[cfg(feature = "liveliness")]
+type Heard = std::sync::Arc<std::sync::Mutex<Vec<(u8, String, u64)>>>;
+
+/// A liveliness subscriber's callback that notes each change it is handed with `tag`.
+#[cfg(feature = "liveliness")]
+fn hearing(tag: u8, heard: &Heard) -> crate::engine::LivelinessCallback {
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+    let heard = heard.clone();
+    alloc::sync::Arc::new(crate::engine::LiveLiveliness::new(
+        wz_capi_port::LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+            heard
+                .lock()
+                .unwrap()
+                .push((tag, sample.keyexpr.to_owned(), sample.token_id));
+        }),
+    ))
+}
+
+/// The tokens a datagram a link lends tells, offered while the lane holds nothing, are held in the
+/// pending table: one record for a token however many liveliness subscribers it reaches, its key
+/// read where it lies or written into the table when it lies elsewhere (a key the session resolved
+/// from its table of peer tokens), and each handed to its callbacks in the order it came, with
+/// nothing through the lane.
+#[cfg(feature = "liveliness")]
+#[test]
+fn the_pending_tokens_of_a_lent_datagram_are_handed_in_order() {
+    use crate::lane::SharedLane;
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    let heard: Heard = std::sync::Arc::default();
+    let (first, second) = (hearing(1, &heard), hearing(2, &heard));
+    let datagram = *b"demo/t";
+    let lying = core::str::from_utf8(&datagram[..]).unwrap();
+    let elsewhere = String::from("demo/out");
+    let put = LivelinessSample {
+        kind: LivelinessSampleKind::Put,
+        keyexpr: lying,
+        token_id: 7,
+    };
+    let gone = LivelinessSample {
+        kind: LivelinessSampleKind::Delete,
+        keyexpr: &elsewhere,
+        token_id: 8,
+    };
+    // SAFETY (every call on the lane and the lending here): this thread is the lane's one writer,
+    // as a session's step is under its lock, and the datagram outlives every use below.
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.offer_liveliness_to(1, &first, &put) };
+    unsafe { lane.offer_liveliness_to(2, &second, &put) };
+    unsafe { lane.offer_liveliness_to(1, &first, &gone) };
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
+    assert!(
+        lane.lends_a_datagram(),
+        "sealed, the table holds the link back"
+    );
+    assert_eq!(lane.handed_on(), 0, "nothing went through the lane");
+    assert!(lane.deliver_pending(|_, _, _| panic!("no sample was offered")));
+    assert_eq!(
+        *heard.lock().unwrap(),
+        [
+            (1, "demo/t".to_owned(), 7),
+            (2, "demo/t".to_owned(), 7),
+            (1, "demo/out".to_owned(), 8)
+        ],
+        "each token handed to each of its subscribers, in the order it came"
+    );
+    assert_eq!(lane.pending_counts(), (1, 2), "one round of two tokens");
+    assert!(
+        !lane.lends_a_datagram(),
+        "handed out, the link is read again"
+    );
+}
+
+/// A token offered with no datagram lent goes through the lane, as it did before the pending
+/// table took them: the table holds only what lies in a datagram a link lends now.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_token_with_no_datagram_lent_goes_through_the_lane() {
+    use crate::lane::SharedLane;
+    use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    let heard: Heard = std::sync::Arc::default();
+    let first = hearing(1, &heard);
+    let put = LivelinessSample {
+        kind: LivelinessSampleKind::Put,
+        keyexpr: "demo/t",
+        token_id: 7,
+    };
+    // SAFETY: as the previous test's.
+    unsafe { lane.offer_liveliness_to(1, &first, &put) };
+    unsafe { lane.held() }.seal_all();
+    assert!(
+        !lane.deliver_pending(|_, _, _| panic!("no sample was offered")),
+        "the pending table holds nothing"
+    );
+    assert_eq!(lane.handed_on(), 1, "the token went through the lane");
+    assert!(
+        heard.lock().unwrap().is_empty(),
+        "and waits for its delivery"
+    );
+}
+
+/// A reply whose parts lie in a datagram a link lends, its key resolved elsewhere.
+#[cfg(feature = "query")]
+struct Lying<'d> {
+    payload: &'d [u8],
+}
+
+#[cfg(feature = "query")]
+impl wz_session_core::reply_sink::ReplyView for Lying<'_> {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        4
+    }
+
+    fn keyexpr(&self) -> &str {
+        "demo/answer"
+    }
+
+    fn kind(&self) -> wz_session_core::reply_sink::ReplyKind {
+        wz_session_core::reply_sink::ReplyKind::Put
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.payload
+    }
+
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        None
+    }
+}
+
+/// What a leg's callback a test holds is handed: the request id, the key, the payload and where
+/// the payload lies.
+#[cfg(feature = "query")]
+type Answers = std::sync::Arc<std::sync::Mutex<Vec<(u32, String, Vec<u8>, usize)>>>;
+
+/// A leg's callback that notes each reply it is handed.
+#[cfg(feature = "query")]
+fn answering(answers: &Answers) -> alloc::sync::Arc<wz_capi_port::ReplyCallback> {
+    use wz_session_core::reply_sink::ReplyView;
+    let answers = answers.clone();
+    alloc::sync::Arc::new(wz_capi_port::ReplyCallback::shared(
+        move |reply: &dyn ReplyView| {
+            answers.lock().unwrap().push((
+                reply.rid(),
+                reply.keyexpr().to_owned(),
+                reply.payload().to_vec(),
+                reply.payload().as_ptr() as usize,
+            ));
+        },
+    ))
+}
+
+/// A reply of a datagram a link lends, offered while the lane holds nothing, is held in the
+/// pending table and handed to its leg's callback where its payload lies, its key written into
+/// the table; nothing goes through the lane.
+#[cfg(feature = "query")]
+#[test]
+fn a_pending_reply_of_a_lent_datagram_is_handed_where_it_lies() {
+    use crate::lane::SharedLane;
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    let answers: Answers = std::sync::Arc::default();
+    let leg = answering(&answers);
+    let datagram = [5u8, 6, 7];
+    // SAFETY (every call on the lane and the lending here): as the tokens' test's.
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe {
+        lane.offer_reply_to(
+            3,
+            &leg,
+            &Lying {
+                payload: &datagram[1..],
+            },
+        )
+    };
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
+    assert_eq!(lane.handed_on(), 0, "nothing went through the lane");
+    assert!(lane.deliver_pending(|_, _, _| panic!("no sample was offered")));
+    assert_eq!(
+        *answers.lock().unwrap(),
+        [(
+            4,
+            "demo/answer".to_owned(),
+            vec![6, 7],
+            datagram.as_ptr() as usize + 1
+        )],
+        "the reply is handed where its payload lies"
+    );
+    assert!(
+        !lane.lends_a_datagram(),
+        "handed out, the link is read again"
+    );
+}
+
+/// A reply with a part outside the datagram a link lends goes through the lane, copied there,
+/// and the pending table takes nothing. The CONTROL is the previous test.
+#[cfg(feature = "query")]
+#[test]
+fn a_reply_with_a_part_outside_the_datagram_goes_through_the_lane() {
+    use crate::lane::SharedLane;
+
+    let lane = alloc::sync::Arc::new(SharedLane::new(lane(1024, 4)));
+    let answers: Answers = std::sync::Arc::default();
+    let leg = answering(&answers);
+    let datagram = [5u8, 6, 7];
+    // SAFETY: as the previous test's.
+    unsafe { lane.set_lending(Some(&datagram[..])) };
+    unsafe { lane.offer_reply_to(3, &leg, &Answer) };
+    unsafe { lane.set_lending(None) };
+    unsafe { lane.held() }.seal_all();
+    assert!(
+        !lane.deliver_pending(|_, _, _| panic!("no sample was offered")),
+        "the pending table holds nothing"
+    );
+    assert_eq!(lane.handed_on(), 1, "the reply went through the lane");
+    assert!(
+        answers.lock().unwrap().is_empty(),
+        "and waits for its delivery"
+    );
+}

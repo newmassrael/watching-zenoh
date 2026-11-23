@@ -19,20 +19,16 @@
 
 use alloc::sync::Arc;
 
-use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
+use wz_capi_port::{SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, LivelinessSample};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_mcu::dial::McuActions;
 
+use super::LivelinessCallback;
 use crate::lane::SharedLane;
 #[allow(unused_imports)]
 use crate::prelude::*;
-
-/// A liveliness subscriber's callback, as the ABI handed it, shared by the table of callbacks and
-/// the deliveries that copied it out: called through a shared borrow with no lock, as a
-/// subscriber's is, and let go of with the last copy.
-pub(super) type LivelinessCallback = Arc<LivelinessSink>;
 
 /// A token the session holds: what its declaration says on the wire, kept to announce it again
 /// over a new link; holding the key also keeps alive what it holds.
@@ -95,12 +91,19 @@ impl LiveSubEntry {
     }
 }
 
-/// The sink subscriber `id` is registered with: each sample is queued in the session's delivery
-/// lane, its key copied into the lane's bytes.
-pub(super) fn sample_sink(id: SubId, lane: &Arc<SharedLane>) -> BoxedLivelinessSampleSink {
+/// The sink subscriber `id` is registered with, holding its `callback`: each sample of a datagram
+/// a link lends is held for the callback in the lane's pending table, and any other is queued in
+/// the session's delivery lane, its key copied into the lane's bytes
+/// (`SharedLane::offer_liveliness_to`).
+pub(super) fn sample_sink(
+    id: SubId,
+    callback: &LivelinessCallback,
+    lane: &Arc<SharedLane>,
+) -> BoxedLivelinessSampleSink {
     let lane = Arc::clone(lane);
+    let callback = Arc::clone(callback);
     BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
         // SAFETY: the registry hands its sinks a token under the session's lock.
-        unsafe { lane.held() }.offer_liveliness(id, &sample);
+        unsafe { lane.offer_liveliness_to(id, &callback, &sample) };
     })
 }

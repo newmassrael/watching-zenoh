@@ -27,6 +27,7 @@ use alloc::sync::Arc;
 
 use wz_session_core::bounded::{BoundedVec, Lent};
 
+use wz_capi_port::ReplyCallback;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
 use crate::lane::SharedLane;
@@ -143,15 +144,20 @@ impl Drop for LegEnd {
     }
 }
 
-/// The sink of leg `leg`'s pending entry: each reply is queued in the session's delivery
-/// `lane`, and the entry's drop queues the leg's end. The Final itself says nothing more: the
-/// registry drops the entry once its Finals are in, which is the end.
+/// The sink of leg `leg`'s pending entry, holding the leg's `callback`: each reply of a datagram
+/// a link lends is held for the callback in the lane's pending table, and any other is queued in
+/// the session's delivery `lane` (`SharedLane::offer_reply_to`); the entry's drop queues the
+/// leg's end. The Final itself says nothing more: the registry drops the entry once its Finals
+/// are in, which is the end. The table of callbacks holds the callback past the entry, so the
+/// entry's drop, under the session's lock, is never its last.
 pub(super) fn reply_sink(
     leg: u64,
+    callback: &Arc<ReplyCallback>,
     plane: &Arc<GetPlane>,
     lane: &Arc<SharedLane>,
 ) -> BoxedReplySink {
     let lane = Arc::clone(lane);
+    let callback = Arc::clone(callback);
     let end = LegEnd {
         leg,
         plane: Arc::clone(plane),
@@ -159,7 +165,7 @@ pub(super) fn reply_sink(
     BoxedReplySink::new(
         move |view: &dyn ReplyView| {
             // SAFETY: the registry hands its sinks a reply under the session's lock.
-            unsafe { lane.held() }.offer_reply(leg, view);
+            unsafe { lane.offer_reply_to(leg, &callback, view) };
         },
         move |_rid| {
             // Owned by this closure so it is dropped with the sink.

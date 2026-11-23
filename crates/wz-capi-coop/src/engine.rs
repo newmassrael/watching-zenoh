@@ -199,7 +199,7 @@ use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 mod liveliness;
 #[cfg(feature = "liveliness")]
 use {
-    liveliness::{LiveSubEntry, LivelinessCallback, TokenEntry},
+    liveliness::{LiveSubEntry, TokenEntry},
     registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
@@ -1113,6 +1113,42 @@ impl LiveCallback {
 /// A subscriber's callback, shared by its row, the table of callbacks and the deliveries that
 /// copied it out of the row.
 pub(crate) type SubscriberCallback = Arc<LiveCallback>;
+
+/// A liveliness subscriber's callback, as the ABI handed it, held as [`LiveCallback`] holds a
+/// subscriber's: called through a shared borrow with no lock, retired when its subscriber is
+/// undeclared or its session closed, and let go of with the last copy.
+#[cfg(feature = "liveliness")]
+pub(crate) struct LiveLiveliness {
+    live: AtomicBool,
+    call: LivelinessSink,
+}
+
+#[cfg(feature = "liveliness")]
+impl LiveLiveliness {
+    pub(crate) fn new(call: LivelinessSink) -> Self {
+        Self {
+            live: AtomicBool::new(true),
+            call,
+        }
+    }
+
+    /// Hand `sample` to the callback, unless it was retired.
+    pub(crate) fn call(&self, sample: LivelinessSample<'_>) {
+        if self.live.load(Ordering::Acquire) {
+            self.call.call(sample);
+        }
+    }
+
+    /// Hand nothing more: its subscriber is gone.
+    fn retire(&self) {
+        self.live.store(false, Ordering::Release);
+    }
+}
+
+/// A liveliness subscriber's callback, shared by the table of callbacks, the sink its
+/// registration holds and the deliveries that copied it out.
+#[cfg(feature = "liveliness")]
+pub(crate) type LivelinessCallback = Arc<LiveLiveliness>;
 
 /// How many subscribers of one sample a delivery keeps the callbacks of ([`Resolved`]): a sample
 /// for more is handed to the ones past these by a look in the table each.
@@ -4860,8 +4896,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Hold `callback` as what the replies of leg `leg` are handed to, until the leg ends.
     #[cfg(feature = "query")]
-    fn hold_leg(&self, leg: u64, callback: ReplyCallback) {
-        lock(&self.targets).push((TargetKey::Reply(leg), Target::Reply(Arc::new(callback))));
+    fn hold_leg(&self, leg: u64, callback: Arc<ReplyCallback>) {
+        lock(&self.targets).push((TargetKey::Reply(leg), Target::Reply(callback)));
     }
 
     /// One reply to the query that came in under `generation`, as its queryable makes it: onto
@@ -5715,6 +5751,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         #[cfg(feature = "liveliness")]
         if live.is_some() {
             let callback = self.take_target(TargetKey::Liveliness(id));
+            // A delivery that copied the callback out of the sink before hands it nothing more.
+            if let Some(Target::Liveliness(callback)) = &callback {
+                callback.retire();
+            }
             drop((live, callback));
             return;
         }
@@ -6386,9 +6426,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // ends before its timeout.
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            // The leg's callback, shared by the entry's sink and the table of callbacks.
+            let callback = Arc::new(leg());
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets, &self.samples),
+                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
             );
             // One Final: the face's peer's. Registered before the request goes out, so no answer
             // can arrive before its entry.
@@ -6401,15 +6443,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     sink,
                 )
             });
-            match registered {
-                Some(Ok(_)) => {}
-                Some(Err(RegisterError::TableFull)) => {
-                    unheld += 1;
-                    continue;
-                }
-                _ => continue,
+            if !matches!(registered, Some(Ok(_))) {
+                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                // A leg no table holds is let go of with no lock held.
+                drop(guard);
+                drop(callback);
+                continue;
             }
-            self.hold_leg(leg_id, leg());
+            self.hold_leg(leg_id, callback);
             // The link names the key as its own key-wire form says.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
@@ -6478,9 +6519,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let callback = Arc::new(leg());
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets, &self.samples),
+                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
             );
             // Registered before the query is queued, as a link's leg is before it is sent.
             let registered = core.registry.borrow_mut().face_mut(face).map(|tables| {
@@ -6492,15 +6534,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     sink,
                 )
             });
-            match registered {
-                Some(Ok(_)) => {}
-                Some(Err(RegisterError::TableFull)) => {
-                    unheld += 1;
-                    continue;
-                }
-                _ => continue,
+            if !matches!(registered, Some(Ok(_))) {
+                unheld += usize::from(matches!(registered, Some(Err(RegisterError::TableFull))));
+                drop(guard);
+                drop(callback);
+                continue;
             }
-            self.hold_leg(leg_id, leg());
+            self.hold_leg(leg_id, callback);
             if !group.ask(rid, keyexpr, wire, &opts.query_metadata()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
@@ -6532,9 +6572,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let timeout_ms = opts.effective_timeout_ms();
             let deadline_ms = (timeout_ms > 0)
                 .then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let callback = Arc::new(leg());
             let sink = ConsolidatingSink::new(
                 opts.resolved_consolidation(),
-                get::reply_sink(leg_id, &self.gets, &self.samples),
+                get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
             );
             let registered = core.registry.borrow_mut().local.replies.register_sink(
                 rid,
@@ -6546,8 +6587,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if matches!(registered, Err(RegisterError::TableFull)) {
                 unheld += 1;
             }
-            if registered.is_ok() {
-                self.hold_leg(leg_id, leg());
+            if registered.is_err() {
+                drop(guard);
+                drop(callback);
+            } else {
+                self.hold_leg(leg_id, callback);
                 core.pending_gets.push(PendingGet {
                     face: LOCAL_FACE,
                     leg: leg_id,
@@ -6610,6 +6654,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             let interest_id = u64::from(interest_id);
             let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+            let callback = Arc::new(leg());
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core
@@ -6620,14 +6665,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                     tables.gets.liveliness_gets.register(
                         interest_id,
                         deadline_ms,
-                        get::reply_sink(leg_id, &self.gets, &self.samples),
+                        get::reply_sink(leg_id, &callback, &self.gets, &self.samples),
                     )
                 })
                 .is_some_and(|registered| matches!(registered, Ok(true)));
             if !registered {
+                drop(guard);
+                drop(callback);
                 continue;
             }
-            self.hold_leg(leg_id, leg());
+            self.hold_leg(leg_id, callback);
             // The Interest names the key as the link's own key-wire form says, as a query does.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
@@ -6785,16 +6832,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // So does a key longer than its row holds.
         let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
+        // The table of callbacks holds it before the sink does, so a sink the registration refuses
+        // is not its last holder when it is dropped under the session's lock.
+        let callback: LivelinessCallback = Arc::new(LiveLiveliness::new(sink));
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
-            Target::Liveliness(Arc::new(sink)),
+            Target::Liveliness(Arc::clone(&callback)),
         ));
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
             keyexpr,
             history,
-            liveliness::sample_sink(id, &self.samples),
+            liveliness::sample_sink(id, &callback, &self.samples),
         );
+        drop(callback);
         // Refused by the observer, the declaration is refused, as a subscriber's is.
         if registered.is_err() {
             drop(guard);
@@ -6912,9 +6963,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             }
         }
         // The session's tokens end with its link, and its liveliness subscribers with it.
+        // Their registrations go under the lock; the callbacks the sinks share with the table of
+        // callbacks are let go of with it, below.
         #[cfg(feature = "liveliness")]
         {
             core.tokens.clear();
+            let mut registry = core.registry.borrow_mut();
+            for entry in core.live_subs.iter() {
+                registry
+                    .app
+                    .liveliness_subscribers
+                    .unregister(u64::from(entry.id));
+            }
+            drop(registry);
             core.live_subs.clear();
         }
         // The watches end with the session; their sinks, and the C contexts they hold, are let go
@@ -6956,6 +7017,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         self.forget_resolved();
         for (_, target) in &taken {
             if let Target::Subscriber(callback) = target {
+                callback.retire();
+            }
+            #[cfg(feature = "liveliness")]
+            if let Target::Liveliness(callback) = target {
                 callback.retire();
             }
         }

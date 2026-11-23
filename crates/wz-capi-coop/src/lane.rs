@@ -84,8 +84,12 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 use wz_session_core::sample::{QosLevel, SampleKind, SourceInfo};
 use wz_session_core::sink::SampleView;
 
+#[cfg(feature = "liveliness")]
+use crate::engine::LivelinessCallback;
 use crate::engine::SubscriberCallback;
 use crate::prelude::*;
+#[cfg(feature = "query")]
+use wz_capi_port::ReplyCallback;
 
 /// The handle the lane's queues carry: the event slot a sample holds and where its bytes start,
 /// generated from `sources/session/delivery_lane_handle.scxml`.
@@ -1592,11 +1596,153 @@ const SEALED: u8 = 2;
 /// A delivery hands them to their callbacks.
 const DELIVERING: u8 = 3;
 
-/// A sample of the pending table: where its parts lie, and the place of its first callback.
+/// A record of the pending table: what it is, where its parts lie, and the place of its first
+/// callback.
 struct PendingEntry {
-    head: EntryHead,
-    rest: Option<EntryRest>,
+    what: Pended,
     first: usize,
+}
+
+impl PendingEntry {
+    /// The callbacks it owes, from `first` on.
+    fn owed(&self) -> usize {
+        match &self.what {
+            Pended::Sample { head, .. } => head.subscribers as usize,
+            #[cfg(feature = "liveliness")]
+            Pended::Liveliness { owed, .. } => *owed as usize,
+            #[cfg(feature = "query")]
+            Pended::Reply(_) => 1,
+        }
+    }
+}
+
+/// What a record of the pending table is.
+enum Pended {
+    /// A sample, for the callbacks of the subscribers it matched.
+    Sample {
+        head: EntryHead,
+        rest: Option<EntryRest>,
+    },
+    /// A token's appearance or retraction, for the callbacks of the liveliness subscribers it
+    /// matched.
+    #[cfg(feature = "liveliness")]
+    Liveliness {
+        kind: LivelinessSampleKind,
+        key: KeyAt,
+        token_id: u64,
+        owed: u32,
+    },
+    /// A reply, for the callback of the leg of the get it answers.
+    #[cfg(feature = "query")]
+    Reply(PendedReply),
+}
+
+/// A reply of the pending table: what it is besides its bytes, and where its parts lie.
+#[cfg(feature = "query")]
+struct PendedReply {
+    rid: wz_session_core::wire_id::RequestId,
+    kind: ReplyKind,
+    qos: Option<QosLevel>,
+    key: KeyAt,
+    payload: Span,
+    attachment: Option<Span>,
+    encoding: Option<(u32, Option<Span>)>,
+    timestamp: Option<(u64, Span)>,
+    source_info: Option<SourceInfo>,
+    responder: Option<(Span, u32)>,
+}
+
+#[cfg(feature = "query")]
+impl PendedReply {
+    /// `view` as it lies in `datagram`, and its key when that lies elsewhere; `None` when a part
+    /// of it other than its key lies elsewhere.
+    fn of<'v>(
+        view: &'v dyn ReplyView,
+        datagram: (*const u8, usize),
+    ) -> Option<(Self, Option<&'v [u8]>)> {
+        let payload = Span::of(view.payload(), datagram)?;
+        let attachment = match view.attachment() {
+            Some(part) => Some(Span::of(part, datagram)?),
+            None => None,
+        };
+        let encoding = match view.put_encoding().or_else(|| view.err_encoding()) {
+            Some((id, Some(schema))) => Some((id, Some(Span::of(schema, datagram)?))),
+            Some((id, None)) => Some((id, None)),
+            None => None,
+        };
+        let timestamp = match view.timestamp_parts() {
+            Some(stamp) => Some((stamp.time, Span::of(stamp.zid, datagram)?)),
+            // A stamp the view holds only as its own value lies outside the datagram.
+            None if view.timestamp().is_some() => return None,
+            None => None,
+        };
+        let responder = match view.responder() {
+            Some((zid, eid)) => Some((Span::of(zid, datagram)?, eid)),
+            None => None,
+        };
+        let key = view.keyexpr().as_bytes();
+        let (at, outside) = match Span::of(key, datagram) {
+            Some(span) => (KeyAt::Lent(span), None),
+            None => (KeyAt::Lent(Span::EMPTY), Some(key)),
+        };
+        let reply = Self {
+            rid: view.rid(),
+            kind: view.kind(),
+            qos: view.qos(),
+            key: at,
+            payload,
+            attachment,
+            encoding,
+            timestamp,
+            source_info: view.source_info().cloned(),
+            responder,
+        };
+        Some((reply, outside))
+    }
+}
+
+/// A callback a record of the pending table owes, copied out of the row that matched it under the
+/// session's lock and let go of, with no lock held, when the table is emptied.
+enum Owed {
+    /// A subscriber's.
+    Subscriber(SubId, SubscriberCallback),
+    /// A liveliness subscriber's.
+    #[cfg(feature = "liveliness")]
+    Liveliness(LivelinessCallback),
+    /// A get's leg's.
+    #[cfg(feature = "query")]
+    Reply(Arc<ReplyCallback>),
+}
+
+impl Owed {
+    /// The subscriber and its callback, when it is a subscriber's.
+    fn as_subscriber(&self) -> Option<(SubId, &SubscriberCallback)> {
+        match self {
+            Self::Subscriber(id, callback) => Some((*id, callback)),
+            #[cfg(feature = "liveliness")]
+            Self::Liveliness(_) => None,
+            #[cfg(feature = "query")]
+            Self::Reply(_) => None,
+        }
+    }
+
+    /// The callback, when it is a liveliness subscriber's.
+    #[cfg(feature = "liveliness")]
+    fn as_liveliness(&self) -> Option<&LivelinessCallback> {
+        match self {
+            Self::Liveliness(callback) => Some(callback),
+            _ => None,
+        }
+    }
+
+    /// The callback, when it is a leg's.
+    #[cfg(feature = "query")]
+    fn as_reply(&self) -> Option<&Arc<ReplyCallback>> {
+        match self {
+            Self::Reply(callback) => Some(callback),
+            _ => None,
+        }
+    }
 }
 
 /// What the pending table holds: the datagram its samples lie in, the samples, the callbacks
@@ -1607,8 +1753,8 @@ struct PendingTable {
     /// size. A datagram that carries more has the rest kept by its link and handed out in the next
     /// round.
     entries: BoundedVec<PendingEntry, { caps::DELIVERY_LANE_EVENTS }, Static>,
-    /// The callbacks the samples owe at most, one for each subscriber each of them reaches.
-    callbacks: BoundedVec<(SubId, SubscriberCallback), { caps::DELIVERY_LANE_CALLBACKS }, Static>,
+    /// The callbacks the records owe at most, one for each subscriber each of them reaches.
+    callbacks: BoundedVec<Owed, { caps::DELIVERY_LANE_CALLBACKS }, Static>,
     keys: BoundedVec<u8, { pending_key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Static>,
     /// The key written last, which the samples on it that follow share.
     key: Option<Span>,
@@ -1634,10 +1780,42 @@ impl PendingTable {
 
     /// The key of the sample `head` names.
     fn key_of(&self, head: &EntryHead) -> &[u8] {
-        match head.key {
+        self.key_at(head.key)
+    }
+
+    /// The key `key` names.
+    fn key_at(&self, key: KeyAt) -> &[u8] {
+        match key {
             KeyAt::Lent(span) => self.lent(span),
             KeyAt::Written(span) => self.written(span),
         }
+    }
+
+    /// The key `key` names, as text.
+    #[cfg(any(feature = "liveliness", feature = "query"))]
+    fn key_text(&self, key: KeyAt) -> &str {
+        // SAFETY: the bytes were a `&str`'s (`SampleView::keyexpr`, `ReplyView::keyexpr`,
+        // `LivelinessSample::keyexpr`), so they are UTF-8.
+        unsafe { core::str::from_utf8_unchecked(self.key_at(key)) }
+    }
+
+    /// Where `key`, a key lying outside the datagram, is written: where the table wrote it last,
+    /// when it is that key again, or after the keys written before it; `None` when the table has
+    /// not the room for it.
+    fn write_key(&mut self, key: &[u8]) -> Option<Span> {
+        if let Some(span) = self.key {
+            if self.written(span) == key {
+                return Some(span);
+            }
+        }
+        let at = self.keys.len();
+        let (Ok(first), Ok(len)) = (u32::try_from(at), u32::try_from(key.len())) else {
+            return None;
+        };
+        self.keys.extend_from_slice(key).ok()?;
+        let span = Span { at: first, len };
+        self.key = Some(span);
+        Some(span)
     }
 
     /// Hold nothing, for the next datagram.
@@ -1774,6 +1952,35 @@ impl Pending {
             .compare_exchange(FILLING, SEALED, Ordering::AcqRel, Ordering::Relaxed);
     }
 
+    /// The state the table is in when it takes a record of `datagram`: `None` when it is sealed,
+    /// handed out, or holds another datagram's records.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    unsafe fn open_for(&self, datagram: (*const u8, usize)) -> Option<u8> {
+        match self.state.load(Ordering::Acquire) {
+            EMPTY => Some(EMPTY),
+            // SAFETY: a filling table is the lock holder's, and the caller holds the lock.
+            FILLING if unsafe { (*self.table.get()).datagram } == datagram => Some(FILLING),
+            _ => None,
+        }
+    }
+
+    /// Ready `table`, in `state`, for a record of `datagram`: an empty table forgets what it held.
+    fn begin(table: &mut PendingTable, state: u8, datagram: (*const u8, usize)) {
+        if state == EMPTY {
+            table.clear();
+            table.datagram = datagram;
+        }
+    }
+
+    /// A record was offered to a table that was in `state`: an empty one is filling from now on.
+    fn filled(&self, state: u8) {
+        if state == EMPTY {
+            self.state.store(FILLING, Ordering::Release);
+        }
+    }
+
     /// Hold `sample` of `datagram` for `callback`, subscriber `subscriber`'s: whether it was
     /// taken. Refused, holding nothing more, when the table is sealed or holds another datagram's
     /// samples, when a part of the sample but its key lies outside the datagram, or when it has
@@ -1789,44 +1996,47 @@ impl Pending {
         sample: &dyn SampleView,
         datagram: (*const u8, usize),
     ) -> bool {
-        let state = self.state.load(Ordering::Acquire);
-        if state != EMPTY && state != FILLING {
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { self.open_for(datagram) }) else {
             return false;
-        }
+        };
         // SAFETY: an empty or filling table is the lock holder's, and the caller holds the lock.
         let table = unsafe { &mut *self.table.get() };
-        if state == FILLING && table.datagram != datagram {
-            return false;
-        }
         let Some(lent) = LentEntry::of(subscriber, sample, datagram) else {
             return false;
         };
-        if state == EMPTY {
-            table.clear();
-            table.datagram = datagram;
-        }
+        Self::begin(table, state, datagram);
         let key = sample.keyexpr().as_bytes();
         // The sample offered last, for one more of its subscribers.
-        if let Some(last) = table.entries.last() {
-            let joins = last.head.same_sample(&lent.head)
-                && last.rest == lent.rest
-                && table.key_of(&last.head) == key
+        if let Some(PendingEntry {
+            what: Pended::Sample { head, rest },
+            first,
+        }) = table.entries.last()
+        {
+            let joins = head.same_sample(&lent.head)
+                && *rest == lent.rest
+                && table.key_of(head) == key
                 && !table
                     .callbacks
-                    .get(last.first..)
+                    .get(*first..)
                     .unwrap_or(&[])
                     .iter()
+                    .filter_map(Owed::as_subscriber)
                     .any(|(_, held)| Arc::ptr_eq(held, callback));
             if joins {
                 if table
                     .callbacks
-                    .push((subscriber, Arc::clone(callback)))
+                    .push(Owed::Subscriber(subscriber, Arc::clone(callback)))
                     .is_err()
                 {
                     return false;
                 }
-                if let Some(last) = table.entries.last_mut() {
-                    last.head.subscribers += 1;
+                if let Some(PendingEntry {
+                    what: Pended::Sample { head, .. },
+                    ..
+                }) = table.entries.last_mut()
+                {
+                    head.subscribers += 1;
                 }
                 return true;
             }
@@ -1836,21 +2046,8 @@ impl Pending {
         }
         let mut head = lent.head;
         if let Some(outside) = lent.key {
-            let span = match table.key {
-                Some(span) if table.written(span) == outside => span,
-                _ => {
-                    let at = table.keys.len();
-                    let (Ok(first), Ok(len)) = (u32::try_from(at), u32::try_from(outside.len()))
-                    else {
-                        return false;
-                    };
-                    if table.keys.extend_from_slice(outside).is_err() {
-                        return false;
-                    }
-                    let span = Span { at: first, len };
-                    table.key = Some(span);
-                    span
-                }
+            let Some(span) = table.write_key(outside) else {
+                return false;
             };
             head.key = KeyAt::Written(span);
         }
@@ -1858,25 +2055,167 @@ impl Pending {
         let kept = table
             .entries
             .push(PendingEntry {
-                head,
-                rest: lent.rest,
+                what: Pended::Sample {
+                    head,
+                    rest: lent.rest,
+                },
                 first,
             })
             .is_ok()
             && table
                 .callbacks
-                .push((subscriber, Arc::clone(callback)))
+                .push(Owed::Subscriber(subscriber, Arc::clone(callback)))
                 .is_ok();
         debug_assert!(kept, "the table had the room its checks found");
-        if state == EMPTY {
-            self.state.store(FILLING, Ordering::Release);
-        }
+        self.filled(state);
         kept
     }
 
-    /// Hand each sample the table holds, sealed, to its callbacks in order, `hand` making each
-    /// call, and empty it: whether there was anything to hand. Nothing of the session is held;
-    /// a delivery that finds the table not sealed, or taken by another, hands nothing.
+    /// Hold `sample`, a token's appearance or retraction a record of `datagram` told, for
+    /// `callback`, a liveliness subscriber's: whether it was taken. Written once for the
+    /// liveliness subscribers it reaches one after the other, as a sample is. Refused, holding
+    /// nothing more, as [`Self::offer`] refuses a sample.
+    ///
+    /// # Safety
+    /// As [`Self::offer`]'s.
+    #[cfg(feature = "liveliness")]
+    unsafe fn offer_liveliness(
+        &self,
+        callback: &LivelinessCallback,
+        sample: &LivelinessSample<'_>,
+        datagram: (*const u8, usize),
+    ) -> bool {
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { self.open_for(datagram) }) else {
+            return false;
+        };
+        // SAFETY: an empty or filling table is the lock holder's, and the caller holds the lock.
+        let table = unsafe { &mut *self.table.get() };
+        Self::begin(table, state, datagram);
+        let key = sample.keyexpr.as_bytes();
+        // The token offered last, for one more of its liveliness subscribers.
+        if let Some(PendingEntry {
+            what:
+                Pended::Liveliness {
+                    kind,
+                    key: at,
+                    token_id,
+                    ..
+                },
+            first,
+        }) = table.entries.last()
+        {
+            let joins = *kind == sample.kind
+                && *token_id == sample.token_id
+                && table.key_at(*at) == key
+                && !table
+                    .callbacks
+                    .get(*first..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(Owed::as_liveliness)
+                    .any(|held| Arc::ptr_eq(held, callback));
+            if joins {
+                if table
+                    .callbacks
+                    .push(Owed::Liveliness(Arc::clone(callback)))
+                    .is_err()
+                {
+                    return false;
+                }
+                if let Some(PendingEntry {
+                    what: Pended::Liveliness { owed, .. },
+                    ..
+                }) = table.entries.last_mut()
+                {
+                    *owed += 1;
+                }
+                return true;
+            }
+        }
+        if table.entries.free_slots() == 0 || table.callbacks.free_slots() == 0 {
+            return false;
+        }
+        let at = match Span::of(key, datagram) {
+            Some(span) => KeyAt::Lent(span),
+            None => match table.write_key(key) {
+                Some(span) => KeyAt::Written(span),
+                None => return false,
+            },
+        };
+        let first = table.callbacks.len();
+        let kept = table
+            .entries
+            .push(PendingEntry {
+                what: Pended::Liveliness {
+                    kind: sample.kind,
+                    key: at,
+                    token_id: sample.token_id,
+                    owed: 1,
+                },
+                first,
+            })
+            .is_ok()
+            && table
+                .callbacks
+                .push(Owed::Liveliness(Arc::clone(callback)))
+                .is_ok();
+        debug_assert!(kept, "the table had the room its checks found");
+        self.filled(state);
+        kept
+    }
+
+    /// Hold `view`, a reply a record of `datagram` carried, for `callback`, the leg's it answers:
+    /// whether it was taken. Refused, holding nothing more, as [`Self::offer`] refuses a sample.
+    ///
+    /// # Safety
+    /// As [`Self::offer`]'s.
+    #[cfg(feature = "query")]
+    unsafe fn offer_reply(
+        &self,
+        callback: &Arc<ReplyCallback>,
+        view: &dyn ReplyView,
+        datagram: (*const u8, usize),
+    ) -> bool {
+        // SAFETY: the caller's contract.
+        let Some(state) = (unsafe { self.open_for(datagram) }) else {
+            return false;
+        };
+        // SAFETY: an empty or filling table is the lock holder's, and the caller holds the lock.
+        let table = unsafe { &mut *self.table.get() };
+        let Some((mut reply, outside)) = PendedReply::of(view, datagram) else {
+            return false;
+        };
+        Self::begin(table, state, datagram);
+        if table.entries.free_slots() == 0 || table.callbacks.free_slots() == 0 {
+            return false;
+        }
+        if let Some(outside) = outside {
+            let Some(span) = table.write_key(outside) else {
+                return false;
+            };
+            reply.key = KeyAt::Written(span);
+        }
+        let first = table.callbacks.len();
+        let kept = table
+            .entries
+            .push(PendingEntry {
+                what: Pended::Reply(reply),
+                first,
+            })
+            .is_ok()
+            && table
+                .callbacks
+                .push(Owed::Reply(Arc::clone(callback)))
+                .is_ok();
+        debug_assert!(kept, "the table had the room its checks found");
+        self.filled(state);
+        kept
+    }
+
+    /// Hand each record the table holds, sealed, to its callbacks in order, `hand` making each
+    /// call of a sample, and empty it: whether there was anything to hand. Nothing of the session
+    /// is held; a delivery that finds the table not sealed, or taken by another, hands nothing.
     fn deliver(&self, mut hand: impl FnMut(SubId, &SubscriberCallback, &dyn SampleView)) -> bool {
         if self
             .state
@@ -1889,14 +2228,44 @@ impl Pending {
         // SAFETY: a table being delivered is this delivery's alone until `emptied` empties it.
         let table = unsafe { &*self.table.get() };
         for entry in table.entries.iter() {
-            let sample = PendingSample {
-                head: entry.head,
-                rest: entry.rest.as_ref(),
-                table,
-            };
-            let owed = entry.first..entry.first + entry.head.subscribers as usize;
-            for (subscriber, callback) in table.callbacks.get(owed).unwrap_or(&[]) {
-                hand(*subscriber, callback, &sample);
+            let owed = table
+                .callbacks
+                .get(entry.first..entry.first + entry.owed())
+                .unwrap_or(&[]);
+            match &entry.what {
+                Pended::Sample { head, rest } => {
+                    let sample = PendingSample {
+                        head: *head,
+                        rest: rest.as_ref(),
+                        table,
+                    };
+                    for (subscriber, callback) in owed.iter().filter_map(Owed::as_subscriber) {
+                        hand(subscriber, callback, &sample);
+                    }
+                }
+                #[cfg(feature = "liveliness")]
+                Pended::Liveliness {
+                    kind,
+                    key,
+                    token_id,
+                    ..
+                } => {
+                    let sample = LivelinessSample {
+                        kind: *kind,
+                        keyexpr: table.key_text(*key),
+                        token_id: *token_id,
+                    };
+                    for callback in owed.iter().filter_map(Owed::as_liveliness) {
+                        callback.call(sample);
+                    }
+                }
+                #[cfg(feature = "query")]
+                Pended::Reply(reply) => {
+                    let view = PendingReply { reply, table };
+                    for callback in owed.iter().filter_map(Owed::as_reply) {
+                        callback.call(&view);
+                    }
+                }
             }
         }
         #[cfg(all(test, feature = "std"))]
@@ -1969,6 +2338,81 @@ impl SampleView for PendingSample<'_> {
     fn encoding_parts(&self) -> Option<(u32, Option<&[u8]>)> {
         let (id, schema) = self.rest?.encoding?;
         Some((id, schema.map(|span| self.table.lent(span))))
+    }
+}
+
+/// A reply of the pending table, read where its datagram and the table's keys hold it: what its
+/// leg's callback is handed.
+#[cfg(feature = "query")]
+struct PendingReply<'t> {
+    reply: &'t PendedReply,
+    table: &'t PendingTable,
+}
+
+#[cfg(feature = "query")]
+impl PendingReply<'_> {
+    /// Its encoding, when it is of the kind `kind`.
+    fn encoding_of(&self, kind: ReplyKind) -> Option<(u32, Option<&[u8]>)> {
+        if self.reply.kind != kind {
+            return None;
+        }
+        self.reply
+            .encoding
+            .map(|(id, schema)| (id, schema.map(|span| self.table.lent(span))))
+    }
+}
+
+#[cfg(feature = "query")]
+impl ReplyView for PendingReply<'_> {
+    fn rid(&self) -> wz_session_core::wire_id::RequestId {
+        self.reply.rid
+    }
+
+    fn keyexpr(&self) -> &str {
+        self.table.key_text(self.reply.key)
+    }
+
+    fn kind(&self) -> ReplyKind {
+        self.reply.kind
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.table.lent(self.reply.payload)
+    }
+
+    fn err_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding_of(ReplyKind::Err)
+    }
+
+    fn put_encoding(&self) -> Option<(u32, Option<&[u8]>)> {
+        self.encoding_of(ReplyKind::Put)
+    }
+
+    fn attachment(&self) -> Option<&[u8]> {
+        self.reply.attachment.map(|span| self.table.lent(span))
+    }
+
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.reply.source_info.as_ref()
+    }
+
+    fn timestamp_parts(&self) -> Option<wz_session_core::reply_stage::TimestampParts<'_>> {
+        self.reply
+            .timestamp
+            .map(|(time, zid)| wz_session_core::reply_stage::TimestampParts {
+                time,
+                zid: self.table.lent(zid),
+            })
+    }
+
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.reply
+            .responder
+            .map(|(zid, eid)| (self.table.lent(zid), eid))
+    }
+
+    fn qos(&self) -> Option<QosLevel> {
+        self.reply.qos
     }
 }
 
@@ -2350,6 +2794,59 @@ impl SharedLane {
             self.pending.seal();
             self.offer_sample(subscriber, sample);
         }
+    }
+
+    /// Hold `sample`, a token's appearance or retraction, for `callback`, liveliness subscriber
+    /// `subscriber`'s, in the pending table when its record lies in the datagram a link lends the
+    /// step and the lane holds nothing to be handed out before it, as [`Self::offer_to`] holds a
+    /// sample; queue it in the lane otherwise, after which the pending table takes no more.
+    ///
+    /// # Safety
+    /// As [`Self::held`]'s.
+    #[cfg(feature = "liveliness")]
+    pub(crate) unsafe fn offer_liveliness_to(
+        &self,
+        subscriber: SubId,
+        callback: &LivelinessCallback,
+        sample: &LivelinessSample<'_>,
+    ) {
+        // SAFETY: the caller's contract: written under the session's lock, which is held.
+        if let Some(datagram) = unsafe { *self.lending.get() } {
+            // SAFETY: the caller's contract, and the link leaves the datagram where it lies while
+            // the table holds it (`Self::lends_a_datagram`).
+            if unsafe { self.quiet() && self.pending.offer_liveliness(callback, sample, datagram) }
+            {
+                return;
+            }
+        }
+        // SAFETY: the caller's contract; the hold seals the pending table.
+        unsafe { self.held() }.offer_liveliness(subscriber, sample);
+    }
+
+    /// Hold `view`, a reply to leg `leg`, for `callback`, the leg's, in the pending table when it
+    /// lies in the datagram a link lends the step and the lane holds nothing to be handed out
+    /// before it, as [`Self::offer_to`] holds a sample; queue it in the lane otherwise, after
+    /// which the pending table takes no more.
+    ///
+    /// # Safety
+    /// As [`Self::held`]'s.
+    #[cfg(feature = "query")]
+    pub(crate) unsafe fn offer_reply_to(
+        &self,
+        leg: u64,
+        callback: &Arc<ReplyCallback>,
+        view: &dyn ReplyView,
+    ) {
+        // SAFETY: the caller's contract: written under the session's lock, which is held.
+        if let Some(datagram) = unsafe { *self.lending.get() } {
+            // SAFETY: the caller's contract, and the link leaves the datagram where it lies while
+            // the table holds it (`Self::lends_a_datagram`).
+            if unsafe { self.quiet() && self.pending.offer_reply(callback, view, datagram) } {
+                return;
+            }
+        }
+        // SAFETY: the caller's contract; the hold seals the pending table.
+        unsafe { self.held() }.offer_reply(leg, view);
     }
 
     /// Whether the lane holds nothing to be handed out and no delivery of it runs: what a sample
