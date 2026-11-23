@@ -621,7 +621,8 @@ impl Table {
 
     /// Where `part` is read: where it lies in `lending`, the datagram a link lends the step, when
     /// it lies there and the table lends no other; written into the area otherwise. `None` when
-    /// the area has not the room.
+    /// the area has not the room. Out of line: every offer places its parts through this one body.
+    #[inline(never)]
     fn place(&mut self, part: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
         if part.is_empty() {
             return Some(Span::EMPTY);
@@ -670,7 +671,8 @@ impl Table {
 
     /// Where `key` is read: where it lies in `lending`, where the table wrote it last when it is
     /// that key again, after the keys written before it, or in the area once the keys are full;
-    /// `None` when there is no room.
+    /// `None` when there is no room. Out of line, as [`Self::place`] is.
+    #[inline(never)]
     fn place_key(&mut self, key: &[u8], lending: Option<(*const u8, usize)>) -> Option<Span> {
         if let Some(span) = self.lent(key, lending) {
             return Some(span);
