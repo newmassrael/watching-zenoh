@@ -152,9 +152,50 @@ impl ArenaRow {
     }
 }
 
-/// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
-/// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 34;
+// The rows of a plan, group by group, each counted where the group's rows are put and under the
+// same features: a group that gains or loses a row changes its own count, and the plan's length
+// follows ([`ARENA_ROWS`]).
+
+/// The texts of the endpoints the session dials and listens on: one row of both tables.
+const ENDPOINT_ROWS: usize = 1;
+/// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
+/// places.
+const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
+/// The delivery lane's flag and its area.
+const LANE_ROWS: usize = 2;
+/// The reassembly buffers' flags and the buffers.
+const REASSEMBLY_ROWS: usize = 2;
+/// The application's tables: subscribers, queryables (`queryable`), liveliness tokens and
+/// subscribers (`liveliness`), and the declaration watchers.
+const OBSERVER_ROWS: usize =
+    1 + cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 1;
+/// The pending gets, and the ends of their legs (`query`).
+const GET_ROWS: usize = 1 + cfg!(feature = "query") as usize;
+/// The peers' tables, and the pools their rows lie in where the faces share them.
+const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
+/// The engine's record of the session's declarations ([`ArenaPlan::put_entities`]): queryables
+/// (`queryable`), tokens and liveliness subscribers (`liveliness`), key expressions, write
+/// filters, matching listeners, interests and the key arena.
+const ENTITY_ROWS: usize =
+    cfg!(feature = "queryable") as usize + 2 * cfg!(feature = "liveliness") as usize + 5;
+/// The links' cells and their gates' cells, each a table of flags and cells
+/// ([`ArenaPlan::holding_cells`]).
+const CELL_ROWS: usize = 4;
+/// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
+const HANDLE_ROWS: usize = 2;
+
+/// The most rows a plan holds: every row of the build, the cells' and the ABI's handle's among
+/// them, the sum of the groups' counts.
+pub const ARENA_ROWS: usize = ENDPOINT_ROWS
+    + LINK_ROWS
+    + LANE_ROWS
+    + REASSEMBLY_ROWS
+    + OBSERVER_ROWS
+    + GET_ROWS
+    + PEER_ROWS
+    + ENTITY_ROWS
+    + CELL_ROWS
+    + HANDLE_ROWS;
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
