@@ -5934,18 +5934,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The table refuses it, before an id is taken or anything is sent, when it is full, when
         // the key cannot be held, or when every id is taken. An id of the shared dictionary names
         // its key in this session's space too, so no key expression is declared under one.
-        let declared = {
-            let mut tables = tables_mut(&core.registry);
+        // One declaration, whatever ids the session shares: the table's declaration is one body
+        // for both.
+        #[cfg(feature = "shared-key-ids")]
+        let shared = core.key_ids.as_ref();
+        let usable = |id: ExprId| -> bool {
             #[cfg(feature = "shared-key-ids")]
-            let declared = match &core.key_ids {
-                Some(ids) => tables
-                    .declare_keyexpr_where(keyexpr, false, |id| ids.next_free_id(id) == Some(id)),
-                None => tables.declare_keyexpr(keyexpr),
-            };
+            {
+                shared.map_or(true, |ids| ids.next_free_id(id) == Some(id))
+            }
             #[cfg(not(feature = "shared-key-ids"))]
-            let declared = tables.declare_keyexpr(keyexpr);
-            declared?
+            {
+                let _ = id;
+                true
+            }
         };
+        let declared = tables_mut(&core.registry).declare_keyexpr_where(keyexpr, false, usable)?;
         let id = declared.id;
         if !declared.new {
             return Ok(id);
