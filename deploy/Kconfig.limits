@@ -215,7 +215,7 @@ config WZ_LIMIT_HELD_SESSIONS
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
 	default 5 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 18
 	help
 	  The owned samples a program of the pico C ABI holds at once (taken out of
 	  a callback, cloned, or held in a channel): the slots of the pool of samples
@@ -225,7 +225,7 @@ config WZ_LIMIT_HELD_SAMPLES
 config WZ_LIMIT_HELD_REPLIES
 	int "HELD_REPLIES"
 	default 3 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 18
 	help
 	  The owned replies and reply errors a program of the pico C ABI holds at
 	  once: the slots of the pool of replies the library reserves at its first
@@ -235,7 +235,7 @@ config WZ_LIMIT_HELD_REPLIES
 config WZ_LIMIT_HELD_QUERIES
 	int "HELD_QUERIES"
 	default 3 if WZ_LIMITS_ZENOH_PICO
-	default 8
+	default 18
 	help
 	  The owned queries a program of the pico C ABI holds at once, each keeping
 	  its query's answer open: the slots of the pool of queries the library
