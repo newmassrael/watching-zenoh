@@ -16205,10 +16205,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body(
+    fn named_key_body<'b>(
         key: Option<(crate::wire_id::ExprId, &str)>,
-        buf: &mut [u8; NAMED_KEY_BODY_BYTES],
-    ) -> Option<&[u8]> {
+        buf: &'b mut [u8; NAMED_KEY_BODY_BYTES],
+    ) -> Option<&'b [u8]> {
         let (mapping_id, suffix) = key?;
         let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(mapping_id, suffix, buf)?;
         buf.get(..len)
