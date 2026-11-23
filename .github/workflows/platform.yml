@@ -48,6 +48,9 @@ on:
       # features, the header tree and licences it copies, and the schemas it ships.
       - ".github/actions/pico-windows-package/**"
       - "scripts/lib/pico_windows_package.py"
+      # zenoh-pico's own programs run on the package (`pico-upstream-windows`): the runner and the
+      # units it links beside them, which live under crates/wz-capi-pico below.
+      - "scripts/lib/pico_upstream_programs.py"
       - "scripts/lib/wz_config.py"
       - "scripts/lib/upstream_switch_map.py"
       - "scripts/requirements-kconfig.txt"
@@ -1348,6 +1351,96 @@ jobs:
             ${{ steps.package.outputs.directory }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
+
+  # zenoh-pico's own API tests and example programs on the DLL a release ships
+  # (scripts/lib/pico_upstream_programs.py; docs/release-proof-pico-windows.md, item W03): the
+  # package without `std` of each width, as `package-windows` built it and its regression test
+  # passed it (the artifact is uploaded only after that test), extracted, held to its manifest, and
+  # every program compiled with MSVC's cl of the package's width against the package's headers and
+  # import library and run with its release DLL. A program that talks to another is paired with
+  # zenoh-pico's own counterpart built against zenoh-pico itself (built here from the pinned
+  # submodule with CMake, as the same build), through a stock zenohd at the pin started afresh for
+  # each scenario; each scenario runs first with zenoh-pico in the library's place, the control that
+  # tells a host that cannot carry it from a red of the library. One verdict line per scenario and
+  # library, in the step summary.
+  #
+  # The router is built in the observed step with `cargo install` on its own release's channel, as
+  # the interop job builds it, and no cache is saved for it. The step is an observation while it is
+  # new (deploy/soft_jobs.json): it becomes a gate once two consecutive main runs read every verdict
+  # line of both widths PASS. `scripts/pico-upstream-programs.sh` makes the same run of the same
+  # profile's library without `std` on a Linux host.
+  pico-upstream-windows:
+    name: zenoh-pico's programs on the release DLL ${{ matrix.arch }} (windows-latest)
+    needs: package-windows
+    runs-on: windows-latest
+    timeout-minutes: 200
+    if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        shell: bash
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Set up Python (the runner and the configuration reader are python)
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .github/python-version
+
+      # The router's version is read from the script that owns it and its channel from that
+      # release's own toolchain file, as the interop job reads them.
+      - name: Read the router's pin (version from the builder script, channel from its release)
+        shell: bash
+        run: |
+          version="$(grep -m1 '^ZENOHD_VERSION=' scripts/build-zenohd.sh | sed 's/.*:-\([0-9][0-9.]*\)}.*/\1/')"
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "::error::scripts/build-zenohd.sh declares no ZENOHD_VERSION default (read: ${version})"; exit 1; }
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/eclipse-zenoh/zenoh/${version}/rust-toolchain.toml" > zenoh-toolchain.toml
+          channel="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' zenoh-toolchain.toml | head -1)"
+          [ -n "$channel" ] || { echo "::error::zenoh ${version} declares no toolchain channel"; exit 1; }
+          echo "ZENOHD_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "ZENOHD_CHANNEL=${channel}" >> "$GITHUB_ENV"
+          echo "router pin: zenohd ${version} on channel ${channel}"
+
+      - name: Install the router's Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$ZENOHD_CHANNEL" --profile minimal
+
+      - name: Download the release package of this width
+        uses: actions/download-artifact@v4
+        with:
+          name: pico-windows-package-${{ matrix.arch }}-single-nostd
+          path: ${{ runner.temp }}/pico-package
+
+      - name: zenoh-pico's own programs on the release DLL (observed)
+        timeout-minutes: 180
+        continue-on-error: true
+        shell: bash
+        env:
+          WZ_PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          temp="$(cygpath -u "$RUNNER_TEMP")"
+          verdict() {
+            echo "pico-upstream on Windows $WZ_PACKAGE_ARCH: $1"
+            echo "pico-upstream on Windows $WZ_PACKAGE_ARCH: $1" >> "$GITHUB_STEP_SUMMARY"
+          }
+          if ! cargo "+$ZENOHD_CHANNEL" install zenohd --version "$ZENOHD_VERSION" --locked --root "$temp/zenohd"; then
+            verdict "zenohd $ZENOHD_VERSION did not build: NOT-MEASURED"
+            exit 1
+          fi
+          set -- "$temp"/pico-package/*-windows-"$WZ_PACKAGE_ARCH"-nostd-*.zip
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            verdict "the download holds no single nostd package of this width: NOT-MEASURED"
+            exit 1
+          fi
+          python scripts/lib/pico_upstream_programs.py --package "$(cygpath -w "$1")" \
+            --zenohd "$(cygpath -w "$temp/zenohd/bin/zenohd.exe")"
 
   # The superseded generations of this workflow's two saved classes, deleted as
   # soon as the savers finish. The why, the least-privilege argument and the
