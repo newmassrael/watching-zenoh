@@ -113,8 +113,6 @@ pub mod admin_host;
 #[cfg(feature = "session-slot")]
 pub mod slot_host;
 // The dialler of the slot profile, over that host: a written endpoint becomes an initiator session.
-// Totality debt TD-222 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "dial"))]
 pub mod slot_dial;
 // Room in a `static` for the parts of a node's loop that live as long as it runs: the slot profile's,
