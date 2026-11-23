@@ -363,7 +363,7 @@ impl DeclaredKeyexpr {
     /// and that key is the one this is called on: for a subscriber it is not
     /// the key the subscription was announced on, which is the caller's.
     pub(crate) fn retraction_naming(&self, session: &PicoSession) -> Option<RetractionKey> {
-        self.retraction_naming_in(session.mode, &*session.engine)
+        self.retraction_naming_in(session.mode, Arc::as_ref(&session.engine))
     }
 
     /// [`Self::retraction_naming`] for a caller that holds the two facts it
@@ -434,7 +434,7 @@ impl DeclaredKeyexpr {
         // `_is_non_wild_prefix_optimized` arm).
         if let Some(existing) = existing {
             if existing
-                .declared_on(&**shared)
+                .declared_on(Arc::as_ref(shared))
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
                 return Ok(existing.share());
@@ -459,7 +459,7 @@ impl DeclaredKeyexpr {
         };
         // A session that holds no more declarations, its table at the limit it opened under or
         // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
-        let Some(id) = shared.acquire_keyexpr(literal[..prefix_len].to_owned()) else {
+        let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         // Made before the key's text is held, so a refusal of the text lets go of the hold.
@@ -1571,7 +1571,7 @@ mod tests {
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.wire(&*shared);
+        let wire = key.wire(Arc::as_ref(&shared));
         assert_eq!(wire.mapping_id, declarations[0].0);
         assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
 
@@ -1707,8 +1707,15 @@ mod key_text_tests {
 }
 
 // The cooperative engine, which keeps a key arena: a session that listens on the loopback and
-// dials nothing.
-#[cfg(all(test, feature = "engine-coop", feature = "peer"))]
+// dials nothing. A build that can open over the program's transport reaches its engine through the
+// port, which an engine opened here on the host's own links is too; one that opens over the host's
+// links alone names the engine's own type, which these sessions are not built as.
+#[cfg(all(
+    test,
+    feature = "engine-coop",
+    feature = "peer",
+    feature = "app-transport"
+))]
 mod arena_key_tests {
     use super::*;
     use wz_capi_port::SessionDrive;

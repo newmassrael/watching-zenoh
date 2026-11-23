@@ -6837,6 +6837,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// The remote peer's zid as its INIT carried it, or `None` before the INIT exchange has named
+    /// it: [`peer_zid`](Self::peer_zid) with its length and no copy on the heap, for every profile.
+    pub fn peer_session_zid(&self) -> Option<SessionZid> {
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| *slot)
+    }
+
     /// The remote peer's zid in its sixteen-byte form, when the key of this session's link
     /// PROVED it ([`Self::peer_identity_verified`]), and `None` for a zid the peer only claims
     /// (decision D12: the commander of a lifecycle verb asked in band is this and nothing

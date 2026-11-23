@@ -151,11 +151,11 @@ impl WriteFilter {
         let shared = session.engine.clone();
         // The key goes on the wire as the entity's own declaration: its id and the rest of
         // the key, or the literal when nothing covers it.
-        let wire = key.wire(&*shared);
+        let wire = key.wire(Arc::as_ref(&shared));
         let ask = interest_form(&shared, session.mode, key, &wire);
         let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, keyexpr.as_str().to_owned(), &wire, ask, count_local)
+            .declare_write_filter(plane, keyexpr.as_str(), &wire, ask, count_local)
             .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
         Ok(Self {
             shared,
@@ -174,7 +174,7 @@ impl WriteFilter {
     pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> (Arc<Engine>, MatchId) {
         let id = self.shared.declare_matching_listener(
             self.plane,
-            self.keyexpr.as_str().to_owned(),
+            self.keyexpr.as_str(),
             sink,
             self.count_local,
         );

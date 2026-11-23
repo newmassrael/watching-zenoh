@@ -169,7 +169,10 @@ mod tests {
         // leaked, so nothing else uses it and it outlives every key.
         let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), span) };
         arena
-            .lend_keys(bytes)
+            .lend_keys(
+                bytes,
+                wz_session_core::limits::SessionLimits::defaults().max_keyexpr_bytes_held(),
+            )
             .expect("the arena is the key arena's span")
     }
 

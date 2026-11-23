@@ -1784,6 +1784,8 @@ pub type SendHostStage<'s> = Pin<Box<dyn core::future::Future<Output = ()> + Sen
 /// through the box cannot be inlined). Over the node's own link and clock, the ones its faces
 /// are opened with. The loop is
 /// [`drive_session_until_terminal_with_extra_deadline`]'s; `hooks` stands for its closures.
+/// Compiled where the node's link is ([`crate::session_open`], `transport-link-tcp`).
+#[cfg(feature = "transport-link-tcp")]
 #[allow(clippy::too_many_arguments)]
 pub fn drive_session_dyn<'a, 's: 'a>(
     driver: &'a mut crate::session_open::InboundLink,
@@ -1804,6 +1806,7 @@ pub fn drive_session_dyn<'a, 's: 'a>(
 
 /// [`drive_session_dyn`] for a drive that runs on a worker thread: its hooks, its stage and so
 /// its loop are `Send`.
+#[cfg(feature = "transport-link-tcp")]
 #[allow(clippy::too_many_arguments)]
 pub fn drive_session_dyn_send<'a, 's: 'a>(
     driver: &'a mut crate::session_open::InboundLink,

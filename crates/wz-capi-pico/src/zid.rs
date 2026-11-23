@@ -292,13 +292,16 @@ unsafe fn enumerate_peers(
                 // simply nothing to invoke.
                 None => return Z_OK,
             };
-            for (zid, whatami) in crate::session::engine_ref(state).peer_identities() {
-                if (whatami == WHATAMI_WIRE_ROUTER) != routers {
-                    continue;
+            let engine = crate::session::engine_ref(state);
+            // Each identity is copied out of the session before the callback runs, so no C
+            // callback runs under the session's lock and the list is never held whole.
+            wz_capi_port::each_peer(engine, |peer| {
+                if (peer.whatami == WHATAMI_WIRE_ROUTER) != routers {
+                    return;
                 }
-                let id = z_id_t::from_wire(&zid);
+                let id = z_id_t::from_wire(&peer.zid);
                 call(&id, taken.context);
-            }
+            });
             // Open-debt item 913 — a session on a multicast group is a peer, and pico lists
             // every member of its group as a peer whatever role the member announced
             // (`vendor/zenoh-pico/src/api/api.c` @ `_zp_multicast_fetch_zid(`), and none as a
@@ -306,10 +309,10 @@ unsafe fn enumerate_peers(
             #[cfg(feature = "multicast-transport")]
             if !routers {
                 // Either engine's groups, through the port.
-                for zid in crate::session::engine_ref(state).group_member_zids() {
+                wz_capi_port::each_group_member(engine, |zid| {
                     let id = z_id_t::from_wire(&zid);
                     call(&id, taken.context);
-                }
+                });
             }
             Z_OK
         })();

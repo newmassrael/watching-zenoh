@@ -8,6 +8,7 @@ copy of them.
 
     fuzz_seeds.py <target> <out-dir>     write the seeds of <target>
     fuzz_seeds.py --targets              print the targets, one a line
+    fuzz_seeds.py --packages             print each target and the package it is a binary of
     fuzz_seeds.py --reads <target>       print the target whose corpus <target> also reads
     fuzz_seeds.py --selftest             check every target writes seeds
 
@@ -26,6 +27,12 @@ Each seed is the input layout its target's header comment states:
 - `config`, `sender`: config texts of the line form `zc_config_from_str` reads
   and the sender calls of `crates/wz-capi-c/tests/e2e_sender_roundtrip.rs`,
   written here in the target's layout.
+- `ingress_frames`, `codec_roundtrip`, `session_unicast`, `slot_session`,
+  `coop_read`: a few bytes of arguments, then the units a session reads off
+  its link, each behind its two-byte little-endian length: each UDP payload of
+  the captures is one, a TCP payload holds them already framed so, and a few
+  written here (an empty Frame each way, a KeepAlive) stand for a capture
+  that holds none.
 
 The output is a pure function of the tree: names are the SHA-256 of the
 bytes, so writing twice changes nothing.
@@ -48,7 +55,44 @@ MAX_CAPTURE = 64 * 1024
 # How many packet payloads the `transport` target is seeded with.
 MAX_PAYLOADS = 256
 
-TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender", "selector_term")
+# The targets that read what a peer sends into a session (`crates/wz-fuzz`'s
+# README): the bytes as units of a link, and the session's own decoders,
+# walks and engines behind them.
+INGRESS = ("ingress_frames", "codec_roundtrip", "session_unicast", "slot_session", "coop_read")
+
+TARGETS = ("pcap", "live", "transport", "text", "proto", "e2e", "replay", "config", "sender", "selector_term", *INGRESS)
+
+# The package of the fuzz workspace each target is a binary of, where it is
+# not `wz-fuzz` itself. Cargo unifies the features of the packages one
+# invocation builds, and these targets each build the session shell on a
+# profile of its own (the heap profile, the per-session slot profile, the C
+# ABI's engine), which must meet neither another's nor the dissector's;
+# `fuzz.sh build` builds each package by itself.
+PACKAGES = {
+    "session_unicast": "wz-fuzz-session-heap",
+    "slot_session": "wz-fuzz-session-slot",
+    "coop_read": "wz-fuzz-coop-engine",
+}
+DEFAULT_PACKAGE = "wz-fuzz"
+
+# How many units, and how many bytes of them, one ingress seed holds at most:
+# a session target steps its session a few times for each unit.
+MAX_UNITS = 64
+MAX_STREAM = 16 * 1024
+
+# The argument bytes in front of an ingress seed, taken in turn (each target's
+# header comment states them).
+INGRESS_HEADS = {
+    "ingress_frames": (bytes([0, 0]), bytes([0x07, 0x10]), bytes([0x0D, 0])),
+    "codec_roundtrip": (bytes([0]),),
+    "session_unicast": (bytes([0]), bytes([5])),
+    "slot_session": (bytes([0]), bytes([5])),
+    "coop_read": (bytes([0]), bytes([5])),
+}
+
+# Units no capture is needed for: an empty reliable Frame, an empty
+# best-effort Frame (each at sequence number 1), and a KeepAlive.
+SYNTHETIC_UNITS = (bytes([0x25, 0x01]), bytes([0x05, 0x01]), bytes([0x04]))
 
 # A target whose input layout is another's, and which also reads the corpus
 # that target's fuzzing grows: `selector_term` holds the sentences of the field
@@ -228,6 +272,13 @@ def classic_packets(data: bytes) -> list[tuple[int, bytes]]:
 
 def transport_payload(link: int, frame: bytes) -> bytes | None:
     """The UDP or TCP payload of an Ethernet/IPv4 frame, if it is one."""
+    carried = ip_payload(link, frame)
+    return None if carried is None else carried[1]
+
+
+def ip_payload(link: int, frame: bytes) -> tuple[int, bytes] | None:
+    """The IP protocol and the UDP or TCP payload of an Ethernet/IPv4 frame,
+    if it is one."""
     if link != 1 or len(frame) < 14 or frame[12:14] != b"\x08\x00":
         return None
     ip = frame[14:]
@@ -236,11 +287,50 @@ def transport_payload(link: int, frame: bytes) -> bytes | None:
     ihl = (ip[0] & 0x0F) * 4
     proto, body = ip[9], ip[ihl:]
     if proto == 17 and len(body) > 8:
-        return body[8:]
+        return proto, body[8:]
     if proto == 6 and len(body) >= 20:
         payload = body[(body[12] >> 4) * 4 :]
-        return payload or None
+        return (proto, payload) if payload else None
     return None
+
+
+def link_units(proto: int, payload: bytes) -> list[bytes]:
+    """The units a session reads off one datagram or segment: a UDP datagram
+    is one; a TCP segment holds units each behind its two-byte little-endian
+    length, of which the whole ones are kept."""
+    if proto == 17:
+        return [payload]
+    units, at = [], 0
+    while at + 2 <= len(payload):
+        size = int.from_bytes(payload[at : at + 2], "little")
+        if size == 0 or at + 2 + size > len(payload):
+            break
+        units.append(payload[at + 2 : at + 2 + size])
+        at += 2 + size
+    return units
+
+
+def unit_stream(units: list[bytes]) -> bytes:
+    """`units` in the layout the ingress targets read: each behind its
+    two-byte little-endian length."""
+    return b"".join(len(unit).to_bytes(2, "little") + unit for unit in units if len(unit) <= 0xFFFF)
+
+
+def ingress_streams() -> list[bytes]:
+    """The units of each capture that holds any, in the order its packets
+    came, at most `MAX_UNITS` and `MAX_STREAM` bytes of them, each stream
+    once; and the stream of `SYNTHETIC_UNITS`."""
+    seen: dict[bytes, None] = {unit_stream(list(SYNTHETIC_UNITS)): None}
+    for c in captures():
+        units: list[bytes] = []
+        for link, frame in classic_packets(c):
+            carried = ip_payload(link, frame)
+            if carried is not None:
+                units.extend(link_units(*carried))
+        stream = unit_stream(units[:MAX_UNITS])[:MAX_STREAM]
+        if stream:
+            seen.setdefault(stream, None)
+    return list(seen)
 
 
 def seeds(target: str) -> list[bytes]:
@@ -263,6 +353,9 @@ def derived(target: str) -> list[bytes]:
     if target == "live":
         # The six ways of opening a handle (`Feed`), in turn.
         return [bytes([n % 2, n % 6, 0, 128, 1, 1, 0, 0x44]) + c for n, c in enumerate(captures())]
+    if target in INGRESS:
+        heads = INGRESS_HEADS[target]
+        return [heads[n % len(heads)] + stream for n, stream in enumerate(ingress_streams())]
     if target == "transport":
         payloads: dict[bytes, None] = {}
         for c in captures():
@@ -322,6 +415,11 @@ def write(target: str, out_dir: pathlib.Path) -> int:
 
 
 def selftest() -> int:
+    for target in [*PACKAGES, *INGRESS_HEADS]:
+        if target not in TARGETS:
+            print(f"fuzz_seeds: FAIL -- `{target}` is named in PACKAGES or INGRESS_HEADS "
+                  "and is no target", file=sys.stderr)
+            return 1
     for reader, read in READS_CORPUS_OF.items():
         if reader not in TARGETS or read not in TARGETS or reader == read:
             print(f"fuzz_seeds: FAIL -- `{reader}` reads the corpus of `{read}`, "
@@ -347,6 +445,9 @@ def selftest() -> int:
 def main(argv: list[str]) -> int:
     if argv == ["--targets"]:
         print("\n".join(TARGETS))
+        return 0
+    if argv == ["--packages"]:
+        print("\n".join(f"{target} {PACKAGES.get(target, DEFAULT_PACKAGE)}" for target in TARGETS))
         return 0
     if argv == ["--selftest"]:
         return selftest()

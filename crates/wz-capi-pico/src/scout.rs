@@ -61,8 +61,9 @@ use core::net::IpAddr;
 
 use crate::prelude::*;
 
+use wz_session_core::caps;
 use wz_session_core::scouting_host::{
-    parse_multicast_locator, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
+    parse_multicast_locator, ScoutedHello, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
     SCOUTING_WHAT_DEFAULT,
 };
 
@@ -70,6 +71,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_zid::SessionZid;
 
+use crate::abi::z_loaned_string_t;
 use crate::config::{ConfigState, Z_CONFIG_SESSION_ZID_KEY};
 use crate::config_policy::PolicyStatements;
 use crate::pubsub::z_closure_drop_callback_t;
@@ -278,7 +280,7 @@ mod window {
 // z_owned_hello_t
 // ---------------------------------------------------------------------------
 
-/// The boxed payload behind a hello handle: one decoded `Hello`, plus the
+/// The payload behind a hello handle: one decoded `Hello`, plus the
 /// locator array it lends out.
 ///
 /// `locators_loan` is a PRE-BUILT loaned handle rather than something
@@ -288,26 +290,76 @@ mod window {
 pub(crate) struct HelloState {
     zid: z_id_t,
     whatami: z_whatami_t,
-    /// Owned, and the target of `locators_loan`'s handle. Boxed so its address
-    /// is stable when this state moves.
-    locators: Box<StringArrayState>,
+    /// The locators an owned hello keeps (`z_hello_clone`), the target of `locators_loan`'s
+    /// handle, boxed so its address is stable when this state moves; none for the hello a scout
+    /// lends its callback, whose array lends the scouted Hello's own strings.
+    _owned: Option<Box<StringArrayState>>,
     locators_loan: z_loaned_string_array_t,
 }
 
 impl HelloState {
+    /// A hello that owns copies of `locators`.
     fn new(zid: z_id_t, whatami: z_whatami_t, locators: Vec<String>) -> Box<Self> {
         let locators = StringArrayState::new(locators);
-        let handle = (&*locators) as *const StringArrayState as *mut c_void;
+        let locators_loan = loan_of(&locators);
         Box::new(Self {
             zid,
             whatami,
-            locators,
-            locators_loan: z_loaned_string_array_t {
-                handle,
-                _pad: [core::ptr::null_mut(); 3],
-            },
+            _owned: Some(locators),
+            locators_loan,
         })
     }
+
+    /// A hello over `locators`, an array its caller keeps for as long as it lends the hello.
+    fn lent(zid: z_id_t, whatami: z_whatami_t, locators: &StringArrayState) -> Self {
+        Self {
+            zid,
+            whatami,
+            _owned: None,
+            locators_loan: loan_of(locators),
+        }
+    }
+
+    /// The array the hello lends its locators in.
+    fn locators(&self) -> &StringArrayState {
+        // SAFETY: the loan's handle is the array the hello was made over: its own box, or the
+        // array the caller of `Self::lent` keeps for as long as it lends the hello.
+        unsafe { &*(self.locators_loan.handle as *const StringArrayState) }
+    }
+}
+
+/// The loaned handle of `locators`.
+fn loan_of(locators: &StringArrayState) -> z_loaned_string_array_t {
+    z_loaned_string_array_t {
+        handle: locators as *const StringArrayState as *mut c_void,
+        _pad: [core::ptr::null_mut(); 3],
+    }
+}
+
+/// Hand `on_hello` the scouted `hello` as pico's callback reads it, its locators lent from the
+/// Hello's own strings, so a delivery copies none of them. A Hello with more locators than a table
+/// of views holds (`MAX_ADMIN_LOCATORS`) is handed through an array of its own copies.
+fn lend_hello(hello: &ScoutedHello, on_hello: &mut impl FnMut(&mut HelloState)) {
+    let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
+    let zid = z_id_t::from_wire(&hello.zid);
+    if hello.locators.len() > caps::MAX_ADMIN_LOCATORS {
+        on_hello(&mut HelloState::new(zid, whatami, hello.locators.clone()));
+        return;
+    }
+    let views: [z_loaned_string_t; caps::MAX_ADMIN_LOCATORS] =
+        core::array::from_fn(|k| match hello.locators.get(k) {
+            Some(locator) => z_loaned_string_t {
+                _start: locator.as_ptr(),
+                _len: locator.len(),
+            },
+            None => z_loaned_string_t {
+                _start: core::ptr::null(),
+                _len: 0,
+            },
+        });
+    // SAFETY: `views` and the Hello's strings outlive the array, which this frame keeps.
+    let array = unsafe { StringArrayState::lent(&views[..hello.locators.len()]) };
+    on_hello(&mut HelloState::lent(zid, whatami, &array));
 }
 
 /// Owned hello (pico `z_owned_hello_t`, 56 B measured).
@@ -399,7 +451,7 @@ pub unsafe extern "C" fn z_hello_locators(
     if out.is_null() {
         return;
     }
-    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators.to_strings());
+    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators().to_strings());
     *out = z_owned_string_array_t {
         handle: Box::into_raw(StringArrayState::new(items)) as *mut c_void,
         _pad: [core::ptr::null_mut(); 3],
@@ -498,7 +550,7 @@ pub unsafe extern "C" fn z_hello_clone(
         *dst = z_owned_hello_t::null_value();
         return crate::result::Z_ERR_INVALID;
     };
-    let cloned = HelloState::new(state.zid, state.whatami, state.locators.to_strings());
+    let cloned = HelloState::new(state.zid, state.whatami, state.locators().to_strings());
     *dst = z_owned_hello_t {
         handle: Box::into_raw(cloned) as *mut c_void,
         _pad: [core::ptr::null_mut(); 6],
@@ -710,22 +762,22 @@ fn draw_zid_bytes(zid: &mut [u8; 16]) -> Option<()> {
 /// `z_scout` with NULL options and `z_open`'s lookup read the same four keys
 /// (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_scout(`), so
 /// they read them here, once.
-struct ScoutConfig {
+struct ScoutConfig<'a> {
     what: u8,
     budget_ms: u64,
-    locator: String,
+    locator: &'a str,
     /// The id the config states for the session, read as `z_open` reads it
     /// (`crate::session::stated_zid`), or `None` when it states none.
     zid: Option<SessionZid>,
 }
 
-impl ScoutConfig {
+impl<'a> ScoutConfig<'a> {
     /// The config's scouting keys, or `Z_ERR_INVALID` when it states an id `z_open` refuses: a
     /// caller that named an identity and scouted as another, or as nobody, would not know it.
     /// pico reads whatever its fixed indexes land on there (`vendor/zenoh-pico/src/api/api.c` @
     /// `_z_uuid_to_bytes(zid.id, zid_str);`), which is no id the caller named.
-    fn read(cfg: Option<&ConfigState>) -> Result<Self, ZResult> {
-        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(|s| s.trim().to_string());
+    fn read(cfg: Option<&'a ConfigState>) -> Result<Self, ZResult> {
+        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(str::trim);
         Ok(Self {
             what: get(Z_CONFIG_SCOUTING_WHAT_KEY)
                 .and_then(|s| s.parse::<u8>().ok())
@@ -733,8 +785,7 @@ impl ScoutConfig {
             budget_ms: get(Z_CONFIG_SCOUTING_TIMEOUT_KEY)
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
-            locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY)
-                .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
+            locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY).unwrap_or(MULTICAST_LOCATOR_DEFAULT),
             zid: crate::session::stated_zid(cfg.and_then(|c| c.get(Z_CONFIG_SESSION_ZID_KEY)))?,
         })
     }
@@ -759,7 +810,7 @@ pub(crate) fn locators_by_scout(
     limits: &SessionLimits,
 ) -> Result<Vec<String>, ZResult> {
     let read = ScoutConfig::read(Some(cfg))?;
-    let Some((group, port)) = parse_multicast_locator(&read.locator) else {
+    let Some((group, port)) = parse_multicast_locator(read.locator) else {
         return Err(crate::result::Z_ERR_INVALID);
     };
     let zid = read.zid.or_else(fresh_scout_zid);
@@ -851,7 +902,7 @@ pub unsafe extern "C" fn z_scout(
     };
     let ScoutConfig { locator, zid, .. } = read;
 
-    let Some((group, port)) = parse_multicast_locator(&locator) else {
+    let Some((group, port)) = parse_multicast_locator(locator) else {
         if let Some(drop_fn) = user_drop {
             drop_fn(user_ctx);
         }
@@ -869,9 +920,9 @@ pub unsafe extern "C" fn z_scout(
         &limits,
         |hello| {
             // The callback takes a MUTABLE loaned pointer (pico's signature), but
-            // this side keeps ownership: the state is dropped when `run_scout`'s
-            // per-hello box goes out of scope, matching upstream, where the hello
-            // is owned by the scouting task and only borrowed by the user.
+            // this side keeps ownership: the state lives in `lend_hello`'s frame
+            // for the call, matching upstream, where the hello is owned by the
+            // scouting task and only borrowed by the user.
             if let Some(call) = user_call {
                 let mut loaned = z_loaned_hello_t {
                     handle: hello as *mut HelloState as *mut c_void,
@@ -931,15 +982,7 @@ fn run_scout(
         budget_ms,
         policy,
         limits,
-        |hello| {
-            let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
-            let mut state = HelloState::new(
-                z_id_t::from_wire(&hello.zid),
-                whatami,
-                hello.locators.clone(),
-            );
-            on_hello(&mut state);
-        },
+        |hello| lend_hello(hello, &mut on_hello),
     )
 }
 
@@ -1004,7 +1047,7 @@ pub unsafe extern "C" fn z_closure_hello(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::string_array::z_string_array_len;
+    use crate::string_array::{z_string_array_get, z_string_array_len};
 
     /// The three C-allocated structs of this plane, pinned against the sizes
     /// MEASURED off the pinned zenoh-pico headers on a 64-bit host (56 / 32 / 24). A C
@@ -1176,6 +1219,82 @@ mod tests {
             assert_eq!(z_hello_whatami(&loaned), 2);
             assert_eq!(z_hello_zid(&loaned).id[0], 0xAB);
             assert_eq!(z_string_array_len(locs), 1);
+        }
+    }
+    /// The loaned form of the hello `state`, as a scout hands it to the callback.
+    fn lent_to_callback(state: &mut HelloState) -> z_loaned_hello_t {
+        z_loaned_hello_t {
+            handle: (state as *mut HelloState).cast::<c_void>(),
+            _pad: [core::ptr::null_mut(); 6],
+        }
+    }
+
+    /// A Hello of `count` locators from the node whose id is all `7`s.
+    fn scouted(count: usize) -> ScoutedHello {
+        ScoutedHello {
+            version: 9,
+            whatami: None,
+            zid: SessionZid::from([7; 16]),
+            locators: (0..count).map(|k| format!("tcp/10.0.0.{k}:7447")).collect(),
+        }
+    }
+
+    /// A scouted Hello is handed to the callback with its locators lent from its own strings:
+    /// each view the callback reads points at the bytes the window decoded, so a delivery copies
+    /// none of them. Turned red by a delivery that copies the locators.
+    #[test]
+    fn a_delivered_hello_lends_the_scouted_locators() {
+        let hello = scouted(caps::MAX_ADMIN_LOCATORS.min(2));
+        let mut seen = 0;
+        lend_hello(&hello, &mut |state: &mut HelloState| {
+            let loaned = lent_to_callback(state);
+            // SAFETY: a live hello, lent for this call.
+            unsafe {
+                let locators = zp_hello_locators(&loaned);
+                assert_eq!(z_string_array_len(locators), hello.locators.len());
+                for (k, locator) in hello.locators.iter().enumerate() {
+                    let view = &*z_string_array_get(locators, k);
+                    assert_eq!(view._start, locator.as_ptr(), "locator {k} is lent");
+                    assert_eq!(view._len, locator.len());
+                }
+                assert_eq!(z_hello_zid(&loaned).id[0], 7);
+                assert_eq!(z_hello_whatami(&loaned), 0);
+            }
+            seen += 1;
+        });
+        assert_eq!(seen, 1);
+    }
+
+    /// A Hello with more locators than the table of views holds is handed whole, through copies,
+    /// and a clone of a delivered hello, lent or not, owns copies that outlive the scouted Hello.
+    #[test]
+    fn a_long_hello_is_handed_whole_and_a_clone_outlives_the_scouted_one() {
+        for count in [
+            caps::MAX_ADMIN_LOCATORS.min(2),
+            caps::MAX_ADMIN_LOCATORS + 1,
+        ] {
+            let hello = scouted(count);
+            let mut cloned = z_owned_hello_t::null_value();
+            lend_hello(&hello, &mut |state: &mut HelloState| {
+                let loaned = lent_to_callback(state);
+                // SAFETY: a live hello, lent for this call, and a writable destination.
+                unsafe {
+                    assert_eq!(z_string_array_len(zp_hello_locators(&loaned)), count);
+                    assert_eq!(z_hello_clone(&mut cloned, &loaned), crate::result::Z_OK);
+                }
+            });
+            drop(hello);
+            // SAFETY: the clone is a live owned hello, dropped once.
+            unsafe {
+                let locators = zp_hello_locators(z_hello_loan(&cloned));
+                assert_eq!(z_string_array_len(locators), count, "{count} locators");
+                if count > 0 {
+                    let first = &*z_string_array_get(locators, 0);
+                    let bytes = core::slice::from_raw_parts(first._start, first._len);
+                    assert_eq!(bytes, b"tcp/10.0.0.0:7447");
+                }
+                z_hello_drop(z_hello_move(&mut cloned));
+            }
         }
     }
 }

@@ -52,7 +52,9 @@
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
 //!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
 //!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
-//!   counted, as zenoh-pico drops a declaration its heap cannot hold.
+//!   counted, as zenoh-pico drops a declaration its heap cannot hold;
+//! - with [`ArenaPlan::holding`], the place the ABI keeps its own handle of the session in, last,
+//!   so the handle is reserved with the session and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -60,10 +62,14 @@
 //! never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
-//! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
-//! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
-//! has a row of gets and no buffers. These are the tables whose limits bind at the open
-//! (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
+//! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
+//! (`Core::accept_face` counts it against `max_faces`): the plan lends a set of a face's tables for
+//! each of those and no more. One that listens holds the buffers of as many links again as
+//! `accept_pending` admits. The config's two numbers are held to the session's `MAX_FACES` and
+//! `MAX_ACCEPT_PENDING` under the build's, which [`admitted_faces`] and [`admitted_handshakes`]
+//! give an ABI to state, and a config over either is refused. A group's face is no link of the
+//! session's: it has a set of tables and no buffers. These are the tables whose limits bind at the
+//! open (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
 //! lends it from the arena and bounds it by limits of its own (`docs/c-abi-no-heap-pools.md`,
 //! section 4.14): reserved before then, it would be memory nothing uses.
 //!
@@ -90,7 +96,7 @@ use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -129,8 +135,9 @@ impl ArenaRow {
     }
 }
 
-/// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 24;
+/// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
+/// handle ([`ArenaPlan::holding`]).
+pub const ARENA_ROWS: usize = 26;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -270,12 +277,23 @@ pub struct ArenaPlan {
     held_queries: usize,
     /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
     key_bytes: usize,
+    /// The bytes of the place the ABI keeps its handle of the session in, none for no place
+    /// ([`Self::holding`]).
+    handle_bytes: usize,
 }
 
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+        hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
+        if !config.listen.is_empty() {
+            hold(
+                "MAX_ACCEPT_PENDING",
+                config.accept_pending,
+                admitted_handshakes(limits)?,
+            )?;
+        }
         let links = links_of(config).ok_or(ArenaRefused::TooLarge)?;
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
@@ -305,6 +323,7 @@ impl ArenaPlan {
                 "KEY_ARENA_BYTES",
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
+            handle_bytes: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -562,6 +581,30 @@ impl ArenaPlan {
         self.len += 1;
     }
 
+    /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
+    /// after every other row: the handle then takes no memory of its own, and an open whose arena
+    /// cannot hold it reserves nothing, as for any other row. A handle of no bytes takes no place.
+    /// Refused as past the address space when the handle asks for more alignment than a span of
+    /// the arena starts on ([`ARENA_ALIGN`]), or the arena with it is.
+    pub fn holding(mut self, handle: Layout) -> Result<Self, ArenaRefused> {
+        if handle.align() > ARENA_ALIGN {
+            return Err(ArenaRefused::TooLarge);
+        }
+        if handle.size() == 0 || self.handle_bytes != 0 {
+            return Ok(self);
+        }
+        self.handle_bytes = handle.size();
+        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES);
+        self.put("session handle", "", 1, handle.size());
+        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(self)
+    }
+
+    /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
+    pub fn handle_bytes(&self) -> usize {
+        self.handle_bytes
+    }
+
     /// The rows, in the order they are lent.
     pub fn rows(&self) -> &[ArenaRow] {
         &self.rows[..self.len]
@@ -686,15 +729,50 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
     })
 }
 
+/// The faces besides the dial role's that `limits` admit: the session's `MAX_FACES`, under the
+/// build's. What an ABI states as [`CoopConfig::max_faces`] for a session that takes faces besides
+/// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
+/// the build's.
+pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_FACES }>("MAX_FACES", limits.max_faces())
+}
+
+/// The inbound links in their handshake at once that `limits` admit: the session's
+/// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as
+/// [`CoopConfig::accept_pending`], which [`ArenaPlan::of`] holds the config of a session that
+/// listens to. Refused when the session's value is over the build's.
+pub fn admitted_handshakes(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_ACCEPT_PENDING }>("MAX_ACCEPT_PENDING", limits.max_accept_pending())
+}
+
+/// `asked`, what a session's config states of the limit `limit`, held to `admitted`, the session's
+/// value of it under the build's: a config over it is refused, as a stage after the build only
+/// lowers the memory the build fixes.
+fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaRefused> {
+    if asked > admitted {
+        return Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: asked,
+                ceiling: admitted,
+            },
+        });
+    }
+    Ok(())
+}
+
 /// `count` items for each of `each` holders.
 fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
-/// The faces a session `config` opens may hold at once: its links ([`links_of`]) and one for each
-/// group it joins. `None` past the address space.
+/// The faces a session `config` opens may hold at once: the dial role's, as many besides as
+/// `max_faces` admits, a link still in its handshake among them, and one for each group it joins.
+/// `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
-    links_of(config)?.checked_add(config.groups.len())
+    1usize
+        .checked_add(config.max_faces)?
+        .checked_add(config.groups.len())
 }
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as
@@ -740,6 +818,36 @@ impl ArenaMemory for AllocatorMemory {
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
         // SAFETY: the caller's contract: the allocator gave `base` for `layout`, given back once.
         unsafe { alloc::alloc::dealloc(base.as_ptr(), layout) }
+    }
+}
+
+/// The place a session's arena lends the ABI's handle of the session in
+/// ([`ArenaPlan::holding`]): `bytes` bytes aligned to [`ARENA_ALIGN`], zeroed at the open, which
+/// the engine never reads or writes. It stands while the engine does, so whatever the ABI keeps
+/// there must not keep the engine past its own drop: the ABI moves its handle out before it lets
+/// the handle go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandlePlace {
+    base: NonNull<u8>,
+    bytes: usize,
+}
+
+// SAFETY: a place is an address in the session's arena and its length; the engine never touches
+// the bytes, and the ABI that writes them keeps its own rule for who may, so handing the address to
+// another thread shares nothing.
+unsafe impl Send for HandlePlace {}
+// SAFETY: as for `Send`: the place itself is read only as an address.
+unsafe impl Sync for HandlePlace {}
+
+impl HandlePlace {
+    /// Where the place starts, aligned to [`ARENA_ALIGN`].
+    pub fn as_ptr(&self) -> NonNull<u8> {
+        self.base
+    }
+
+    /// How many bytes it holds: at least the size of the layout the plan was given.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -843,11 +951,45 @@ impl SessionArena {
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
-    /// in, for the session's life. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_keys(&mut self, plan: &ArenaPlan) -> Result<KeySpace, ArenaRefused> {
+    /// in, for the session's life, each key at most `longest` bytes, the session's
+    /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_keys(
+        &mut self,
+        plan: &ArenaPlan,
+        longest: MaxKeyexprBytesHeld,
+    ) -> Result<KeySpace, ArenaRefused> {
         self.arena
-            .lend_keys(plan.key_bytes)
+            .lend_keys(plan.key_bytes, longest)
             .map_err(ArenaRefused::Lend)
+    }
+
+    /// Lend the place for the ABI's handle `plan` holds, its last row: held by the handle for the
+    /// session's life and never given back to the arena, as the lane's area is not. `None` for a
+    /// plan with no place. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_handle(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<Option<HandlePlace>, ArenaRefused> {
+        if plan.handle_bytes == 0 {
+            return Ok(None);
+        }
+        let cells = self
+            .arena
+            .lend_byte_cells(plan.handle_bytes, 1)
+            .map_err(ArenaRefused::Lend)?;
+        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(plan.handle_bytes),
+            left: 0,
+        });
+        let buffer = cells.claim().ok_or(refused)?;
+        let (base, bytes) = buffer.raw();
+        // As the lane's: the claim is held for the session's life, and a buffer dropped then would
+        // write its cell's flag into an arena given back before it.
+        core::mem::forget(buffer);
+        Ok(Some(HandlePlace {
+            base: NonNull::new(base).ok_or(refused)?,
+            bytes,
+        }))
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,

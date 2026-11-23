@@ -72,7 +72,7 @@ fn a_key_the_record_keeps_is_held_in_the_same_block() {
     let engine = open(&router);
     let before = engine.key_counts().used;
     let id = engine
-        .acquire_keyexpr("demo/held/shared".to_owned())
+        .acquire_keyexpr("demo/held/shared")
         .expect("a declaration");
     let declared = engine.key_counts().used;
     assert_eq!(
@@ -153,7 +153,13 @@ fn holds_and_declarations_past_the_arena_leave_it_as_they_found_it() {
         let held = keys(&engine).hold_key(&key).expect("the room given back");
         keys(&engine).release_key(held);
         let id = engine
-            .declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink(&minted))
+            .declare_subscriber_on_wire(
+                &key,
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                sink(&minted),
+            )
             .expect("the room given back takes the subscriber");
         engine.undeclare_subscriber(id);
     }

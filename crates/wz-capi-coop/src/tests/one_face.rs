@@ -24,7 +24,7 @@ fn hearing(session: &Stepped) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     session.declare_subscriber_on_wire(
-        "demo/one/**".to_owned(),
+        "demo/one/**",
         WireKey::literal(),
         Locality::Any,
         None,

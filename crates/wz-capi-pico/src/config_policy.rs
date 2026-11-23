@@ -48,10 +48,12 @@ use wz_session_core::json5::{self, Json5Value};
 use wz_session_core::limits::RuntimeLimits;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
+#[cfg(feature = "config-policy")]
+use wz_session_core::policy::{POLICIES, POLICY_COUNT};
 #[cfg(test)]
 use wz_session_core::policy_document::Resolved;
 #[cfg(feature = "config-policy")]
-use wz_session_core::policy_document::{self, Overrides, Statement};
+use wz_session_core::policy_document::{self, Overrides, Profile, Statement};
 
 #[cfg(feature = "config-policy")]
 use crate::abi::z_loaned_config_t;
@@ -59,8 +61,6 @@ use crate::abi::z_loaned_config_t;
 use crate::config::ConfigState;
 #[cfg(feature = "config-policy")]
 use crate::ffi::guarded;
-#[cfg(feature = "config-policy")]
-use crate::prelude::*;
 use crate::result::ZResult;
 #[cfg(feature = "config-document")]
 use crate::result::Z_EINVAL;
@@ -112,19 +112,71 @@ impl PolicyStatements {
 }
 
 /// What a config's doors stated about its policies, as they stated it: the open judges and
-/// composes it ([`Self::compose`]).
+/// composes it ([`Self::compose`]). The profile and the statements are the build's own ids, found
+/// by the door in the build's tables, so a config keeps them in no memory of its own.
 #[cfg(feature = "config-policy")]
 #[derive(Clone, Default)]
 pub(crate) struct PolicyStatements {
-    /// The id `wz_ext_config_profile` named; it replaces the profile the document names.
-    profile: Option<String>,
+    /// The id of the profile `wz_ext_config_profile` named; it replaces the profile the document
+    /// names.
+    profile: Option<&'static str>,
     /// The `wz` members of the document `wz_ext_config_document` was handed, gathered as the
     /// members of a document of their own.
     #[cfg(feature = "config-document")]
     document: Option<Json5Value>,
-    /// The statements of `wz_ext_config_policy`, a policy's id and a value's id, one per policy,
-    /// in the order each policy was first stated.
-    api: Vec<(String, String)>,
+    /// The statements of `wz_ext_config_policy`.
+    api: ApiStatements,
+}
+
+/// The statements of `wz_ext_config_policy`, a policy's id and a value's id, one per policy, in
+/// the order each policy was first stated: at most one row for each policy the build has.
+#[cfg(feature = "config-policy")]
+#[derive(Clone, Copy)]
+struct ApiStatements {
+    rows: [Statement<'static>; POLICY_COUNT],
+    held: usize,
+}
+
+#[cfg(feature = "config-policy")]
+impl Default for ApiStatements {
+    fn default() -> Self {
+        Self {
+            rows: [Statement::new("", ""); POLICY_COUNT],
+            held: 0,
+        }
+    }
+}
+
+#[cfg(feature = "config-policy")]
+impl ApiStatements {
+    fn as_slice(&self) -> &[Statement<'static>] {
+        &self.rows[..self.held]
+    }
+
+    /// `statement` in place of a held statement of its policy, or after the others. A policy is
+    /// held once, so the rows hold every policy the build has.
+    fn state(&mut self, statement: Statement<'static>) {
+        match self.rows[..self.held]
+            .iter_mut()
+            .find(|held| held.policy == statement.policy)
+        {
+            Some(held) => *held = statement,
+            None => {
+                self.rows[self.held] = statement;
+                self.held += 1;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.held
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.held == 0
+    }
 }
 
 #[cfg(feature = "config-policy")]
@@ -145,14 +197,9 @@ impl PolicyStatements {
         policy: &mut SessionPolicy,
         limits: &mut SessionLimits,
     ) -> Result<(), ZResult> {
-        let api: Vec<Statement<'_>> = self
-            .api
-            .iter()
-            .map(|(id, value)| Statement::new(id.as_str(), value.as_str()))
-            .collect();
         let overrides = Overrides {
-            profile: self.profile.as_deref(),
-            statements: &api,
+            profile: self.profile,
+            statements: self.api.as_slice(),
             limits: &[],
         };
         // The reader of a document resolves into a record of where each value came from; the
@@ -182,14 +229,9 @@ impl PolicyStatements {
     #[cfg(test)]
     pub(crate) fn compose(&self, base: SessionPolicy) -> Result<Resolved, ZResult> {
         let base = policy_document::Base::session(base);
-        let api: Vec<Statement<'_>> = self
-            .api
-            .iter()
-            .map(|(policy, value)| Statement::new(policy.as_str(), value.as_str()))
-            .collect();
         let overrides = Overrides {
-            profile: self.profile.as_deref(),
-            statements: &api,
+            profile: self.profile,
+            statements: self.api.as_slice(),
             limits: &[],
         };
         #[cfg(feature = "config-document")]
@@ -221,19 +263,37 @@ impl PolicyStatements {
     }
 
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
-    /// replaced.
-    fn state_policy(&mut self, policy: &str, value: &str) {
-        match self.api.iter_mut().find(|(held, _)| held == policy) {
-            Some((_, held)) => *held = value.to_owned(),
-            None => self.api.push((policy.to_owned(), value.to_owned())),
-        }
+    /// replaced. A policy the build does not have, or a value the policy does not have, is
+    /// `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it.
+    fn state_policy(&mut self, policy: &str, value: &str) -> Result<(), ZResult> {
+        let entry = POLICIES
+            .iter()
+            .find(|entry| entry.id() == policy)
+            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        let value = entry
+            .values()
+            .iter()
+            .copied()
+            .find(|known| *known == value)
+            .ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        self.api.state(Statement::new(entry.id(), value));
+        Ok(())
+    }
+
+    /// The profile of the build whose id is `id` is the one the sessions start from; a profile
+    /// the build does not have is `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution
+    /// gives it.
+    fn state_profile(&mut self, id: &str) -> Result<(), ZResult> {
+        let profile = Profile::find(id).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        self.profile = Some(profile.id);
+        Ok(())
     }
 
     /// A statement no door would keep, for a test of what the open does with one.
     #[cfg(test)]
-    pub(crate) fn unchecked(policy: &str, value: &str) -> Self {
+    pub(crate) fn unchecked(policy: &'static str, value: &'static str) -> Self {
         let mut statements = Self::default();
-        statements.state_policy(policy, value);
+        statements.api.state(Statement::new(policy, value));
         statements
     }
 }
@@ -316,8 +376,7 @@ pub unsafe extern "C" fn wz_ext_config_policy(
     guarded(|| {
         amend(config, |statements| {
             let (policy, value) = (text_of(policy)?, text_of(value)?);
-            statements.state_policy(policy, value);
-            Ok(())
+            statements.state_policy(policy, value)
         })
     })
 }
@@ -338,8 +397,7 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 ) -> ZResult {
     guarded(|| {
         amend(config, |statements| {
-            statements.profile = Some(text_of(profile)?.to_owned());
-            Ok(())
+            statements.state_profile(text_of(profile)?)
         })
     })
 }
@@ -451,11 +509,12 @@ mod tests {
     use super::*;
     use crate::abi::z_owned_config_t;
     use crate::config::{z_config_default, z_config_drop, z_config_loan_mut, z_config_move};
+    #[cfg(feature = "config-document")]
+    use crate::prelude::*;
     use crate::session::{resolve_policy, resolve_snapshots};
     use alloc::ffi::CString;
-    use wz_session_core::policy::POLICIES;
     use wz_session_core::policy_binding::{Binding, PolicyEntry};
-    use wz_session_core::policy_document::{Origin, Profile};
+    use wz_session_core::policy_document::Origin;
 
     /// A config made by `z_config_default`, which the test drops.
     struct Config(z_owned_config_t);
@@ -696,6 +755,28 @@ mod tests {
         assert_eq!(config.policy(entry.id(), second), Z_OK);
         assert_eq!(entry.value_in(&config.resolved().policy), second);
         assert_eq!(config.state().policies.api.len(), 1);
+    }
+
+    /// A statement and a profile the doors keep are the build's own ids, not copies of the text the
+    /// caller handed, so a config holds them in no memory of its own. Turned red by a door that
+    /// keeps a copy of what it is handed.
+    #[test]
+    fn the_doors_keep_the_builds_own_ids() {
+        let (entry, value) = one_allowed();
+        let mut config = Config::new();
+        assert_eq!(config.policy(entry.id(), value), Z_OK);
+        let held = config.state().policies.api.as_slice()[0];
+        assert!(core::ptr::eq(held.policy, entry.id()));
+        assert!(entry
+            .values()
+            .iter()
+            .any(|known| core::ptr::eq(*known, held.value)));
+        if upstream_allowed().is_some() {
+            assert_eq!(config.profile("upstream"), Z_OK);
+            let kept = config.state().policies.profile.expect("a profile kept");
+            let declared = Profile::find("upstream").expect("declared");
+            assert!(core::ptr::eq(kept, declared.id));
+        }
     }
 
     #[test]

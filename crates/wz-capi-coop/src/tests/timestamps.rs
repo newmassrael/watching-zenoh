@@ -54,7 +54,7 @@ fn a_subscriber_sees_the_timestamp_as_the_sessions_policy_says() {
         let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
         let into = seen.clone();
         engine.declare_subscriber_on_wire(
-            "demo/ts/**".to_owned(),
+            "demo/ts/**",
             WireKey::literal(),
             Locality::Any,
             None,
