@@ -29005,6 +29005,105 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
     return "$fail"
 }
 
+# ─── Layer Qzp — the pico C ABI's MCU image builds, and one cell of it boots ───
+#
+# The pico C ABI without `std` on Zephyr (`wz-capi-pico` with `os-zephyr` and `scout-mcu`, the
+# staticlib of deploy/zephyr-capi-pico/rust) was built by no hosted lane: the MCU speed matrix
+# (scripts/mcu-speed.sh) and the kit's compare builds link it, both run by hand, so a change that broke
+# the image's build was seen on the next run by hand. This lane builds the matrix's arm-W images, in
+# pico's two threading arms, with the script's own `--images-only`, so the lane and the matrix build
+# the image one way and arm W's stack gate (`stack_frame_gate.py`, row zephyr-mcu-speed-w) is held on
+# every hosted run. It then boots the single-threaded image under QEMU against a stock zenohd, as a cell
+# of the matrix boots: the image opens a client session over the emulator's user network and declares a
+# subscriber, which its `MCU-SPEED READY workload=sub` line says. Nothing is measured: the cell would
+# wait for samples nobody publishes, so the lane stops it at that line.
+#
+# Needs the Zephyr toolchain and QEMU (WZ_QZ_REQUIRE) and a zenohd (WZ_QA_REQUIRE), so it runs in the
+# hosted job that provisions all three for Layer Qza.
+layer_qzp_pico_abi_mcu_image() {
+    local rc
+    _qz_toolchain thumbv7m-none-eabi qemu && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+    _qa_zenohd_prereqs Qzp && rc=0 || rc=$?
+    [[ "$rc" -eq 10 ]] && return 0
+    [[ "$rc" -ne 0 ]] && return 1
+
+    WZ_ZEPHYR_VENV="$_QZ_VENV" WZ_ZEPHYR_BASE="$_QZ_BASE" bash scripts/mcu-speed.sh --images-only --arms W
+    rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "  Qzp FAIL — the pico C ABI's MCU images did not build (exit $rc, above)" >&2
+        return 1
+    fi
+    local images="$WZ_ARTIFACTS/target/mcu-speed/images" threads
+    for threads in st mt; do
+        if [[ ! -s "$images/W-$threads.elf" ]]; then
+            echo "  Qzp FAIL — the build left no image W-$threads.elf under $images" >&2
+            return 1
+        fi
+        echo "  Qzp build W-$threads (deploy/zephyr-mcu-speed over deploy/zephyr-capi-pico/rust) OK"
+    done
+
+    # The router the image dials, as scripts/host-bench/mcu_speed.py starts it: QEMU's user network
+    # answers for the host at 10.0.2.2, and the router is ready once its tcp port takes a connection.
+    local zenohd="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}"
+    local udp=17460 tcp=17461 router_log qlog router_pid qpid up=0 fail=0
+    router_log="$(mktemp)"
+    qlog="$(mktemp)"
+    "$zenohd" --no-multicast-scouting -l "udp/127.0.0.1:$udp" -l "tcp/127.0.0.1:$tcp" \
+        >"$router_log" 2>&1 &
+    router_pid=$!
+    for _ in $(seq 1 100); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$tcp") 2>/dev/null; then
+            up=1
+            break
+        fi
+        kill -0 "$router_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [[ "$up" -ne 1 ]]; then
+        echo "  Qzp FAIL — zenohd did not listen on tcp/127.0.0.1:$tcp:" >&2
+        sed 's/^/    router| /' "$router_log" >&2
+        kill "$router_pid" 2>/dev/null
+        wait "$router_pid" 2>/dev/null
+        rm -f "$router_log" "$qlog"
+        return 1
+    fi
+
+    # One receiving cell's command line (`cell_args` of mcu_speed.py: the locator, the workload, the
+    # size, the window, the warm-up and the unused timeout), over the matrix's guest MAC. The image
+    # opens its session up to thirty times a second apart, so the backstop leaves room for all of them.
+    # Both console patterns end in `[[:space:]]*$` because QEMU's serial console writes CRLF.
+    timeout 300 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none \
+        -serial stdio -nic "user,model=lan9118,mac=52:54:00:12:34:56" \
+        -semihosting-config "enable=on,target=native,arg=mcu-speed,arg=udp/10.0.2.2:$udp,arg=sub,arg=8,arg=1000,arg=0,arg=0" \
+        -kernel "$images/W-st.elf" >"$qlog" 2>&1 &
+    qpid=$!
+    for _ in $(seq 1 2900); do
+        grep -qE '^MCU-SPEED (READY|FAIL) ' "$qlog" 2>/dev/null && break
+        kill -0 "$qpid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill "$qpid" 2>/dev/null
+    wait "$qpid" 2>/dev/null
+    kill "$router_pid" 2>/dev/null
+    wait "$router_pid" 2>/dev/null
+
+    if grep -qE '^MCU-SPEED BOOT arm=W threads=st[[:space:]]*$' "$qlog" \
+        && grep -qE '^MCU-SPEED READY workload=sub size=8[[:space:]]*$' "$qlog"; then
+        echo "  Qzp run W-st via mps2/an385 (mps2-an385): a client session to zenohd and a subscriber PASS"
+    else
+        echo "  Qzp run W-st FAIL (no 'MCU-SPEED READY workload=sub' line after the arm-W boot line)" >&2
+        echo "  ── Qzp: captured qemu output ──" >&2
+        sed 's/^/    | /' "$qlog" >&2
+        echo "  ── Qzp: the router's last lines ──" >&2
+        tail -n 20 "$router_log" | sed 's/^/    router| /' >&2
+        fail=1
+    fi
+    rm -f "$router_log" "$qlog"
+    return "$fail"
+}
+
 # ─── Layer Qzb — every BUILT board of the Zephyr table builds ───
 #
 # R3082. `deploy/zephyr-boards.json` grades each (board, link, app) row, and BUILT
@@ -29531,6 +29630,7 @@ run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1
 run_layer Qz layer_qz_zephyr_boot || overall=1
 run_layer Qza layer_qza_zephyr_admin_node_vs_zenohd || overall=1
+run_layer Qzp layer_qzp_pico_abi_mcu_image || overall=1
 run_layer Qzb layer_qzb_zephyr_board_matrix || overall=1
 run_layer Qzk layer_qzk_client_images_build || overall=1
 run_layer M layer_m_scouting_multicast || overall=1

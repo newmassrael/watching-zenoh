@@ -5049,6 +5049,19 @@ jobs:
           . ~/zephyrproject/.venv/bin/activate
           bash scripts/run-ci.sh --layer Qza
 
+      - name: Layer Qzp — the pico C ABI's MCU image builds and a cell of it boots
+        # The matrix's arm-W images (deploy/zephyr-mcu-speed over deploy/zephyr-capi-pico/rust) in
+        # both threading arms, built by scripts/mcu-speed.sh --images-only, and the single-threaded
+        # one booted under QEMU against the zenohd this job unpacked: a client session and a
+        # subscriber. Both flags, for the reason Layer Qza arms them.
+        env:
+          WZ_QZ_REQUIRE: "1"
+          WZ_QA_REQUIRE: "1"
+        run: |
+          # shellcheck source=/dev/null  # provisioned by the venv step above
+          . ~/zephyrproject/.venv/bin/activate
+          bash scripts/run-ci.sh --layer Qzp
+
   # R311y11 — macOS + Windows NATIVE portability check of the wz AP stack.
   # The Linux `ci` job above cannot catch target_os-routed regressions: the
   # default AP stack must compile clean off-Linux, the quinn/rustls datagram

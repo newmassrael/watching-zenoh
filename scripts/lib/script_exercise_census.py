@@ -182,13 +182,6 @@ DECLARED: dict[str, tuple[str, str]] = {
         "the workspace type-check of the pre-push hook; the lanes build the crates themselves",
         "runs on every push through the pre-push hook",
     ),
-    "scripts/mcu-speed.sh": (
-        "builds four Zephyr images and the host probe and boots each image once a cell under QEMU; "
-        "its gate mcu_speed.py is selftested in Layer C0, and no lane runs it until its table is "
-        "filled from a first run",
-        "run through bx on a machine with the Zephyr toolchain, QEMU and a zenohd "
-        "(docs/mcu-speed-matrix.md)",
-    ),
     "scripts/pico-compare.sh": (
         "the host performance comparison with zenoh-pico; needs idle pinned CPUs on a build "
         "host, and the tools it runs (perf_matrix.py, nodrop.py, parity.py, batch_control.py) are "
