@@ -8082,7 +8082,8 @@ mod tests {
     #[test]
     fn a_source_info_ext_body_is_walked_into_the_origin_triple() {
         let zid = [0xA1u8, 0xB2, 0xC3];
-        let body = crate::source_info_ext::encode_source_info_ext_body(&zid, 7, 42);
+        let body = crate::source_info_ext::encode_source_info_ext_body(&zid, 7, 42)
+            .expect("a zid of 1 to 16 bytes");
         let bytes = msg_put(None, None, &[ext_zbuf(0x01, false, &body)], b"x");
         let f = agree(
             "MsgPut",
@@ -8896,7 +8897,8 @@ mod tests {
     /// body established (R311y597).
     #[test]
     fn an_ext_body_that_does_not_walk_cleanly_stays_an_opaque_value() {
-        let mut trailing = crate::source_info_ext::encode_source_info_ext_body(&[0xAA], 1, 2);
+        let mut trailing = crate::source_info_ext::encode_source_info_ext_body(&[0xAA], 1, 2)
+            .expect("a zid of 1 to 16 bytes");
         trailing.push(0xFF);
         for (body, label) in [
             (

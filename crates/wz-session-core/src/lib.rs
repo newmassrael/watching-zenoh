@@ -1679,8 +1679,6 @@ pub mod pubsub;
 // `codec-response`-gated `response_build` module to close the
 // arbitrary-composition gap (north-star mechanism ①).
 #[cfg(feature = "alloc")]
-// Totality debt TD-110 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod source_info_ext;
 
 /// SSOT for the attachment extension wire shape. Gated on the

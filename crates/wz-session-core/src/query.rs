@@ -4370,7 +4370,8 @@ mod tests {
         suffix: &str,
         zid: &[u8],
     ) -> RequestOwned {
-        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
+        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42)
+            .expect("a zid of 1 to 16 bytes");
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
         ext.set_enc(2); // ENC_ZBUF
@@ -7310,7 +7311,8 @@ mod request_decode_isolation_tests {
         suffix: &str,
         zid: &[u8],
     ) -> RequestOwned {
-        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
+        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42)
+            .expect("a zid of 1 to 16 bytes");
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
         ext.set_enc(2); // ENC_ZBUF
