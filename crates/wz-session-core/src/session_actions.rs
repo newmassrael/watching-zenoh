@@ -3195,25 +3195,34 @@ enum LentDeclaration<'a> {
     },
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
-    /// A retraction, naming its key when `key` holds the `ext_keyexpr` body.
+    /// A retraction, naming its key when `key` holds it.
     #[cfg(all(
         feature = "alloc",
         feature = "declare-subscriber",
         feature = "declare-undeclare"
     ))]
-    UndeclareSubscriber { id: u64, key: Option<&'a [u8]> },
+    UndeclareSubscriber {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-queryable",
         feature = "declare-undeclare"
     ))]
-    UndeclareQueryable { id: u64, key: Option<&'a [u8]> },
+    UndeclareQueryable {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
     #[cfg(all(
         feature = "alloc",
         feature = "declare-token",
         feature = "declare-undeclare"
     ))]
-    UndeclareToken { id: u64, key: Option<&'a [u8]> },
+    UndeclareToken {
+        id: u64,
+        key: Option<&'a crate::lent_control::NamedKeyexpr>,
+    },
 }
 
 #[cfg(all(
@@ -15746,10 +15755,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A lend-only session writes the retraction from its parts.
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
                     id: subscriber_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -15766,8 +15775,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
-    /// The `ext_keyexpr` body a retraction written from its parts names `key` by: the bytes of
-    /// the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// The `ext_keyexpr` body a retraction written from its parts names `key` by, made on the
+    /// stack: the bytes of the owned retraction's extension (`declare_ext_keyexpr::build_ext_wireexpr`).
+    /// A suffix past the session's `MAX_KEYEXPR_BYTES`, a key the session holds no text for, is
+    /// not named, and the retraction goes by the id alone, which the peer retracts by as well.
     #[cfg(all(
         feature = "tx-lend-only",
         feature = "declare-undeclare",
@@ -15777,10 +15788,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body(key: Option<(crate::wire_id::ExprId, &str)>) -> Option<Vec<u8>> {
-        key.map(|(mapping_id, suffix)| {
-            crate::declare_ext_keyexpr::ext_wireexpr_body(mapping_id, suffix)
-        })
+    fn named_key_body(
+        &self,
+        key: Option<(crate::wire_id::ExprId, &str)>,
+    ) -> Option<crate::lent_control::NamedKeyexpr> {
+        let (mapping_id, suffix) = key?;
+        crate::lent_control::NamedKeyexpr::new(
+            mapping_id,
+            suffix,
+            self.params.limits.max_keyexpr_bytes_held(),
+        )
+        .ok()
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -15825,10 +15843,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_queryable_recorded(queryable_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
                     id: queryable_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -15892,10 +15910,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_token_recorded(token_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let body = self.named_key_body(key);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
                     id: token_id,
-                    key: body.as_deref(),
+                    key: body.as_ref(),
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
