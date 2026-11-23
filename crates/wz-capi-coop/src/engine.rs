@@ -1688,7 +1688,14 @@ impl InterestHold {
 fn suffix_place(keyexpr: &str, suffix: Option<&str>) -> Option<usize> {
     let suffix = suffix?;
     let at = keyexpr.len().checked_sub(suffix.len())?;
-    (keyexpr.get(at..) == Some(suffix)).then_some(at)
+    keyexpr.ends_with(suffix).then_some(at)
+}
+
+/// Whether a row's key is `text`: one body for every table a key the session keeps already is
+/// looked for in (`Core::kept_key`), each of which would carry a copy of the comparison.
+#[inline(never)]
+fn is_text(key: &RowKey, text: &str) -> bool {
+    key.as_str() == text
 }
 
 struct MatchEntry {
@@ -1908,22 +1915,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the session's declarations and the program's objects name alike (a publisher's key, its write
     /// filter's and its Interest's) takes one block, whichever of them came first.
     fn kept_key(&self, keyexpr: &str) -> Option<RowKey> {
+        let kept = |key: &&RowKey| is_text(key, keyexpr);
         let found = self
             .keyexprs
             .iter()
             .map(|e| &e.keyexpr)
-            .chain(self.subscribers.iter().map(|e| &e.keyexpr))
-            .chain(self.filters.iter().map(|e| &e.keyexpr))
-            .chain(self.interests.iter().map(|e| &e.keyexpr))
-            .chain(self.matches.iter().map(|e| &e.keyexpr))
-            .find(|key| key.as_str() == keyexpr);
+            .find(kept)
+            .or_else(|| self.subscribers.iter().map(|e| &e.keyexpr).find(kept))
+            .or_else(|| self.filters.iter().map(|e| &e.keyexpr).find(kept))
+            .or_else(|| self.interests.iter().map(|e| &e.keyexpr).find(kept))
+            .or_else(|| self.matches.iter().map(|e| &e.keyexpr).find(kept));
         #[cfg(feature = "queryable")]
-        let found = found.or_else(|| {
-            self.queryables
-                .iter()
-                .map(|e| &e.keyexpr)
-                .find(|key| key.as_str() == keyexpr)
-        });
+        let found = found.or_else(|| self.queryables.iter().map(|e| &e.keyexpr).find(kept));
         found.cloned()
     }
 
