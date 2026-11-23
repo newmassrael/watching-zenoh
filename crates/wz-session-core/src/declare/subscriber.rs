@@ -327,20 +327,23 @@ impl RemoteSubscriberPeer<Profile> {
 
 #[cfg(feature = "storage-profile")]
 impl RemoteSubscriberPeer<crate::bounded::Lent> {
-    /// Keep the subscribers the peer declares from here on in rows of `rows`, the session's pool,
-    /// which the tables of every face share. What the table held in another pool is forgotten
+    /// Keep the subscribers the peer declares from here on in rows of `rows`, the session's: a pool
+    /// the faces share, or a span of this table's own. What the table held elsewhere is forgotten
     /// first.
     pub fn keep_rows_in(
         &mut self,
-        rows: crate::row_pool::RowSpace<(u64, crate::key_arena::KeyRef)>,
+        rows: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
     ) {
         self.declared.keep_rows_in(rows);
     }
 
     /// Keep the repeats of the subscribers the peer declares from here on in rows of `repeats`, the
-    /// session's pool, which the tables of every face share.
+    /// session's: a pool the faces share, or a span of this table's own.
     #[cfg(feature = "alloc")]
-    pub fn keep_repeat_rows_in(&mut self, repeats: crate::row_pool::RowSpace<(u64, u64)>) {
+    pub fn keep_repeat_rows_in(
+        &mut self,
+        repeats: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
+    ) {
         self.aliases.keep_rows_in(repeats);
     }
 }

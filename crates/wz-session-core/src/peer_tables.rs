@@ -53,7 +53,7 @@ use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
 use core::mem::MaybeUninit;
-use core::ptr::{self, addr_of_mut};
+use core::ptr::{self, addr_of_mut, NonNull};
 
 #[cfg(feature = "liveliness-token")]
 use crate::bounded::BoundedVec;
@@ -253,8 +253,10 @@ impl PeerTables<Lent> {
         self.remote_queryables.keep_rows_in(pools.queryables);
         #[cfg(feature = "alloc")]
         {
-            self.remote_subscribers.keep_repeat_rows_in(pools.repeats);
-            self.remote_queryables.keep_repeat_rows_in(pools.repeats);
+            self.remote_subscribers
+                .keep_repeat_rows_in(pools.sub_repeats);
+            self.remote_queryables
+                .keep_repeat_rows_in(pools.queryable_repeats);
         }
         self.tokens.keep_rows_in(pools.tokens);
     }
@@ -289,42 +291,202 @@ impl PeerTables<Lent> {
     }
 }
 
-/// How many rows each pool of what the peers of one session write by their own choice holds
-/// ([`PeerPools::lent`]): what the session's faces may hold together, each face held to its own
-/// bound besides.
+/// How many rows each kind of what the peers of one session write by their own choice is lent
+/// ([`PeerPools::lent`]), and whether the session's faces share them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeerPoolRows {
     /// The peers' keyexpr aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`).
     pub aliases: usize,
     /// The peers' declarations of one kind (`SESSION_MAX_REMOTE_DECLS`): the subscribers, the
     /// queryables and the tokens each this many, and with `alloc` the repeats of the subscribers
-    /// and the queryables twice this many, as a repeat is an id its kind's table holds.
+    /// and of the queryables each this many, as a repeat is an id its kind's table holds.
     pub remote_decls: usize,
     /// The peers' subscriber interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`); none in a build
     /// without `declare-subscriber`.
     pub interests: usize,
+    /// Whether the faces of the session share the rows, a pool of each kind for a session of many
+    /// faces, or one face has them, a span of each of its tables' own for a session of one.
+    pub shared: bool,
 }
 
-/// The pools the tables of every face of a session keep what their peers write by their own choice
-/// in: one pool of each row kind for the session, lent from its arena once, each face's table a
-/// list of the rows its peer holds (`crate::row_pool`). A face's tables keep the bound of each
-/// peer; a pool bounds what the faces hold together, so a session reserves what its faces may hold
-/// at once and not its faces times what each may hold. A row a full pool cannot take is refused
-/// and counted by the table that asked, as a declaration past that table's bound is. A handle:
-/// copies name the same pools.
+/// The rows of a table keyed by a peer's ids whose value is a key's place.
+type KeyRows = crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>;
+
+/// The rows of the peer's queryables.
+type QueryableRows =
+    crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::id_map::DeclaredQueryable<Lent>>>;
+
+/// The rows of the repeats of the peer's subscribers or queryables.
+#[cfg(feature = "alloc")]
+type RepeatRows = crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>;
+
+impl PeerPoolRows {
+    /// The bytes the aliases' rows take in an arena. `None` past the most rows a pool or a span
+    /// names, or the address space.
+    pub const fn alias_bytes(&self) -> Option<usize> {
+        if self.shared {
+            KeyRows::pool_bytes(self.aliases)
+        } else {
+            span_of(KeyRows::own_bytes(self.aliases))
+        }
+    }
+
+    /// The bytes the declarations' rows take in an arena: the subscribers', the queryables', the
+    /// tokens' and, with `alloc`, the repeats'. In a session of one face they are one span, each
+    /// table's rows from where the one before ends, aligned for its rows. `None` past the most
+    /// rows a pool or a span names, or the address space.
+    pub const fn decl_bytes(&self) -> Option<usize> {
+        if !self.shared {
+            return match decl_layout(self.remote_decls) {
+                Some(layout) => Arena::span(layout[DECL_END]),
+                None => None,
+            };
+        }
+        let rows = self.remote_decls;
+        #[cfg(feature = "alloc")]
+        let repeats = match RepeatRows::pool_bytes(rows) {
+            Some(each) => each.checked_mul(2),
+            None => None,
+        };
+        #[cfg(not(feature = "alloc"))]
+        let repeats = Some(0);
+        sum_spans(&[
+            KeyRows::pool_bytes(rows),
+            QueryableRows::pool_bytes(rows),
+            KeyRows::pool_bytes(rows),
+            repeats,
+        ])
+    }
+
+    /// The bytes the interests' rows take in an arena: none without `declare-subscriber`. `None`
+    /// past the most rows a pool or a span names, or the address space.
+    pub const fn interest_bytes(&self) -> Option<usize> {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            if self.shared {
+                crate::pubsub::InterestRows::pool_bytes(self.interests)
+            } else {
+                span_of(crate::pubsub::InterestRows::own_bytes(self.interests))
+            }
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        {
+            Some(0)
+        }
+    }
+
+    /// The bytes an arena [`PeerPools::lent`] takes for these rows. `None` past the most rows a
+    /// pool or a span names, or the address space.
+    pub const fn arena_bytes(&self) -> Option<usize> {
+        sum_spans(&[self.alias_bytes(), self.decl_bytes(), self.interest_bytes()])
+    }
+}
+
+/// `bytes` rounded up to an arena's span.
+const fn span_of(bytes: Option<usize>) -> Option<usize> {
+    match bytes {
+        Some(bytes) => Arena::span(bytes),
+        None => None,
+    }
+}
+
+/// Where the rows of a table of `bytes` bytes aligned to `align` lie in a span, laid after
+/// `from`: their start and their end. `None` past the address space.
+const fn carve(from: usize, align: usize, bytes: Option<usize>) -> Option<(usize, usize)> {
+    let start = match from.checked_add(align - 1) {
+        Some(up) => up & !(align - 1),
+        None => return None,
+    };
+    match bytes {
+        Some(bytes) => match start.checked_add(bytes) {
+            Some(end) => Some((start, end)),
+            None => None,
+        },
+        None => None,
+    }
+}
+
+/// The index of the end of the rows in [`decl_layout`]'s answer.
+const DECL_END: usize = 5;
+
+/// Where the rows of a face's own declaration tables of `rows` rows each lie in their one span:
+/// the subscribers', the queryables', the tokens', the subscribers' repeats' and the queryables'
+/// repeats' starts, and where the last ends (the repeats none without `alloc`). `None` past the
+/// most rows a span names or the address space.
+const fn decl_layout(rows: usize) -> Option<[usize; DECL_END + 1]> {
+    let subscribers = match carve(0, KeyRows::item_align(), KeyRows::own_bytes(rows)) {
+        Some(place) => place,
+        None => return None,
+    };
+    let queryables = match carve(
+        subscribers.1,
+        QueryableRows::item_align(),
+        QueryableRows::own_bytes(rows),
+    ) {
+        Some(place) => place,
+        None => return None,
+    };
+    let tokens = match carve(
+        queryables.1,
+        KeyRows::item_align(),
+        KeyRows::own_bytes(rows),
+    ) {
+        Some(place) => place,
+        None => return None,
+    };
+    #[cfg(feature = "alloc")]
+    let (sub_repeats, queryable_repeats) = {
+        let (align, bytes) = (RepeatRows::item_align(), RepeatRows::own_bytes(rows));
+        let first = match carve(tokens.1, align, bytes) {
+            Some(place) => place,
+            None => return None,
+        };
+        match carve(first.1, align, bytes) {
+            Some(second) => (first, second),
+            None => return None,
+        }
+    };
+    #[cfg(not(feature = "alloc"))]
+    let (sub_repeats, queryable_repeats) = ((tokens.1, tokens.1), (tokens.1, tokens.1));
+    Some([
+        subscribers.0,
+        queryables.0,
+        tokens.0,
+        sub_repeats.0,
+        queryable_repeats.0,
+        queryable_repeats.1,
+    ])
+}
+
+/// Where the tables of the faces of a session keep what their peers write by their own choice:
+/// lent from the session's arena once, at its open (`crate::row_pool`).
+///
+/// For a session of many faces, one pool of each row kind the faces share, each face's table a
+/// list of the rows its peer holds: a face's tables keep the bound of each peer, and a pool bounds
+/// what the faces hold together, so a session reserves what its faces may hold at once and not its
+/// faces times what each may hold. A row a full pool cannot take is refused and counted by the
+/// table that asked, as a declaration past that table's bound is.
+///
+/// For a session of one face, a span of each table's own of that face's bound, laid out as the
+/// inline tables lay their rows out, with no link and no pool state: they are handed to that one
+/// face's tables and to no other.
+///
+/// A handle: copies name the same rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerPools {
-    aliases: crate::row_pool::RowSpace<(u64, crate::key_arena::KeyRef)>,
-    subscribers: crate::row_pool::RowSpace<(u64, crate::key_arena::KeyRef)>,
-    queryables: crate::row_pool::RowSpace<(u64, crate::id_map::DeclaredQueryable<Lent>)>,
-    tokens: crate::row_pool::RowSpace<(u64, crate::key_arena::KeyRef)>,
+    aliases: KeyRows,
+    subscribers: KeyRows,
+    queryables: QueryableRows,
+    tokens: KeyRows,
     #[cfg(feature = "alloc")]
-    repeats: crate::row_pool::RowSpace<(u64, u64)>,
+    sub_repeats: RepeatRows,
+    #[cfg(feature = "alloc")]
+    queryable_repeats: RepeatRows,
     #[cfg(feature = "declare-subscriber")]
     interests: crate::pubsub::InterestRows,
 }
 
-/// What each pool of a session's [`PeerPools`] holds now.
+/// What each pool of a session's shared [`PeerPools`] holds now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeerPoolCounts {
     /// The peers' aliases.
@@ -335,99 +497,108 @@ pub struct PeerPoolCounts {
     pub queryables: crate::row_pool::RowCounts,
     /// The peers' tokens.
     pub tokens: crate::row_pool::RowCounts,
-    /// The repeats of the peers' subscribers and queryables; nothing without `alloc`.
-    pub repeats: crate::row_pool::RowCounts,
+    /// The repeats of the peers' subscribers; nothing without `alloc`.
+    pub sub_repeats: crate::row_pool::RowCounts,
+    /// The repeats of the peers' queryables; nothing without `alloc`.
+    pub queryable_repeats: crate::row_pool::RowCounts,
     /// The peers' subscriber interests; nothing without `declare-subscriber`.
     pub interests: crate::row_pool::RowCounts,
 }
 
 impl PeerPools {
-    /// The pools `rows` states, lent from `arena` in the order [`Self::arena_bytes`] counts
-    /// them: the aliases', the declarations' and the interests'. Refused, the pools lent so far
-    /// going back with the arena, when the arena has not the room.
+    /// The rows `rows` states, lent from `arena` in the order [`PeerPoolRows::arena_bytes`]
+    /// counts them: the aliases', the declarations' and the interests'. Refused, what was lent so
+    /// far going back with the arena, when the arena has not the room or a count is past what a
+    /// pool or a span names.
     pub fn lent(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
+        if !rows.shared {
+            return Self::own_in(arena, rows);
+        }
+        let decls = rows.remote_decls;
         Ok(Self {
             aliases: arena.lend_pool(rows.aliases)?,
-            subscribers: arena.lend_pool(rows.remote_decls)?,
-            queryables: arena.lend_pool(rows.remote_decls)?,
-            tokens: arena.lend_pool(rows.remote_decls)?,
+            subscribers: arena.lend_pool(decls)?,
+            queryables: arena.lend_pool(decls)?,
+            tokens: arena.lend_pool(decls)?,
             #[cfg(feature = "alloc")]
-            repeats: arena.lend_pool(Self::repeats_of(rows.remote_decls))?,
+            sub_repeats: arena.lend_pool(decls)?,
+            #[cfg(feature = "alloc")]
+            queryable_repeats: arena.lend_pool(decls)?,
             #[cfg(feature = "declare-subscriber")]
             interests: crate::pubsub::InterestRows::lent(arena, rows.interests)?,
         })
     }
 
-    /// The rows of the repeats' pool: a repeat is an id of a subscriber's or a queryable's table,
-    /// so two of those pools' rows. Saturates, so a count past the address space is refused by
-    /// the pool's span.
-    #[cfg(feature = "alloc")]
-    const fn repeats_of(remote_decls: usize) -> usize {
-        remote_decls.saturating_mul(2)
-    }
-
-    /// The bytes of the aliases' pool of `rows` rows. `None` past the address space.
-    pub const fn alias_bytes(rows: usize) -> Option<usize> {
-        crate::row_pool::RowSpace::<(u64, crate::key_arena::KeyRef)>::span_bytes(rows)
-    }
-
-    /// The bytes of the declarations' pools of `rows` rows of each kind: the subscribers', the
-    /// queryables', the tokens' and, with `alloc`, the repeats'. `None` past the address space.
-    pub const fn decl_bytes(rows: usize) -> Option<usize> {
-        #[cfg(feature = "alloc")]
-        let repeats = crate::row_pool::RowSpace::<(u64, u64)>::span_bytes(Self::repeats_of(rows));
-        #[cfg(not(feature = "alloc"))]
-        let repeats = Some(0);
-        let spans = [
-            crate::row_pool::RowSpace::<(u64, crate::key_arena::KeyRef)>::span_bytes(rows),
-            crate::row_pool::RowSpace::<(u64, crate::id_map::DeclaredQueryable<Lent>)>::span_bytes(
-                rows,
-            ),
-            crate::row_pool::RowSpace::<(u64, crate::key_arena::KeyRef)>::span_bytes(rows),
-            repeats,
-        ];
-        sum_spans(&spans)
-    }
-
-    /// The bytes of the interests' pool of `rows` rows: none without `declare-subscriber`.
-    /// `None` past the address space.
-    pub const fn interest_bytes(rows: usize) -> Option<usize> {
+    /// The spans of one face's own tables `rows` states: one for its aliases, one its declaration
+    /// tables share laid out by [`decl_layout`], one for its interests.
+    fn own_in(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
+        let left = arena.bytes() - arena.high_water();
+        let Some(layout) = decl_layout(rows.remote_decls) else {
+            return Err(LendRefused::Exhausted { asked: None, left });
+        };
+        let aliases = arena.lend_span(KeyRows::own_bytes(rows.aliases))?;
+        let decl_span = arena.lend_span(Some(layout[DECL_END]))?;
         #[cfg(feature = "declare-subscriber")]
-        {
-            crate::pubsub::InterestRows::arena_bytes(rows)
-        }
-        #[cfg(not(feature = "declare-subscriber"))]
-        {
-            let _ = rows;
-            Some(0)
+        let interests = arena.lend_span(crate::pubsub::InterestRows::own_bytes(rows.interests))?;
+        let at = |index: usize| {
+            // SAFETY: the layout's starts lie inside the span of the declarations, which is its
+            // end long, so each is inside it or at its end.
+            unsafe { NonNull::new_unchecked(decl_span.as_ptr().add(layout[index])) }
+        };
+        let decls = rows.remote_decls;
+        // SAFETY: each span was lent above, aligned to the arena's spans, its own counts checked
+        // against what a span names by its bytes; each table's rows start aligned for its rows
+        // (`decl_layout`), end before the next table's start, and are handed to the one table of
+        // the one face this session holds.
+        unsafe {
+            Ok(Self {
+                aliases: KeyRows::own_over(aliases, rows.aliases),
+                subscribers: KeyRows::own_over(at(0), decls),
+                queryables: QueryableRows::own_over(at(1), decls),
+                tokens: KeyRows::own_over(at(2), decls),
+                #[cfg(feature = "alloc")]
+                sub_repeats: RepeatRows::own_over(at(3), decls),
+                #[cfg(feature = "alloc")]
+                queryable_repeats: RepeatRows::own_over(at(4), decls),
+                #[cfg(feature = "declare-subscriber")]
+                interests: crate::pubsub::InterestRows::own_over(interests, rows.interests),
+            })
         }
     }
 
-    /// The bytes of an arena [`Self::lent`] takes for `rows`. `None` past the address space.
+    /// The bytes of an arena [`Self::lent`] takes for `rows`. `None` past the most rows a pool
+    /// or a span names, or the address space.
     pub const fn arena_bytes(rows: PeerPoolRows) -> Option<usize> {
-        sum_spans(&[
-            Self::alias_bytes(rows.aliases),
-            Self::decl_bytes(rows.remote_decls),
-            Self::interest_bytes(rows.interests),
-        ])
+        rows.arena_bytes()
     }
 
-    /// What each pool holds now.
-    pub fn counts(&self) -> PeerPoolCounts {
-        PeerPoolCounts {
-            aliases: self.aliases.counts(),
-            subscribers: self.subscribers.counts(),
-            queryables: self.queryables.counts(),
-            tokens: self.tokens.counts(),
+    /// Whether the faces share these rows; one face's own spans are handed to that face's tables
+    /// alone.
+    pub fn is_shared(&self) -> bool {
+        self.aliases.is_shared()
+    }
+
+    /// What each shared pool holds now; `None` for one face's own spans, whose tables say what they
+    /// hold.
+    pub fn counts(&self) -> Option<PeerPoolCounts> {
+        Some(PeerPoolCounts {
+            aliases: self.aliases.counts()?,
+            subscribers: self.subscribers.counts()?,
+            queryables: self.queryables.counts()?,
+            tokens: self.tokens.counts()?,
             #[cfg(feature = "alloc")]
-            repeats: self.repeats.counts(),
+            sub_repeats: self.sub_repeats.counts()?,
             #[cfg(not(feature = "alloc"))]
-            repeats: crate::row_pool::RowCounts::default(),
+            sub_repeats: crate::row_pool::RowCounts::default(),
+            #[cfg(feature = "alloc")]
+            queryable_repeats: self.queryable_repeats.counts()?,
+            #[cfg(not(feature = "alloc"))]
+            queryable_repeats: crate::row_pool::RowCounts::default(),
             #[cfg(feature = "declare-subscriber")]
-            interests: self.interests.counts(),
+            interests: self.interests.counts()?,
             #[cfg(not(feature = "declare-subscriber"))]
             interests: crate::row_pool::RowCounts::default(),
-        }
+        })
     }
 }
 
@@ -750,13 +921,23 @@ mod lent_tests {
             .expect("the arena is the key arena's span")
     }
 
-    /// Pools of `each` rows of every kind, lent from an arena of their own, so the arena a peer's
-    /// tables are lent from is laid out by their plan alone.
+    /// Pools the faces share of `each` rows of every kind, lent from an arena of their own, so the
+    /// arena a peer's tables are lent from is laid out by their plan alone.
     fn pools(each: usize) -> PeerPools {
+        rows_of(each, true)
+    }
+
+    /// One face's own spans of `each` rows of every kind, lent from an arena of their own.
+    fn own_rows(each: usize) -> PeerPools {
+        rows_of(each, false)
+    }
+
+    fn rows_of(each: usize, shared: bool) -> PeerPools {
         let rows = PeerPoolRows {
             aliases: each,
             remote_decls: each,
             interests: each,
+            shared,
         };
         PeerPools::lent(
             &mut arena(PeerPools::arena_bytes(rows).expect("small pools")),
@@ -1289,7 +1470,10 @@ mod lent_tests {
                 declare_subscriber(&mut table, tables, id, &std::format!("demo/{n}/{id}"));
             }
         }
-        assert_eq!(shared.counts().subscribers.used, FACES * 2);
+        assert_eq!(
+            shared.counts().expect("shared pools").subscribers.used,
+            FACES * 2
+        );
         for (n, tables) in faces.iter().enumerate() {
             assert_eq!(
                 (
@@ -1311,7 +1495,7 @@ mod lent_tests {
             (
                 faces[3].remote_subscribers.declared_count(),
                 faces[3].remote_subscribers.refusals(),
-                shared.counts().subscribers.refused,
+                shared.counts().expect("shared pools").subscribers.refused,
             ),
             (2, 1, 1),
             "(held, refused by the face's table, refused by the pool)"
@@ -1335,7 +1519,10 @@ mod lent_tests {
             faces[3].remote_subscribers.has_matching("demo/3/3"),
             "the row face 6's peer withdrew holds face 3's next subscriber"
         );
-        assert_eq!(shared.counts().subscribers.used, FACES * 2);
+        assert_eq!(
+            shared.counts().expect("shared pools").subscribers.used,
+            FACES * 2
+        );
     }
 
     /// A peer forgotten gives back exactly the rows it held in the session's pools, its aliases',
@@ -1372,7 +1559,7 @@ mod lent_tests {
         );
         declare_alias(&mut faces[1], 1, "demo/b/alias");
         declare_subscriber(&mut table, &mut faces[1], 1, "demo/b/1");
-        let held = shared.counts();
+        let held = shared.counts().expect("shared pools");
         assert_eq!(
             (
                 held.aliases.used,
@@ -1383,7 +1570,7 @@ mod lent_tests {
             "CONTROL: (aliases, subscribers, interests) both peers hold"
         );
         faces[0].forget_peer();
-        let left = shared.counts();
+        let left = shared.counts().expect("shared pools");
         assert_eq!(
             (
                 left.aliases.used,
@@ -1403,10 +1590,119 @@ mod lent_tests {
         }
         assert_eq!(faces[0].remote_subscribers.declared_count(), 3);
         assert_eq!(
-            shared.counts().subscribers.refused,
+            shared.counts().expect("shared pools").subscribers.refused,
             0,
             "the rows given back took them"
         );
+    }
+
+    /// One face's own spans hold what its peer writes to their rows and refuse past them: two
+    /// subscribers, an alias and an interest are held, the third subscriber is refused and counted
+    /// by its table, and a forgotten peer leaves the rows to the next declarations. They are no
+    /// pool: nothing of them is counted as one.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "codec-declare",
+        feature = "declare-subscriber"
+    ))]
+    #[test]
+    fn a_faces_own_spans_hold_its_peers_rows_and_refuse_past_them() {
+        use crate::pubsub::SubscriberTable;
+        use crate::sink::BoxedSink;
+
+        if caps::MAX_REMOTE_DECLS < 3 {
+            // A table of fewer rows refuses the third declaration by itself.
+            return;
+        }
+        let own = own_rows(2);
+        assert!(!own.is_shared() && own.counts().is_none());
+        let mut tables = PeerTables::<Lent>::lent(
+            &mut arena(1 << 16),
+            keys(1024),
+            rows(1),
+            own,
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let mut table = RemoteSubscribers::default();
+        declare_alias(&mut tables, 9, "demo/own/alias");
+        for id in 1..=3u64 {
+            declare_subscriber(&mut table, &mut tables, id, &std::format!("demo/own/{id}"));
+        }
+        assert_eq!(
+            (
+                tables.remote_subscribers.declared_count(),
+                tables.remote_subscribers.refusals()
+            ),
+            (2, 1),
+            "the span's two rows held, the third refused and counted"
+        );
+        assert_eq!(
+            tables.subscribers.resolve_inbound_mapping(9).as_deref(),
+            Some("demo/own/alias")
+        );
+        SubscriberTable::<BoxedSink>::default().respond_to_subscriber_interest_borrowed(
+            &mut tables.subscribers,
+            7,
+            Some("demo/**"),
+            false,
+            true,
+            true,
+        );
+        assert_eq!(tables.subscribers.interest_count(), 1);
+        tables.forget_peer();
+        declare_subscriber(&mut table, &mut tables, 3, "demo/own/3");
+        assert!(
+            tables.remote_subscribers.has_matching("demo/own/3"),
+            "the rows a forgotten peer left take the next declaration"
+        );
+    }
+
+    /// One face's own spans and the heads of its tables take no more than the inline tables of the
+    /// same bounds did: each table's rows are the inline table's, and the head that points at them
+    /// fits in the room the inline table's length, count and padding took. What the spans add is
+    /// their rounding to an arena's spans, under one span's alignment for each of the three.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        not(feature = "pool-monitor")
+    ))]
+    #[test]
+    fn one_faces_own_spans_take_no_more_than_the_inline_tables() {
+        use crate::id_map::{DeclaredQueryable, FixedIdMap, PooledIdMap};
+        use crate::key_arena::KeyRef;
+        use crate::row_pool::{PooledRows, Seq};
+        use core::mem::size_of;
+        const A: usize = caps::MAX_PEER_KEYEXPR_ALIASES;
+        const D: usize = caps::MAX_REMOTE_DECLS;
+        const I: usize = caps::MAX_INBOUND_SUB_INTERESTS;
+        let rows = PeerPoolRows {
+            aliases: A,
+            remote_decls: D,
+            interests: I,
+            shared: false,
+        };
+        let interest_rows = crate::pubsub::InterestRows::own_bytes(I).expect("fits");
+        let heads = size_of::<PooledIdMap<KeyRef, A>>()
+            + 2 * size_of::<PooledIdMap<KeyRef, D>>()
+            + size_of::<PooledIdMap<DeclaredQueryable<Lent>, D>>()
+            + 2 * size_of::<PooledRows<Seq<(u64, u64)>, D>>()
+            + size_of::<PooledRows<Seq<u64>, I>>();
+        let laid = KeyRows::own_bytes(A).expect("fits")
+            + decl_layout(D).expect("fits")[DECL_END]
+            + interest_rows;
+        let inline = size_of::<FixedIdMap<KeyRef, A>>()
+            + 2 * size_of::<FixedIdMap<KeyRef, D>>()
+            + size_of::<FixedIdMap<DeclaredQueryable<Lent>, D>>()
+            + 2 * size_of::<crate::bounded::BoundedVec<(u64, u64), D, Static>>()
+            + size_of::<crate::bounded::BoundedVec<u8, 1, Lent>>()
+            + span_of(Some(interest_rows)).expect("fits");
+        assert!(
+            heads + laid <= inline,
+            "heads {heads} and rows {laid} against the inline tables' {inline}"
+        );
+        let rounding = rows.arena_bytes().expect("fits") - laid;
+        assert!(rounding < 3 * ARENA_ALIGN, "{rounding} bytes of rounding");
     }
 
     /// Tables of the lent policy that were handed no key arena keep no key: what the peer

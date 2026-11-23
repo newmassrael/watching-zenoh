@@ -226,38 +226,38 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
     }
 }
 
-/// The lent backing of [`IdMap`]: at most `N` rows of `(id, value)`, each in a pool the faces of
-/// the session share ([`crate::row_pool::RowSpace`]), the table a list of the rows it holds in the
-/// order they were bound. A lookup scans the table's own rows, as [`FixedIdMap`]'s does. A NEW id
-/// is refused, handed back and counted, as a full fixed table refuses it, when the table holds
-/// `N` ids or the pool has no row left (which the pool counts too); a held id is replaced in
-/// place and needs no row. Made by `Default` it holds no pool and refuses every new id until it
-/// is handed one ([`Self::keep_rows_in`]).
+/// The lent backing of [`IdMap`]: at most `N` rows of `(id, value)`, where the session's open put
+/// them ([`crate::row_pool::RowSpace`]): in a pool the faces of the session share, the table a
+/// list of the rows it holds in the order they were bound, or in a span of the table's own laid
+/// out as [`FixedIdMap`]'s rows are. A lookup scans the table's own rows, as [`FixedIdMap`]'s
+/// does. A NEW id is refused, handed back and counted, as a full fixed table refuses it, when the
+/// table holds `N` ids, its span or its pool has no row left (which the pool counts too); a held
+/// id is replaced in place and needs no row. Made by `Default` it holds no rows and refuses every
+/// new id until it is handed some ([`Self::keep_rows_in`]). Its refusals are counted in the head
+/// of its rows, so the table is a pointer and three counters wherever it lies.
 pub struct PooledIdMap<V, const N: usize> {
-    rows: crate::row_pool::PooledRows<(u64, V), N>,
-    refused: u32,
+    rows: crate::row_pool::PooledRows<crate::row_pool::Keyed<V>, N>,
     /// The most ids the table has held: zero-sized unless the build keeps the mark
     /// (`pool-monitor`).
     high: crate::pool_gauge::HighWater,
 }
 
 impl<V, const N: usize> PooledIdMap<V, N> {
-    /// An empty table with no pool. `const`, as [`FixedIdMap::new`] is.
+    /// An empty table with no rows. `const`, as [`FixedIdMap::new`] is.
     pub const fn new() -> Self {
         Self {
             rows: crate::row_pool::PooledRows::new(),
-            refused: 0,
             high: crate::pool_gauge::HighWater::new(),
         }
     }
 
-    /// Bind the ids that come from here on in rows of `pool`, the session's. A table that holds
-    /// rows of another pool forgets them first; the refusals it counted are kept.
-    pub fn keep_rows_in(&mut self, pool: crate::row_pool::RowSpace<(u64, V)>) {
-        self.rows.keep_rows_in(pool);
+    /// Bind the ids that come from here on in rows of `space`, the session's. A table that holds
+    /// rows of another space forgets them first; the refusals it counted are kept.
+    pub fn keep_rows_in(&mut self, space: crate::row_pool::RowSpace<crate::row_pool::Keyed<V>>) {
+        self.rows.keep_rows_in(space);
     }
 
-    /// The declared capacity `N`: the most ids the table holds at once, whatever its pool has.
+    /// The declared capacity `N`: the most ids the table holds at once, whatever its rows have.
     pub const fn capacity(&self) -> usize {
         N
     }
@@ -276,7 +276,7 @@ impl<V, const N: usize> crate::pool_gauge::PoolGauge for PooledIdMap<V, N> {
             capacity: crate::pool_gauge::count(N),
             in_use: crate::pool_gauge::count(self.rows.len()),
             high_water: self.high.get(),
-            refused: u64::from(self.refused),
+            refused: u64::from(self.rows.refusals()),
         }
     }
 }
@@ -304,23 +304,21 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
             return Ok(Some(core::mem::replace(held, value)));
         }
         if !admits(self.rows.len() + 1) {
-            self.refused = self.refused.saturating_add(1);
+            self.rows.count_refused();
             return Err(CapacityFull(value));
         }
+        // A refused push is counted by the rows it was refused by.
         match self.rows.push((id, value)) {
             Ok(()) => {
                 self.high.note(self.rows.len());
                 Ok(None)
             }
-            Err(CapacityFull((_, value))) => {
-                self.refused = self.refused.saturating_add(1);
-                Err(CapacityFull(value))
-            }
+            Err(CapacityFull((_, value))) => Err(CapacityFull(value)),
         }
     }
 
     fn unbind(&mut self, id: u64) -> Option<V> {
-        self.rows.remove_first(|(k, _)| *k == id).map(|(_, v)| v)
+        self.rows.remove_id(id)
     }
 
     fn reset(&mut self) {
@@ -335,15 +333,15 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
     where
         V: 'a,
     {
-        self.rows.iter().map(|(k, v)| (*k, v))
+        self.rows.iter()
     }
 
     fn refusals(&self) -> u32 {
-        self.refused
+        self.rows.refusals()
     }
 
     fn count_refused(&mut self) {
-        self.refused = self.refused.saturating_add(1);
+        self.rows.count_refused();
     }
 }
 
@@ -524,10 +522,13 @@ impl<P: Storage> Default for DeclaredAliases<P> {
 
 #[cfg(feature = "alloc")]
 impl DeclaredAliases<crate::bounded::Lent> {
-    /// Keep the aliases recorded from here on in rows of `pool`, the session's; the ones held go
-    /// first, as their rows belong to the pool before.
-    pub fn keep_rows_in(&mut self, pool: crate::row_pool::RowSpace<(u64, u64)>) {
-        self.0.keep_rows_in(pool);
+    /// Keep the aliases recorded from here on in rows of `space`, the session's; the ones held go
+    /// first, as their rows belong to the space before.
+    pub fn keep_rows_in(
+        &mut self,
+        space: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
+    ) {
+        self.0.keep_rows_in(space);
     }
 }
 
@@ -612,10 +613,19 @@ mod tests {
         _bytes: [u8; crate::bounded::ARENA_ALIGN],
     }
 
-    /// A pool of `rows` rows of `T` over memory the test process leaks, so it outlives every row.
-    fn pool_of<T>(rows: usize) -> crate::row_pool::RowSpace<T> {
+    /// An arena over memory the test process leaks for a shared pool of `rows` rows of `K`, and,
+    /// with `own`, a span of one table's own instead.
+    fn space_of<K: crate::row_pool::RowKind>(
+        rows: usize,
+        own: bool,
+    ) -> crate::row_pool::RowSpace<K> {
         use crate::bounded::{Arena, ARENA_ALIGN};
-        let bytes = crate::row_pool::RowSpace::<T>::span_bytes(rows).expect("a test pool fits");
+        use crate::row_pool::RowSpace;
+        let bytes = if own {
+            Arena::span(RowSpace::<K>::own_bytes(rows).expect("fits")).expect("fits")
+        } else {
+            RowSpace::<K>::pool_bytes(rows).expect("a test pool fits")
+        };
         let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
         let region: &'static mut [Block] =
             std::vec![Block { _bytes: [0; ARENA_ALIGN] }; blocks].leak();
@@ -623,7 +633,16 @@ mod tests {
         // leaked, so nothing else uses it and it outlives every row.
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        arena.lend_pool(rows).expect("the arena is the pool's span")
+        if own {
+            arena.lend_own(rows).expect("the arena is the span")
+        } else {
+            arena.lend_pool(rows).expect("the arena is the pool's span")
+        }
+    }
+
+    /// A shared pool of `rows` rows of `K`.
+    fn pool_of<K: crate::row_pool::RowKind>(rows: usize) -> crate::row_pool::RowSpace<K> {
+        space_of(rows, false)
     }
 
     /// The aliases of a peer whose tables are lent keep their rows in the session's pool: one is
@@ -631,22 +650,26 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn lent_aliases_keep_their_rows_in_the_sessions_pool() {
-        let pool = pool_of::<(u64, u64)>(2);
+        let pool = pool_of::<crate::row_pool::Seq<(u64, u64)>>(2);
         let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
         aliases.keep_rows_in(pool);
         aliases.insert(3, 1);
         aliases.insert(3, 2);
         assert_eq!(aliases.told_as(3), Some(2), "a repeat rebinds its row");
-        assert_eq!(pool.counts().used, 1, "in one row of the pool");
+        assert_eq!(
+            pool.counts().expect("shared").used,
+            1,
+            "in one row of the pool"
+        );
         assert_eq!(aliases.remove(3), Some(2));
-        assert_eq!(pool.counts().used, 0, "the row went back");
+        assert_eq!(pool.counts().expect("shared").used, 0, "the row went back");
     }
 
     /// A lent table refuses a NEW id as a fixed one of its capacity does, and as one whose pool
     /// has no row left: handed back and counted, by the table and by the pool, what it held kept.
     #[test]
     fn a_pooled_table_refuses_past_its_bound_and_past_its_pool() {
-        let pool = pool_of::<(u64, u32)>(3);
+        let pool = pool_of::<crate::row_pool::Keyed<u32>>(3);
         let mut table: PooledIdMap<u32, 2> = PooledIdMap::new();
         table.keep_rows_in(pool);
         assert!(table.bind(1, 10).is_ok() && table.bind(2, 20).is_ok());
@@ -655,7 +678,11 @@ mod tests {
             (Some(30), 1),
             "the table's own bound"
         );
-        assert_eq!(pool.counts().refused, 0, "the pool had a row left");
+        assert_eq!(
+            pool.counts().expect("shared").refused,
+            0,
+            "the pool had a row left"
+        );
         let mut other: PooledIdMap<u32, 2> = PooledIdMap::new();
         other.keep_rows_in(pool);
         assert!(other.bind(7, 70).is_ok(), "the pool's last row");
@@ -663,7 +690,7 @@ mod tests {
             (
                 other.bind(8, 80).err().map(|c| c.0),
                 other.refusals(),
-                pool.counts().refused
+                pool.counts().expect("shared").refused
             ),
             (Some(80), 1, 1),
             "(value handed back, the table's count, the pool's count)"
@@ -683,7 +710,11 @@ mod tests {
         );
         table.reset();
         other.reset();
-        assert_eq!(pool.counts().used, 0, "a reset gives back every row");
+        assert_eq!(
+            pool.counts().expect("shared").used,
+            0,
+            "a reset gives back every row"
+        );
         assert_eq!(
             (table.refusals(), other.refusals()),
             (1, 1),
@@ -699,14 +730,35 @@ mod tests {
         assert_eq!((table.count(), table.refusals()), (0, 1));
     }
 
-    /// The lent backing refuses under a bound as the fixed one does.
+    /// The lent backing refuses under a bound as the fixed one does, in a shared pool and in a
+    /// span of its own.
     #[test]
     fn a_bound_refuses_a_new_id_on_the_lent_backing() {
-        a_bound_refuses_a_new_id_as_a_full_table_does_in(|| {
-            let mut table: PooledIdMap<u32, 4> = PooledIdMap::new();
-            table.keep_rows_in(pool_of(4));
-            table
-        });
+        for own in [false, true] {
+            a_bound_refuses_a_new_id_as_a_full_table_does_in(|| {
+                let mut table: PooledIdMap<u32, 4> = PooledIdMap::new();
+                table.keep_rows_in(space_of(4, own));
+                table
+            });
+        }
+    }
+
+    /// A lent table in a span of its own takes no more than the inline table of the same rows:
+    /// the rows are the inline table's `(id, value)`, and the head that points at them is the
+    /// room the inline table's length and count take.
+    #[cfg(not(feature = "pool-monitor"))]
+    #[test]
+    fn a_lent_table_of_its_own_span_is_no_larger_than_the_inline_table() {
+        use crate::key_arena::KeyRef;
+        use crate::row_pool::{Keyed, RowSpace};
+        const N: usize = 16;
+        let lent = core::mem::size_of::<PooledIdMap<KeyRef, N>>()
+            + RowSpace::<Keyed<KeyRef>>::own_bytes(N).expect("fits");
+        assert!(
+            lent <= core::mem::size_of::<FixedIdMap<KeyRef, N>>(),
+            "{lent} against {}",
+            core::mem::size_of::<FixedIdMap<KeyRef, N>>()
+        );
     }
 
     fn fill(table: &mut FixedIdMap<u32, 3>, from: u64, to: u64) {
