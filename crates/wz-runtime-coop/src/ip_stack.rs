@@ -1999,7 +1999,6 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_tls_dial_is_begun_and_asked_never_waited_for() {
-        use alloc::rc::Rc;
         use core::cell::Cell;
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
 
