@@ -113,7 +113,7 @@ fn a_declaration_on_a_closed_session_is_refused_as_closed() {
     SessionDrive::close(&*engine);
 
     let sink = subscriber_sink(&minted);
-    let held = Arc::downgrade(&sink);
+    let dropped_before = minted.load(Ordering::SeqCst);
     assert_eq!(
         engine.declare_subscriber_on_wire(
             "demo/c/s2",
@@ -124,7 +124,11 @@ fn a_declaration_on_a_closed_session_is_refused_as_closed() {
         ),
         Err(Refusal::Closed)
     );
-    assert!(held.upgrade().is_none(), "the refused sink is let go of");
+    assert_eq!(
+        minted.load(Ordering::SeqCst),
+        dropped_before + 1,
+        "the refused sink is let go of"
+    );
     assert_eq!(engine.acquire_keyexpr("demo/c/k2"), Err(Refusal::Closed));
     #[cfg(feature = "liveliness")]
     assert_eq!(

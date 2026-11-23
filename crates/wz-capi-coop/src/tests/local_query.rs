@@ -170,7 +170,7 @@ fn an_own_answer_is_handed_inside_its_reply_and_a_held_one_at_the_end() {
                 })
             },
         );
-        assert_eq!(issued, Some(1), "{mode:?}");
+        assert_eq!(issued, Ok(1), "{mode:?}");
         assert_eq!(
             *inside.lock().unwrap(),
             [handed_inside],

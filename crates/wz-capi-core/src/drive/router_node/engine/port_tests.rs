@@ -590,7 +590,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_| {})),
+            wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
         .expect("a node with ids left declares");
     assert!(
@@ -638,7 +638,7 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_| {})),
+            wz_capi_port::SubscriberSink::shared(|_: &dyn wz_session_core::sink::SampleView| {}),
         )
         .expect("a node with ids left declares");
     assert!(eventually(|| {

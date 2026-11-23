@@ -7470,7 +7470,7 @@ mod matching_aggregate_tests {
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
-        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let declare = |shared: &SharedSession| {
             SessionEngine::declare_subscriber_on_wire(
                 shared,
@@ -7528,7 +7528,9 @@ mod matching_aggregate_tests {
                 None,
                 &mut || -> wz_capi_port::ReplyCallback {
                     minted.set(minted.get() + 1);
-                    Box::new(|_view: &dyn wz_session_core::reply_sink::ReplyView| {})
+                    wz_capi_port::ReplyCallback::shared(
+                        |_view: &dyn wz_session_core::reply_sink::ReplyView| {},
+                    )
                 },
             )
         };
