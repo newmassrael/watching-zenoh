@@ -23953,10 +23953,37 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c` and its client test
     # `tests/z_client_test.c`, built and run as its CMake and `tests/api.sh` do, under the arm
     # its integration workflow builds them with.
-    wz_test_args wz-integration-tests pico_upstream_api_tests_on_wz
-    _runci_guarded_test Z 17 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
-        "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
-        || return 1
+    #
+    # Several of those programs fix a port or a group in their own text (`FIXED_NETWORK` in
+    # scripts/lib/pico_upstream_programs.py: 12345, 9000, 7448 to 7464, the group on lo), so another
+    # process of a shared host holding one fails a program for a reason that is not the library's.
+    # The leg therefore runs in a network namespace of its own: the bwrap sandbox, probed with
+    # `netns_sandbox_probe` and not `netns_topology_probe`, whose sudo answer would leave the leg
+    # on the host's network because these tests build no namespace themselves. Already inside a
+    # sandbox, or on a hosted runner whose network holds nothing but this run, the network is the
+    # leg's own as it is.
+    local api_sandbox_rc=0
+    local -a api_wrap=()
+    if [[ "${WZ_NETNS_SANDBOX:-}" != "1" && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+        # shellcheck source=scripts/lib/netns-topology.sh
+        (source scripts/lib/netns-topology.sh && netns_sandbox_probe) || api_sandbox_rc=$?
+        if (( api_sandbox_rc == 0 )); then
+            api_wrap=(bash "$PWD/scripts/lib/netns-sandbox.sh")
+        fi
+    fi
+    if (( api_sandbox_rc == 2 )); then
+        _z_unavailable "zenoh-pico's API tests fix ports and groups, and this host makes no namespace sandbox" \
+            || return 1
+    elif (( api_sandbox_rc != 0 )); then
+        echo "  Layer Z FAIL: netns sandbox probe rc=$api_sandbox_rc (4 = the build broke)" >&2
+        return 1
+    else
+        wz_test_args wz-integration-tests pico_upstream_api_tests_on_wz
+        _runci_guarded_test Z 17 "${api_wrap[@]}" env WZ_ZENOHD_BIN="$zenohd" \
+            cargo test -p wz-integration-tests \
+            "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+            || return 1
+    fi
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real
     # zenoh-pico z_get_liveliness against the real zenoh-pico z_liveliness, wired
