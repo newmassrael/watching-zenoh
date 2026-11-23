@@ -212,7 +212,7 @@ use crate::sample::Sample;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::sample::{SampleKind, TimestampHint};
-use crate::sink::{SampleSink, SampleView};
+use crate::sink::{SampleDelivery, SampleSink, SampleView};
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
 use crate::transport_profile::owned::InterestOwned;
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
@@ -251,7 +251,7 @@ impl SubscriptionId {
     }
 }
 
-struct Subscriber<C: SampleSink, P: Storage = Profile> {
+struct Subscriber<C, P: Storage = Profile> {
     id: SubscriptionId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, kept as the policy keeps a row's key
     /// ([`Storage::Key`]): a buffer inline in the row on the static policy, a block of the
@@ -302,7 +302,7 @@ pub use crate::keyexpr_match::{keyexpr_intersects, keyexpr_matches};
 /// See module-level docs for scope (Push + DECLARE resolver, R121d).
 /// `!Sync` by construction (no shared mutable state); callers that
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
-pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
+pub struct SubscriberTable<C, P: Storage = Profile> {
     subscribers: BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
     /// The most subscriptions the table admits (`MAX_SUBSCRIPTIONS`): what the creator of the
     /// table resolved ([`Self::limit_to`]), the build's value until it does. A growable table
@@ -819,12 +819,12 @@ pub enum SubInterestReply {
 /// `session-slot`'s ([`SubscriberTable`] once per process, a [`SubscriberPeer`] in
 /// each session slot); it uses this type for nothing but the single-session case
 /// and for tests.
-pub struct SubscriberRegistry<C: SampleSink, P: Storage = Profile> {
+pub struct SubscriberRegistry<C, P: Storage = Profile> {
     table: SubscriberTable<C, P>,
     peer: SubscriberPeer<P>,
 }
 
-impl<C: SampleSink, P: Storage> core::ops::Deref for SubscriberRegistry<C, P> {
+impl<C, P: Storage> core::ops::Deref for SubscriberRegistry<C, P> {
     type Target = SubscriberTable<C, P>;
 
     fn deref(&self) -> &SubscriberTable<C, P> {
@@ -832,13 +832,13 @@ impl<C: SampleSink, P: Storage> core::ops::Deref for SubscriberRegistry<C, P> {
     }
 }
 
-impl<C: SampleSink, P: Storage> core::ops::DerefMut for SubscriberRegistry<C, P> {
+impl<C, P: Storage> core::ops::DerefMut for SubscriberRegistry<C, P> {
     fn deref_mut(&mut self) -> &mut SubscriberTable<C, P> {
         &mut self.table
     }
 }
 
-impl<C: SampleSink, P: Storage> Default for SubscriberRegistry<C, P> {
+impl<C, P: Storage> Default for SubscriberRegistry<C, P> {
     fn default() -> Self {
         Self {
             table: SubscriberTable::default(),
@@ -847,7 +847,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberRegistry<C, P> {
     }
 }
 
-impl<C: SampleSink> SubscriberTable<C, Profile> {
+impl<C> SubscriberTable<C, Profile> {
     /// New empty table over an explicit sink backing `C`, of this build's storage
     /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
     /// subscription" value for any caller-side wrapper that needs one. Defined for
@@ -858,7 +858,7 @@ impl<C: SampleSink> SubscriberTable<C, Profile> {
     }
 }
 
-impl<C: SampleSink> SubscriberTable<C, Lent> {
+impl<C> SubscriberTable<C, Lent> {
     /// An empty table whose subscriptions are `rows` rows lent from `arena`, at most
     /// `MAX_SUBSCRIPTIONS`, their patterns kept in `keys`, the session's key arena: a session's,
     /// at its open. Refused, taking nothing, past that ceiling or past what the arena has left.
@@ -871,7 +871,7 @@ impl<C: SampleSink> SubscriberTable<C, Lent> {
     }
 }
 
-impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
+impl<C, P: Storage> Default for SubscriberTable<C, P> {
     fn default() -> Self {
         Self {
             subscribers: BoundedVec::default(),
@@ -890,7 +890,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
     }
 }
 
-impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+impl<C, P: Storage> SubscriberTable<C, P> {
     /// The bytes one subscription takes in the table's storage: its pattern's text with it where
     /// the storage policy keeps the text in the row, and its sink as the table holds it.
     pub const ROW_BYTES: usize = core::mem::size_of::<Subscriber<C, P>>();
@@ -1182,8 +1182,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         &mut self,
         peer: &mut SubscriberPeer<Q>,
         event: IterationEvent<'_, '_>,
-    ) {
-        peer.dispatch_iteration_event(self, event);
+    ) where
+        C: SampleSink,
+    {
+        peer.dispatch_iteration_event(self, &mut (), event);
     }
 
     /// [`SubscriberPeer::dispatch`] over this table, from `peer`, the side of the registry the
@@ -1194,8 +1196,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         peer: &mut SubscriberPeer<Q>,
         message: &NetworkMessage,
         reliability: Reliability,
-    ) {
-        peer.dispatch(self, message, reliability);
+    ) where
+        C: SampleSink,
+    {
+        peer.dispatch(self, &mut (), message, reliability);
     }
 
     /// R311y530 — the no-heap staging SSOT for an inbound SUBSCRIBER
@@ -1383,7 +1387,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     ///
     /// R227 — the single source of truth for subscriber filtering.
     /// Both `dispatch_push` (wire path) and
-    /// [`local_publish`](Self::local_publish) (self-publish loopback)
+    /// [`local_publish`](LocalSubscribers::local_publish) (self-publish loopback)
     /// converge here so the locality + pattern-match invariants are
     /// enforced exactly once. Mirrors zenoh-pico's
     /// `_z_trigger_subscriptions_impl`
@@ -1409,18 +1413,20 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// (`dispatch_push`) funnels its owned
     /// `Sample` through the same matcher via the `Sample: SampleView`
     /// coercion (one matching SSOT). Returns the count of sinks fired.
-    pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
+    pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize
+    where
+        C: SampleSink,
+    {
         self.fire_to_subscribers(view, is_remote, None)
     }
 
     /// [`Self::dispatch_borrowed`] for a message from a peer whose declared class is `class`: what a
     /// closed image that declares its peers must call, since without a class a message from a peer is
     /// allowed nothing.
-    pub fn dispatch_borrowed_from(
-        &mut self,
-        view: &dyn SampleView,
-        class: Option<ClassId>,
-    ) -> usize {
+    pub fn dispatch_borrowed_from(&mut self, view: &dyn SampleView, class: Option<ClassId>) -> usize
+    where
+        C: SampleSink,
+    {
         self.fire_to_subscribers(view, true, class)
     }
 
@@ -1429,13 +1435,16 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         view: &dyn SampleView,
         is_remote: bool,
         class: Option<ClassId>,
-    ) -> usize {
+    ) -> usize
+    where
+        C: SampleSink,
+    {
         if is_remote {
             return self.deliver_from_peer(
                 view.keyexpr(),
                 class,
                 PeerDelivery::default(),
-                |sink| sink.deliver(view),
+                |_, sink: &mut C| sink.deliver(view),
             );
         }
         // The application's own message: no key gate, matched as it is.
@@ -1446,7 +1455,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             view.keyexpr(),
             false,
             false,
-            |sink| sink.deliver(view),
+            |_, sink: &mut C| sink.deliver(view),
         )
     }
 
@@ -1459,7 +1468,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         &mut self,
         key: KeyId,
         text: &str,
-        deliver: impl FnMut(&mut C),
+        deliver: impl FnMut(SubscriptionId, &mut C),
     ) -> Option<usize> {
         #[cfg(feature = "key-set-closed")]
         {
@@ -1499,9 +1508,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// `is_remote = false` semantic).
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     #[cfg(feature = "alloc")]
-    fn dispatch_push<L: LocalSubscribers>(
+    fn dispatch_push<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
+        cx: &mut X,
         push: &PushOwned,
         reliability: Reliability,
         is_remote: bool,
@@ -1785,10 +1795,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 sample.keyexpr(),
                 self.class,
                 PeerDelivery::default(),
-                |sink| sink.deliver(&sample),
+                |id, row| cx.deliver(id, row, &sample),
             );
         } else {
-            subs.fire_matching(sample.keyexpr(), true, false, |sink| sink.deliver(&sample));
+            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
+                cx.deliver(id, row, &sample)
+            });
         }
     }
 }
@@ -1819,11 +1831,14 @@ impl<Q: Storage> SubscriberPeer<Q> {
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event<L: LocalSubscribers>(
+    pub fn dispatch_iteration_event<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
+        cx: &mut X,
         event: IterationEvent<'_, '_>,
     ) {
+        // A build that delivers no sample reads no context.
+        let _ = &cx;
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload {
@@ -1832,7 +1847,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 if let Some(messages) = crate::driver_loop::owned_records(messages) {
                     let reliability = Reliability::from_reliable_bool(*reliable);
                     for message in messages {
-                        self.dispatch(subs, message, reliability);
+                        self.dispatch(subs, cx, message, reliability);
                     }
                 }
             }
@@ -1847,7 +1862,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 ..
             }) => {
                 if crate::driver_loop::OWNED_RECORDS {
-                    self.dispatch_plain_puts(subs, *reliable, payload, puts);
+                    self.dispatch_plain_puts(subs, cx, *reliable, payload, puts);
                 }
             }
             // A Push lent where its frame lies, and the control records lent beside
@@ -1860,7 +1875,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             ))]
             IterationEvent::InPlace(record) => {
                 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-                self.dispatch_in_place(subs, &record);
+                self.dispatch_in_place(subs, cx, &record);
                 #[cfg(feature = "rx-lent-control")]
                 self.dispatch_in_place_control(subs, &record);
             }
@@ -1914,9 +1929,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// `subs` are the subscriptions delivered to; see
     /// [`dispatch_iteration_event`](Self::dispatch_iteration_event).
     #[cfg(feature = "alloc")]
-    pub fn dispatch<L: LocalSubscribers>(
+    pub fn dispatch<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
+        cx: &mut X,
         message: &NetworkMessage,
         _reliability: Reliability,
     ) {
@@ -1926,7 +1942,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             // R227 — wire-arrived Push carries `is_remote = true` so
             // the locality filter selects `allows_remote()`. The
             // self-publish loopback path (see
-            // [`local_publish`](SubscriberTable::local_publish)) enters
+            // [`local_publish`](LocalSubscribers::local_publish)) enters
             // `fire_to_subscribers`
             // directly with `is_remote = false`.
             //
@@ -1938,10 +1954,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
             // frame but has no body op to interpret it. The arm is then
             // absent and the Push falls through to `_ => {}` (drop),
             // mirroring the `PushOwnedVariant::Default` silent-drop. The
-            // loopback path ([`local_publish`](SubscriberTable::local_publish)) stays
+            // loopback path ([`local_publish`](LocalSubscribers::local_publish)) stays
             // unguarded — it does not depend on the wire codec gate.
             #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-            NetworkMessage::Push(push) => self.dispatch_push(subs, push, reliability, true),
+            NetworkMessage::Push(push) => self.dispatch_push(subs, cx, push, reliability, true),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body, subs.own_space()),
             // R311y530 — a remote publisher's SUBSCRIBER Interest. Answered
@@ -1953,9 +1969,9 @@ impl<Q: Storage> SubscriberPeer<Q> {
             }
             _ => {}
         }
-        // `subs` is read by every arm that exists; with none compiled in it is
+        // `subs` and `cx` are read by the arms that exist; with none compiled in they are
         // not, and the signature is the same in every subset.
-        let _ = &subs;
+        let _ = (&subs, &cx);
     }
 
     /// R311y530 — `alloc` inbound-parse entry: consume an inbound
@@ -2090,12 +2106,12 @@ enum Admission {
 /// A row that has no entity (made before the table was given, and not declared by it) is matched
 /// by its pattern, as `scan_subscribers` matches it, so no subscription is left without messages.
 #[cfg(feature = "key-set-closed")]
-fn fire_by_selection<C: SampleSink, P: Storage>(
+fn fire_by_selection<C, P: Storage>(
     subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
     catalogue: &crate::key_catalogue::KeyCatalogue<'_>,
     key: KeyId,
     text: &str,
-    mut deliver: impl FnMut(&mut C),
+    mut deliver: impl FnMut(SubscriptionId, &mut C),
 ) -> usize {
     let selection = catalogue.selection(key, EntityKind::Subscriber);
     let mut fired = 0usize;
@@ -2108,7 +2124,7 @@ fn fire_by_selection<C: SampleSink, P: Storage>(
             None => keyexpr_intersects_text(&subscriber.pattern, text),
         };
         if reached {
-            deliver(&mut subscriber.sink);
+            deliver(subscriber.id, &mut subscriber.sink);
             fired = fired.saturating_add(1);
         }
     }
@@ -2231,22 +2247,24 @@ pub(crate) struct RowRef<'a> {
 /// subscriber table's list and the table set's slot map both implement it, so both deliver
 /// through the same functions, each compiled for its own rows (`docs/c-abi-l3-tables.md`).
 pub(crate) trait SubscriberRows {
-    /// The sink a matched row is handed a sample through.
-    type Sink: SampleSink;
+    /// What a matched row is delivered through, with a context ([`SampleDelivery`]).
+    type Sink;
+    /// The id the table gives a row, which a delivery names it by.
+    type RowId: Copy;
 
-    /// Hand `f` each row with its position and its sink, in the table's order: one pass over
-    /// the rows, with no lookup of a position.
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut Self::Sink)>(&mut self, f: F);
+    /// Hand `f` each row with its position, its id and its sink, in the table's order: one pass
+    /// over the rows, with no lookup of a position.
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, Self::RowId, &mut Self::Sink)>(&mut self, f: F);
 
     /// Whether `f` holds for any row, asked in the table's order until it does.
     fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, f: F) -> bool;
 
-    /// The sink of the row at `position`, `None` where no row is: what a remembered match,
-    /// which keeps positions, is delivered through.
-    fn sink_at(&mut self, position: usize) -> Option<&mut Self::Sink>;
+    /// The id and the sink of the row at `position`, `None` where no row is: what a remembered
+    /// match, which keeps positions, is delivered through.
+    fn sink_at(&mut self, position: usize) -> Option<(Self::RowId, &mut Self::Sink)>;
 }
 
-impl<C: SampleSink, P: Storage> Subscriber<C, P> {
+impl<C, P: Storage> Subscriber<C, P> {
     /// The row as the matcher reads it.
     fn row_ref(&self) -> RowRef<'_> {
         RowRef {
@@ -2257,19 +2275,20 @@ impl<C: SampleSink, P: Storage> Subscriber<C, P> {
     }
 }
 
-impl<C: SampleSink, P: Storage> SubscriberRows
+impl<C, P: Storage> SubscriberRows
     for BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>
 {
     type Sink = C;
+    type RowId = SubscriptionId;
 
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut C)>(&mut self, mut f: F) {
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriptionId, &mut C)>(&mut self, mut f: F) {
         for (position, subscriber) in self.iter_mut().enumerate() {
             let row = RowRef {
                 pattern: &subscriber.pattern,
                 facts: subscriber.pattern_facts,
                 origin: subscriber.allowed_origin,
             };
-            f(position, row, &mut subscriber.sink);
+            f(position, row, subscriber.id, &mut subscriber.sink);
         }
     }
 
@@ -2277,9 +2296,9 @@ impl<C: SampleSink, P: Storage> SubscriberRows
         self.iter().any(|subscriber| f(subscriber.row_ref()))
     }
 
-    fn sink_at(&mut self, position: usize) -> Option<&mut C> {
+    fn sink_at(&mut self, position: usize) -> Option<(SubscriptionId, &mut C)> {
         self.get_mut(position)
-            .map(|subscriber| &mut subscriber.sink)
+            .map(|subscriber| (subscriber.id, &mut subscriber.sink))
     }
 }
 
@@ -2321,7 +2340,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     key: &str,
     is_remote: bool,
     repeats_previous: bool,
-    mut deliver: impl FnMut(&mut R::Sink),
+    mut deliver: impl FnMut(R::RowId, &mut R::Sink),
 ) -> usize {
     // No slots: the memory is out, and the message is matched by the scan alone.
     if memo.slot_count() == 0 {
@@ -2333,8 +2352,8 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
                 if let Some(slot) = &memo.slots[at] {
                     if slot.epoch == epoch && slot.remote == is_remote {
                         for position in slot.hits.iter() {
-                            if let Some(sink) = rows.sink_at(usize::from(*position)) {
-                                deliver(sink);
+                            if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
+                                deliver(id, sink);
                             }
                         }
                         return slot.hits.len();
@@ -2349,8 +2368,8 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
             for position in slot.hits.iter() {
-                if let Some(sink) = rows.sink_at(usize::from(*position)) {
-                    deliver(sink);
+                if let Some((id, sink)) = rows.sink_at(usize::from(*position)) {
+                    deliver(id, sink);
                 }
             }
             return slot.hits.len();
@@ -2407,7 +2426,7 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     rows: &mut R,
     keyexpr: &str,
     is_remote: bool,
-    mut deliver: impl FnMut(&mut R::Sink),
+    mut deliver: impl FnMut(R::RowId, &mut R::Sink),
     mut hit: impl FnMut(usize),
 ) -> Option<usize> {
     #[cfg(test)]
@@ -2443,7 +2462,7 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     {
         return None;
     }
-    rows.each_row_mut(|position, row, sink| {
+    rows.each_row_mut(|position, row, id, sink| {
         let pass = if is_remote {
             row.origin.allows_remote()
         } else {
@@ -2456,7 +2475,7 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
-            deliver(sink);
+            deliver(id, sink);
             hit(position);
             fired = fired.saturating_add(1);
         }
@@ -2608,13 +2627,13 @@ std::thread_local! {
     pub(crate) static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+impl<C, P: Storage> SubscriberTable<C, P> {
     /// R311y788 — the SESSION-LOCAL half of a publisher's matching
     /// status: `true` iff at least one subscriber registered on THIS
     /// session would receive a local publish on `publish_keyexpr`.
     ///
     /// Two filters, both of them the ones
-    /// [`local_publish`](Self::local_publish) already applies, so a
+    /// [`local_publish`](LocalSubscribers::local_publish) already applies, so a
     /// `true` here means a real delivery rather than a mere table entry:
     /// the subscriber's own `allowed_origin` must permit a local origin
     /// (a `Locality::Remote` subscriber is not a matching target for its
@@ -2632,48 +2651,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// that agrees with this registry's own delivery rule.
     ///
     /// The PUBLISHER-side locality gate is the caller's, exactly as it
-    /// is for [`local_publish`](Self::local_publish) — pico's
+    /// is for [`local_publish`](LocalSubscribers::local_publish) — pico's
     /// `ctx->allow_local` (`filtering.c:66`, `:127`).
     #[cfg(feature = "storage-profile")]
     pub fn has_local_matching(&self, publish_keyexpr: &str) -> bool {
         any_local_match(&self.subscribers, publish_keyexpr)
-    }
-
-    /// R227 — self-publish loopback entry point. Routes `sample`
-    /// through the same locality + pattern-match dispatch as a
-    /// wire-arrived Push, but with `is_remote = false` so subscribers
-    /// pinned to [`Locality::SessionLocal`](crate::locality::Locality)
-    /// fire and subscribers pinned to
-    /// [`Locality::Remote`](crate::locality::Locality) are suppressed.
-    /// [`Locality::Any`](crate::locality::Locality) subscribers (the
-    /// default for [`register`](Self::register)) fire on both wire and
-    /// loopback origins. Returns the number of subscriber callbacks
-    /// that fired so the caller can assert loopback delivery in a
-    /// test or wire it into an observability counter in production.
-    ///
-    /// The caller constructs the [`Sample`] through
-    /// [`Sample::new_put`](crate::sample::Sample::new_put) /
-    /// [`Sample::new_del`](crate::sample::Sample::new_del) plus
-    /// optional `with_*` setters; the registry does not synthesize
-    /// wire-shape metadata for the loopback path because an
-    /// application performing loopback already owns every field it
-    /// just published. This keeps the loopback API a thin Rust idiom
-    /// over zenoh-pico's
-    /// `_z_session_deliver_push_locally`
-    /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100) without
-    /// imposing the codec wire-shape on in-process callers.
-    ///
-    /// The publisher-side locality check (zenoh-pico's
-    /// `allowed_destination.allows_local()` in
-    /// `vendor/zenoh-pico/src/net/primitives.c` 198-202) is the
-    /// caller's responsibility: only invoke `local_publish` when the
-    /// publisher's locality permits a local delivery. The registry's
-    /// `is_remote = false` branch then filters on the subscriber-side
-    /// locality so the Any/Remote/SessionLocal contract holds for
-    /// every receiver.
-    #[cfg(feature = "alloc")]
-    pub fn local_publish(&mut self, sample: &Sample) -> usize {
-        self.fire_to_subscribers(sample, false, None)
     }
 }
 
@@ -4058,7 +4040,7 @@ impl<P: Storage> SubscriberPeer<P> {
 /// The application-facing registry of ONE session: the table and that session's
 /// peer side. Everything that does not need the peer is the table's, reached
 /// through `Deref`; what does is here, with the signature it has always had.
-impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+impl<C, P: Storage> SubscriberTable<C, P> {
     /// [`Self::register_sink`], and then what the registration owes `peer`.
     ///
     /// R311y530 — pub-before-sub: a remote publisher that already registered
@@ -4114,8 +4096,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 /// subscriber table of both storage profiles ([`SubscriberTable`]) and by the session's one table
 /// set ([`crate::session_tables::SessionTables`]), so a path written over it serves either.
 pub trait LocalSubscribers {
-    /// The sink a matching subscription is handed a sample through.
-    type Sink: SampleSink;
+    /// What a matching subscription is delivered through, with the context the dispatch is
+    /// handed ([`SampleDelivery`]): the row's own record of its subscriber.
+    type Sink;
+    /// The id the table gives a subscription's row, which a delivery names it by.
+    type RowId: Copy;
 
     /// Our own id space, when the subscriptions are kept in the session's one table set, which
     /// holds the key expressions the session declared: what an `M=0` key of a peer's message is
@@ -4163,7 +4148,7 @@ pub trait LocalSubscribers {
     /// [`Self::epoch`] is answered from what it matched then, and `repeats_previous` is the
     /// caller's word that `key` is the key of the call just before. No key gate is asked: a table
     /// that closes its key set gates and selects a peer's message before it matches one.
-    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
@@ -4177,7 +4162,7 @@ pub trait LocalSubscribers {
     /// it or select its subscribers by the key's number, else to every subscription
     /// [`Self::fire_matching`] reaches from a peer. `class` is the row of the image's
     /// allowance the session found for the peer. How many sinks were handed it.
-    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         class: Option<ClassId>,
@@ -4187,10 +4172,31 @@ pub trait LocalSubscribers {
     where
         Self: Sized;
 
-    /// The frame whose plain `Put`s were just delivered has no more records: every sink is
-    /// told ([`SampleSink::end_plain_frame`]), matched or not.
+    /// The frame whose plain `Put`s were just delivered has no more records: `cx` is told of
+    /// every row ([`SampleDelivery::end_plain_frame`]), matched or not.
     #[cfg(feature = "alloc")]
-    fn end_plain_frame(&mut self);
+    fn end_plain_frame<X: SampleDelivery<Self::Sink, Self::RowId>>(&mut self, cx: &mut X)
+    where
+        Self: Sized;
+
+    /// Deliver `sample`, which the session itself published, through `cx` to every subscription
+    /// whose pattern intersects its key and whose origins admit the session's own messages: how
+    /// many. zenoh-pico's `_z_session_deliver_push_locally`
+    /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100); whether the publisher's locality allows
+    /// a local delivery at all is the caller's to ask first (`vendor/zenoh-pico/src/net/primitives.c`
+    /// 198-202).
+    fn local_publish<X: SampleDelivery<Self::Sink, Self::RowId>>(
+        &mut self,
+        cx: &mut X,
+        sample: &dyn SampleView,
+    ) -> usize
+    where
+        Self: Sized,
+    {
+        self.fire_matching(sample.keyexpr(), true, false, |id, row| {
+            cx.deliver(id, row, sample)
+        })
+    }
 }
 
 /// How a message from a peer is delivered ([`LocalSubscribers::deliver_from_peer`]).
@@ -4204,8 +4210,9 @@ pub struct PeerDelivery {
     pub no_allocation: bool,
 }
 
-impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
+impl<C, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
     type Sink = C;
+    type RowId = SubscriptionId;
 
     fn epoch(&self) -> u64 {
         self.epoch
@@ -4257,7 +4264,7 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
         any_local_match(&self.subscribers, key)
     }
 
-    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
@@ -4275,7 +4282,7 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
         )
     }
 
-    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         class: Option<ClassId>,
@@ -4311,14 +4318,14 @@ impl<C: SampleSink, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
     }
 
     #[cfg(feature = "alloc")]
-    fn end_plain_frame(&mut self) {
+    fn end_plain_frame<X: SampleDelivery<Self::Sink, Self::RowId>>(&mut self, cx: &mut X) {
         for subscriber in self.subscribers.iter_mut() {
-            subscriber.sink.end_plain_frame();
+            cx.end_plain_frame(subscriber.id, &mut subscriber.sink);
         }
     }
 }
 
-impl<C: SampleSink> SubscriberRegistry<C, Profile> {
+impl<C> SubscriberRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`, of this build's storage
     /// profile. Subscriber ids start at 1 so 0 stays available as a sentinel "no
     /// subscription" value for any caller-side wrapper that needs one.
@@ -4336,7 +4343,7 @@ impl<C: SampleSink> SubscriberRegistry<C, Profile> {
     }
 }
 
-impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
+impl<C, P: Storage> SubscriberRegistry<C, P> {
     /// The peer's side of this registry, for a caller that wants its counters or
     /// its tables by name.
     pub fn peer(&self) -> &SubscriberPeer<P> {
@@ -4455,13 +4462,19 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
 
     /// [`SubscriberTable::dispatch_iteration_event`] for this registry's peer.
     #[cfg(feature = "storage-profile")]
-    pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_, '_>) {
+    pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_, '_>)
+    where
+        C: SampleSink,
+    {
         self.table.dispatch_iteration_event(&mut self.peer, event);
     }
 
     /// [`SubscriberTable::dispatch`] for this registry's peer.
     #[cfg(feature = "alloc")]
-    pub fn dispatch(&mut self, message: &NetworkMessage, reliability: Reliability) {
+    pub fn dispatch(&mut self, message: &NetworkMessage, reliability: Reliability)
+    where
+        C: SampleSink,
+    {
         self.table.dispatch(&mut self.peer, message, reliability);
     }
 
@@ -6897,7 +6910,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 1, "Any subscriber fires on loopback");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -6919,7 +6932,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(
             fired, 1,
             "Locality::SessionLocal fires on R227 loopback (is_remote=false)"
@@ -6945,7 +6958,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(
             fired, 0,
             "Locality::Remote suppresses loopback (allows_local() == false)"
@@ -6971,7 +6984,7 @@ mod tests {
         );
         // The prediction agrees with the delivery.
         let sample = Sample::new_put("home/temp", b"1".to_vec());
-        assert_eq!(registry.local_publish(&sample), 1);
+        assert_eq!(registry.local_publish(&mut (), &sample), 1);
     }
 
     #[test]
@@ -6991,7 +7004,7 @@ mod tests {
         );
         let sample = Sample::new_put("home/temp", b"1".to_vec());
         assert_eq!(
-            registry.local_publish(&sample),
+            registry.local_publish(&mut (), &sample),
             0,
             "and the delivery agrees"
         );
@@ -7076,7 +7089,7 @@ mod tests {
         }
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(
             fired, 2,
             "loopback fires Any + SessionLocal, suppresses Remote"
@@ -7114,7 +7127,7 @@ mod tests {
         // iteration assumption.
         let mut registry = SubscriberRegistry::new();
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 0);
     }
 
@@ -7133,7 +7146,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 0);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
@@ -7165,7 +7178,7 @@ mod tests {
         }
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 2, "both matching subscribers fire");
         assert_eq!(hits_a.load(Ordering::SeqCst), 1);
         assert_eq!(hits_b.load(Ordering::SeqCst), 1);
@@ -7187,7 +7200,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 1, "`home/**` matches `home/kitchen/temp`");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -7208,7 +7221,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/temp_42", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -7233,7 +7246,7 @@ mod tests {
             .with_reliability(Rel::BestEffort)
             .with_qos(QosLevel::from_raw(0x12))
             .with_attachment(b"attach".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 1);
 
         let got = observed
@@ -7266,7 +7279,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_del("home/temp");
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(fired, 1);
         assert_eq!(*observed.lock().unwrap(), Some(SampleKind::Del));
     }
@@ -7289,7 +7302,7 @@ mod tests {
             .expect("no quota is stated on this table");
 
         let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
         assert_eq!(
             fired, 0,
             "Locality::Remote suppresses loopback even when the wildcard pattern matches"
@@ -8397,7 +8410,7 @@ mod tests {
         // must NOT engage because is_remote=false.
         let sample = Sample::new_put("demo/temp", b"local".to_vec())
             .with_source_info(crate::sample::SourceInfo::new(&own, 0, 0));
-        let fired = registry.local_publish(&sample);
+        let fired = registry.local_publish(&mut (), &sample);
 
         assert_eq!(
             fired, 1,
@@ -9479,12 +9492,12 @@ mod local_subscribers_tests {
         assert!(!LocalSubscribers::has_local_matching(&table, "b"));
         let mut calls = 0usize;
         assert_eq!(
-            table.fire_matching("a/b", false, false, |_sink: &mut BoxedSink| calls += 1),
+            table.fire_matching("a/b", false, false, |_, _sink: &mut BoxedSink| calls += 1),
             2
         );
         assert_eq!(calls, 2, "from a peer, both subscriptions hear it");
         assert_eq!(
-            table.fire_matching("a/b", true, false, |_sink: &mut BoxedSink| calls += 1),
+            table.fire_matching("a/b", true, false, |_, _sink: &mut BoxedSink| calls += 1),
             1
         );
         assert_eq!(
@@ -9524,14 +9537,14 @@ mod local_subscribers_tests {
             reliability: Reliability::Reliable,
         };
         assert_eq!(
-            table.fire_matching("a/b", true, false, |sink: &mut BoxedSink| sink
+            table.fire_matching("a/b", true, false, |_, sink: &mut BoxedSink| sink
                 .deliver(&sample)),
             1
         );
         assert_eq!(any_heard.load(Ordering::Relaxed), 1);
         assert_eq!(remote_heard.load(Ordering::Relaxed), 0);
         assert_eq!(
-            table.fire_matching("a/b", false, false, |sink: &mut BoxedSink| sink
+            table.fire_matching("a/b", false, false, |_, sink: &mut BoxedSink| sink
                 .deliver(&sample)),
             2
         );

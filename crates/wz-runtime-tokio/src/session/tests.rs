@@ -15558,7 +15558,13 @@ fn subscriber_sample_staged_before_undeclare_is_suppressed() {
     {
         let mut obs = session.observer().lock().unwrap();
         let sample = Sample::new_put("home/temp", b"x".to_vec());
-        obs.with_app(|app_half| app_half.subscribers.local_publish(&sample));
+        obs.with_app(|app_half| {
+            wz_session_core::pubsub::LocalSubscribers::local_publish(
+                &mut *app_half.subscribers,
+                &mut (),
+                &sample,
+            )
+        });
     }
     assert!(sub.undeclare(), "undeclare removes the registration");
     session.drain_deferred_fires();
@@ -15890,11 +15896,13 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
     // loop is in between its `dispatch_event` and its `drain_deferred_fires`.
     let sample =
         super::publish_common::build_loopback_sample("demo/a", b"payload", &PublishOptions::put());
-    session
-        .observer()
-        .lock()
-        .unwrap()
-        .with_app(|app_half| app_half.subscribers.local_publish(&sample));
+    session.observer().lock().unwrap().with_app(|app_half| {
+        wz_session_core::pubsub::LocalSubscribers::local_publish(
+            &mut *app_half.subscribers,
+            &mut (),
+            &sample,
+        )
+    });
     assert_eq!(
         fired.load(Ordering::SeqCst),
         0,

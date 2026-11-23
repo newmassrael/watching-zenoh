@@ -1996,19 +1996,20 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 }
 
-impl<Key: KeyBacking, Cb: crate::sink::SampleSink, P: Storage> SubscriberRows
+impl<Key: KeyBacking, Cb, P: Storage> SubscriberRows
     for SlotMap<kind::Subscriber, SubscriberRow<Key, Cb>, { caps::MAX_SUBSCRIPTIONS }, P>
 {
     type Sink = Cb;
+    type RowId = SubscriberHandle;
 
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut Cb)>(&mut self, mut f: F) {
-        for (place, row) in self.live_places_mut() {
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriberHandle, &mut Cb)>(&mut self, mut f: F) {
+        for (place, handle, row) in self.live_handles_mut() {
             let found = RowRef {
                 pattern: text(&row.key.key),
                 facts: row.facts,
                 origin: row.origin,
             };
-            f(place, found, &mut row.callback);
+            f(place, found, handle, &mut row.callback);
         }
     }
 
@@ -2022,16 +2023,15 @@ impl<Key: KeyBacking, Cb: crate::sink::SampleSink, P: Storage> SubscriberRows
         })
     }
 
-    fn sink_at(&mut self, position: usize) -> Option<&mut Cb> {
-        self.live_at_mut(position).map(|row| &mut row.callback)
+    fn sink_at(&mut self, position: usize) -> Option<(SubscriberHandle, &mut Cb)> {
+        self.live_handle_at_mut(position)
+            .map(|(handle, row)| (handle, &mut row.callback))
     }
 }
 
-impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P>
-where
-    F::Subscriber: crate::sink::SampleSink,
-{
+impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P> {
     type Sink = F::Subscriber;
+    type RowId = SubscriberHandle;
 
     // The table set holds the key expressions the session declared: a peer's `M=0` key is read
     // from them where they lie.
@@ -2080,7 +2080,7 @@ where
         any_local_match(&self.subscribers, key)
     }
 
-    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
@@ -2100,7 +2100,7 @@ where
 
     /// The table set holds no key gate yet: a peer's message on any key is matched against
     /// every subscription that hears peers.
-    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
         &mut self,
         key: &str,
         _class: Option<crate::key_gate::ClassId>,
@@ -2123,9 +2123,12 @@ where
     }
 
     #[cfg(feature = "alloc")]
-    fn end_plain_frame(&mut self) {
-        for (_, row) in self.subscribers.iter_mut() {
-            crate::sink::SampleSink::end_plain_frame(&mut row.callback);
+    fn end_plain_frame<X: crate::sink::SampleDelivery<Self::Sink, Self::RowId>>(
+        &mut self,
+        cx: &mut X,
+    ) {
+        for (handle, row) in self.subscribers.iter_mut() {
+            cx.end_plain_frame(handle, &mut row.callback);
         }
     }
 }

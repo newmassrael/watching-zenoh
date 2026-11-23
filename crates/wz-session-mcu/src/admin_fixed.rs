@@ -562,7 +562,9 @@ impl<const BODY: usize, const SESSIONS: usize, O: InBand> ObserverSinks
     type Subscriber = crate::admin_host::ConnectWriteSink;
     #[cfg(not(feature = "adminspace-write"))]
     type Subscriber = NoSink;
-    type Subscribers<P: Storage> = SubscriberTable<Self::Subscriber, P>;
+    type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type Delivery = ();
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = AdminQuerySink<BODY, SESSIONS, O>;
     type Declared = NoSink;
     type Undeclared = NoSink;

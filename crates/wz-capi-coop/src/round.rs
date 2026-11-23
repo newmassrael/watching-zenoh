@@ -43,7 +43,7 @@ use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use portable_atomic::{AtomicU64, AtomicU8};
+use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use wz_capi_port::SubId;
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused, Lent};
@@ -778,15 +778,17 @@ pub(crate) type Captured = BoundedVec<SubscriberCall, { caps::MAX_SUBSCRIPTIONS 
 /// put after its calls, the session refusing a record under its lock.
 struct Released {
     handles: Lock<BoundedVec<SubscriberHandle, { caps::MAX_SUBSCRIPTIONS }, Static>>,
-    /// Whether `handles` holds one, so a delivery that let none go takes no lock for it.
-    any: AtomicBool,
+    /// The rows not dropped yet: those `handles` holds and those taken from it whose drop has not
+    /// ended ([`Releasing`]). A delivery that reads none takes no lock for them, and an
+    /// undeclaration that waits for its row reads that no drop is under way.
+    owed: AtomicUsize,
 }
 
 impl Released {
     fn new() -> Self {
         Self {
             handles: Lock::new(BoundedVec::new_static()),
-            any: AtomicBool::new(false),
+            owed: AtomicUsize::new(0),
         }
     }
 
@@ -797,7 +799,9 @@ impl Released {
         };
         let kept = self.handles.with(|handles| {
             let kept = handles.push(handle).is_ok();
-            self.any.store(true, Ordering::Release);
+            if kept {
+                self.owed.fetch_add(1, Ordering::AcqRel);
+            }
             kept
         });
         // An undeclared row keeps its slot until it is let go of, so the rows waiting here are
@@ -816,18 +820,41 @@ impl Released {
         }
     }
 
-    /// The next row to let go of.
-    fn take(&self) -> Option<SubscriberHandle> {
-        if !self.any.load(Ordering::Acquire) {
+    /// The next row to let go of, counted as owed until what it hands back is dropped.
+    fn take(&self) -> Option<Releasing<'_>> {
+        if self.owed.load(Ordering::Acquire) == 0 {
             return None;
         }
-        self.handles.with(|handles| {
-            let next = handles.pop();
-            if handles.is_empty() {
-                self.any.store(false, Ordering::Release);
-            }
-            next
+        let handle = self.handles.with(|handles| handles.pop())?;
+        Some(Releasing {
+            released: self,
+            handle,
         })
+    }
+
+    /// Whether no row is owed: none waits to be let go of and no drop of one is under way.
+    fn settled(&self) -> bool {
+        self.owed.load(Ordering::Acquire) == 0
+    }
+}
+
+/// A row taken to be let go of ([`Round::take_released`]): owed until this is dropped, which its
+/// taker does once the row was dropped.
+pub(crate) struct Releasing<'r> {
+    released: &'r Released,
+    handle: SubscriberHandle,
+}
+
+impl Releasing<'_> {
+    /// The row's handle.
+    pub(crate) fn handle(&self) -> SubscriberHandle {
+        self.handle
+    }
+}
+
+impl Drop for Releasing<'_> {
+    fn drop(&mut self) {
+        self.released.owed.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -1519,9 +1546,16 @@ impl Round {
     }
 
     /// The next row whose last call ended after its subscriber was undeclared, for the session to
-    /// let go of (`SessionTables::release_subscriber`) under its lock and drop after it.
-    pub(crate) fn take_released(&self) -> Option<SubscriberHandle> {
+    /// let go of (`SessionTables::release_subscriber`) under its lock and drop after it, and then
+    /// drop what this hands back.
+    pub(crate) fn take_released(&self) -> Option<Releasing<'_>> {
         self.released.take()
+    }
+
+    /// Whether no row waits to be let go of and no drop of one is under way: what an undeclaration
+    /// that waits for its row reads once the row left its table.
+    pub(crate) fn released_settled(&self) -> bool {
+        self.released.settled()
     }
 
     /// Empty a sealed round no delivery has taken, handing nothing out, its calls ended: what the
@@ -1634,6 +1668,35 @@ impl Round {
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn samples_lent(&self) -> usize {
         self.lent_samples.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+impl Round {
+    /// A round over an area of `bytes` the test leaks, holding `events` records at once, its tables
+    /// lent from an arena the test leaks too, so both outlive the round.
+    pub(crate) fn leaked(bytes: usize, events: usize) -> Arc<Self> {
+        use crate::arena::{AllocatorMemory, SessionArena};
+        use wz_session_core::bounded::ARENA_ALIGN;
+
+        let counts = RoundRowCounts {
+            records: events,
+            callbacks: caps::DELIVERY_LANE_CALLBACKS,
+            longest_key: caps::MAX_KEYEXPR_BYTES,
+        };
+        // Each table on a span of its own, rounded up to the next start of one.
+        let bytes_of_rows = events * RECORD_BYTES
+            + counts.callbacks * CALLBACK_BYTES
+            + counts.key_bytes()
+            + 3 * ARENA_ALIGN;
+        let arena: &'static mut SessionArena = Box::leak(Box::new(
+            SessionArena::of_bytes(bytes_of_rows, &AllocatorMemory)
+                .expect("the host has the memory"),
+        ));
+        let rows = RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows");
+        let area: &'static mut [u8] = vec![0u8; bytes].leak();
+        // SAFETY: the area is leaked, so it outlives the round, and nothing else uses it.
+        unsafe { Self::shared_over(NonNull::from(area).cast::<u8>(), bytes, rows) }
     }
 }
 

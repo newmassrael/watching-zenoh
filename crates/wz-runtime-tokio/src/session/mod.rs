@@ -2042,7 +2042,13 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 if opts.allowed_destination.allows_local() && self.has_local_subscriber(keyexpr) {
                     let sample = build_loopback_sample(keyexpr, payload, &opts);
                     let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                        observer.with_app(|app| app.subscribers.local_publish(&sample))
+                        observer.with_app(|app| {
+                            wz_session_core::pubsub::LocalSubscribers::local_publish(
+                                &mut *app.subscribers,
+                                &mut (),
+                                &sample,
+                            )
+                        })
                     });
                     // R311lh / R311lj — drain the fires THIS publish staged (the
                     // loopback `local_publish`) so the local subscriber callbacks
@@ -4635,7 +4641,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             sample.payload = shared;
         }
         let delivered = R::with_mutex_mut(&self.observer, |o| {
-            o.with_app(|app| app.subscribers.local_publish(&sample))
+            o.with_app(|app| {
+                wz_session_core::pubsub::LocalSubscribers::local_publish(
+                    &mut *app.subscribers,
+                    &mut (),
+                    &sample,
+                )
+            })
         });
         // R311y554 — same policy gate as `Session::publish`.
         self.drain_local_fires_if_inline();
@@ -5255,7 +5267,13 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             {
                 let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
                 let delivered = R::with_mutex_mut(&self.observer, |observer| {
-                    observer.with_app(|app| app.subscribers.local_publish(&sample))
+                    observer.with_app(|app| {
+                        wz_session_core::pubsub::LocalSubscribers::local_publish(
+                            &mut *app.subscribers,
+                            &mut (),
+                            &sample,
+                        )
+                    })
                 });
                 // R311lh / R311lj — drain the loopback-staged fires;
                 // gated on the local-delivery path, see `Session::publish`.

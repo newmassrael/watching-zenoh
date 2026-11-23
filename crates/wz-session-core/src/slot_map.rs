@@ -526,17 +526,8 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         None
     }
 
-    /// The live row at `place`, whatever its generation, to change: what a reader that keeps
-    /// places rather than handles reads, one that is valid only while the table does not change
-    /// (a match cache kept against a count that moves with every insert and removal).
-    pub(crate) fn live_at_mut(&mut self, place: usize) -> Option<&mut T> {
-        if self.meta.get(place)?.state != State::Live {
-            return None;
-        }
-        self.rows.get_mut(place)?.as_mut()
-    }
-
-    /// Every live row with its place, in slot order, to change: [`Self::live_at_mut`]'s places.
+    /// Every live row with its place, in slot order, to change: [`Self::live_handle_at_mut`]'s
+    /// places.
     pub(crate) fn live_places_mut(&mut self) -> impl Iterator<Item = (usize, &mut T)> + '_ {
         self.meta
             .iter()
@@ -544,6 +535,33 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .enumerate()
             .filter_map(|(at, (slot, row))| match (slot.state, row) {
                 (State::Live, Some(row)) => Some((at, row)),
+                _ => None,
+            })
+    }
+
+    /// The live row at `place`, whatever its generation, with its handle, to change: what a
+    /// reader that keeps places rather than handles reads, one that is valid only while the table
+    /// does not change (a match cache kept against a count that moves with every insert and
+    /// removal), and that hands each row on under the handle the table gave it.
+    pub(crate) fn live_handle_at_mut(&mut self, place: usize) -> Option<(Handle<K>, &mut T)> {
+        let slot = self.meta.get(place)?;
+        if slot.state != State::Live {
+            return None;
+        }
+        let handle = Handle::at(place, slot.generation)?;
+        Some((handle, self.rows.get_mut(place)?.as_mut()?))
+    }
+
+    /// Every live row with its place and its handle, in slot order, to change.
+    pub(crate) fn live_handles_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (usize, Handle<K>, &mut T)> + '_ {
+        self.meta
+            .iter()
+            .zip(self.rows.iter_mut())
+            .enumerate()
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((at, Handle::at(at, slot.generation)?, row)),
                 _ => None,
             })
     }

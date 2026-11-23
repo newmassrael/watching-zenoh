@@ -14,7 +14,7 @@
 //! extension are read where they lie, and the subscribers are handed a
 //! [`SampleView`] over those bytes ([`LentSample`]) through the same matcher
 //! and the same sinks the owned path uses. A subscriber's contract was already
-//! a view borrowed for the call ([`SampleSink::deliver`]), so no subscriber
+//! a view borrowed for the call ([`SampleDelivery::deliver`]), so no subscriber
 //! changes; one that keeps the sample copies it
 //! ([`Sample::from_view`](crate::sample::Sample::from_view)).
 //!
@@ -47,7 +47,7 @@ use crate::reliability::Reliability;
 use crate::sample::{EncodingHint, TimestampHint};
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
-use crate::sink::{SampleSink, SampleView};
+use crate::sink::{SampleDelivery, SampleView};
 use crate::wireexpr_resolve::{
     resolve_plain_parts_over, resolve_wireexpr_view_over, KeyexprBuf, KeyexprPastBound,
 };
@@ -242,9 +242,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ///
     /// This is the sending peer's side, whose aliases the keyexpr resolves through and whose
     /// zid names a self-echo; `subs` are the subscriptions the Push is delivered to.
-    pub(super) fn dispatch_in_place<L: LocalSubscribers>(
+    pub(super) fn dispatch_in_place<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
+        cx: &mut X,
         record: &InPlaceRecord<'_, '_>,
     ) {
         // A lent Request or Response is the queryables' or the pending gets'.
@@ -252,36 +253,37 @@ impl<Q: Storage> SubscriberPeer<Q> {
             return;
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
-        match self.deliver_lent(subs, push, reliability) {
+        match self.deliver_lent(subs, cx, push, reliability) {
             Ok(()) => {}
             // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
                 self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
                 self.in_place_fallbacks.keyexpr_past_bound =
                     self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
                 self.in_place_fallbacks.instrumented =
                     self.in_place_fallbacks.instrumented.saturating_add(1);
                 #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(subs, push, reliability);
+                self.dispatch_owned_projection(subs, cx, push, reliability);
             }
         }
     }
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
     /// fits, short of a timestamp or encoding hint a subscriber asks for.
-    fn deliver_lent<L: LocalSubscribers>(
+    fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &self,
         subs: &mut L,
+        cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
     ) -> Result<(), Fallback> {
@@ -364,7 +366,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 no_allocation: true,
                 ..PeerDelivery::default()
             },
-            |sink| SampleSink::deliver(sink, &sample),
+            |id, row| cx.deliver(id, row, &sample),
         );
         Ok(())
     }
@@ -373,9 +375,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
     /// copying receive takes ([`Self::dispatch_push`]), so a Put the lent form
     /// cannot represent is delivered exactly as it always was.
     #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-    fn dispatch_owned_projection<L: LocalSubscribers>(
+    fn dispatch_owned_projection<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
+        cx: &mut X,
         push: &Push<'_>,
         reliability: Reliability,
     ) {
@@ -383,7 +386,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // ranges), so this projection cannot refuse a decoded Push. It
         // consumes its view; the clone is of the view, not of the bytes.
         if let Ok(owned) = push.clone().try_into_owned_in::<crate::wire::WireStorage>() {
-            self.dispatch_push(subs, &owned, reliability, true);
+            self.dispatch_push(subs, cx, &owned, reliability, true);
         }
     }
 }
@@ -399,9 +402,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
     ///
     /// A key the peer never declared (or the empty key) is dropped, as the owned path
     /// drops it, and one record's key never affects another's.
-    pub(super) fn dispatch_plain_puts<L: LocalSubscribers>(
+    pub(super) fn dispatch_plain_puts<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &self,
         subs: &mut L,
+        cx: &mut X,
         reliable: bool,
         frame: &crate::link::RxBytes,
         puts: &[crate::plain_push::PlainPut],
@@ -475,11 +479,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     repeats_previous: repeats,
                     ..PeerDelivery::default()
                 },
-                |sink| SampleSink::deliver_plain(sink, &sample),
+                |id, row| cx.deliver_plain(id, row, &sample),
             );
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
-        subs.end_plain_frame();
+        subs.end_plain_frame(cx);
     }
 }
 

@@ -129,7 +129,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{SampleSink, SampleView};
+use wz_session_core::sink::{SampleDelivery, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -1671,14 +1671,28 @@ impl SubscriberCall {
     }
 }
 
-impl SampleSink for SubscriberRow {
-    fn deliver(&mut self, sample: &dyn SampleView) {
-        // SAFETY: the session core's table hands its sinks a sample under the session's lock: it
-        // is the registry's, which only `Core` holds.
-        unsafe {
-            self.lane
-                .offer_sample(self.id, self.callback.as_ref(), sample)
-        }
+/// What the session's dispatch hands a sample a subscriber row matched to: the round of deliveries,
+/// which holds a call begun on the row until a delivery makes it with no lock held. The registry
+/// holds it and hands it to each dispatch, so no row keeps a reference to the round.
+pub(crate) struct RoundDelivery(Arc<Round>);
+
+impl RoundDelivery {
+    /// Deliveries into `round`.
+    pub(crate) fn new(round: Arc<Round>) -> Self {
+        Self(round)
+    }
+}
+
+impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
+    fn deliver(&mut self, id: SubscriberHandle, row: &mut SubscriberRow, sample: &dyn SampleView) {
+        // A row past the most calls one latch counts is handed nothing; an undeclared one is in no
+        // lookup, so no dispatch reaches it.
+        let Some(call) = RowCallback::begin(&*row) else {
+            return;
+        };
+        // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`
+        // holds, as the round's writer must.
+        unsafe { self.0.offer_sample(SubscriberCall::new(call, id), sample) };
     }
 }
 
@@ -3652,6 +3666,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             },
             plan.gets(),
             plan.peers(),
+            RoundDelivery::new(samples.clone()),
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
         // The ends of the session's legs wait in rows the plan counts for them.
@@ -4754,11 +4769,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
     /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
     /// it here, with no lock of the session held, inside the put as zenoh-pico's does
-    /// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), by the
-    /// callback each one's row holds, copied out under the session's lock. A callback is called
-    /// through a shared borrow ([`LiveCallback`]): one running on another thread is called beside
-    /// it, and one the putting thread is inside of is called again from inside itself, as pico's
-    /// is, so a put a callback makes on its own subscriber's key reaches it at once, at any depth.
+    /// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), by a
+    /// call begun on each one's row under the session's lock ([`SubscriberCall`]). A callback is
+    /// called through a shared borrow: one running on another thread is called beside it, and one
+    /// the putting thread is inside of is called again from inside itself, as pico's is, so a put a
+    /// callback makes on its own subscriber's key reaches it at once, at any depth.
     /// The number of subscribers reached.
     #[cfg(feature = "local-subscriber")]
     fn publish_to_subscribers(
@@ -4776,13 +4791,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let sample = opts.loopback_sample(keyexpr, payload);
         // SAFETY: the session's lock is held (`core`).
         unsafe { self.samples.capture() };
-        wz_session_core::pubsub::LocalSubscribers::fire_matching(
-            &mut core.0.registry.borrow_mut().app.subscribers,
-            &sample.keyexpr,
-            true,
-            false,
-            |row: &mut SubscriberRow| row.deliver(&sample),
-        );
+        core.0.registry.borrow_mut().local_publish(&sample);
         // SAFETY: as above.
         let mut reached = unsafe { self.samples.captured() };
         drop(core);
@@ -4839,15 +4848,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// its table under the session's lock and dropped after it, one at a time, so a C program's
     /// `drop` never runs under the lock.
     fn let_go_of_released(&self) {
-        while let Some(handle) = self.samples.take_released() {
+        while let Some(releasing) = self.samples.take_released() {
             let row = {
                 let guard = self.core.lock();
                 let mut tables = tables_mut(&guard.0.registry);
                 tables
-                    .release_subscriber(handle)
+                    .release_subscriber(releasing.handle())
                     .map(|row| row.into_callback())
             };
             drop(row);
+            // Only now is the row's drop over, which a waiting undeclaration reads.
+            drop(releasing);
         }
     }
 
@@ -4862,14 +4873,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         loop {
             // A round sealed and handed out by no delivery yet may owe the row a call: handed out
-            // here, the call hands nothing to an undeclared subscriber and is ended.
+            // here, the call hands nothing to an undeclared subscriber and is ended, and the rows
+            // whose last call ended are let go of.
             self.deliver();
             let held = {
                 let guard = self.core.lock();
                 let tables = tables(&guard.0.registry);
                 tables.subscribers().holds_slot(handle)
             };
-            if !held {
+            // Out of its table, the row is dropped by whoever took it, after the lock: settled,
+            // no drop is under way.
+            if !held && self.samples.released_settled() {
                 return;
             }
             sleep_ms(1);

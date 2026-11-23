@@ -289,7 +289,8 @@ where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
-    K: ObserverSinks + 'static,
+    // The node's rows deliver themselves: the dispatch hands them no context.
+    K: ObserverSinks<Delivery = ()> + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_, '_>) {
@@ -303,7 +304,13 @@ where
             peers
                 .queries
                 .set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
-            observer.dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
+            observer.dispatch(
+                &mut (),
+                &mut peers,
+                &mut self.requesters,
+                event,
+                &*self.handle,
+            );
         }
         // A query whose deadline has passed ends with a timeout reply and its final, here, because
         // this is the one place that runs on every iteration of the session and holds the pending

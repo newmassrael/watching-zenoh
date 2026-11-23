@@ -48,7 +48,7 @@ use wz_session_core::slot_observer::{
     ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
 };
 
-use super::{LegSink, SubscriberRow};
+use super::{LegSink, RoundDelivery, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::FilterPlane;
 use wz_session_core::slot_observer::RequesterRows;
@@ -305,7 +305,9 @@ pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
-    type Subscribers<P: wz_session_core::bounded::Storage> =
+    type SubscriberId = wz_session_core::session_tables::SubscriberHandle;
+    type Delivery = RoundDelivery;
+    type Tables<P: wz_session_core::bounded::Storage> =
         wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = BoxedQuerySink;
     type Declared = BoxedDeclSink;
@@ -319,6 +321,9 @@ pub(super) type App = SlotObserverOf<CoopSinks, Lent>;
 /// The application layer of one session. See the module documentation.
 pub(super) struct Registry {
     pub(super) app: App,
+    /// Where a sample the application's subscribers match goes: the session's round of
+    /// deliveries, handed to each dispatch of the application's tables.
+    delivery: RoundDelivery,
     /// The session's pools of what its peers write by their own choice, which every face's tables
     /// keep their rows in from the open on: what a test reads the pools' counts by.
     #[cfg(test)]
@@ -376,6 +381,7 @@ pub(super) struct Registry {
 /// its call needs.
 struct Split<'a> {
     app: &'a mut App,
+    delivery: &'a mut RoundDelivery,
     face: &'a mut FaceTables,
     others: Others<'a>,
 }
@@ -388,8 +394,8 @@ impl Registry {
     /// a session that dials nothing, `FacePeers::dial`), the session's own gets where it answers
     /// its own, and the rest kept for the faces to come. What the peers
     /// declare keeps its keys in `keys`, the session's key arena, as the session's own
-    /// declarations do. Refused when the arena has not the rows, which one reserved by the plan
-    /// that counts them always has.
+    /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
+    /// the arena has not the rows, which one reserved by the plan that counts them always has.
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
@@ -397,6 +403,7 @@ impl Registry {
         rows: ObserverRows<wz_session_core::session_tables::TableRows>,
         gets: GetTables,
         peers: FacePeers,
+        delivery: RoundDelivery,
     ) -> Result<Self, LendRefused> {
         let app = App::lent(arena, keys, rows, limits)?;
         let mut pools = PeerPools::lent(arena, peers.pools)?;
@@ -438,6 +445,7 @@ impl Registry {
         }
         Ok(Self {
             app,
+            delivery,
             sets,
             held,
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
@@ -652,7 +660,11 @@ impl Registry {
     fn split(&mut self, id: FaceId) -> Option<Split<'_>> {
         self.writing();
         let Self {
-            app, sets, held, ..
+            app,
+            delivery,
+            sets,
+            held,
+            ..
         } = self;
         let held: &[HeldSet] = &held[..];
         let place = held.iter().position(|face| face.id == id)?;
@@ -661,6 +673,7 @@ impl Registry {
         let (face, after) = rest.split_first_mut()?;
         Some(Split {
             app,
+            delivery,
             face,
             others: Others {
                 before: &*before,
@@ -688,13 +701,33 @@ impl Registry {
         self.decl_watches.drop_staged();
         #[cfg(feature = "declarations-synced-event")]
         let was_final = self.declarations_final(id);
-        if let Some(Split { app, face, others }) = self.split(id) {
-            app.dispatch_event_among(&mut face.peer, &mut face.gets, event, &others);
+        if let Some(Split {
+            app,
+            delivery,
+            face,
+            others,
+        }) = self.split(id)
+        {
+            app.dispatch_event_among(delivery, &mut face.peer, &mut face.gets, event, &others);
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(id) {
             self.decl_watches.stage_synced();
         }
+    }
+
+    /// Hand `sample`, which the session itself published, to each of its subscribers that hears
+    /// the session's own messages: how many.
+    #[cfg(feature = "local-subscriber")]
+    pub(super) fn local_publish(
+        &mut self,
+        sample: &dyn wz_session_core::sink::SampleView,
+    ) -> usize {
+        wz_session_core::pubsub::LocalSubscribers::local_publish(
+            &mut self.app.subscribers,
+            &mut self.delivery,
+            sample,
+        )
     }
 
     /// Whether the peer of face `id` has ended its initial declarations since its link came up.
@@ -772,10 +805,17 @@ impl Registry {
         #[cfg(all(test, feature = "std"))]
         let written = self.faces_written;
         let owed = match self.split(id) {
-            Some(Split { app, face, .. }) => {
-                face.peer
-                    .subscribers
-                    .dispatch_iteration_event(&mut app.subscribers, event);
+            Some(Split {
+                app,
+                delivery,
+                face,
+                ..
+            }) => {
+                face.peer.subscribers.dispatch_iteration_event(
+                    &mut app.subscribers,
+                    delivery,
+                    event,
+                );
                 face.peer.subscribers.reconcile(&app.subscribers);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
@@ -815,10 +855,16 @@ impl Registry {
     {
         #[cfg(all(test, feature = "std"))]
         let written = self.faces_written;
-        if let Some(Split { app, face, .. }) = self.split(id) {
+        if let Some(Split {
+            app,
+            delivery,
+            face,
+            ..
+        }) = self.split(id)
+        {
             face.peer
                 .subscribers
-                .dispatch_iteration_event(&mut app.subscribers, event);
+                .dispatch_iteration_event(&mut app.subscribers, delivery, event);
             face.peer.subscribers.reconcile(&app.subscribers);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
@@ -830,9 +876,12 @@ impl Registry {
     /// and the matching listeners are told what that makes of them, the other faces' peers
     /// counting as they do.
     pub(super) fn flush_declarations_on_link_loss(&mut self, id: FaceId) -> usize {
-        self.split(id).map_or(0, |Split { app, face, others }| {
-            app.flush_declarations_on_link_loss_among(&mut face.peer, &others)
-        })
+        self.split(id).map_or(
+            0,
+            |Split {
+                 app, face, others, ..
+             }| { app.flush_declarations_on_link_loss_among(&mut face.peer, &others) },
+        )
     }
 
     /// The link of face `id` was lost: every token its peer declared is gone, and the liveliness
@@ -914,7 +963,9 @@ impl Registry {
         local: bool,
         sink: BoxedMatchingSink,
     ) -> u64 {
-        let Split { app, face, others } = self
+        let Split {
+            app, face, others, ..
+        } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
         let local = local || others.subscribes(&criterion);
@@ -934,7 +985,9 @@ impl Registry {
         local: bool,
         sink: BoxedMatchingSink,
     ) -> u64 {
-        let Split { app, face, others } = self
+        let Split {
+            app, face, others, ..
+        } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
         let local = local || others.answers(&criterion);
@@ -950,7 +1003,9 @@ impl Registry {
     /// subscribers whether it now matches, after one was declared or retracted here.
     #[cfg(feature = "local-subscriber")]
     pub(super) fn reevaluate_publisher_watches(&mut self) {
-        let Split { app, face, others } = self
+        let Split {
+            app, face, others, ..
+        } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
         let subscribers = &app.subscribers;
@@ -968,7 +1023,9 @@ impl Registry {
     /// The queriers' plane's counterpart of [`Self::reevaluate_publisher_watches`].
     #[cfg(feature = "local-queryable")]
     pub(super) fn reevaluate_querier_watches(&mut self) {
-        let Split { app, face, others } = self
+        let Split {
+            app, face, others, ..
+        } = self
             .split(DIAL_FACE)
             .expect("the registry holds the dial face");
         let queryables = &app.queryables;
@@ -1178,6 +1235,7 @@ mod tests {
             },
             gets,
             peers,
+            RoundDelivery::new(crate::round::Round::leaked(1024, 4)),
         )
         .expect("the arena has the rows");
         Held {
