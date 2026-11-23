@@ -362,7 +362,10 @@ TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen by
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
 constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
 same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
-through `Bounded::new`, over a sink that cannot refuse. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+through `Bounded::new`, over a sink that cannot refuse. TD-042 (`serial_link`) keeps the
+two `expect`s of the handshake, which frames an `INIT` and an `INIT|ACK` of no payload through
+`encode_frame`: that answers a `Result` for any payload, and an empty one is always within the
+MTU. A frame of fixed bytes made when the build is compiled would pay them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
 TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
