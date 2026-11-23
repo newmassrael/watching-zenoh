@@ -299,6 +299,74 @@ pub fn is_canon(input: &str, dialect: KeyexprDialect) -> bool {
     walked.is_ok() && rest.is_empty()
 }
 
+/// The canonical form of `input` written into `out` from its first byte, and its length: the
+/// form [`canonize_keyexpr_in`] gives, refused with its refusals, bounded only by `out`. A text
+/// of any length is read, so a long text whose form is short is taken, and a form longer than
+/// `out` is refused as [`KeyexprCanonError::ExceedsCapacity`]. No chunk count is bounded and
+/// nothing is allocated, on any profile. The bytes of `out` past the length are not written; on
+/// a refusal, what was written before it is not specified.
+pub fn canonize_into(
+    input: &str,
+    out: &mut [u8],
+    dialect: KeyexprDialect,
+) -> Result<usize, KeyexprCanonError> {
+    let mut len = 0usize;
+    walk_canonical(input, dialect, false, &mut |piece: &str| {
+        let end = len
+            .checked_add(piece.len())
+            .ok_or(KeyexprCanonError::ExceedsCapacity)?;
+        out.get_mut(len..end)
+            .ok_or(KeyexprCanonError::ExceedsCapacity)?
+            .copy_from_slice(piece.as_bytes());
+        len = end;
+        Ok(())
+    })?;
+    Ok(len)
+}
+
+/// The canonical form of `text` written over `text` from its first byte, and its length: the
+/// form [`canonize_keyexpr_in`] gives, refused with its refusals, for a text of any length,
+/// with no capacity bound on any profile and nothing allocated. The bytes past the length are
+/// not specified, nor are any bytes after a refusal.
+///
+/// The grammar is a byte grammar and every cut the walk makes is at an ASCII byte, so a text
+/// that is UTF-8 is UTF-8 after it, and a text that is not is canonized byte for byte.
+///
+/// It is the walk's own property that makes this sound: the form never grows, so every span the
+/// walk hands out starts at or after the end of what is written, and every byte written lies
+/// before the bytes the walk has still to read. A span is moved back by its
+/// place, so no borrow of the text is held across a write.
+pub fn canonize_in_place(
+    text: &mut [u8],
+    dialect: KeyexprDialect,
+) -> Result<usize, KeyexprCanonError> {
+    let mut walk = CanonWalk::new(dialect, false);
+    let mut len = 0usize;
+    while let Some(piece) = walk.next(text) {
+        // A piece past the room the walk's property promises is refused rather than written
+        // where the walk has still to read; no text reaches that arm.
+        len = match piece? {
+            Piece::Text { from, to } => match len.checked_add(to.saturating_sub(from)) {
+                Some(end) if (len..=to).contains(&from) && to <= text.len() => {
+                    text.copy_within(from..to, len);
+                    end
+                }
+                _ => return Err(KeyexprCanonError::ExceedsCapacity),
+            },
+            Piece::Fixed(spelling) => {
+                let end = len
+                    .checked_add(spelling.len())
+                    .ok_or(KeyexprCanonError::ExceedsCapacity)?;
+                text.get_mut(len..end)
+                    .ok_or(KeyexprCanonError::ExceedsCapacity)?
+                    .copy_from_slice(spelling.as_bytes());
+                end
+            }
+        };
+    }
+    Ok(len)
+}
+
 /// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
 /// text with every run of `$*` written once, which is the longest the canonical form can be,
 /// past `CAPACITY`, the bytes the output's type holds
@@ -344,22 +412,63 @@ fn is_dollar_star_at(bytes: &[u8], i: usize) -> bool {
 
 /// Whether `chunk` is one or more `$*` tokens and nothing else: the chunk whose collapsed
 /// form is a lone `$*`.
-fn is_dollar_star_run(chunk: &str) -> bool {
-    let bytes = chunk.as_bytes();
-    let mut pairs = bytes.chunks_exact(2);
-    !bytes.is_empty() && pairs.remainder().is_empty() && pairs.all(|pair| pair == b"$*")
+fn is_dollar_star_run(chunk: &[u8]) -> bool {
+    let mut pairs = chunk.chunks_exact(2);
+    !chunk.is_empty() && pairs.remainder().is_empty() && pairs.all(|pair| pair == b"$*")
 }
 
-/// The canonical form of `input`, handed to `sink` a piece at a time as the text is read:
-/// every `/`-separated chunk is judged by [`analyze_chunk`] and written in its canonical
-/// form (a `$*` run written once, a lone `$*` as `*`), and a wild RUN of `*` / `**` chunks
-/// is held as two counts and written, when the run ends, as every `*` first and then at most
-/// one `**`. `chunk_bound` refuses an output of more than [`MAX_KEYEXPR_CHUNKS`] chunks, at
-/// the chunk that would pass it.
+/// One piece of the canonical form: a span of the text, where it lies, or a spelling the walk
+/// writes itself. A span is given by its place and not borrowed, so a caller that writes the
+/// form over the text it reads ([`canonize_in_place`]) holds no borrow of the text between steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Piece {
+    /// The bytes `from..to` of the text.
+    Text { from: usize, to: usize },
+    /// A spelling of the canonical form that the text need not hold where it is written.
+    Fixed(&'static str),
+}
+
+/// What the walk writes once the wild run held before it is written.
+#[derive(Debug, Clone, Copy)]
+enum AfterRun {
+    /// The literal chunk `start..end` of the text.
+    Chunk { start: usize, end: usize },
+    /// A lone `$*` chunk that ends the run (the pico dialect), written `*`.
+    Star,
+    /// The end of the text.
+    End,
+}
+
+/// Where the walk is between two pieces.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// Read and judge the next chunk.
+    Read,
+    /// Write the wild run held, then what follows it.
+    Run(AfterRun),
+    /// Count the literal chunk `start..end` and write the `/` before it.
+    Open { start: usize, end: usize },
+    /// Write the literal chunk from `from` to `end`.
+    Chunk { from: usize, end: usize },
+    /// Every piece is written, or the text was refused.
+    Done,
+}
+
+/// The canonical form of a text, a piece at a time ([`Self::next`]): every `/`-separated
+/// chunk is judged by [`analyze_chunk`] and written in its canonical form (a `$*` run written
+/// once, a lone `$*` as `*`), and a wild RUN of `*` / `**` chunks is held as two counts and
+/// written, when the run ends, as every `*` first and then at most one `**`. `chunk_bound`
+/// refuses an output of more than [`MAX_KEYEXPR_CHUNKS`] chunks, at the chunk that would pass it.
 ///
-/// One walk serves the canonizer, whose sink writes the output, and the verdict, whose sink
-/// writes nothing, so the two cannot disagree on a text. It is not generic over the sink: one
-/// copy of the walk serves every policy.
+/// Every writer of the form steps this one walk (the canonizer, the verdict, the canon check,
+/// the writer into a caller's buffer and the writer over the text itself), so no two of them
+/// can disagree on a text. It holds places and counts and no borrow of the text, which it is
+/// handed at each step.
+///
+/// The form never grows: each chunk written stands for a chunk read that is at least as long,
+/// and each `/` for a `/` read. So when a piece is handed out, everything written before it
+/// fits in the bytes the walk has read, and a span it hands out starts at or after the end of
+/// what is written. That is what lets [`canonize_in_place`] write the form over the text.
 ///
 /// # R311y564 — the run rule REPLACES an absorb rule that was wrong
 ///
@@ -381,120 +490,186 @@ fn is_dollar_star_run(chunk: &str) -> bool {
 /// `home/**/*/temp` and each answered `home/*/**/temp`, where wz
 /// answered `home/**/temp`. The two ABIs' pure-function oracles
 /// now drive that comparison on every run.
+struct CanonWalk {
+    dialect: KeyexprDialect,
+    chunk_bound: bool,
+    /// Where the chunk not yet read starts; `None` once the last chunk is read.
+    next_chunk: Option<usize>,
+    /// The chunks written so far.
+    written: usize,
+    /// The wild run held: how many `*` chunks it has, and whether it has a `**`.
+    singles: usize,
+    double: bool,
+    step: Step,
+}
+
+impl CanonWalk {
+    fn new(dialect: KeyexprDialect, chunk_bound: bool) -> Self {
+        Self {
+            dialect,
+            chunk_bound,
+            next_chunk: Some(0),
+            written: 0,
+            singles: 0,
+            double: false,
+            step: Step::Read,
+        }
+    }
+
+    /// The next piece of the canonical form of `text`, or its refusal, and `None` once the
+    /// form is all handed out or a refusal was. `text` is the same text at every step, but for
+    /// the bytes before the start of the last span handed out, which the caller may have
+    /// written the form over.
+    fn next(&mut self, text: &[u8]) -> Option<Result<Piece, KeyexprCanonError>> {
+        let stepped = self.step_on(text);
+        if matches!(stepped, Some(Err(_))) {
+            self.step = Step::Done;
+        }
+        stepped
+    }
+
+    fn step_on(&mut self, text: &[u8]) -> Option<Result<Piece, KeyexprCanonError>> {
+        loop {
+            match self.step {
+                Step::Done => return None,
+                Step::Read => {
+                    let Some(start) = self.next_chunk else {
+                        // A keyexpr may END in a wild run, so the run is written at the end too.
+                        self.step = Step::Run(AfterRun::End);
+                        continue;
+                    };
+                    let end = text
+                        .get(start..)
+                        .unwrap_or_default()
+                        .iter()
+                        .position(|byte| *byte == b'/')
+                        .map_or(text.len(), |at| start.saturating_add(at));
+                    self.next_chunk = if end < text.len() {
+                        Some(end.saturating_add(1))
+                    } else {
+                        None
+                    };
+                    let shape = match analyze_chunk(text.get(start..end).unwrap_or_default()) {
+                        Ok(shape) => shape,
+                        Err(refused) => return Some(Err(refused)),
+                    };
+                    // The ONE case the two dialects split on — see [`KeyexprDialect`]: pico ends
+                    // the wild run at a `$*` chunk and writes `*` after whatever the run held;
+                    // zenoh-c folds it into the run.
+                    match shape {
+                        ChunkShape::SingleStar => self.singles = self.singles.saturating_add(1),
+                        ChunkShape::LoneDollarStar if self.dialect == KeyexprDialect::ZenohC => {
+                            self.singles = self.singles.saturating_add(1);
+                        }
+                        ChunkShape::DoubleStar => self.double = true,
+                        ChunkShape::LoneDollarStar => self.step = Step::Run(AfterRun::Star),
+                        ChunkShape::Mixed => self.step = Step::Run(AfterRun::Chunk { start, end }),
+                    }
+                }
+                Step::Run(after) => {
+                    if self.singles > 0 {
+                        self.singles = self.singles.saturating_sub(1);
+                        return Some(self.fixed_chunk("*", "/*"));
+                    }
+                    if self.double {
+                        self.double = false;
+                        return Some(self.fixed_chunk("**", "/**"));
+                    }
+                    match after {
+                        AfterRun::Chunk { start, end } => self.step = Step::Open { start, end },
+                        AfterRun::Star => {
+                            self.step = Step::Read;
+                            return Some(self.fixed_chunk("*", "/*"));
+                        }
+                        AfterRun::End => {
+                            self.step = Step::Done;
+                            return None;
+                        }
+                    }
+                }
+                Step::Open { start, end } => {
+                    let first = self.written == 0;
+                    if let Err(refused) = self.count_chunk() {
+                        return Some(Err(refused));
+                    }
+                    self.step = Step::Chunk { from: start, end };
+                    if !first {
+                        return Some(Ok(Piece::Fixed("/")));
+                    }
+                }
+                Step::Chunk { from, end } => {
+                    // A run of `$*` is written up to its first token and the rest of the run is
+                    // stepped over. A `$*` holds no `/`, so no run reaches past the chunk; every
+                    // place below is inside the text, so the sums do not saturate.
+                    let mut at = from;
+                    while at < end {
+                        if is_dollar_star_at(text, at) {
+                            let first_end = at.saturating_add(2);
+                            let mut run_end = first_end;
+                            while is_dollar_star_at(text, run_end) {
+                                run_end = run_end.saturating_add(2);
+                            }
+                            if run_end > first_end {
+                                self.step = Step::Chunk { from: run_end, end };
+                                return Some(Ok(Piece::Text {
+                                    from,
+                                    to: first_end,
+                                }));
+                            }
+                            at = run_end;
+                        } else {
+                            at = at.saturating_add(1);
+                        }
+                    }
+                    self.step = Step::Read;
+                    return Some(Ok(Piece::Text { from, to: end }));
+                }
+            }
+        }
+    }
+
+    /// Count one more chunk of the form, refused past the chunk bound where there is one.
+    fn count_chunk(&mut self) -> Result<(), KeyexprCanonError> {
+        if self.chunk_bound && self.written >= MAX_KEYEXPR_CHUNKS {
+            return Err(KeyexprCanonError::ExceedsCapacity);
+        }
+        // At most `MAX_KEYEXPR_CHUNKS` where it is bounded, and a count of chunks of a text.
+        self.written = self.written.saturating_add(1);
+        Ok(())
+    }
+
+    /// A chunk the walk spells itself: `bare` as the first chunk, `after_another` (with its
+    /// `/`) after one.
+    fn fixed_chunk(
+        &mut self,
+        bare: &'static str,
+        after_another: &'static str,
+    ) -> Result<Piece, KeyexprCanonError> {
+        let first = self.written == 0;
+        self.count_chunk()?;
+        Ok(Piece::Fixed(if first { bare } else { after_another }))
+    }
+}
+
+/// The canonical form of `input`, handed to `sink` a piece at a time as [`CanonWalk`] reads
+/// the text. Not generic over the sink: one copy of the walk serves every policy.
 fn walk_canonical(
     input: &str,
     dialect: KeyexprDialect,
     chunk_bound: bool,
     sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
 ) -> Result<(), KeyexprCanonError> {
-    let mut written = 0usize;
-    // The wild run being accumulated: how many `*` chunks it has
-    // contained so far, and whether any of them was a `**`.
-    let mut run_single_stars = 0usize;
-    let mut run_has_double_star = false;
-    for chunk in input.split('/') {
-        let shape = analyze_chunk(chunk)?;
-        // The ONE case the two dialects split on — see [`KeyexprDialect`].
-        // pico ends the wild run at a `$*` chunk and emits `*` after
-        // whatever the run held; zenoh-c folds it into the run.
-        let folds_into_run = match shape {
-            ChunkShape::SingleStar => true,
-            ChunkShape::LoneDollarStar => dialect == KeyexprDialect::ZenohC,
-            _ => false,
+    let mut walk = CanonWalk::new(dialect, chunk_bound);
+    while let Some(piece) = walk.next(input.as_bytes()) {
+        // A span starts and ends at a `/`, at a `$*` or at an end of the text, each an ASCII
+        // byte, so it is cut at char boundaries.
+        let piece = match piece? {
+            Piece::Text { from, to } => input.get(from..to).unwrap_or_default(),
+            Piece::Fixed(spelling) => spelling,
         };
-        if folds_into_run {
-            run_single_stars = run_single_stars.saturating_add(1);
-            continue;
-        }
-        if shape == ChunkShape::DoubleStar {
-            run_has_double_star = true;
-            continue;
-        }
-        // A pico-dialect `$*`, or an ordinary literal chunk: write the
-        // pending run, then this chunk's canonical form.
-        write_run(
-            sink,
-            &mut written,
-            chunk_bound,
-            run_single_stars,
-            run_has_double_star,
-        )?;
-        run_single_stars = 0;
-        run_has_double_star = false;
-        let literal = if shape == ChunkShape::LoneDollarStar {
-            "*"
-        } else {
-            chunk
-        };
-        write_chunk(sink, &mut written, chunk_bound, literal)?;
-    }
-    // A keyexpr may END in a wild run, so the run cannot be written only
-    // at the literal-chunk boundary.
-    write_run(
-        sink,
-        &mut written,
-        chunk_bound,
-        run_single_stars,
-        run_has_double_star,
-    )
-}
-
-/// Write a wild run in canonical order: every `*`, then at most one `**`.
-fn write_run(
-    sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
-    written: &mut usize,
-    chunk_bound: bool,
-    singles: usize,
-    has_double: bool,
-) -> Result<(), KeyexprCanonError> {
-    for _ in 0..singles {
-        write_chunk(sink, written, chunk_bound, "*")?;
-    }
-    if has_double {
-        write_chunk(sink, written, chunk_bound, "**")?;
+        sink(piece)?;
     }
     Ok(())
-}
-
-/// Write one output chunk, `/`-separated from the one before it, with every run of `$*` in
-/// it written once. `written` counts the chunks written so far.
-fn write_chunk(
-    sink: &mut dyn FnMut(&str) -> Result<(), KeyexprCanonError>,
-    written: &mut usize,
-    chunk_bound: bool,
-    chunk: &str,
-) -> Result<(), KeyexprCanonError> {
-    if chunk_bound && *written >= MAX_KEYEXPR_CHUNKS {
-        return Err(KeyexprCanonError::ExceedsCapacity);
-    }
-    if *written > 0 {
-        sink("/")?;
-    }
-    // At most `MAX_KEYEXPR_CHUNKS` where it is bounded, and a count of chunks of a text.
-    *written = written.saturating_add(1);
-    let bytes = chunk.as_bytes();
-    // `from` is where the text not yet written starts; a run of `$*` is written up to its
-    // first token and the rest of the run is stepped over. Every position below is inside the
-    // chunk, at an ASCII byte, so the sums do not saturate and each cut is a char boundary.
-    let mut from = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if is_dollar_star_at(bytes, i) {
-            let first_end = i.saturating_add(2);
-            let mut end = first_end;
-            while is_dollar_star_at(bytes, end) {
-                end = end.saturating_add(2);
-            }
-            if end > first_end {
-                sink(chunk.get(from..first_end).unwrap_or_default())?;
-                from = end;
-            }
-            i = end;
-        } else {
-            i = i.saturating_add(1);
-        }
-    }
-    sink(chunk.get(from..).unwrap_or_default())
 }
 
 /// Per-chunk validation + shape classification, of the chunk as the text holds it: a `$*`
@@ -507,19 +682,19 @@ fn write_chunk(
 /// encoding (0 = normal, 1 = after `$`, 3 = after `$*`); the
 /// non-contiguous 2-skip keeps the cross-reference mechanical
 /// instead of having to mentally re-encode states.
-fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
+fn analyze_chunk(chunk: &[u8]) -> Result<ChunkShape, KeyexprCanonError> {
     if chunk.is_empty() {
         return Err(KeyexprCanonError::EmptyChunk);
     }
     match chunk {
-        "*" => return Ok(ChunkShape::SingleStar),
-        "**" => return Ok(ChunkShape::DoubleStar),
+        b"*" => return Ok(ChunkShape::SingleStar),
+        b"**" => return Ok(ChunkShape::DoubleStar),
         _ => {}
     }
     if is_dollar_star_run(chunk) {
         return Ok(ChunkShape::LoneDollarStar);
     }
-    let mut rest = chunk.as_bytes();
+    let mut rest = chunk;
     let mut state: u8 = 0;
     while let [byte, tail @ ..] = rest {
         // The rest of a `$*` run, which the canonical form writes once.
@@ -1092,7 +1267,7 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
 /// excluded.
 #[cfg(feature = "storage-profile")]
 fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
-    chunk == "*" || chunk == "**" || is_dollar_star_run(chunk)
+    chunk == "*" || chunk == "**" || is_dollar_star_run(chunk.as_bytes())
 }
 
 #[cfg(test)]
@@ -1135,6 +1310,97 @@ mod tests {
         }
         // Both answers are met, so a check that always said one of them would fail.
         assert!(canon > 0 && canon < inputs.len().saturating_mul(2));
+    }
+
+    /// The writer into a buffer and the writer over the text give the canonizer's answer, form
+    /// and refusal, in both dialects, for canonical texts, texts the canonizer rewrites and texts
+    /// it refuses.
+    #[test]
+    fn the_three_writers_give_one_answer() {
+        let inputs = [
+            "home/temp",
+            "home/$*/temp",
+            "home/$*$*$*foo",
+            "home/**/*/temp",
+            "**/$*/temp",
+            "**/*",
+            "a/**/**",
+            "$*$*/$*",
+            "home//temp",
+            "home/",
+            "home/foo?bar",
+            "foo$bar",
+            "",
+        ];
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            for input in inputs {
+                let formed = canonize_keyexpr_in(input, dialect);
+                let mut out = [0u8; 32];
+                let into = canonize_into(input, &mut out, dialect);
+                let mut text = [0u8; 32];
+                text[..input.len()].copy_from_slice(input.as_bytes());
+                let in_place = canonize_in_place(&mut text[..input.len()], dialect);
+                match formed {
+                    Ok(form) => {
+                        let form = form.as_str().as_bytes();
+                        assert_eq!(into, Ok(form.len()), "{input:?} {dialect:?}");
+                        assert_eq!(&out[..form.len()], form, "{input:?} {dialect:?}");
+                        assert_eq!(in_place, Ok(form.len()), "{input:?} {dialect:?}");
+                        assert_eq!(&text[..form.len()], form, "{input:?} {dialect:?}");
+                    }
+                    Err(refused) => {
+                        assert_eq!(into, Err(refused.clone()), "{input:?} {dialect:?}");
+                        assert_eq!(in_place, Err(refused), "{input:?} {dialect:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A text longer than any key a bounded profile holds is taken when its form is short: the
+    /// writers bound the form, not the text.
+    #[test]
+    fn a_long_text_whose_form_is_short_is_taken() {
+        let mut text = [b'$'; 2 * caps::MAX_KEYEXPR_BYTES + 4];
+        text[..2].copy_from_slice(b"a/");
+        for pair in text[2..2 * caps::MAX_KEYEXPR_BYTES + 2].chunks_exact_mut(2) {
+            pair.copy_from_slice(b"$*");
+        }
+        text[2 * caps::MAX_KEYEXPR_BYTES + 2..].copy_from_slice(b"/b");
+        let input = core::str::from_utf8(&text).expect("ASCII");
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            let mut out = [0u8; 5];
+            assert_eq!(
+                canonize_into(input, &mut out, dialect),
+                Ok(5),
+                "{dialect:?}"
+            );
+            assert_eq!(&out, b"a/*/b", "{dialect:?}");
+            let mut over = text;
+            assert_eq!(canonize_in_place(&mut over, dialect), Ok(5), "{dialect:?}");
+            assert_eq!(&over[..5], b"a/*/b", "{dialect:?}");
+        }
+    }
+
+    /// A form one byte past the buffer is refused as past the capacity, and one that fits is
+    /// taken; a refused text that fits is refused for its grammar.
+    #[test]
+    fn a_form_past_the_buffer_is_refused() {
+        let mut short = [0u8; 8];
+        assert_eq!(
+            canonize_into("home/temp", &mut short, KeyexprDialect::Pico),
+            Err(KeyexprCanonError::ExceedsCapacity)
+        );
+        let mut exact = [0u8; 9];
+        assert_eq!(
+            canonize_into("home/temp", &mut exact, KeyexprDialect::Pico),
+            Ok(9)
+        );
+        assert_eq!(&exact, b"home/temp");
+        assert_eq!(
+            canonize_into("a?b", &mut short, KeyexprDialect::Pico),
+            Err(KeyexprCanonError::ContainsSharpOrQmark)
+        );
     }
 
     // ── The one walk answers what the canonizer written as two passes answered ──
@@ -1196,7 +1462,7 @@ mod tests {
         let mut singles = 0usize;
         let mut has_double = false;
         for chunk in collapsed.as_str().split('/') {
-            let shape = analyze_chunk(chunk)?;
+            let shape = analyze_chunk(chunk.as_bytes())?;
             let folds_into_run = match shape {
                 ChunkShape::SingleStar => true,
                 ChunkShape::LoneDollarStar => dialect == KeyexprDialect::ZenohC,
@@ -1374,6 +1640,32 @@ mod tests {
     #[test]
     fn the_walk_agrees_with_the_reference_on_a_lent_policy() {
         walk_agrees_with_the_reference::<crate::bounded::Lent>();
+    }
+
+    /// The writer into a buffer as long as the text and the writer over the text give what the
+    /// canonizer of a policy with no bound gives, form and refusal, on every text the walk is held
+    /// to: so the form never needs more room than the text it is written from.
+    #[cfg(feature = "alloc")]
+    fn writers_agree_on(text: &str) {
+        for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+            let formed = canonize_keyexpr_as::<crate::bounded::Heap>(text, dialect)
+                .map(|form| form.as_str().as_bytes().to_vec());
+            let mut out = vec![0u8; text.len()];
+            let into = canonize_into(text, &mut out, dialect).map(|len| out[..len].to_vec());
+            let mut over = text.as_bytes().to_vec();
+            let in_place = canonize_in_place(&mut over, dialect).map(|len| over[..len].to_vec());
+            assert_eq!(into, formed, "{text:?} {dialect:?}");
+            assert_eq!(in_place, formed, "{text:?} {dialect:?}");
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_writers_agree_with_the_canonizer_on_every_text() {
+        for text in canon_corpus() {
+            writers_agree_on(&text);
+        }
+        walk_alphabet(writers_agree_on);
     }
 
     /// The verdict is the canonizer's, refusal kind included, on every text the walk is held to,
@@ -1609,11 +1901,11 @@ mod tests {
 
     #[test]
     fn analyze_chunk_classifies_canonical_shapes() {
-        assert_eq!(analyze_chunk("*").unwrap(), ChunkShape::SingleStar);
-        assert_eq!(analyze_chunk("**").unwrap(), ChunkShape::DoubleStar);
-        assert_eq!(analyze_chunk("$*").unwrap(), ChunkShape::LoneDollarStar);
-        assert_eq!(analyze_chunk("foo").unwrap(), ChunkShape::Mixed);
-        assert_eq!(analyze_chunk("pre$*suf").unwrap(), ChunkShape::Mixed);
+        assert_eq!(analyze_chunk(b"*").unwrap(), ChunkShape::SingleStar);
+        assert_eq!(analyze_chunk(b"**").unwrap(), ChunkShape::DoubleStar);
+        assert_eq!(analyze_chunk(b"$*").unwrap(), ChunkShape::LoneDollarStar);
+        assert_eq!(analyze_chunk(b"foo").unwrap(), ChunkShape::Mixed);
+        assert_eq!(analyze_chunk(b"pre$*suf").unwrap(), ChunkShape::Mixed);
     }
 
     /// A chunk is judged as the canonical form will hold it: a `$*` run is one token, so a
@@ -1621,24 +1913,27 @@ mod tests {
     /// and a `$` after a run is unbound to the same rule as after one token.
     #[test]
     fn analyze_chunk_reads_a_dollar_star_run_as_one_token() {
-        assert_eq!(analyze_chunk("$*$*").unwrap(), ChunkShape::LoneDollarStar);
-        assert_eq!(analyze_chunk("$*$*$*").unwrap(), ChunkShape::LoneDollarStar);
-        assert_eq!(analyze_chunk("$*$*a").unwrap(), ChunkShape::Mixed);
-        assert_eq!(analyze_chunk("a$*$*b").unwrap(), ChunkShape::Mixed);
+        assert_eq!(analyze_chunk(b"$*$*").unwrap(), ChunkShape::LoneDollarStar);
         assert_eq!(
-            analyze_chunk("$*$*$"),
+            analyze_chunk(b"$*$*$*").unwrap(),
+            ChunkShape::LoneDollarStar
+        );
+        assert_eq!(analyze_chunk(b"$*$*a").unwrap(), ChunkShape::Mixed);
+        assert_eq!(analyze_chunk(b"a$*$*b").unwrap(), ChunkShape::Mixed);
+        assert_eq!(
+            analyze_chunk(b"$*$*$"),
             Err(KeyexprCanonError::DollarAfterDollarOrStar)
         );
         assert_eq!(
-            analyze_chunk("$*$"),
+            analyze_chunk(b"$*$"),
             Err(KeyexprCanonError::DollarAfterDollarOrStar)
         );
         assert_eq!(
-            analyze_chunk("$$*"),
+            analyze_chunk(b"$$*"),
             Err(KeyexprCanonError::DollarAfterDollarOrStar)
         );
         assert_eq!(
-            analyze_chunk("a$"),
+            analyze_chunk(b"a$"),
             Err(KeyexprCanonError::ContainsUnboundDollar)
         );
     }
