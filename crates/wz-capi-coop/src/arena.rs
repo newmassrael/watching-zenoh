@@ -468,24 +468,21 @@ impl ArenaPlan {
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`).
         let pools = plan.peers.pools;
-        plan.put(
-            "peer alias pool",
-            "SESSION_MAX_PEER_KEYEXPR_ALIASES",
-            1,
-            pools.alias_bytes().ok_or(ArenaRefused::TooLarge)?,
-        );
-        plan.put(
-            "peer declaration pools",
-            "SESSION_MAX_REMOTE_DECLS",
-            1,
-            pools.decl_bytes().ok_or(ArenaRefused::TooLarge)?,
-        );
-        plan.put(
-            "peer interest pool",
-            "SESSION_MAX_INBOUND_SUB_INTERESTS",
-            1,
-            pools.interest_bytes().ok_or(ArenaRefused::TooLarge)?,
-        );
+        for (part, kind, bytes) in [
+            ("peer alias pool", &POOL_LIMITS[0], pools.alias_bytes()),
+            (
+                "peer declaration pools",
+                &POOL_LIMITS[1],
+                pools.decl_bytes(),
+            ),
+            (
+                "peer interest pool",
+                &POOL_LIMITS[2],
+                pools.interest_bytes(),
+            ),
+        ] {
+            plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+        }
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
@@ -652,9 +649,17 @@ impl ArenaPlan {
 /// into its limits at the open, under `CEILING`, the build's value of the limit, which is the
 /// capacity the build gives the table's type (a `BoundedVec<T, CEILING, Lent>` is lent at most
 /// that many rows): the build sizes the storage and the snapshot chooses within it.
+#[inline]
 fn lent<const CEILING: usize>(limit: &'static str, value: Quota) -> Result<usize, ArenaRefused> {
+    lent_under(limit, value, CEILING)
+}
+
+/// [`lent`] with the build's value a value: one body for every limit, the ceiling a const of the
+/// caller's alone.
+#[inline(never)]
+fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize, ArenaRefused> {
     value
-        .lent_under(Quota::at_most(CEILING))
+        .lent_under(Quota::at_most(ceiling))
         .map_err(|why| ArenaRefused::Limit { limit, why })
 }
 
@@ -730,57 +735,64 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
 /// by the limit that set it: the session's limit for a pool, the face's for a span. Refused too
 /// when a limit is over the build's value.
 fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
-    let shared = faces > 1;
-    let kind = |face, session| kind_rows(faces, face, session);
+    let mut rows = [0; POOL_LIMITS.len()];
+    for (kind, held) in POOL_LIMITS.iter().zip(&mut rows) {
+        let face = lent_under(kind.face, (kind.face_of)(limits), kind.face_ceiling)?;
+        let session = lent_under(
+            kind.session,
+            (kind.session_of)(limits),
+            kind.session_ceiling,
+        )?;
+        *held = kind_rows(faces, (kind.face, face), (kind.session, session))?;
+    }
+    let [aliases, remote_decls, interests] = rows;
     Ok(PeerPoolRows {
-        aliases: kind(
-            (
-                "MAX_PEER_KEYEXPR_ALIASES",
-                lent::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
-                    "MAX_PEER_KEYEXPR_ALIASES",
-                    limits.max_peer_keyexpr_aliases(),
-                )?,
-            ),
-            (
-                "SESSION_MAX_PEER_KEYEXPR_ALIASES",
-                lent::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
-                    "SESSION_MAX_PEER_KEYEXPR_ALIASES",
-                    limits.session_max_peer_keyexpr_aliases(),
-                )?,
-            ),
-        )?,
-        remote_decls: kind(
-            (
-                "MAX_REMOTE_DECLS",
-                lent::<{ caps::MAX_REMOTE_DECLS }>("MAX_REMOTE_DECLS", limits.max_remote_decls())?,
-            ),
-            (
-                "SESSION_MAX_REMOTE_DECLS",
-                lent::<{ caps::SESSION_MAX_REMOTE_DECLS }>(
-                    "SESSION_MAX_REMOTE_DECLS",
-                    limits.session_max_remote_decls(),
-                )?,
-            ),
-        )?,
-        interests: kind(
-            (
-                "MAX_INBOUND_SUB_INTERESTS",
-                lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
-                    "MAX_INBOUND_SUB_INTERESTS",
-                    limits.max_inbound_sub_interests(),
-                )?,
-            ),
-            (
-                "SESSION_MAX_INBOUND_SUB_INTERESTS",
-                lent::<{ caps::SESSION_MAX_INBOUND_SUB_INTERESTS }>(
-                    "SESSION_MAX_INBOUND_SUB_INTERESTS",
-                    limits.session_max_inbound_sub_interests(),
-                )?,
-            ),
-        )?,
-        shared,
+        aliases,
+        remote_decls,
+        interests,
+        shared: faces > 1,
     })
 }
+
+/// The two limits that bound one kind of what the peers of a session write: one face's, and all
+/// the faces' together, each by its id, the build's value of it and how a snapshot reads it.
+struct PoolLimit {
+    face: &'static str,
+    face_ceiling: usize,
+    face_of: fn(&SessionLimits) -> Quota,
+    session: &'static str,
+    session_ceiling: usize,
+    session_of: fn(&SessionLimits) -> Quota,
+}
+
+/// The kinds [`pool_rows`] resolves, in the order of [`PeerPoolRows`]'s fields: the aliases, the
+/// declarations of one kind and the interests. One table, so the three are resolved by one body.
+const POOL_LIMITS: [PoolLimit; 3] = [
+    PoolLimit {
+        face: "MAX_PEER_KEYEXPR_ALIASES",
+        face_ceiling: caps::MAX_PEER_KEYEXPR_ALIASES,
+        face_of: SessionLimits::max_peer_keyexpr_aliases,
+        session: "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+        session_ceiling: caps::SESSION_MAX_PEER_KEYEXPR_ALIASES,
+        session_of: SessionLimits::session_max_peer_keyexpr_aliases,
+    },
+    PoolLimit {
+        face: "MAX_REMOTE_DECLS",
+        face_ceiling: caps::MAX_REMOTE_DECLS,
+        face_of: SessionLimits::max_remote_decls,
+        session: "SESSION_MAX_REMOTE_DECLS",
+        session_ceiling: caps::SESSION_MAX_REMOTE_DECLS,
+        session_of: SessionLimits::session_max_remote_decls,
+    },
+    PoolLimit {
+        face: "MAX_INBOUND_SUB_INTERESTS",
+        face_ceiling: caps::MAX_INBOUND_SUB_INTERESTS,
+        face_of: SessionLimits::max_inbound_sub_interests,
+        session: "SESSION_MAX_INBOUND_SUB_INTERESTS",
+        session_ceiling: caps::SESSION_MAX_INBOUND_SUB_INTERESTS,
+        session_of: SessionLimits::session_max_inbound_sub_interests,
+    },
+];
 
 /// The rows of one kind of what the peers of a session of `faces` faces write: the fewer of the
 /// session's limit and the faces' bounds together, `face` and `session` each a limit's id and the
