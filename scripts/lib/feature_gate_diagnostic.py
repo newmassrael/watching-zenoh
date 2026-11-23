@@ -781,6 +781,14 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-consolidation",
                 "query-queryable",
                 "query-timeout",
+                # `reply-egress-gate` compiles in the egress admission of the replies a session
+                # sends. Both of its public items, the gate's type `ReplyEgressGate` and
+                # `SessionLinkActions::set_egress_reply_gate` that installs one, are behind
+                # `all(reply-egress-gate, any(codec-response, liveliness-token,
+                # declare-subscriber))` (`session_actions.rs`), a compound cfg; the reader a
+                # reply passes through (`reply_egress_verdict`) exists in every build with the
+                # codec and admits every reply without it.
+                "reply-egress-gate",
                 # `rx-lent-control` lends the control records of a frame read in place. What it
                 # gates in public is the registries' readers of a lent declaration or interest
                 # (`dispatch_declare_view*`, `respond_to_interest_view`), each behind an `all(..)`
@@ -824,6 +832,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
+                # `action-trace` keeps the session machine's action counters. Their type
+                # (`action_trace::ActionTrace`) is in every build; what the feature gates in
+                # public is the reader `SessionLinkActions::trace_snapshot`, a METHOD under a
+                # simple cfg, and the counters' slot on the session, a field.
+                "action-trace",
                 # `clock-source` gates `ClockStanding::holdover_expired`, the event of the
                 # host's holdover bound passing, a METHOD under a simple cfg; the rest of what
                 # it changes in this package is a match arm and the body of a method.
@@ -868,6 +881,20 @@ DEFERRED: dict[str, dict[str, str]] = {
             "(`batch_staged_messages`), with no `module::name` path to import, and the struct "
             "and method it gates beside `transport-tx-lend` are behind an `all(..)`, for which "
             "rustc's note names no feature"
+        ),
+        # `peer-row-pools` keeps what a peer writes by its own choice in rows lent at the open.
+        # The public items it gates under a simple cfg are METHODS, each with a
+        # `cfg(not(..))` twin of the same signature that keeps or lends nothing
+        # (`PeerTables::keep_rows_in`, `PeerPools::lent`, `PeerPools::counts`), so those
+        # paths resolve in every build. What a build without it loses is behind an `all(..)`
+        # with `declare-subscriber` or `storage-profile`: `pubsub::InterestRows` and the
+        # subscriber side's `keep_alias_rows_in` and `keep_interest_rows_in`, for which
+        # rustc's note names no feature. Neither shape leaves a path an import could probe.
+        "peer-row-pools": (
+            "@defer impl-method -- every public item it gates under a simple cfg is a METHOD "
+            "with a `cfg(not(..))` twin, so the path resolves either way, and the struct and "
+            "methods that do disappear without it are behind an `all(..)`, for which rustc's "
+            "note names no feature"
         ),
         # `initial_sn::derive_initial_sn` is declared twice, once under the feature (a compact pure
         # function of the two zids) and once under `not` (zenoh's SHAKE128), so turning the feature
