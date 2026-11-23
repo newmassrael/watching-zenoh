@@ -810,6 +810,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # arms that call it), and `driver_loop::RX_LENT_ONLY` exists in every build.
                 "rx-lent-only",
                 "session-matching",
+                # `session-slot` MOVED HERE when its simple-cfg public items (`SigningKey`'s
+                # `SIGNING_KEY_MAX`, the fixed `SessionBytes`) went to `session-fixed-storage`,
+                # which it turns on: what it still gates publicly is `pub mod session_slot`,
+                # behind `all(session-unicast, session-slot)` (`lib.rs`), a compound site.
+                "session-slot",
                 # `session-unicast-accept` and `session-unicast-open` MOVED HERE from
                 # `NO_PUBLIC_PATH` (see the note there). The handshake-stray-message policy
                 # holds the establishment answer a link sent, to send it again on a repeated
