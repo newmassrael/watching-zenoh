@@ -356,16 +356,13 @@ impl Pair {
         };
 
         let opened = links.open_acceptor(port).expect("bind the acceptor");
-        let acceptor_actions = new_session_actions(
-            opened.sink,
-            params(0xa1),
-            CoopTime::new(&runtime),
-            Counting(1),
-        );
+        let acceptor_actions =
+            new_session_actions(opened.sink, params(0xa1), CoopTime::new(&runtime));
         let mut acceptor = SessionPump::new(
             runtime.clone(),
             opened.pump,
             acceptor_actions.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
         );
@@ -387,6 +384,7 @@ impl Pair {
             runtime.clone(),
             opened.pump,
             initiator_actions.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
         );

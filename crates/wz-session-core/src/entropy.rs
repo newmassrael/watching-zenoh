@@ -107,6 +107,14 @@ pub trait EntropySource {
     }
 }
 
+/// A source reached through an exclusive reference draws as the source does: what lets a
+/// session hand its one source by reference (the fixed-memory slot's `&'static mut`).
+impl<E: EntropySource + ?Sized> EntropySource for &mut E {
+    fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+        (**self).try_fill_bytes(buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

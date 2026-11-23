@@ -42,7 +42,7 @@ use wz_codecs::wire_const;
 use wz_link_lwip::rx_sockets::{bind_session_rx, SessionRxSocket};
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionPump, SessionRole};
-use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
+use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{DeclSink, DeclView};
@@ -196,6 +196,7 @@ fn create(
     zid: u8,
 ) -> (
     Handle,
+    SessionEntropy,
     LwipSessionLink<Rc<LwipLink>>,
     SlotDriver<LwipUdpDriver>,
 ) {
@@ -209,8 +210,8 @@ fn create(
     };
     let sender = claim.driver_handle();
     let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-    let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
-    (actions, pump_link, sender)
+    let (actions, entropy) = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
+    (actions, entropy, pump_link, sender)
 }
 
 /// A reliable or best-effort Frame at `sn` carrying `payload`: the header, the SN as a VLE
@@ -280,8 +281,9 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
     let port = 7741;
     let acceptor_socket = bind_session_rx(&link, port).expect("bind the acceptor");
     let initiator_socket = bind_session_rx(&link, 0).expect("bind the initiator");
-    let (a_actions, a_link, _a_sender) = create(&link, &runtime, acceptor_socket, None, 0xa1);
-    let (i_actions, i_link, i_sender) = create(
+    let (a_actions, a_entropy, a_link, _a_sender) =
+        create(&link, &runtime, acceptor_socket, None, 0xa1);
+    let (i_actions, i_entropy, i_link, i_sender) = create(
         &link,
         &runtime,
         initiator_socket,
@@ -292,6 +294,7 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
         runtime.clone(),
         a_link,
         a_actions.clone(),
+        a_entropy,
         CoopTime::new(&runtime),
         config(SessionRole::Acceptor),
     );
@@ -299,6 +302,7 @@ fn a_datagram_of_two_frames_is_read_where_it_lies_without_a_heap() {
         runtime.clone(),
         i_link,
         i_actions.clone(),
+        i_entropy,
         CoopTime::new(&runtime),
         config(SessionRole::Initiator),
     );

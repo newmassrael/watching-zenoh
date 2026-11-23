@@ -1743,6 +1743,19 @@ pub trait SessionRuntime: Runtime + Sized {
     /// one; everything else is the owning profile's business.
     type IterationWork: Default;
 
+    /// The session's one entropy source, as each of its links' handshake bindings holds it
+    /// ([`SessionActionsBinding`](crate::session_actions::SessionActionsBinding)): what every
+    /// InitAck the session sends draws its cookie nonce and its challenges from. A link's bundle
+    /// holds none, so there is one source per session however many links it has.
+    ///
+    /// The profile names the form, as it names [`LinkSink`](Self::LinkSink): a value that
+    /// stands for the one source (the AP's `getrandom`, a zero-sized type), a counted handle on
+    /// it (the cooperative profile, one per link), or the exclusive reference to it that a
+    /// session's own slot hands out once (the fixed-memory profile). Present where the
+    /// session's handshake is, as [`ActionsHandle`](Self::ActionsHandle) is.
+    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    type EntropyDraw: crate::entropy::EntropySource;
+
     /// Wrap an owned value in the per-profile [`Shared`](Self::Shared) pointer
     /// (tokio `Arc::new`, lwIP `Rc::new`). Generic-`R` code (the
     /// [`SessionLinkActions`] constructor + the multilink join) shares a

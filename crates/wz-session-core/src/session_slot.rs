@@ -24,10 +24,10 @@
 //! `//!` and resolves the merged text at the crate root.)
 //!
 //! The bundle reaches the driver through a [`SlotSink`](crate::session_slot::SlotSink) (the runtime's
-//! `R::LinkSink`) and the entropy source through the `&'static mut` its
-//! `CookieEntropy` is, both of them references into this same slot. They are
-//! references and not owners, so the slot is the only thing that owns any of it
-//! and the only thing that frees it.
+//! `R::LinkSink`), and the session's handshake binding reaches the entropy source through
+//! the one `&'static mut` the slot hands out when it is opened, both of them references into
+//! this same slot. They are references and not owners, so the slot is the only thing that
+//! owns any of it and the only thing that frees it.
 //!
 //! ## Where a slot lives, and who may free it
 //!
@@ -461,11 +461,16 @@ where
         }
     }
 
-    /// Build the session in this slot: the bundle, over this driver, with this
-    /// entropy source installed, and the slot's peer tables held to the limits of
-    /// `params` ([`SessionInitParams::limits`]). Everything the session holds is in
-    /// the slot afterwards, and the returned handle is the first count on it (the
-    /// claim's own count moves to it).
+    /// Build the session in this slot: the bundle, over this driver, and the slot's peer
+    /// tables held to the limits of `params` ([`SessionInitParams::limits`]). Everything the
+    /// session holds is in the slot afterwards, and the returned handle is the first count on
+    /// it (the claim's own count moves to it).
+    ///
+    /// The slot's entropy source is handed out beside the handle, once: the one exclusive
+    /// reference to it, which the session's handshake binding holds
+    /// ([`SessionRuntime::EntropyDraw`](crate::link::SessionRuntime::EntropyDraw)); the bundle
+    /// keeps none. The binding holds a count on the slot through its handle, so the slot
+    /// outlives the reference.
     ///
     /// The bundle is built in the slot, field by field (`SessionLinkActions::build_in`), and is
     /// never a value on the stack: its two halves are written one field at a time, so the
@@ -480,7 +485,11 @@ where
     /// gone when it returns. Inlined into the dial, it stayed in the dial's frame while the
     /// pump and the engine were built beneath it.
     #[inline(never)]
-    pub fn open(self, params: impl FnOnce() -> SessionInitParams, clock: T) -> SlotRef<R, T> {
+    pub fn open(
+        self,
+        params: impl FnOnce() -> SessionInitParams,
+        clock: T,
+    ) -> (SlotRef<R, T>, &'static mut E) {
         let params = params();
         let cell = self.cell;
         // The peer tables are the slot's and outlive each session in it: every session opened here
@@ -493,7 +502,9 @@ where
         // SAFETY: the claim holds the slot `Claimed`, so the driver and the
         // entropy source are written. The references made here are `'static`
         // because the slot is, and are valid until the slot is released, which
-        // happens only after the bundle that holds them has dropped.
+        // happens only after the last count on it has dropped: the bundle's, and
+        // the binding's that holds the entropy reference beside its handle. The
+        // claim is opened once, so this is the one exclusive reference made.
         let (driver, entropy): (&'static D, &'static mut E) = unsafe {
             (
                 (*cell.driver.get()).assume_init_ref(),
@@ -515,14 +526,14 @@ where
             }
         };
         cell.state.set(CellState::Open);
-        placed.install_cookie_entropy(entropy);
         // The claim's count becomes the handle's; the claim must not give it back.
         core::mem::forget(self);
-        SlotRef {
+        let handle = SlotRef {
             guard: SlotGuard { head: &cell.head },
             actions: placed,
             peers: &cell.peers,
-        }
+        };
+        (handle, entropy)
     }
 }
 

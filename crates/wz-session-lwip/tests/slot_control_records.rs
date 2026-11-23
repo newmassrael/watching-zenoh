@@ -67,7 +67,7 @@ use wz_link_lwip::rx_sockets::SessionRxSocket;
 use wz_link_lwip::test_bind::session_rx as bind_session_rx;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionPump, SessionRole};
-use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
+use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
@@ -192,6 +192,7 @@ fn create(
     zid: u8,
 ) -> (
     Handle,
+    SessionEntropy,
     LwipSessionLink<Rc<LwipLink>>,
     SlotDriver<LwipUdpDriver>,
 ) {
@@ -207,8 +208,8 @@ fn create(
     };
     let sender = claim.driver_handle();
     let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-    let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
-    (actions, pump_link, sender)
+    let (actions, entropy) = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
+    (actions, entropy, pump_link, sender)
 }
 
 /// The `on_event` an end's pump is driven with.
@@ -253,8 +254,9 @@ fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserve
 fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
     let acceptor_socket = bind_session_rx(link, port).expect("bind the acceptor");
     let initiator_socket = bind_session_rx(link, 0).expect("bind the initiator");
-    let (a_actions, a_link, a_sender) = create(link, runtime, acceptor_socket, None, 0xa1);
-    let (i_actions, i_link, i_sender) = create(
+    let (a_actions, a_entropy, a_link, a_sender) =
+        create(link, runtime, acceptor_socket, None, 0xa1);
+    let (i_actions, i_entropy, i_link, i_sender) = create(
         link,
         runtime,
         initiator_socket,
@@ -268,6 +270,7 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
             runtime.clone(),
             a_link,
             a_actions.clone(),
+            a_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Acceptor),
         ),
@@ -282,6 +285,7 @@ fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
             runtime.clone(),
             i_link,
             i_actions.clone(),
+            i_entropy,
             CoopTime::new(runtime),
             config(SessionRole::Initiator),
         ),
