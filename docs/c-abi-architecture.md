@@ -105,7 +105,10 @@ not only in the total.
   pending queries and replies, interests. Routing/matching is a function over these tables. The
   callback of a local entity is stored in the entity's row (a C function pointer and context, or
   a Rust closure in a pool row); delivery calls it from the row, holding the row pinned, with no
-  intermediate lane and no copy.
+  intermediate lane and no copy. A callback is entered at depth 1: it is called once for each
+  delivery and nothing is held for it to be handed after it returns, so a call made from inside it
+  that would need it again (a put that reaches its own subscriber) is refused with a code
+  (`wz_ext.h`, "callbacks at depth 1").
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the

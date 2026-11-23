@@ -1606,6 +1606,24 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * a call that steps the session on the program's thread: the program sends
  * and pulls, the read task does the rest. */
 
+/* ================================================ callbacks at depth 1
+ *
+ * No door of wz's own: this section states how the cooperative engine enters
+ * a program's callbacks (docs/c-abi-architecture.md, section 3, L3). A
+ * callback is entered at depth 1: the library calls it once for each
+ * delivery, with no lock of the library held, and holds nothing for it to be
+ * handed after it returns, so it is never called again from inside itself.
+ * A call made from inside a callback that would need that callback again is
+ * refused with a code, and does nothing:
+ *
+ *   a put        that reaches the subscriber whose callback made it answers
+ *                _Z_ERR_INVALID (-75), the code a read task stopped from
+ *                inside itself answers, and no subscriber of the session is
+ *                handed it, where zenoh-pico would call the callback again
+ *                from inside itself. A put made inside a callback that
+ *                reaches only other subscribers is handed to them inside the
+ *                put, as zenoh-pico's is. */
+
 /* ================================================ the program's transport
  *
  * A transport the program supplies: a program with a network stack of its
