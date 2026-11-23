@@ -2354,11 +2354,12 @@ id = "DELIVERY_LANE_CALLBACKS"
 kconfig = "WZ_LIMIT_DELIVERY_LANE_CALLBACKS"
 kind = "bound"
 driven = "remote"
+on_heap = "capacity"
 default = 256
-storage = "quota"
+storage = "both"
 scope = "entity"
-binding_heap = "live"
-binding_fixed = "none"
+binding_heap = "open"
+binding_fixed = "build"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2372,6 +2373,10 @@ least 1.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: the delivery lane of an offloaded subscriber is wz's own."
+
+[limit.pico_preset]
+value = 64
+reason = "zenoh-pico keeps no delivery lane: it calls each subscriber's callback from its receive buffer. The preset is one callback for each record the round holds at the preset's DELIVERY_LANE_EVENTS (64), and above the most one record owes at the preset's other values (3 subscribers, 2 liveliness subscribers), which the gate asks room for. zenoh-pico's subscriber examples (z_sub, z_sub_thr) declare one subscriber on a session, so a round of their samples fills on its records as at the build's 256; a round of samples that each reach several fills on its callbacks sooner and is handed out sooner, and the rest of the batch waits in the link until it is emptied (RoundGate, crates/wz-capi-coop/src/round.rs), so nothing is lost and nothing is reordered."
 
 [[limit]]
 id = "MAX_QUERYABLES"
