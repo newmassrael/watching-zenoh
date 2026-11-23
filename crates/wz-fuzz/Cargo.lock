@@ -436,6 +436,18 @@ name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
+]
 
 [[package]]
 name = "prettyplease"
@@ -1075,6 +1087,16 @@ name = "wz-abi-stamp"
 version = "0.1.0"
 
 [[package]]
+name = "wz-admin"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "log",
+ "wz-runtime-core",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-analyze"
 version = "0.1.0"
 dependencies = [
@@ -1102,6 +1124,18 @@ dependencies = [
  "wz-conformance-build",
  "wz-runtime-tokio",
  "wz-session-core",
+]
+
+[[package]]
+name = "wz-capi-coop"
+version = "0.1.0"
+dependencies = [
+ "portable-atomic",
+ "sce-forge-runtime",
+ "wz-capi-port",
+ "wz-runtime-coop",
+ "wz-session-core",
+ "wz-session-mcu",
 ]
 
 [[package]]
@@ -1192,6 +1226,49 @@ dependencies = [
  "wz-capi-dissect",
  "wz-capi-replay",
  "wz-capture",
+ "wz-codecs",
+ "wz-fuzz-ingress-common",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-fuzz-coop-engine"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "wz-capi-coop",
+ "wz-capi-port",
+ "wz-fuzz-ingress-common",
+ "wz-runtime-coop",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-fuzz-ingress-common"
+version = "0.1.0"
+dependencies = [
+ "wz-session-wire-fixtures",
+]
+
+[[package]]
+name = "wz-fuzz-session-heap"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "wz-fuzz-ingress-common",
+ "wz-runtime-coop",
+ "wz-session-core",
+]
+
+[[package]]
+name = "wz-fuzz-session-slot"
+version = "0.1.0"
+dependencies = [
+ "libfuzzer-sys",
+ "wz-fuzz-ingress-common",
+ "wz-runtime-coop",
+ "wz-session-core",
+ "wz-session-mcu",
 ]
 
 [[package]]
@@ -1242,6 +1319,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-runtime-coop"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "portable-atomic",
+ "portable-atomic-util",
+ "wz-runtime-core",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-runtime-core"
 version = "0.1.0"
 
@@ -1282,6 +1370,7 @@ dependencies = [
  "keccak",
  "log",
  "lz4_flex",
+ "portable-atomic",
  "sce-forge-runtime",
  "sce-portable-bytes",
  "sce-rust-runtime",
@@ -1290,6 +1379,22 @@ dependencies = [
  "wz-runtime-core",
  "zeroize",
 ]
+
+[[package]]
+name = "wz-session-mcu"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "wz-admin",
+ "wz-runtime-coop",
+ "wz-runtime-core",
+ "wz-session-core",
+ "wz-workload",
+]
+
+[[package]]
+name = "wz-session-wire-fixtures"
+version = "0.1.0"
 
 [[package]]
 name = "wz-tls-record"
