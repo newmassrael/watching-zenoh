@@ -3851,3 +3851,96 @@ mod group_declarations_written_from_parts {
         assert_eq!(compared, kinds().len() * keys().len());
     }
 }
+
+/// A group's publication written from its parts is the bytes of the owned Push the group would
+/// have built for it, named as the group's publish names its key.
+#[cfg(all(test, feature = "alloc", feature = "codec-push"))]
+mod group_publications_written_from_parts {
+    use super::*;
+    use crate::metadata::PushMetadata;
+    use crate::push_build;
+    use crate::sample::SampleKind;
+
+    /// The bytes `body` writes.
+    fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        bytes
+    }
+
+    /// The publication written from `(mapping_id, suffix)`, as the group's publish writes it.
+    fn lent(
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        kind: SampleKind,
+        meta: &PushMetadata,
+    ) -> Vec<u8> {
+        multicast_tx_publication(
+            mapping_id,
+            suffix,
+            kind,
+            b"value",
+            meta,
+            true,
+            Priority::DEFAULT,
+            |message| written(message.body),
+        )
+        .expect("written from its parts")
+    }
+
+    /// A literal key, named `(0, Some(keyexpr))` as the group's publish names it, and an aliased
+    /// one, each a Put and a Del, plain and with metadata, are the owned builders' bytes. Turned
+    /// red by a literal named another way than the owned literal Push names it.
+    #[test]
+    fn a_group_publication_written_from_its_parts_is_its_builders_bytes() {
+        #[cfg_attr(not(feature = "pubsub-qos"), allow(unused_mut))]
+        let mut metas = alloc::vec![
+            PushMetadata::default(),
+            PushMetadata {
+                attachment: Some(alloc::vec![1, 2, 3]),
+                ..PushMetadata::default()
+            },
+        ];
+        #[cfg(feature = "pubsub-qos")]
+        metas.push(PushMetadata {
+            qos: Some(
+                crate::sample::QosLevel::DEFAULT
+                    .with_congestion(crate::qos::CongestionControl::Drop),
+            ),
+            ..PushMetadata::default()
+        });
+        let mut compared = 0usize;
+        for meta in &metas {
+            let literal_put =
+                push_build::build_push_literal_with_meta("demo/group", b"value", meta)
+                    .expect("put");
+            let literal_del =
+                push_build::build_push_del_literal_with_meta("demo/group", meta).expect("del");
+            let aliased_put =
+                push_build::build_push_aliased_with_meta(7, Some("/x"), b"value", meta)
+                    .expect("aliased put");
+            let aliased_del = push_build::build_push_del_aliased_with_meta(7, Some("/x"), meta)
+                .expect("aliased del");
+            let owned =
+                |push: &crate::wire::PushOwned| written(&crate::frame_encode::push_body(push));
+            assert_eq!(
+                lent(0, Some("demo/group"), SampleKind::Put, meta),
+                owned(&literal_put)
+            );
+            assert_eq!(
+                lent(0, Some("demo/group"), SampleKind::Del, meta),
+                owned(&literal_del)
+            );
+            assert_eq!(
+                lent(7, Some("/x"), SampleKind::Put, meta),
+                owned(&aliased_put)
+            );
+            assert_eq!(
+                lent(7, Some("/x"), SampleKind::Del, meta),
+                owned(&aliased_del)
+            );
+            compared += 4;
+        }
+        assert_eq!(compared, metas.len() * 4);
+    }
+}
