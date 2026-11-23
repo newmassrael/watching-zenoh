@@ -5413,7 +5413,11 @@ mod tests {
                                             // admits it).
         let query = encode_frame_with_request(
             /*sn=*/ 0,
-            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             /*reliable=*/ true,
         );
 
@@ -5516,7 +5520,11 @@ mod tests {
         // the wire (request id 7, reliable, at the JOIN-advertised next SN).
         let query = encode_frame_with_request(
             0,
-            build_request_query(7, 0, Some("myns/demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("myns/demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             true,
         );
 

@@ -402,9 +402,12 @@ mod tests {
     #[test]
     fn a_query_is_dispatched_lent_as_the_owned_path_dispatches_it() {
         let full = {
-            let builder = RequestQueryBuilder::new(12, 0, Some("demo/full"))
-                .parameters(b"a=1;b=2")
-                .request_qos(0x0D);
+            let builder = RequestQueryBuilder::new(
+                12,
+                crate::wire_key::WireKey::literal("demo/full").expect("a literal key"),
+            )
+            .parameters(b"a=1;b=2")
+            .request_qos(0x0D);
             #[cfg(feature = "query-attachment")]
             let builder = builder.query_attachment(b"att");
             #[cfg(feature = "query-value")]
@@ -420,35 +423,56 @@ mod tests {
             builder.build().expect("build")
         };
         let cases = [
-            RequestQueryBuilder::new(11, 0, Some("demo/a"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                11,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
             full,
             // Matches nobody: still dispatched, still owed its Final.
-            RequestQueryBuilder::new(13, 0, Some("other/a"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                13,
+                crate::wire_key::WireKey::literal("other/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
             // A target only complete queryables answer: matches nobody here.
-            RequestQueryBuilder::new(14, 0, Some("demo/a"))
-                .request_target(QueryTarget::AllComplete)
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                14,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .request_target(QueryTarget::AllComplete)
+            .build()
+            .expect("build"),
             // Through the peer's alias, with and without a suffix.
-            RequestQueryBuilder::new(15, 5, None)
-                .build()
-                .expect("build"),
-            RequestQueryBuilder::new(16, 5, Some("/more"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                15,
+                crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
+            RequestQueryBuilder::new(
+                16,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             // An id the peer never declared: never routed, owed nothing.
-            RequestQueryBuilder::new(17, 77, None)
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                17,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             // Past the bounded buffer: the fixed backing falls back to the
             // owned projection, which dispatches it.
-            RequestQueryBuilder::new(18, 6, Some("/tail"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                18,
+                crate::wire_key::WireKey::from_parts(6, Some("/tail")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
         ];
         let mut finals = 0;
         for (i, request) in cases.iter().enumerate() {
@@ -477,29 +501,41 @@ mod tests {
     fn a_lent_request_names_its_key_as_the_owned_decode_does() {
         use crate::wire::parts::{WireexprLocalOwned, WireexprNonlocalOwned, WireexprOwnedVariant};
 
-        let mut senders = RequestQueryBuilder::new(23, 5, None)
-            .build()
-            .expect("build");
+        let mut senders = RequestQueryBuilder::new(
+            23,
+            crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+        )
+        .build()
+        .expect("build");
         senders.keyexpr.body = WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
             id: 5,
             suffix_len: None,
             suffix: None,
         });
-        let mut receivers = RequestQueryBuilder::new(24, 5, None)
-            .build()
-            .expect("build");
+        let mut receivers = RequestQueryBuilder::new(
+            24,
+            crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+        )
+        .build()
+        .expect("build");
         receivers.keyexpr.body = WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
             id: 5,
             suffix_len: None,
             suffix: None,
         });
         let cases = [
-            RequestQueryBuilder::new(21, 0, Some("demo/a"))
-                .build()
-                .expect("build"),
-            RequestQueryBuilder::new(22, 5, Some("/more"))
-                .build()
-                .expect("build"),
+            RequestQueryBuilder::new(
+                21,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            )
+            .build()
+            .expect("build"),
+            RequestQueryBuilder::new(
+                22,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+            )
+            .build()
+            .expect("build"),
             senders,
             receivers,
         ];
@@ -536,10 +572,13 @@ mod tests {
             (bound + 1).min(most)
         };
         let long = alloc::vec![b'x'; length];
-        let request = RequestQueryBuilder::new(19, 0, Some("demo/a"))
-            .parameters(&long)
-            .build()
-            .expect("build");
+        let request = RequestQueryBuilder::new(
+            19,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .parameters(&long)
+        .build()
+        .expect("build");
         let (owned, lent) = both(&request);
         assert_eq!(lent, owned);
         let (seen, replies, finals) = owned;
@@ -561,11 +600,14 @@ mod tests {
 
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, alloc::vec![9, 8, 7], false);
-        let instrumented = RequestQueryBuilder::new(21, 0, Some("demo/a"))
-            .request_qos(0x0D)
-            .request_ts_stack(&stack)
-            .build()
-            .expect("build");
+        let instrumented = RequestQueryBuilder::new(
+            21,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .request_qos(0x0D)
+        .request_ts_stack(&stack)
+        .build()
+        .expect("build");
         let (owned, lent) = both(&instrumented);
         assert_eq!(lent, owned, "the lent path is the owned one");
         assert_eq!(owned.0.len(), 1);
@@ -573,9 +615,12 @@ mod tests {
         assert!(!owned.0[0].is_local, "it came in over a link");
         assert_eq!(owned.2.len(), 1, "the query is owed its Final");
 
-        let plain = RequestQueryBuilder::new(22, 0, Some("demo/a"))
-            .build()
-            .expect("build");
+        let plain = RequestQueryBuilder::new(
+            22,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
         let (owned, lent) = both(&plain);
         assert_eq!(lent, owned);
         assert_eq!(owned.0[0].ts_stack, None);
@@ -587,9 +632,12 @@ mod tests {
     #[cfg(feature = "bounded-heapless")]
     #[test]
     fn a_lent_query_past_pending_finals_is_refused_before_a_queryable_runs() {
-        let request = RequestQueryBuilder::new(21, 0, Some("demo/a"))
-            .build()
-            .expect("build");
+        let request = RequestQueryBuilder::new(
+            21,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
         let wire = request
             .try_as_borrowed()
             .expect("a borrowed view")

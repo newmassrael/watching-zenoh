@@ -311,10 +311,12 @@ impl RouterState {
 
         let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
         let meta = options.query_metadata();
+        let key = wz_session_core::wire_key::WireKey::literal(keyexpr)
+            .ok_or_else(|| String::from("the query names no key"))?;
         let request = if meta.is_empty() {
-            build_request_query(rid, 0, Some(keyexpr))
+            build_request_query(rid, key)
         } else {
-            build_request_query_with_meta(rid, 0, Some(keyexpr), &meta)
+            build_request_query_with_meta(rid, key, &meta)
         }
         .map_err(|error| format!("the query could not be built: {error:?}"))?;
         // Held before the router is asked: the face's thread reads its commands in the order they

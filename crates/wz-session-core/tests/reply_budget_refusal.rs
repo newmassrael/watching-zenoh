@@ -130,9 +130,12 @@ fn registry(payloads: Vec<Vec<u8>>) -> (QueryableRegistry<Replier>, Arc<Mutex<Se
 
 fn request(rid: wz_session_core::wire_id::RequestId) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
-        RequestQueryBuilder::new(rid, 0, Some("demo/a"))
-            .build()
-            .expect("build"),
+        RequestQueryBuilder::new(
+            rid,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+        )
+        .build()
+        .expect("build"),
     ))
 }
 

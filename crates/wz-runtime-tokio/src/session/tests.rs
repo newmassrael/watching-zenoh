@@ -5527,14 +5527,16 @@ fn query_options_qos_reaches_the_request_wire() {
     assert_eq!(meta.qos, Some(qos), "query_metadata carries the QoS byte");
 
     // (3) And it lands on the wire where a direct builder chain puts it.
-    let wire =
-        wz_session_core::request_build::build_request_query_with_meta(7, 0, Some("q/qos"), &meta)
-            .expect("request build")
-            .wire();
+    let wire = wz_session_core::request_build::build_request_query_with_meta(
+        7,
+        wz_session_core::wire_key::WireKey::literal("q/qos").expect("a literal key"),
+        &meta,
+    )
+    .expect("request build")
+    .wire();
     let expected = wz_session_core::request_build::build_request_query_with_meta(
         7,
-        0,
-        Some("q/qos"),
+        wz_session_core::wire_key::WireKey::literal("q/qos").expect("a literal key"),
         &wz_session_core::metadata::QueryMetadata {
             qos: Some(qos),
             ..meta.clone()
@@ -5550,8 +5552,7 @@ fn query_options_qos_reaches_the_request_wire() {
     // build that dropped the QoS everywhere.
     let without = wz_session_core::request_build::build_request_query_with_meta(
         7,
-        0,
-        Some("q/qos"),
+        wz_session_core::wire_key::WireKey::literal("q/qos").expect("a literal key"),
         &wz_session_core::metadata::QueryMetadata {
             qos: None,
             ..meta.clone()
@@ -5727,11 +5728,15 @@ fn expected_query_request_bytes(
         meta.consolidation =
             Some(wz_session_core::query_mode::ConsolidationMode::resolve_auto(None, params));
     }
-    wz_session_core::request_build::build_request_query_with_meta(0, mapping_id, keyexpr, &meta)
-        .unwrap()
-        .try_as_borrowed()
-        .expect("test: <=N exts by construction")
-        .encode_to_vec()
+    wz_session_core::request_build::build_request_query_with_meta(
+        0,
+        wz_session_core::wire_key::WireKey::from_parts(mapping_id, keyexpr).expect("a key"),
+        &meta,
+    )
+    .unwrap()
+    .try_as_borrowed()
+    .expect("test: <=N exts by construction")
+    .encode_to_vec()
 }
 
 #[cfg(all(
@@ -14469,8 +14474,11 @@ fn query_from_a_member(
     keyexpr: &str,
 ) {
     use wz_session_core::network_message::NetworkMessage;
-    let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
-        .expect("the query builds");
+    let request = wz_session_core::request_build::build_request_query(
+        rid,
+        wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+    )
+    .expect("the query builds");
     let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
         priority: wz_session_core::qos::Priority::DEFAULT,
         reliable: true,

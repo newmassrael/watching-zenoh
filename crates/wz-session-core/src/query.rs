@@ -5165,10 +5165,13 @@ mod tests {
         .expect("no quota is stated on this table");
 
         // Over a link.
-        let request = RequestQueryBuilder::new(42, 0, Some("home/temp"))
-            .request_ts_stack(&stack)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+        )
+        .request_ts_stack(&stack)
+        .build()
+        .unwrap();
         let mut replies = ReplyStage::new();
         reg.dispatch_request(&request, &HashMap::new(), &mut replies);
         reg.dispatch_request(
@@ -5596,10 +5599,13 @@ mod tests {
             packed_id: 0x0B,
             schema: Some(b"json".to_vec()),
         };
-        let request = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_value(b"the-query-value", encoding)
-            .build()
-            .unwrap();
+        let request = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_value(b"the-query-value", encoding)
+        .build()
+        .unwrap();
         let mut replies = ReplyStage::new();
         let matched = reg.dispatch_request(&request, &HashMap::new(), &mut replies);
         assert_eq!(
@@ -5696,12 +5702,15 @@ mod tests {
             packed_id: 0x0B,
             schema: Some(b"json".to_vec()),
         };
-        let wire = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_attachment(b"the-query-attachment")
-            .query_value(b"the-query-value", encoding)
-            .build()
-            .unwrap()
-            .wire();
+        let wire = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_attachment(b"the-query-attachment")
+        .query_value(b"the-query-value", encoding)
+        .build()
+        .unwrap()
+        .wire();
 
         let frame = RxBytes::lend(wire.clone());
         let span = frame.as_slice().as_ptr_range();
@@ -5760,11 +5769,14 @@ mod tests {
         use crate::request_build::RequestQueryBuilder;
         use crate::sample::EncodingHint;
 
-        let only_attachment = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_attachment(b"alone")
-            .build()
-            .unwrap()
-            .wire();
+        let only_attachment = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_attachment(b"alone")
+        .build()
+        .unwrap()
+        .wire();
         let messages = parse_frame_payload_in(&RxBytes::lend(only_attachment)).unwrap();
         let seen = seen_by_a_queryable(&messages);
         assert!(seen.value.borrowed.is_none() && seen.value.shared.is_none());
@@ -5773,17 +5785,20 @@ mod tests {
             Some(&b"alone"[..])
         );
 
-        let only_value = RequestQueryBuilder::new(9, 0, Some("demo/data"))
-            .query_value(
-                b"alone",
-                EncodingHint {
-                    packed_id: 0,
-                    schema: None,
-                },
-            )
-            .build()
-            .unwrap()
-            .wire();
+        let only_value = RequestQueryBuilder::new(
+            9,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+        )
+        .query_value(
+            b"alone",
+            EncodingHint {
+                packed_id: 0,
+                schema: None,
+            },
+        )
+        .build()
+        .unwrap()
+        .wire();
         let messages = parse_frame_payload_in(&RxBytes::lend(only_value)).unwrap();
         let seen = seen_by_a_queryable(&messages);
         assert_eq!(
@@ -5951,8 +5966,12 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let messages = vec![NetworkMessage::Request(Box::new(
-            build_request_query_with_target(9, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
-                .expect("build AllComplete request"),
+            build_request_query_with_target(
+                9,
+                crate::wire_key::WireKey::literal("metrics/cpu").expect("a literal key"),
+                QueryTarget::AllComplete,
+            )
+            .expect("build AllComplete request"),
         ))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
@@ -6638,8 +6657,12 @@ mod tests {
         // AllComplete ext on the wire -> only the complete queryable matches.
         let mut replies = ReplyStage::new();
         let matched = reg.dispatch_request(
-            &build_request_query_with_target(1, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
-                .unwrap(),
+            &build_request_query_with_target(
+                1,
+                crate::wire_key::WireKey::literal("metrics/cpu").expect("a literal key"),
+                QueryTarget::AllComplete,
+            )
+            .unwrap(),
             &HashMap::new(),
             &mut replies,
         );
@@ -6778,10 +6801,13 @@ mod tests {
         let express_rt = QosLevel::from_parts(Priority::RealTime, CongestionControl::Drop, true);
         assert_ne!(block_data.raw, express_rt.raw);
         for (rid, qos) in [(1, block_data), (2, express_rt)] {
-            let request = RequestQueryBuilder::new(rid, 0, Some("metrics/cpu"))
-                .request_qos(qos.raw)
-                .build()
-                .unwrap();
+            let request = RequestQueryBuilder::new(
+                rid,
+                crate::wire_key::WireKey::literal("metrics/cpu").expect("a literal key"),
+            )
+            .request_qos(qos.raw)
+            .build()
+            .unwrap();
             let mut replies = ReplyStage::new();
             reg.dispatch_request(&request, &HashMap::new(), &mut replies);
             assert_eq!(replies.len(), arms, "every reply arm staged one reply");

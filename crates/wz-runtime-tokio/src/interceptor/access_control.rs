@@ -517,7 +517,11 @@ mod tests {
         use wz_session_core::response_build::build_response_reply;
 
         let query = NetworkMessage::Request(Box::new(
-            build_request_query(1, 0, Some("demo/q")).expect("build query"),
+            build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build query"),
         ));
         assert_eq!(
             acl_action(&query),

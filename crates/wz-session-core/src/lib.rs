@@ -1001,7 +1001,7 @@ pub mod publish_options;
 /// rules.
 #[cfg(feature = "alloc")]
 // Totality debt TD-108 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::unreachable)]
+#[allow(clippy::expect_used)]
 pub mod query_options;
 
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a
@@ -1865,13 +1865,6 @@ pub mod response_build;
 // `all(alloc, codec-request)` — the builders allocate owned codec
 // buffers and there is no Request frame to build without the codec.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
-// Totality debt TD-077 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
 pub mod request_build;
 
 /// Request routing-context source `node_id` (P4 routing, query-routing atom

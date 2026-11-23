@@ -586,7 +586,11 @@ impl GroupFace {
         meta: &QueryMetadata,
     ) -> bool {
         let key = self.join.declarations.key(keyexpr, wire);
-        match build_request_query_with_meta(rid, key.mapping_id, key.suffix, meta) {
+        let Some(key) = wz_session_core::wire_key::WireKey::from_parts(key.mapping_id, key.suffix)
+        else {
+            return false;
+        };
+        match build_request_query_with_meta(rid, key, meta) {
             Ok(request) => {
                 self.push(MulticastTxItem::Request {
                     request: alloc::boxed::Box::new(request),

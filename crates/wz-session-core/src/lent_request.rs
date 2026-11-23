@@ -234,8 +234,12 @@ mod tests {
             qos: Some(parts.qos),
             ..QueryMetadata::default()
         };
-        let request = build_request_query_with_meta(parts.rid, 0, Some(parts.keyexpr), &meta)
-            .expect("the owned request is built");
+        let request = build_request_query_with_meta(
+            parts.rid,
+            crate::wire_key::WireKey::literal(parts.keyexpr).expect("a literal key"),
+            &meta,
+        )
+        .expect("the owned request is built");
         let view = request.try_as_borrowed().expect("a view");
         view.encode_to_vec()
     }

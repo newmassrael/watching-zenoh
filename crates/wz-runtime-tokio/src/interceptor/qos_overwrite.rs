@@ -512,7 +512,11 @@ mod tests {
             real_time(),
         )];
         let mut query = NetworkMessage::Request(Box::new(
-            build_request_query(1, 0, Some("a/test")).expect("build query"),
+            build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("a/test").expect("a literal key"),
+            )
+            .expect("build query"),
         ));
         let face = Face::keyed("a/test");
         let qos = run(rules, &face, &query, true);

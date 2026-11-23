@@ -3751,8 +3751,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All).unwrap();
+        let standalone = build_request_query_with_target(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            QueryTarget::All,
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3777,8 +3781,7 @@ mod tests {
 
         let standalone = build_request_query_with_consolidation(
             42,
-            0,
-            Some("home/temp"),
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
             ConsolidationMode::Latest,
         )
         .unwrap();
@@ -3804,8 +3807,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att").unwrap();
+        let standalone = build_request_query_with_attachment(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"q-att",
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3833,10 +3840,13 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone = RequestQueryBuilder::new(42, 0, Some("home/temp"))
-            .query_source_info(si)
-            .build()
-            .unwrap();
+        let standalone = RequestQueryBuilder::new(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+        )
+        .query_source_info(si)
+        .build()
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3869,7 +3879,11 @@ mod tests {
         // is not empty for is_empty() because attachment.is_some(),
         // but the wire emission elides the ext because the inner
         // slice is empty).
-        let baseline = build_request_query(42, 0, Some("home/temp")).unwrap();
+        let baseline = build_request_query(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+        )
+        .unwrap();
         let baseline_bytes = baseline.wire();
         let frame = driver.frame_bytes(0);
         assert!(
@@ -3892,8 +3906,12 @@ mod tests {
             .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
             .unwrap();
 
-        let standalone =
-            build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000).unwrap();
+        let standalone = build_request_query_with_timeout_ms(
+            42,
+            wz_session_core::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            5_000,
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = driver.frame_bytes(0);
         assert!(

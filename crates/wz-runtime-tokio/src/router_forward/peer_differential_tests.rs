@@ -423,13 +423,18 @@ impl Node {
                 self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
             }
             Step::Query(id, rid, keyexpr) => {
-                let request =
-                    wz_session_core::request_build::build_request_query(*rid, 0, Some(keyexpr))
-                        .expect("request");
+                let request = wz_session_core::request_build::build_request_query(
+                    *rid,
+                    wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+                )
+                .expect("request");
                 self.deliver(*id, NetworkMessage::Request(Box::new(request)));
             }
             Step::QueryWith(id, rid, keyexpr, asked) => {
-                let mut builder = RequestQueryBuilder::new(*rid, 0, Some(keyexpr));
+                let mut builder = RequestQueryBuilder::new(
+                    *rid,
+                    wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+                );
                 if let Some(target) = asked.target {
                     builder = builder.request_target(target);
                 }

@@ -807,12 +807,15 @@ mod query_and_reply {
     }
 
     fn request(rid: RequestId) -> Vec<u8> {
-        wz_session_core::request_build::RequestQueryBuilder::new(rid, 0, Some(KEY))
-            .build()
-            .expect("a query")
-            .try_as_borrowed()
-            .expect("a borrowed view")
-            .encode_to_vec()
+        wz_session_core::request_build::RequestQueryBuilder::new(
+            rid,
+            wz_session_core::wire_key::WireKey::literal(KEY).expect("a literal key"),
+        )
+        .build()
+        .expect("a query")
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec()
     }
 
     /// What the shared batch decoder reads out of a payload of Responses: each
