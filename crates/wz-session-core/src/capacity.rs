@@ -304,8 +304,11 @@ impl LatenessWindows {
     pub fn record(&mut self, now_ms: u64, late_ms: u64) {
         self.since_start_ms = self.since_start_ms.max(late_ms);
         let tag = Self::tag(now_ms);
-        // `tag % LATENESS_WINDOWS` is below the array's length by construction.
-        let Some(slot) = self.slots.get_mut((tag % LATENESS_WINDOWS as u64) as usize) else {
+        // The remainder is below the array's length, so the slot is always found.
+        let Some(slot) = tag
+            .checked_rem(LATENESS_WINDOWS as u64)
+            .and_then(|index| self.slots.get_mut(index as usize))
+        else {
             return;
         };
         if slot.0 == tag {

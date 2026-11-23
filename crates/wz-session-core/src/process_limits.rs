@@ -40,7 +40,7 @@ pub struct ProcessRefused {
 // A build whose own values give a machine of the process no rows does not compile: the refusal is
 // a constant's, evaluated where the build is made.
 const _: () = assert!(
-    matches!(ProcessRows::of(&RuntimeLimits::BUILD), Ok(_)),
+    ProcessRows::of(&RuntimeLimits::BUILD).is_ok(),
     "the build's runtime limits give every machine of the process its rows"
 );
 
