@@ -1213,6 +1213,11 @@ pub(crate) struct PlainPublisher {
     /// key, which retracts the declaration AFTER the publisher itself is gone —
     /// upstream's order.
     key: DeclaredKeyexpr,
+    /// The key as every put and delete of this publisher names it on the wire, made once at
+    /// declare: the declaration's id and the rest of the key are fixed for as long as `key` holds
+    /// the declaration. After the filter, as `key` is, so the declaration it keeps is retracted
+    /// after the filter's Interest.
+    wire: WireKey,
     /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
     /// allocated ONCE at declare from the session's entity counter. See
     /// `SharedSession::next_entity_id` for why it is allocated rather than
@@ -1355,10 +1360,12 @@ impl PlainPublisher {
         // R2962 — the filter is created AFTER the key, because its Interest names
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
+        let wire = key.wire(Arc::as_ref(&session.engine));
         let filter = WriteFilter::declare(
             session,
             FilterPlane::Subscribers,
             &key,
+            &wire,
             declared.counts_local(),
         )?;
         let plain = declared
@@ -1371,6 +1378,7 @@ impl PlainPublisher {
             shared: session.engine.clone(),
             filter,
             key,
+            wire,
             declared,
             plain,
         })
@@ -1425,12 +1433,13 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
-        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
-        publish_code(
-            self.shared
-                .publish_on_wire_all(self.key.literal(), &wire, payload, &opts),
-        )
+        publish_code(self.shared.publish_on_wire_all(
+            self.key.literal(),
+            &self.wire,
+            payload,
+            &opts,
+        ))
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
