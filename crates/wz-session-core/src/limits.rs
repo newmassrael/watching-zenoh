@@ -1851,7 +1851,7 @@ mod enforcement {
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(
-            observer.with_app(|app_half| app_half.queryables.oversize_refusals()),
+            observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
             u32::from(refused)
         );
         assert_eq!(
@@ -1883,7 +1883,7 @@ mod enforcement {
                     "the longer query ran nowhere"
                 );
                 assert_eq!(
-                    observer.with_app(|app_half| app_half.queryables.oversize_refusals()),
+                    observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
                     1
                 );
                 assert_eq!(
@@ -1911,7 +1911,7 @@ mod enforcement {
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(
-            observer.with_app(|app_half| app_half.queryables.oversize_refusals()),
+            observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
             u32::from(refused)
         );
         assert_eq!(
@@ -1943,7 +1943,7 @@ mod enforcement {
                     "the longer query ran nowhere"
                 );
                 assert_eq!(
-                    observer.with_app(|app_half| app_half.queryables.oversize_refusals()),
+                    observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
                     1
                 );
                 assert_eq!(
@@ -2638,7 +2638,7 @@ mod enforcement {
             caps::MATCH_MEMO_SLOTS
         };
         assert_eq!(
-            observer.with_app(|app_half| app_half.subscribers.memo_slot_count()),
+            observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
             build
         );
     }
@@ -2661,7 +2661,7 @@ mod enforcement {
                 other
             };
             assert_eq!(
-                observer.with_app(|app_half| app_half.subscribers.memo_slot_count()),
+                observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
                 held
             );
         }
