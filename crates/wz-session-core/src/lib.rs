@@ -2089,8 +2089,6 @@ pub mod group_membership;
 // What the hosts of a group share beside the wire: the keys, the ids that may join, the table of
 // known members and what an event does to it (`group_view`).
 #[cfg(feature = "ext-pubsub-group-membership")]
-// Totality debt TD-136 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod group_view;
 
 // R311dy — application-layer reply registry (`ReplyRegistry` +
