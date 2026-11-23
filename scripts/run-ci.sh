@@ -3484,6 +3484,12 @@ layer_c0_test_discipline() {
     # wz_ext_* doors.
     _runci_leg drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null
     _runci_leg drop_in_header_gate --after drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py
+    # The release proof of the pico Windows DLL (docs/release-proof-pico-windows.md): every
+    # public function, switch, example and test of zenoh-pico at the pin, and every wz_ext_*
+    # door, has a row, and a row's status is what the lanes it cites make it. It reads
+    # zenoh-pico's header through the drop-in gate's reader, three `cc -E` runs, no build.
+    _runci_leg release_proof_ledger_gate.selftest -- python3 scripts/lib/release_proof_ledger_gate.py --selftest
+    _runci_leg release_proof_ledger_gate --after release_proof_ledger_gate.selftest -- python3 scripts/lib/release_proof_ledger_gate.py --check
     # R2213 (open-debt item 566) — and the same question asked of EVERY gate,
     # not only of the one that learned to ask it.
     #
