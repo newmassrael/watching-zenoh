@@ -317,17 +317,6 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// ([`Self::limit_keys_to`]), the build's value until it does. Where the build fixes the
     /// bound to the rows' capacity it is held in no byte and the rows refuse alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
-    /// The most interests one peer's side remembers (`MAX_INBOUND_SUB_INTERESTS`), applied to
-    /// every [`SubscriberPeer`] this table answers: what the creator of the table resolved
-    /// ([`Self::limit_interests_to`]), the build's value until it does. Held here and not on the
-    /// peer's side because the table is what every session's interests are answered through,
-    /// and the creator that resolves the limits creates the table.
-    #[cfg(feature = "declare-subscriber")]
-    interest_quota: crate::limits::MaxInboundSubInterestsHeld,
-    /// The most items one peer's side stages between two drains (`MAX_PENDING_DECLARES`),
-    /// applied as the interest quota above is ([`Self::limit_interest_replies_to`]).
-    #[cfg(feature = "declare-subscriber")]
-    reply_quota: crate::limits::MaxPendingDeclaresHeld,
     /// The declaration id the next subscription or aggregate reply takes. It
     /// starts at 1, as upstream's counter does (0 is the routing core's), and
     /// it is a `u64` only so that it can stand one past `u32::MAX`, which is
@@ -556,6 +545,15 @@ struct InterestSide<P: Storage = Profile> {
     /// under `session-slot`) reads it; see [`Self::reconcile`].
     #[cfg(feature = "declare-subscriber")]
     reconciled_epoch: u64,
+    /// The most interests the side remembers (`MAX_INBOUND_SUB_INTERESTS`): what the session's
+    /// creator resolved ([`SubscriberPeer::limit_interests_to`]), the build's value until it does.
+    #[cfg(feature = "declare-subscriber")]
+    quota: crate::limits::MaxInboundSubInterestsHeld,
+    /// The most items the side stages between two drains (`MAX_PENDING_DECLARES`): what the
+    /// session's creator resolved ([`SubscriberPeer::limit_interest_replies_to`]), the build's
+    /// value until it does.
+    #[cfg(feature = "declare-subscriber")]
+    reply_quota: crate::limits::MaxPendingDeclaresHeld,
     /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
     /// policy ([`SubscriberPeer::keep_keys_in`]). An interest whose key finds no room there is
     /// answered by its `Final` alone, as one whose key is past the bound is.
@@ -597,8 +595,8 @@ pub struct InPlaceFallbacks {
 /// Reachable where the tables are held to a count: on the fixed backing
 /// ([`crate::bounded::ENFORCES_CAPACITY`]) by their storage, and on every backing
 /// by the quotas the creator of the subscriber table states
-/// ([`SubscriberTable::limit_interests_to`],
-/// [`SubscriberTable::limit_interest_replies_to`]). The interest table then holds
+/// ([`SubscriberPeer::limit_interests_to`],
+/// [`SubscriberPeer::limit_interest_replies_to`]). The interest table then holds
 /// at most [`caps::MAX_INBOUND_SUB_INTERESTS`] rows and the staging buffer at most
 /// [`caps::MAX_PENDING_DECLARES`] items between two drains, and one frame of
 /// Interests is staged before the drain runs. A refusal is the peer's to see as
@@ -828,10 +826,6 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             subscribers: BoundedVec::default(),
             quota: Default::default(),
             key_quota: Default::default(),
-            #[cfg(feature = "declare-subscriber")]
-            interest_quota: Default::default(),
-            #[cfg(feature = "declare-subscriber")]
-            reply_quota: Default::default(),
             next_id: 1,
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -886,30 +880,6 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// ([`Self::limit_memo_to`]).
     pub fn memo_slot_count(&self) -> usize {
         self.memo.slot_count()
-    }
-
-    /// Hold every peer's side this table answers to the `MAX_INBOUND_SUB_INTERESTS` its creator
-    /// resolved: an interest that would leave a side with more rows than `quota` admits is not
-    /// remembered, as a full fixed table does not remember it (a FUTURE one is counted in
-    /// [`SubInterestRefusals::future_interests`], an AGGREGATE CURRENT one has its chain refused),
-    /// and the rows already held are kept.
-    #[cfg(feature = "declare-subscriber")]
-    pub fn limit_interests_to(&mut self, quota: crate::limits::MaxInboundSubInterestsHeld) {
-        self.interest_quota = quota;
-    }
-
-    /// Hold every peer's side this table answers to the `MAX_PENDING_DECLARES` its creator
-    /// resolved: what would leave more items staged between two drains than `quota` admits is
-    /// refused and counted, as a full fixed staging buffer refuses it (a CURRENT chain whole, in
-    /// [`SubInterestRefusals::chains`]; an announcement in
-    /// [`SubInterestRefusals::announcements`]), and what is staged is kept.
-    ///
-    /// A quota under the subscriptions a match-all interest is answered with, plus its `Final`,
-    /// refuses that interest's chain every time it is asked. The build holds its own capacities
-    /// clear of that (`caps.rs`); a stage that states a lower quota states that refusal.
-    #[cfg(feature = "declare-subscriber")]
-    pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
-        self.reply_quota = quota;
     }
 
     /// Replace the gate that decides which keys a message from a peer may be on, which starts as
@@ -1524,7 +1494,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
-                    interests.stage_final_only(self.reply_quota, interest_id);
+                    interests.stage_final_only(interest_id);
                     return;
                 }
             },
@@ -1574,7 +1544,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 Ok(Some(p)) => Some(p),
                 Ok(None) => return,
                 Err(crate::wireexpr_resolve::KeyexprPastBound) => {
-                    interests.stage_final_only(self.reply_quota, interest_id);
+                    interests.stage_final_only(interest_id);
                     return;
                 }
             },
@@ -1672,7 +1642,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 // A keyexpr past the bounded field, or with no room where the side keeps its
                 // keys, cannot be replied with anyway; terminate the chain honestly instead of
                 // half-answering it. The terminator is a chain of one, staged whole or counted.
-                interests.stage_final_only(self.reply_quota, interest_id);
+                interests.stage_final_only(interest_id);
                 return 0;
             };
             // R2292 (open-debt item 627) — ONE id space per session, drawn
@@ -1699,7 +1669,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // interest: its id is at least the counter AFTER the id the row
             // took. `watermark` is that boundary, for a table that learns of
             // registrations by reading its epoch ([`SubscriberPeer::reconcile`]).
-            let stored = self.interest_quota.admits(interests.rows.len() + 1)
+            let stored = interests.quota.admits(interests.rows.len() + 1)
                 && self.next_entity_id().is_some_and(|decl_id| {
                     interests
                         .rows
@@ -1754,7 +1724,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 .filter(|sub| subscription_matches_interest(&sub.pattern, pattern))
                 .count()
         };
-        if !interests.has_room(self.reply_quota, replies.saturating_add(1)) {
+        if !interests.has_room(replies.saturating_add(1)) {
             interests.count_refused_chain();
             return 0;
         }
@@ -1846,7 +1816,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // not a CURRENT dump, and the peer's CURRENT solicitation was
             // already resolved when the interest arrived. A second `Final`
             // would close an interest that is still live.
-            interests.stage_announcement(self.reply_quota, item);
+            interests.stage_announcement(item);
         }
     }
 
@@ -1888,10 +1858,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         for interest_id in hits.iter().copied() {
             // A refused retraction leaves the row `announced`, so it is still
             // owed; what is lost is THIS staging of it, and that is counted.
-            interests.stage_announcement(
-                self.reply_quota,
-                SubInterestReply::AggregateRetract { interest_id },
-            );
+            interests.stage_announcement(SubInterestReply::AggregateRetract { interest_id });
         }
     }
 
@@ -3597,6 +3564,8 @@ impl<P: Storage> Default for InterestSide<P> {
             staged: BoundedVec::default(),
             refusals: SubInterestRefusals::default(),
             reconciled_epoch: 0,
+            quota: crate::limit_binding::Limited::build_default(),
+            reply_quota: crate::limit_binding::Limited::build_default(),
             keys: Default::default(),
         }
     }
@@ -3664,6 +3633,8 @@ impl InterestSide<crate::bounded::Static> {
                 announcements: 0,
             },
             reconciled_epoch: 0,
+            quota: crate::limit_binding::Limited::build_default(),
+            reply_quota: crate::limit_binding::Limited::build_default(),
             keys: crate::bounded::InlineKeys,
         }
     }
@@ -3682,20 +3653,19 @@ impl<P: Storage> InterestSide<P> {
     /// build whose quota is its storage's capacity, where `admits` compares
     /// nothing, compiles each caller to the storage's check alone.
     #[inline(always)]
-    fn has_room(&self, quota: crate::limits::MaxPendingDeclaresHeld, count: usize) -> bool {
-        self.staged.free_slots() >= count && quota.admits(self.staged.len().saturating_add(count))
+    fn has_room(&self, count: usize) -> bool {
+        self.staged.free_slots() >= count
+            && self
+                .reply_quota
+                .admits(self.staged.len().saturating_add(count))
     }
 
     /// Stage one unsolicited announcement, which has no chain to keep whole, or
     /// count it when the staging has no room for it under `quota`. Inlined as
     /// [`Self::has_room`] is.
     #[inline(always)]
-    fn stage_announcement(
-        &mut self,
-        quota: crate::limits::MaxPendingDeclaresHeld,
-        item: SubInterestReply,
-    ) {
-        Self::stage_announcement_in(&mut self.staged, &mut self.refusals, quota, item);
+    fn stage_announcement(&mut self, item: SubInterestReply) {
+        Self::stage_announcement_in(&mut self.staged, &mut self.refusals, self.reply_quota, item);
     }
 
     /// [`Self::stage_announcement`] into the side's staging and refusals alone, for a caller that
@@ -3714,8 +3684,8 @@ impl<P: Storage> InterestSide<P> {
 
     /// Stage the terminating `Final` of an interest that could not be
     /// remembered, as a chain of one, whole or counted.
-    fn stage_final_only(&mut self, quota: crate::limits::MaxPendingDeclaresHeld, interest_id: u64) {
-        if !self.has_room(quota, 1) {
+    fn stage_final_only(&mut self, interest_id: u64) {
+        if !self.has_room(1) {
             self.count_refused_chain();
         } else {
             self.staged
@@ -3740,6 +3710,31 @@ impl<P: Storage> InterestSide<P> {
 /// to it, and what could not be.
 #[cfg(feature = "declare-subscriber")]
 impl<P: Storage> SubscriberPeer<P> {
+    /// Hold this side to the `MAX_INBOUND_SUB_INTERESTS` the session's creator resolved: an
+    /// interest that would leave it with more rows than `quota` admits is not remembered, as a
+    /// full fixed table does not remember it (a FUTURE one is counted in
+    /// [`SubInterestRefusals::future_interests`], an AGGREGATE CURRENT one has its chain refused),
+    /// and the rows already held are kept. A limit of each peer's, so it is the peer's side that
+    /// holds it, whatever table its interests are answered through.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn limit_interests_to(&mut self, quota: crate::limits::MaxInboundSubInterestsHeld) {
+        self.interests.quota = quota;
+    }
+
+    /// Hold this side to the `MAX_PENDING_DECLARES` the session's creator resolved: what would
+    /// leave more items staged between two drains than `quota` admits is refused and counted, as
+    /// a full fixed staging buffer refuses it (a CURRENT chain whole, in
+    /// [`SubInterestRefusals::chains`]; an announcement in
+    /// [`SubInterestRefusals::announcements`]), and what is staged is kept.
+    ///
+    /// A quota under the subscriptions a match-all interest is answered with, plus its `Final`,
+    /// refuses that interest's chain every time it is asked. The build holds its own capacities
+    /// clear of that (`caps.rs`); a stage that states a lower quota states that refusal.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
+        self.interests.reply_quota = quota;
+    }
+
     /// The counted refusals of this peer's interest staging. All zero on the
     /// growable backing with no quota stated; see [`SubInterestRefusals`].
     pub fn interest_staging_refusals(&self) -> SubInterestRefusals {
@@ -3831,6 +3826,7 @@ impl<P: Storage> SubscriberPeer<P> {
             rows,
             staged,
             refusals,
+            reply_quota,
             ..
         } = &mut self.interests;
         for row in rows.iter_mut() {
@@ -3859,7 +3855,7 @@ impl<P: Storage> SubscriberPeer<P> {
                 };
                 // No terminating `Final`: an unsolicited FUTURE push, not a
                 // CURRENT dump (see `stage_future_subscriber_pushes`).
-                InterestSide::<P>::stage_announcement_in(staged, refusals, table.reply_quota, item);
+                InterestSide::<P>::stage_announcement_in(staged, refusals, *reply_quota, item);
             }
             row.watermark = table.next_id;
         }
@@ -4057,6 +4053,18 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     /// The two halves apart, to read ([`Self::split_mut`]).
     pub fn split(&self) -> (&SubscriberTable<C, P>, &SubscriberPeer<P>) {
         (&self.table, &self.peer)
+    }
+
+    /// [`SubscriberPeer::limit_interests_to`] for this registry's peer.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn limit_interests_to(&mut self, quota: crate::limits::MaxInboundSubInterestsHeld) {
+        self.peer.limit_interests_to(quota);
+    }
+
+    /// [`SubscriberPeer::limit_interest_replies_to`] for this registry's peer.
+    #[cfg(feature = "declare-subscriber")]
+    pub fn limit_interest_replies_to(&mut self, quota: crate::limits::MaxPendingDeclaresHeld) {
+        self.peer.limit_interest_replies_to(quota);
     }
 
     /// [`SubscriberPeer::limit_aliases_to`] for this registry's peer.
@@ -8922,7 +8930,7 @@ mod match_memo_position_tests {
 ///
 /// Only a build whose interest tables may grow past that count has the case: a fixed build states
 /// its capacity as every table's quota, a table on the heap policy included
-/// ([`SubscriberTable::limit_interests_to`]), so no table of it holds more rows than its lists do.
+/// ([`SubscriberPeer::limit_interests_to`]), so no table of it holds more rows than its lists do.
 #[cfg(all(
     test,
     feature = "alloc",

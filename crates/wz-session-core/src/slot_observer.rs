@@ -751,12 +751,6 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             limits.query_attachment_max_bytes_held(),
         );
         #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interests_to(limits.max_inbound_sub_interests_held());
-        #[cfg(feature = "declare-subscriber")]
-        self.subscribers
-            .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "declare-subscriber")]
         self.remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "declare-queryable")]
