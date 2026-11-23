@@ -2831,8 +2831,6 @@ pub mod replay_publisher;
 // of a round, the live samples it holds back, and the `replay_round` machine that says when the
 // round ends. Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "replay-cache")]
-// Totality debt TD-020 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_subscriber;
 
 /// SCE-generated lifecycle of one link over a transport the program supplies, from
