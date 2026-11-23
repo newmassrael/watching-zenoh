@@ -164,8 +164,10 @@ impl FaceSnapshot {
         let peer = actions.peer_zid()?;
         let whatami = actions.peer_whatami_wire()?;
         let mut zid = [0u8; 16];
-        let n = peer.len().min(16);
-        zid[..n].copy_from_slice(&peer[..n]);
+        // The first sixteen bytes at most, as many as the peer's zid has.
+        for (into, byte) in zid.iter_mut().zip(peer) {
+            *into = *byte;
+        }
         let subject = actions.link_subject().cloned();
         let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
         // What the handshake negotiated for the links of the transport: the band and the class the
@@ -292,8 +294,9 @@ impl FaceSnapshot {
         let whatami = member.whatami?.to_wire();
         let peer = member.peer.as_slice();
         let mut zid = [0u8; 16];
-        let n = peer.len().min(16);
-        zid[..n].copy_from_slice(&peer[..n]);
+        for (into, byte) in zid.iter_mut().zip(peer) {
+            *into = *byte;
+        }
         let GroupMemberLink {
             src,
             dst,

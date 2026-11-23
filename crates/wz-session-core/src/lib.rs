@@ -821,8 +821,6 @@ pub mod link;
 /// links, and the event a watcher is told when one comes up or goes down. Read off the
 /// session's own actions, so no engine owns the model.
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-// Totality debt TD-097 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod face;
 
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded

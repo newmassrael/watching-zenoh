@@ -309,7 +309,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-094 | `wz-session-core` | `reply` | `arithmetic_side_effects` | 5 | in flight |
 | TD-095 | `wz-session-core` | `slot_observer` | `panic`, `arithmetic_side_effects` | 5 | open |
 | TD-096 | `wz-session-core` | `credential_identity` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
-| TD-097 | `wz-session-core` | `face` | `indexing_slicing` | 4 | open |
 | TD-098 | `wz-session-core` | `handshake_encode` | `expect_used`, `arithmetic_side_effects` | 4 | open |
 | TD-099 | `wz-session-core` | `lent_control` | `indexing_slicing`, `expect_used`, `unreachable`, `arithmetic_side_effects` | 4 | open |
 | TD-100 | `wz-session-core` | `peer_tables` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
