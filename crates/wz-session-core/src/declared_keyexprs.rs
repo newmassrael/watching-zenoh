@@ -7,10 +7,12 @@
 //!
 //! One fact with one owner. A session that declares through one link (the AP engine's) keeps the
 //! table on that link and records each declaration as the link sends it (`LinkKeyexprs::Held`).
-//! A session of several links (the cooperative engine's) keeps one table for all of them and
-//! hands each link a handle to it (`LinkKeyexprs::Session`): every
-//! link is told the same declarations under the same ids, so a table per link would be a copy of
-//! the session's, and a declaration would grow every link's.
+//! A session of several links (the cooperative engine's) keeps one table for all of them, and its
+//! links keep none and read none (`LinkKeyexprs::Session`): every link is told the same
+//! declarations under the same ids, so a table per link would be a copy of the session's, and a
+//! link that read the session's would reach into the session from under its send. Such a
+//! session names each key it sends itself (`crate::named_key::NamedKey`), and reads a peer's
+//! `M=0` key from its own tables.
 //!
 //! The table is written over a storage policy ([`Storage`]): the growable policy's rows are a
 //! hash map of strings, the fixed and the lent policies' are bounded at
@@ -112,10 +114,9 @@ pub(crate) enum LinkKeyexprs {
     /// The link keeps them, recorded as it sends each declaration and forgotten as it sends each
     /// retraction: the session declares through this link alone.
     Held(DeclaredKeyexprs<crate::bounded::Heap>),
-    /// The session keeps them for every link it has and records them itself; the link reads them
-    /// through this handle and records nothing.
-    #[cfg(target_has_atomic = "ptr")]
-    Session(crate::wireexpr_resolve::SharedOwnMappingSpace),
+    /// The session keeps them for every link it has and records them itself; the link records
+    /// nothing and reads nothing of them.
+    Session,
 }
 
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
@@ -135,8 +136,7 @@ impl LinkKeyexprs {
             Self::Held(table) => {
                 let _ = table.record(id, literal);
             }
-            #[cfg(target_has_atomic = "ptr")]
-            Self::Session(_) => {}
+            Self::Session => {}
         }
     }
 
@@ -147,8 +147,7 @@ impl LinkKeyexprs {
             Self::Held(table) => {
                 table.forget(id);
             }
-            #[cfg(target_has_atomic = "ptr")]
-            Self::Session(_) => {}
+            Self::Session => {}
         }
     }
 
@@ -156,17 +155,15 @@ impl LinkKeyexprs {
     pub(crate) fn held(&self) -> Option<&DeclaredKeyexprs<crate::bounded::Heap>> {
         match self {
             Self::Held(table) => Some(table),
-            #[cfg(target_has_atomic = "ptr")]
-            Self::Session(_) => None,
+            Self::Session => None,
         }
     }
 
-    /// The space the link reads, whichever keeps it.
-    pub(crate) fn space(&self) -> &dyn OwnMappingSpace {
+    /// The space the link reads: its own table, or none where the session keeps the table.
+    pub(crate) fn space(&self) -> Option<&dyn OwnMappingSpace> {
         match self {
-            Self::Held(table) => table,
-            #[cfg(target_has_atomic = "ptr")]
-            Self::Session(space) => &**space,
+            Self::Held(table) => Some(table),
+            Self::Session => None,
         }
     }
 }
@@ -265,35 +262,19 @@ mod tests {
         assert_eq!(held.held().and_then(|t| t.literal(5)), Some("home/temp"));
         let mut out = KeyexprBuf::default();
         assert!(matches!(
-            held.space().append_own_mapping(5, &mut out),
+            held.space()
+                .and_then(|space| space.append_own_mapping(5, &mut out)),
             Some(Ok(()))
         ));
         held.sent_retraction(5);
         assert_eq!(held.held().and_then(|t| t.literal(5)), None);
 
-        #[cfg(target_has_atomic = "ptr")]
-        {
-            let mut session_table = DeclaredKeyexprs::<crate::bounded::Heap>::default();
-            assert_eq!(session_table.record(6, "home/session"), Ok(()));
-            let space: crate::wireexpr_resolve::SharedOwnMappingSpace =
-                alloc::sync::Arc::new(session_table);
-            let mut read = LinkKeyexprs::Session(space);
-            read.sent_declaration(9, "home/link");
-            assert!(read.held().is_none(), "the link keeps no table");
-            let mut out = KeyexprBuf::default();
-            assert!(read.space().append_own_mapping(9, &mut out).is_none());
-            assert!(matches!(
-                read.space().append_own_mapping(6, &mut out),
-                Some(Ok(()))
-            ));
-            assert_eq!(&*out, "home/session");
-            read.sent_retraction(6);
-            assert!(
-                read.space()
-                    .append_own_mapping(6, &mut KeyexprBuf::default())
-                    .is_some(),
-                "the session's table is the session's to change"
-            );
-        }
+        // A link whose session keeps the table records nothing it sends and reads nothing.
+        let mut kept = LinkKeyexprs::Session;
+        kept.sent_declaration(9, "home/link");
+        assert!(kept.held().is_none(), "the link keeps no table");
+        assert!(kept.space().is_none(), "nor reads the session's");
+        kept.sent_retraction(9);
+        assert!(kept.held().is_none());
     }
 }

@@ -2286,8 +2286,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `_z_session_t._local_resources`): what a later aliased publish, a loopback delivery and
     /// a received `M=0` alias resolve against. Either this link keeps them, recorded as
     /// `Self::send_declare_keyexpr` sends each and forgotten as `Self::send_undeclare_kexpr`
-    /// retracts it, or the session keeps one table for all its links and this link reads it
-    /// through the handle the session installed (`Self::install_session_keyexprs`).
+    /// retracts it, or the session keeps one table for all its links and this link keeps none
+    /// and reads none (`Self::keep_no_keyexprs`).
     ///
     /// A mutex rather than a read-write lock: it is written when a key is declared (rare) and
     /// read one id at a time on the publish path, where a read-write lock's write penalty would
@@ -3899,7 +3899,7 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().append_own_mapping(id, out)
+            keys.space()?.append_own_mapping(id, out)
         })
     }
 
@@ -15743,7 +15743,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            keys.space().resolve_own_mapping(mapping_id)
+            keys.space()?.resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
     }
@@ -15856,15 +15856,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// Read the key expressions this link's session declared from the session's own table,
-    /// through `space`, and keep none on the link: what it declares from here on is recorded by
-    /// the session, which tells every link it has the same declarations under the same ids. A
-    /// session of several links installs it before the link carries anything; what the link had
-    /// kept until then is let go of.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    pub fn install_session_keyexprs(&self, space: crate::wireexpr_resolve::SharedOwnMappingSpace) {
+    /// Keep none of the key expressions this link's session declared, and read none: the
+    /// session records them, tells every link it has the same declarations under the same ids,
+    /// names each key it sends ([`crate::named_key::NamedKey`]) and reads a peer's `M=0` key
+    /// from its own tables. A session of several links does this before the link carries
+    /// anything; what the link had kept until then is let go of.
+    #[cfg(feature = "alloc")]
+    pub fn keep_no_keyexprs(&self) {
         R::with_mutex_mut(&self.own_keyexprs, |keys| {
-            *keys = crate::declared_keyexprs::LinkKeyexprs::Session(space)
+            *keys = crate::declared_keyexprs::LinkKeyexprs::Session
         });
     }
 

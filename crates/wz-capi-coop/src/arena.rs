@@ -9,9 +9,8 @@
 //! [`ArenaPlan::of`] states what the arena holds as rows, each `count` items of `entry_bytes`,
 //! from the limits and the config the open was handed:
 //!
-//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), each
-//!   row the engine's whole record of a subscriber (`crate::engine::SubscriberRow`), with
-//!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
+//! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`) are
+//!   rows of the session's one table set (below), with `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
 //!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
 //!   the lists of the watchers of what a peer declares, two for each plane that has them
 //!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
@@ -115,15 +114,12 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::locator_directory::LocatorText;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
-use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{
-    CoopTables, EntryBytes, LegSink, SubscriberRow, FACE_SET_BYTES, HELD_SET_BYTES,
-};
+use crate::engine::{CoopTables, EntryBytes, LegSink, FACE_SET_BYTES, HELD_SET_BYTES};
 use crate::open_source::EndpointList;
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
@@ -541,12 +537,6 @@ impl ArenaPlan {
             plan.reassembly_chains,
             plan.reassembly_bytes,
         )?;
-        plan.put(
-            "subscribers",
-            "MAX_SUBSCRIPTIONS",
-            lent::<{ caps::MAX_SUBSCRIPTIONS }>("MAX_SUBSCRIPTIONS", limits.max_subscriptions())?,
-            SubscriberTable::<SubscriberRow, Lent>::ROW_BYTES,
-        )?;
         #[cfg(feature = "queryable")]
         plan.put(
             "queryables",
@@ -770,6 +760,7 @@ impl ArenaPlan {
     pub fn tables(&self) -> TableRows {
         TableRows {
             keyexprs: self.entities.keyexprs,
+            subscribers: self.entities.subscribers,
             tokens: self.entities.tokens,
             ..TableRows::default()
         }

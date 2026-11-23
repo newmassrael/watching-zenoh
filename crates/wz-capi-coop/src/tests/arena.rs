@@ -244,8 +244,8 @@ fn a_limit_lowered_at_open_lowers_its_row() {
     let at_two = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&at_two, "subscribers").count, 2);
-    assert_eq!(row(&built, "subscribers").count, caps::MAX_SUBSCRIPTIONS);
+    assert_eq!(at_two.tables().subscribers, 2);
+    assert_eq!(built.tables().subscribers, caps::MAX_SUBSCRIPTIONS);
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
@@ -623,8 +623,9 @@ fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
     let plan =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
-        row(&plan, "subscribers").entry_bytes,
-        SubscriberTable::<crate::engine::SubscriberRow, Lent>::ROW_BYTES
+        row(&plan, "session tables").entry_bytes,
+        crate::engine::CoopTables::arena_bytes(&plan.tables()).expect("within the address space"),
+        "the subscribers are rows of the session's one table set"
     );
     assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
     // A key of the static policy is its text and its length; a place is a few words.
@@ -702,8 +703,8 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
     );
     assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
     assert_eq!(
-        row(&listening, "subscribers"),
-        row(&dial, "subscribers"),
+        row(&listening, "session tables"),
+        row(&dial, "session tables"),
         "the application's tables are held once"
     );
 }

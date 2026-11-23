@@ -47,7 +47,6 @@ use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, Respo
 use wz_session_core::slot_observer::{
     ObserverRows, ObserverSinks, OtherPeers, Requesters, SlotObserverOf,
 };
-use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
 use super::{LegSink, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
@@ -299,14 +298,15 @@ impl OtherPeers for Others<'_> {
 pub(super) const LOCAL_FACE: FaceId = u64::MAX;
 
 /// What the application's tables hold on this engine: the heap profile's registrations, but for
-/// the session's own subscribers, each of whose rows is the engine's whole record of it
-/// ([`SubscriberRow`]), not a closure over the engine's own.
+/// the session's own subscribers, which are rows of the session's one table set, each row's
+/// callback the engine's whole record of it ([`SubscriberRow`]), not a closure over the engine's
+/// own.
 pub(super) struct CoopSinks;
 
 impl ObserverSinks for CoopSinks {
     type Subscriber = SubscriberRow;
     type Subscribers<P: wz_session_core::bounded::Storage> =
-        wz_session_core::pubsub::SubscriberTable<Self::Subscriber, P>;
+        wz_session_core::session_tables::SessionTables<super::CoopRows, P>;
     type Queryable = BoxedQuerySink;
     type Declared = BoxedDeclSink;
     type Undeclared = BoxedUndeclSink;
@@ -394,7 +394,7 @@ impl Registry {
         limits: &SessionLimits,
         arena: &mut Arena,
         keys: KeySpace,
-        rows: ObserverRows,
+        rows: ObserverRows<wz_session_core::session_tables::TableRows>,
         gets: GetTables,
         peers: FacePeers,
     ) -> Result<Self, LendRefused> {
@@ -619,19 +619,6 @@ impl Registry {
         self.held_mut(id)
     }
 
-    /// Hand the tables of face `id` the id space of the link now opened to it: the key expressions
-    /// this session declared to that link, which its peer may name in what it sends. A peer that
-    /// has been told an id prefers it to the literal (zenoh's routers do, for a subscriber they
-    /// route to), and an id the tables cannot resolve is a sample that is dropped. The space is
-    /// the link's, so each link the face is opened over installs its own, and the dial role's
-    /// face, which is opened again after a loss, replaces the lost link's.
-    pub(super) fn install_own_mapping_space(&mut self, id: FaceId, space: SharedOwnMappingSpace) {
-        self.writing();
-        if let Some(face) = self.held_mut(id) {
-            face.peer.subscribers.set_own_mapping_space(space);
-        }
-    }
-
     /// State the answer face `id`'s session gives a query of its peer whose key the face's tables
     /// cannot resolve: the session's policy, held by the face from its link on.
     pub(super) fn set_unanswerable_final(
@@ -641,16 +628,6 @@ impl Registry {
     ) {
         if let Some(face) = self.held_mut(id) {
             face.peer.queries.set_unanswerable_final(value);
-        }
-    }
-
-    /// Let go of the id space the tables of face `id` hold, the link it was the space of being gone:
-    /// until the next link of the face installs its own, the peer's ids of the session's
-    /// declarations resolve to nothing, as before the first link.
-    pub(super) fn forget_own_mapping_space(&mut self, id: FaceId) {
-        self.writing();
-        if let Some(face) = self.held_mut(id) {
-            face.peer.subscribers.clear_own_mapping_space();
         }
     }
 
@@ -796,8 +773,9 @@ impl Registry {
         let written = self.faces_written;
         let owed = match self.split(id) {
             Some(Split { app, face, .. }) => {
-                app.subscribers
-                    .dispatch_iteration_event(&mut face.peer.subscribers, event);
+                face.peer
+                    .subscribers
+                    .dispatch_iteration_event(&mut app.subscribers, event);
                 face.peer.subscribers.reconcile(&app.subscribers);
                 app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
                 face.peer.finals.take_owed()
@@ -838,8 +816,9 @@ impl Registry {
         #[cfg(all(test, feature = "std"))]
         let written = self.faces_written;
         if let Some(Split { app, face, .. }) = self.split(id) {
-            app.subscribers
-                .dispatch_iteration_event(&mut face.peer.subscribers, event);
+            face.peer
+                .subscribers
+                .dispatch_iteration_event(&mut app.subscribers, event);
             face.peer.subscribers.reconcile(&app.subscribers);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
@@ -978,7 +957,10 @@ impl Registry {
         app.remote_subscribers
             .reevaluate_matching(&face.peer.remote_subscribers, &|criterion| {
                 (criterion.locality.allows_local()
-                    && subscribers.has_local_matching(&criterion.keyexpr))
+                    && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                        subscribers,
+                        &criterion.keyexpr,
+                    ))
                     || others.subscribes(criterion)
             });
     }
@@ -1403,8 +1385,8 @@ mod tests {
                 .expect("the registry holds the face");
             let Registry { app, sets, .. } = &mut held.registry;
             let set = &mut sets[at];
-            app.subscribers.respond_to_subscriber_interest_borrowed(
-                &mut set.peer.subscribers,
+            set.peer.subscribers.answer_subscriber_interest(
+                &mut app.subscribers,
                 7,
                 Some("demo/**"),
                 false,

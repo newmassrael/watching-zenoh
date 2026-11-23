@@ -70,7 +70,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L,
         &self,
         handle: wz_session_core::session_tables::TokenHandle,
     ) {
-        let tables = self.tables.borrow();
+        let tables = super::tables(&self.registry);
         let Some(row) = tables.tokens().get(handle) else {
             return;
         };

@@ -131,7 +131,6 @@ use wz_session_core::sink::{SampleSink, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
-use wz_session_core::wireexpr_resolve::{OwnMappingSpace, SharedOwnMappingSpace};
 use wz_session_core::WhatAmI;
 #[cfg(feature = "listen")]
 use wz_session_mcu::dial::parse_listen_locator;
@@ -1143,60 +1142,30 @@ unsafe impl<T> Send for Confined<T> {}
 pub(crate) struct CoopRows;
 
 impl RowCallbacks for CoopRows {
-    type Subscriber = ();
+    type Subscriber = SubscriberRow;
     type Queryable = ();
     type LivelinessSubscriber = ();
     type Matching = ();
     type Reply = ();
 }
 
-/// The session's one table set, its rows lent from the session's arena (`Core::tables`).
+/// The session's one table set, its rows lent from the session's arena: the application's tables
+/// (`Registry::app`), read through [`tables`].
 pub(crate) type CoopTables = SessionTables<CoopRows, Lent>;
 
-/// The session's own id space, read from its one table of declared key expressions: what a link
-/// sends names a key by the id the session gave it, and what a peer sends for the session may
-/// name one too (a router does for a subscriber it routes to). Every link is told the same
-/// declarations under the same ids, so each link and the tables of each face hold this handle
-/// and none keeps a copy: a declaration grows nothing on a link. The table is held weakly: the
-/// session owns it and drops it before the arena its keys lie in, and a handle left after that
-/// reads nothing.
-struct SessionKeyexprs(alloc::rc::Weak<RefCell<CoopTables>>);
-
-impl SessionKeyexprs {
-    /// Hand `read` the key the session declared under `id`, while the session holds it.
-    fn with_key<R>(&self, id: ExprId, read: impl FnOnce(&str) -> R) -> Option<R> {
-        let tables = self.0.upgrade()?;
-        let tables = tables.borrow();
-        let handle = tables.keyexpr_by_id(id)?;
-        tables.keyexprs().get(handle).map(|row| read(row.key()))
-    }
+/// The session's one table set, read where the registry keeps it: the application's tables are the
+/// session's tables (`Registry::app`), so a declaration and the dispatch that reads it hold one
+/// record.
+fn tables(registry: &RefCell<Registry>) -> core::cell::Ref<'_, CoopTables> {
+    core::cell::Ref::map(registry.borrow(), |registry| &registry.app.subscribers)
 }
 
-impl OwnMappingSpace for SessionKeyexprs {
-    fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
-        self.with_key(id, |key: &str| key.to_owned())
-    }
-
-    // The literal goes from the session's row straight into the resolver's buffer: the provided
-    // form would make a `String` of it first, an allocation for every message that names an id
-    // of this session's.
-    fn append_own_mapping(
-        &self,
-        id: ExprId,
-        out: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
-    ) -> Option<Result<(), wz_session_core::bounded::CapacityFull<()>>> {
-        self.with_key(id, |key| out.push_str(key))
-    }
+/// [`tables`], to write.
+fn tables_mut(registry: &RefCell<Registry>) -> core::cell::RefMut<'_, CoopTables> {
+    core::cell::RefMut::map(registry.borrow_mut(), |registry| {
+        &mut registry.app.subscribers
+    })
 }
-
-// SAFETY: as `Confined`. A `SessionKeyexprs` is stored only in the tables of a face and in the
-// actions of a link, which `Core` owns inside the lock of `CoopEngine`, and it is read only by
-// the dispatch of a face's frames and by a link's sends, which run under the same lock; no clone
-// of its `Weak` leaves the lock. The marker traits are what the shared handle of a host build
-// names (`SharedOwnMappingSpace` is an `Arc` of a `Send + Sync` object where the target has
-// atomic pointers).
-unsafe impl Send for SessionKeyexprs {}
-unsafe impl Sync for SessionKeyexprs {}
 
 /// A subscriber's callback, as the ABI handed it ([`SubscriberSink`]), and whether it is shown each
 /// sample's timestamp (`entity-timestamp-opt-in`). It is called through a shared borrow with no
@@ -1453,10 +1422,6 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     entities: EntityRows,
     /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
     keys: KeySpace,
-    /// The session's one table set: the key expressions it declared and their ids, shared only
-    /// with the weak handles its links and the tables of its faces read them through
-    /// (`SessionKeyexprs`), so it is dropped here, before the arena its rows and keys lie in.
-    tables: Rc<RefCell<CoopTables>>,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
     /// a key goes on the wire as the session's key-wire form says (`shared-key-ids`).
@@ -1590,9 +1555,10 @@ fn sleep_ms(ms: u32) {
     os::sleep_ms(ms.into());
 }
 
-/// One of the session's own subscribers, as a row of the session core's subscriber table holds
-/// it: the row keeps the pattern the subscriber matches, and this, its sink, everything else the
-/// session knows of it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1).
+/// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
+/// the pattern the subscriber matches and the declaration its key is named by, and this, its sink,
+/// everything else the session knows of it. The subscriber is that one row
+/// (`docs/c-abi-architecture.md`, P1).
 pub(crate) struct SubscriberRow {
     id: SubId,
     retraction: Option<RetractionKey>,
@@ -1602,17 +1568,11 @@ pub(crate) struct SubscriberRow {
     /// Where a sample the row matches is offered, under the subscriber's id.
     lane: Arc<Round>,
     /// The callback the samples the row matches are handed to, copied out of the row with each
-    /// of them. Set once the row is registered, so a refused registration mints none.
+    /// of them.
     callback: Option<SubscriberCallback>,
 }
 
 impl SubscriberRow {
-    /// `keyexpr`, the key this subscriber matches, as the session sends it: named by the
-    /// declaration the ABI named it by while that declaration stands in `tables`.
-    fn named<'k>(&self, keyexpr: &'k str, tables: &CoopTables) -> Option<NamedKey<'k>> {
-        tables.named_by(keyexpr, self.wire.mapping_id)
-    }
-
     /// Declare this subscriber, on `key`, over `actions`: whether the link took it.
     fn declare<C: ClockSource + 'static>(
         &self,
@@ -1634,6 +1594,26 @@ impl SubscriberRow {
             ),
             None => actions.send_undeclare_subscriber(u64::from(self.id)),
         }
+    }
+}
+
+// A subscriber's callback is called outside the session's lock through the copy of it each
+// sample carries (`LiveCallback`), not through the row: the row is let go of when it is undeclared.
+impl wz_session_core::row_callback::RowCallback for SubscriberRow {
+    type Call = core::convert::Infallible;
+
+    const READS_ROW_IN_PLACE: bool = false;
+
+    fn begin(&self) -> Option<core::convert::Infallible> {
+        None
+    }
+
+    unsafe fn end(call: core::convert::Infallible) -> bool {
+        match call {}
+    }
+
+    fn retire(&self) -> bool {
+        true
     }
 }
 
@@ -2148,7 +2128,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// numbered by, from 1, upstream's `u32` `EntityId`; `None` once every one has been handed
     /// out, which refuses the declaration rather than wrap onto a live id.
     fn take_entity_id(&self) -> Option<EntityId> {
-        self.tables.borrow_mut().take_entity_id()
+        tables_mut(&self.registry).take_entity_id()
     }
 
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
@@ -2170,7 +2150,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The form an entity the ABI declares with `wire` takes in the session's tables: named by the
     /// key expression declaration `wire` names, which the entity's row holds for as long as it
     /// stands, and with its key named in its retraction when `names_key`.
-    #[cfg(feature = "liveliness")]
     fn key_form(
         &self,
         wire: &WireKey,
@@ -2179,7 +2158,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let prefix = if wire.mapping_id == 0 {
             None
         } else {
-            self.tables.borrow().keyexpr_by_id(wire.mapping_id)
+            tables(&self.registry).keyexpr_by_id(wire.mapping_id)
         };
         wz_session_core::session_tables::KeyForm { prefix, names_key }
     }
@@ -2285,10 +2264,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let to = parse_locator(endpoint).map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
         })?;
-        // The face's last link holds its buffers in the session's arena until the last thing that
-        // holds the link lets it go, and that is the id space the face's tables keep until a link
-        // replaces it: let go of here, so the dial begun next finds the buffers the last one held.
-        self.registry.borrow_mut().forget_own_mapping_space(face);
         self.links.begin_dial(to).map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Link(refused)))
         })
@@ -2366,19 +2341,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 return Err(OpenError::EntropyUnavailable);
             }
         }
-        // The session's id space, read from its one table of declarations by the link (what it
-        // sends names a key by its id) and by the tables of the face it serves (what the peer
-        // sends may name one): installed whenever a link is made, a redialled face's included.
-        let keyexprs = SessionKeyexprs(Rc::downgrade(&self.tables));
-        #[cfg(target_has_atomic = "ptr")]
-        let own_space: SharedOwnMappingSpace = Arc::new(keyexprs);
-        #[cfg(not(target_has_atomic = "ptr"))]
-        let own_space: SharedOwnMappingSpace = Rc::new(keyexprs);
-        #[cfg(target_has_atomic = "ptr")]
-        actions.install_session_keyexprs(Arc::clone(&own_space));
-        self.registry
-            .borrow_mut()
-            .install_own_mapping_space(face, own_space);
+        // The session keeps its declarations in its one table set and names each key it sends
+        // itself, so the link keeps none and reads none; what the peer sends by the session's
+        // ids is read from the same tables, which the dispatch of every face reads.
+        actions.keep_no_keyexprs();
         // The answer the face's session gives a query of its peer whose key it cannot resolve:
         // the session's policy, stated for each link the face is opened over.
         self.registry
@@ -2469,14 +2435,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             dispatch,
         );
         // The runtime's cells were reserved at the open, one for each link the config admits: a
-        // link past them has no task to run its session, and what it installed in the face's
-        // tables goes with it.
+        // link past them has no task to run its session.
         let task = match spawned {
             Ok(task) => task,
-            Err(why) => {
-                self.registry.borrow_mut().forget_own_mapping_space(face);
-                return Err(OpenError::NoTask(why));
-            }
+            Err(why) => return Err(OpenError::NoTask(why)),
         };
         Ok(wz_runtime_coop::faces::Wire::new(
             LinkSession {
@@ -3622,16 +3584,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let keys = arena
             .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
             .map_err(OpenError::Arena)?;
-        // The session's one table set, lent the rows the plan counts for it.
-        let tables = CoopTables::lent(arena.arena_mut(), keys, &plan.tables())
-            .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
-        // The application's tables, lent from the rows the plan counts for them.
+        // The application's tables, lent from the rows the plan counts for them: the session's
+        // one table set among them, which holds its subscribers.
         let registry = Registry::new(
             &resolve_limits(&config),
             arena.arena_mut(),
             keys,
             ObserverRows {
-                subscribers: entities.subscribers,
+                subscribers: plan.tables(),
                 queryables: entities.queryables,
                 local_tokens: entities.tokens,
                 liveliness_subscribers: entities.liveliness_subscribers,
@@ -3699,7 +3659,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             wire_zid: wire,
             entities,
             keys,
-            tables: Rc::new(RefCell::new(tables)),
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
             #[cfg(feature = "shared-key-ids")]
@@ -3986,7 +3945,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// subscriber's ends reads. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn subscriber_rows(&self) -> usize {
-        self.core.lock().0.registry.borrow().app.subscribers.len()
+        tables(&self.core.lock().0.registry).subscribers().len()
     }
 
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
@@ -4545,7 +4504,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let priority = opts.priority_band();
         // The key as the session's tables name it: by the declaration the ABI named it by while
         // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
-        let Some(named) = core.tables.borrow().named_by(keyexpr, wire.mapping_id) else {
+        let Some(named) = tables(&core.registry).named_by(keyexpr, wire.mapping_id) else {
             return (Err(FanoutError::ExceedsCapacity), None);
         };
         let mut outcome = Ok(0);
@@ -4825,12 +4784,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         loop {
             let row = {
                 let guard = self.core.lock();
-                let mut registry = guard.0.registry.borrow_mut();
-                let subscribers = &mut registry.app.subscribers;
-                let Some(last) = subscribers.len().checked_sub(1) else {
+                let mut tables = tables_mut(&guard.0.registry);
+                let Some((handle, _)) = tables.subscribers().iter().next() else {
                     break;
                 };
-                subscribers.take_at(last)
+                tables
+                    .undeclare_subscriber(handle)
+                    .and_then(|undeclared| undeclared.row)
+                    .map(|row| row.into_callback())
             };
             if let Some(callback) = row.as_ref().and_then(|row| row.callback.as_ref()) {
                 callback.retire();
@@ -5190,12 +5151,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn local_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
         #[cfg(feature = "local-subscriber")]
         if matches!(plane, FilterPlane::Subscribers) {
-            return core
-                .registry
-                .borrow()
-                .app
-                .subscribers
-                .has_local_matching(keyexpr);
+            return wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                &*tables(&core.registry),
+                keyexpr,
+            );
         }
         #[cfg(feature = "local-queryable")]
         if let FilterPlane::Queryables { complete_required } = plane {
@@ -5637,50 +5596,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A closed session declares nothing, and takes no id for what it does not declare.
         let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
-        // The subscriber is one row of the session core's table. A full table refuses it before
-        // it takes an id, registers or sends anything; the sink goes with the refusal.
-        if core.registry.borrow().app.subscribers.is_full() {
-            return Err(Declined::TableFull);
-        }
-        let id = core.take_entity_id().ok_or(Declined::NoEntityId)?;
-        // The row goes at the end of the table, where the replay finds it.
-        let at = core.registry.borrow().app.subscribers.len();
+        // The subscriber is one row of the session's tables, numbered by the id they hand out
+        // next: a full table, a key the session cannot hold or no id left refuses it before
+        // anything is sent, and the sink goes with the refusal. The row holds the key expression
+        // declaration its key is named by for as long as it stands.
+        let id = tables(&core.registry)
+            .next_entity_id()
+            .ok_or(Declined::NoEntityId)?;
+        let form = core.key_form(&wire, retraction.is_some());
+        // The declaration states no choice about the timestamp, so it takes the session's
+        // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
+        let callback: SubscriberCallback =
+            Arc::new(LiveCallback::new(sink, exposed_by(&core.policy)));
         let row = SubscriberRow {
             id,
             retraction,
             wire,
             lane: self.samples.clone(),
-            callback: None,
+            callback: Some(callback),
         };
-        // A registration the table refuses (a key longer than a row holds or with no room in the
-        // key arena) is a refused declaration, told as one: an id answered for it would name a
-        // subscriber that hears nothing and was never announced.
-        let registered =
-            core.registry
-                .borrow_mut()
-                .app
-                .subscribers
-                .register_sink(keyexpr, allowed_origin, row);
-        registered?;
-        // The declaration states no choice about the timestamp, so it takes the session's
-        // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let callback: SubscriberCallback =
-            Arc::new(LiveCallback::new(sink, exposed_by(&core.policy)));
-        if let Some((_, row)) = core.registry.borrow_mut().app.subscribers.row_at_mut(at) {
-            row.callback = Some(callback);
-        }
-        // Each link is told it from the row, which names the key as the table keeps it.
-        core.announce_subscriber(at);
+        let declared =
+            tables_mut(&core.registry).declare_subscriber(keyexpr, allowed_origin, form, row);
+        let declared = match declared {
+            Ok(declared) => declared,
+            Err(refused) => {
+                // The program's callback goes with the refusal, let go of with no lock held.
+                drop(guard);
+                let why = Declined::from(refused.why);
+                drop(refused.callback);
+                return Err(why);
+            }
+        };
+        debug_assert_eq!(
+            declared.id, id,
+            "the tables number a row as they said they would"
+        );
+        // Each link is told it from the row, which names the key as the tables keep it.
+        core.announce_subscriber(declared.handle);
         #[cfg(feature = "group")]
         {
-            let registry = core.registry.borrow();
-            if let Some((keyexpr, row)) = registry.app.subscribers.row_at(at) {
+            let tables = tables(&core.registry);
+            if let Some(row) = tables.subscribers().get(declared.handle) {
                 core.announce_to_groups(GroupEntity {
                     what: GroupDeclaration::Subscriber,
                     entity: id,
-                    keyexpr,
-                    wire: &row.wire,
-                    retraction: row.retraction.as_ref(),
+                    keyexpr: row.key().as_str(),
+                    wire: &row.callback().wire,
+                    retraction: row.callback().retraction.as_ref(),
                     allowed_origin,
                 });
             }
@@ -5731,27 +5693,60 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(entry);
             return;
         }
-        // The row is taken out of the table under the lock and let go of after it: its key may hold
+        // The row is taken out of the tables under the lock and let go of after it: its key may hold
         // a declaration whose release reaches the session (`WireKey`).
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
-            let at = core
-                .registry
-                .borrow()
-                .app
-                .subscribers
-                .position_of(|row| row.id == id)?;
-            let links = core.retract(Kind::Subscriber, at);
+            // The declaration its key is named by goes with it when it is the last that holds it.
+            let (handle, last) = {
+                let tables = tables(&core.registry);
+                let found = tables
+                    .subscribers()
+                    .iter()
+                    .find(|(_, row)| row.id() == id)
+                    .map(|(handle, row)| {
+                        let last = row.key().prefix().filter(|&prefix| {
+                            tables
+                                .keyexprs()
+                                .get(prefix)
+                                .is_some_and(|keyexpr| keyexpr.holds() <= 1)
+                        });
+                        (handle, last)
+                    });
+                found
+            }?;
+            // The links are asked while the rows stand, which are their places in the replay's
+            // order: the subscriber's, then the declaration's, which comes before every
+            // subscriber.
+            let place = core.subscriber_place(handle);
+            let links = core.retract_at(place);
+            let keyexpr_links = last.map(|prefix| {
+                let place = core.keyexpr_place(prefix);
+                core.retract_at(place)
+            });
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
-            let row = core.registry.borrow_mut().app.subscribers.take_at(at)?;
-            for actions in links {
-                row.retract(&actions);
+            let undeclared = tables_mut(&core.registry).undeclare_subscriber(handle)?;
+            let row = undeclared.row.map(|row| row.into_callback());
+            // The rows went before the links are told: a send never finds the tables borrowed.
+            if let Some(row) = &row {
+                for actions in links {
+                    row.retract(&actions);
+                }
+            }
+            if let (Some(links), Some(mapping_id)) = (keyexpr_links, undeclared.keyexpr) {
+                for actions in links {
+                    actions.send_undeclare_kexpr(mapping_id);
+                }
+                #[cfg(feature = "group")]
+                for group in &core.groups {
+                    group.retract_keyexpr(mapping_id);
+                }
             }
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
-            Some(row)
+            row
         });
         // A delivery that copied the callback out of the row before hands it nothing more; the row,
         // and its callback with it, is let go of here, with no lock held.
@@ -5772,7 +5767,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // the key cannot be held, or when every id is taken. An id of the shared dictionary names
         // its key in this session's space too, so no key expression is declared under one.
         let declared = {
-            let mut tables = core.tables.borrow_mut();
+            let mut tables = tables_mut(&core.registry);
             #[cfg(feature = "shared-key-ids")]
             let declared = match &core.key_ids {
                 Some(ids) => tables
@@ -5797,7 +5792,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             |actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
-            core.tables.borrow_mut().undeclare_keyexpr(declared.handle);
+            tables_mut(&core.registry).undeclare_keyexpr(declared.handle);
             return Err(Declined::ExceedsCapacity);
         }
         // And each group told the session's keyexprs, as a link is.
@@ -5815,7 +5810,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let core = &mut core.0;
         let (handle, last) = {
-            let tables = core.tables.borrow();
+            let tables = tables(&core.registry);
             let Some(handle) = tables.keyexpr_by_id(mapping_id) else {
                 return;
             };
@@ -5828,7 +5823,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The links are asked while the row stands, which is its place in the replay's order.
         let place = core.keyexpr_place(handle);
         let links = last.then(|| core.retract_at(place));
-        let retracted = core.tables.borrow_mut().undeclare_keyexpr(handle);
+        let retracted = tables_mut(&core.registry).undeclare_keyexpr(handle);
         if let (Some(links), Some(_)) = (links, retracted) {
             // The row went before the links are told: a send never finds the table borrowed.
             for actions in links {
@@ -5848,7 +5843,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.live()
             .map(|core| {
-                let tables = core.0.tables.borrow();
+                let tables = tables(&core.0.registry);
                 tables
                     .keyexprs()
                     .iter()
@@ -6109,12 +6104,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // sends it and delivers it there.
         #[cfg(feature = "local-subscriber")]
         if params.destination.allows_local()
-            && core
-                .registry
-                .borrow()
-                .app
-                .subscribers
-                .has_local_matching(keyexpr)
+            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                &*tables(&core.registry),
+                keyexpr,
+            )
         {
             return FilteredPut::NotPlain;
         }
@@ -6134,7 +6127,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return FilteredPut::NotPlain;
         }
         // The key as the session's tables name it, and each link as its key-wire form says.
-        let Some(named) = core.tables.borrow().named_by(keyexpr, mapping_id) else {
+        let Some(named) = tables(&core.registry).named_by(keyexpr, mapping_id) else {
             return FilteredPut::NotPlain;
         };
         let mut outcome = Ok(0);
@@ -6272,7 +6265,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         // The key is named before the links are told, from the tables as they stand: telling a
         // link changes none of the session's declarations.
-        let named = entry.named(&core.tables.borrow());
+        let named = entry.named(&tables(&core.registry));
         core.announce(Kind::Queryable, |actions| {
             named.is_some_and(|key| entry.declare(key, actions))
         });
@@ -6744,7 +6737,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // session cannot hold or no id left refuses it before anything is registered or sent. It
         // holds the key expression declaration its key is named by for as long as it stands.
         let form = core.key_form(&wire, retraction.is_some());
-        let declared = core.tables.borrow_mut().declare_token(keyexpr, form)?;
+        let declared = tables_mut(&core.registry).declare_token(keyexpr, form)?;
         let id = declared.id;
         if let Err(refused) = core
             .registry
@@ -6753,7 +6746,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .local_tokens
             .register(u64::from(id), keyexpr)
         {
-            let _ = core.tables.borrow_mut().undeclare_token(declared.handle);
+            let _ = tables_mut(&core.registry).undeclare_token(declared.handle);
             return Err(refused.into());
         }
         core.announce_token(declared.handle);
@@ -6773,7 +6766,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let core = &mut core.0;
         let retracted = {
-            let tables = core.tables.borrow();
+            let tables = tables(&core.registry);
             let found =
                 tables
                     .tokens()
@@ -6808,7 +6801,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let place = core.keyexpr_place(prefix);
             core.retract_at(place)
         });
-        let Some(undeclared) = core.tables.borrow_mut().undeclare_token(handle) else {
+        let Some(undeclared) = tables_mut(&core.registry).undeclare_token(handle) else {
             return;
         };
         #[cfg(feature = "group")]
@@ -6982,7 +6975,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // declaration its key is named by.
         #[cfg(feature = "liveliness")]
         {
-            let mut tables = core.tables.borrow_mut();
+            let mut tables = tables_mut(&core.registry);
             loop {
                 let Some(handle) = tables.tokens().iter().next().map(|(handle, _)| handle) else {
                     break;

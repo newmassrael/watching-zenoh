@@ -180,7 +180,12 @@ fn the_plan_lends_each_declaration_table_its_limit() {
             .find(|row| row.part == part)
             .map(|row| row.count)
     };
-    assert_eq!(count("subscribers"), Some(2));
+    assert_eq!(plan.tables().subscribers, 2);
+    assert_eq!(
+        count("subscribers"),
+        None,
+        "a subscriber is a row of the session's one table set"
+    );
     assert_eq!(
         count("subscriber declarations"),
         None,
