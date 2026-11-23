@@ -1,0 +1,22 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Split hosted Layer C1cs into two shards dealt by measured cost, so the capability cost job leaves its time alarm. The job read `elapsed 1114s of 1200s budget (92%)` at run 45051019628 with its lane at 1,013 s, and 1,084 to 1,132 s in five of the six runs before it: the eight release builds the 1200 s budget was sized for are now twenty-two size cases and two statement cases, and `timeout-minutes: 20` was under seventy seconds away. `capability_cost_gate.py --shards N --shard K` builds the cases `census_shard_plan.plan` deals to shard K over `c1cs_case_weights.tsv` (the C1cn and C1bnl planner, the same rule: the weights decide the balance, never which case is built), and each case prints its seconds so the table is refreshed from hosted logs. The weights are one `--measure` of every case on four cores with an empty artifact root (1,218 s together); the plan puts 611 and 607 s in the two shards. Prediction for the next run: each shard near 660 s with its setup, 55 percent of the budget.
+'''
+changes = '''
+- scripts/lib/capability_cost_gate.py: `--shards N --shard K` selects the cases `shard_cases` plans (size and statement cases together, in the gate's order); each case prints `<id>: <N>s`; stdout is line-buffered so the hosted log stamps each case; four selftest arms hold the partition.
+- scripts/lib/c1cs_case_weights.tsv (new): 24 cases' seconds from one four-core cold `--measure`.
+- scripts/lib/census_shard_plan.py: the docstring names the C1cs use; `CASE_WEIGHTS`, read by its selftest.
+- scripts/run-ci.sh: `layer_c1cs_capability_cost` passes `WZ_C1CS_SHARDS`/`WZ_C1CS_SHARD` to the gate; unset, every case is built as before.
+- .github/workflows/ci.yml: `capability-cost` is a matrix of two shards with the env pair, and its comment records the reading and the prediction.
+'''
+verification = '''
+- `capability_cost_gate.py --measure` of all 24 cases under `taskset -c 0-3`, `CARGO_BUILD_JOBS=4` and an empty artifact root: rc 0 in 1,217 s, each case's seconds printed (the table's rows).
+- `--measure --shards 2 --shard 0 pico-client-coop-unstable` prints shard 0's twelve cases and builds none; `--shard 1` with the same id builds that one case (31 s); the two shards' lists are disjoint and cover the 24.
+- `--check --shards 2`, `--shards 2 --shard 2` and `--shard x` exit 2 with the usage reason.
+- capability_cost_gate.py --selftest 55/55; census_shard_plan.py --selftest OK; shard_matrix_binding.py OK with `capability-cost` among its seven sharded jobs; shellcheck -x scripts/run-ci.sh clean.
+- The pre-push hook's round-fed gates: 168 of 170 pass; feature_gate_diagnostic and silent_skip_gate fail as on origin/main, from Round 4610's integration, which its owner is repairing.
+'''
+carry = '''
+- Read the two C1cs shards' times on this landing's hosted run against the prediction (each near 660 s with setup); refresh `c1cs_case_weights.tsv` from the `<id>: <N>s` lines if they come out unbalanced, or hand budget back if a shard reads under 240 s.
+- The C1bnl four-shard prediction of Round 4612 (each near 1,260 s) is still to be read from its hosted run.
+'''
