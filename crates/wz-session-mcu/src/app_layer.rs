@@ -352,9 +352,10 @@ pub const DEFAULT_GET_TIMEOUT_MS: u32 = 10_000;
 pub enum GetError {
     /// The pending table is full, or the keyexpr is longer than the table keeps.
     Register(wz_session_core::registry_error::RegisterError),
-    /// The request could not be written or sent: the session has no transport at the moment, or
-    /// the keyexpr is empty.
+    /// The request could not be written or sent: the session has no transport at the moment.
     Send(wz_session_core::send_wire_error::SendWireError),
+    /// The keyexpr is empty: it names no key, so there is nothing to ask.
+    NoKey,
 }
 
 #[cfg(all(feature = "session-slot", feature = "query-get"))]
@@ -380,6 +381,7 @@ where
     ///
     /// # Errors
     ///
+    /// [`GetError::NoKey`] for an empty keyexpr, before anything is registered or sent;
     /// [`GetError::Register`] when the table has no free row, [`GetError::Send`] when the request
     /// could not go out.
     pub fn get(
@@ -389,6 +391,8 @@ where
     ) -> Result<wz_session_core::reply::ReplyHandle, GetError> {
         use wz_session_core::reply_acceptance::ReplyAcceptance;
 
+        let key =
+            wz_session_core::wire_key::WireKey::literal(request.keyexpr).ok_or(GetError::NoKey)?;
         let actions = &*self.handle;
         let rid = actions.alloc_next_request_id();
         let timeout_ms = match request.timeout_ms {
@@ -413,14 +417,17 @@ where
         // loop that went to sleep between this call and the next event would otherwise sleep past it.
         self.publish_wake_deadline();
         let actions = &*self.handle;
-        let sent = actions.send_get_parts(wz_session_core::lent_request::GetParts {
+        let sent = actions.send_get_parts(wz_session_core::query_parts::GetParts {
             rid,
-            keyexpr: request.keyexpr,
-            parameters: request.parameters,
-            consolidation: request.consolidation,
-            target: request.target,
-            timeout_ms: u64::from(request.timeout_ms),
-            qos: request.qos,
+            key,
+            query: wz_session_core::query_parts::QueryParts {
+                parameters: request.parameters,
+                consolidation: request.consolidation,
+                target: request.target,
+                timeout_ms: request.timeout_ms,
+                qos: request.qos,
+                ..wz_session_core::query_parts::QueryParts::PLAIN
+            },
         });
         if let Err(why) = sent {
             self.requesters.replies.unregister(rid);

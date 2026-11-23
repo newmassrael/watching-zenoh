@@ -934,6 +934,37 @@ impl QueryOptions {
         }
     }
 
+    /// What this query asks of the peers, borrowed from the options: the description a link's
+    /// `get` is written from with nothing copied. The slots are read as [`Self::query_metadata`]
+    /// reads them, which the tests below hold slot for slot.
+    #[cfg(feature = "query-get")]
+    pub fn query_parts(&self) -> crate::query_parts::QueryParts<'_> {
+        crate::query_parts::QueryParts {
+            parameters: self.parameters.as_deref().unwrap_or(&[]),
+            consolidation: self.wire_consolidation(),
+            target: self.effective_target(),
+            timeout_ms: self.effective_timeout_ms(),
+            qos: self.qos.unwrap_or(QosLevel::DEFAULT),
+            value: match (&self.payload, &self.encoding) {
+                (None, None) => None,
+                (payload, encoding) => Some((
+                    encoding.as_ref().map_or(
+                        crate::reply_stage::EncodingParts {
+                            packed_id: 0,
+                            schema: None,
+                        },
+                        crate::reply_stage::EncodingParts::of,
+                    ),
+                    payload.as_deref().unwrap_or(&[]),
+                )),
+            },
+            source_info: self.source_info.as_ref(),
+            attachment: self.attachment.as_deref().unwrap_or(&[]),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.wire_ts_stack.as_ref().or(self.ts_stack.as_ref()),
+        }
+    }
+
     /// The Query body a get delivers to the session's OWN queryables (zenoh-pico's
     /// `_z_session_deliver_query_locally`, `vendor/zenoh-pico/src/session/loopback.c`): the
     /// slots a queryable can observe (the selector's parameters, the value, the source info, the
@@ -945,7 +976,7 @@ impl QueryOptions {
     /// dispatch beside it (`QueryEnvelope`), the consolidation is applied at the requester's sink
     /// on both origins, and the timeout arms the pending entry's deadline.
     ///
-    /// The wire builder's `rid = 0` / literal-key envelope is discarded: the loopback's request id
+    /// Only the body is built ([`crate::request_build::QueryBuilder`]): the loopback's request id
     /// and key ride the dispatch's arguments. Its caller-error asserts are the wire's too, so a
     /// selector longer than the wire's bound panics here as it would on the link: a selector that
     /// no wire queryable could receive is not one a local queryable should.
@@ -966,12 +997,9 @@ impl QueryOptions {
             value: full.value,
             ..Default::default()
         };
-        let request = crate::request_build::build_request_query_with_meta(0, 0, None, &meta)
-            .expect("a loopback Query body builds on the heap profile");
-        match request.body {
-            wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
-            _ => unreachable!("build_request_query_with_meta always produces a Query body"),
-        }
+        crate::request_build::QueryBuilder::from_meta(&meta)
+            .build()
+            .expect("a loopback Query body builds on the heap profile")
     }
 }
 
@@ -997,6 +1025,47 @@ mod tests {
         let mut opts = QueryOptions::get();
         opts.allowed_destination = Locality::Remote;
         assert_eq!(opts.remote_finals(0), 0, "a group with no member owes none");
+    }
+
+    /// The parts a link's `get` is written from are the metadata the owned path is handed, slot
+    /// for slot: for options that state nothing, a payload alone, an encoding alone, and every
+    /// slot at once.
+    #[test]
+    fn the_query_parts_are_the_query_metadata_borrowed() {
+        let mut every = QueryOptions::get()
+            .with_target(QueryTarget::AllComplete)
+            .with_consolidation(ConsolidationMode::Monotonic)
+            .with_payload(b"value".to_vec())
+            .with_encoding(EncodingHint {
+                packed_id: 0x0B,
+                schema: Some(b"json".to_vec()),
+            })
+            .with_qos(QosLevel::from_parts(
+                Priority::RealTime,
+                CongestionControl::Block,
+                true,
+            ));
+        // Written past the setters, which only the builds that carry these slots have.
+        every.attachment = Some(alloc::vec![1, 2]);
+        every.parameters = Some(b"_time=[..]".to_vec());
+        every.source_info = Some(SourceInfo::new(&[4; 8], 3, 2));
+        let cases = [
+            QueryOptions::get(),
+            QueryOptions::get().with_payload(b"only".to_vec()),
+            QueryOptions::get().with_encoding(EncodingHint {
+                packed_id: 0x0A,
+                schema: None,
+            }),
+            every,
+        ];
+        for opts in &cases {
+            let meta = opts.query_metadata();
+            assert_eq!(
+                opts.query_parts(),
+                crate::query_parts::QueryParts::of_metadata(&meta),
+                "{opts:?}"
+            );
+        }
     }
 
     /// A target is read, and carried on the wire, only where the build carries the slot

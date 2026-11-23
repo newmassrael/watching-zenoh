@@ -6319,10 +6319,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             } else {
                 (wire.mapping_id, wire.suffix.as_deref())
             };
-            if actions
-                .send_request_query_with_meta(rid, mapping_id, suffix, &opts.query_metadata())
-                .is_err()
-            {
+            // The query is written from the options where they lie, with nothing copied.
+            let sent = match wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix) {
+                Some(key) => actions
+                    .send_get_parts(wz_session_core::query_parts::GetParts {
+                        rid,
+                        key,
+                        query: opts.query_parts(),
+                    })
+                    .is_ok(),
+                None => false,
+            };
+            if !sent {
                 // Nothing went out: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
                     tables.gets.replies.unregister(rid);

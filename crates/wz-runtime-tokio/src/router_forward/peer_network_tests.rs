@@ -404,9 +404,11 @@ impl Network {
                 self.inject(*name, NetworkMessage::Declare(Box::new(declare)));
             }
             NetStep::Query(name, rid, keyexpr) => {
-                let request =
-                    wz_session_core::request_build::build_request_query(*rid, 0, Some(keyexpr))
-                        .expect("request");
+                let request = wz_session_core::request_build::build_request_query(
+                    *rid,
+                    wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+                )
+                .expect("request");
                 self.inject(*name, NetworkMessage::Request(Box::new(request)));
             }
             NetStep::Reply(name, keyexpr, payload) => {

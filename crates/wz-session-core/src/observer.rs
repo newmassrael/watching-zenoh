@@ -2015,7 +2015,7 @@ mod sub_interest_reply_tests {
     fn a_member_interest_on_its_own_alias_is_answered() {
         let mut observer = ApplicationLayerObserver::new();
         observer
-            .subscribe("demo/mc/**", |_| {})
+            .subscribe("demo/mc/cross", |_| {})
             .expect("no quota is stated on this table");
         let kexpr = crate::declare_build::build_declare_kexpr(1, "demo/mc/cross")
             .expect("a literal key builds");
@@ -2049,7 +2049,7 @@ mod sub_interest_reply_tests {
                 .iter()
                 .map(|(_, key, interest)| (key.clone(), *interest))
                 .collect::<Vec<_>>(),
-            alloc::vec![("demo/mc/**".to_string(), 3)],
+            alloc::vec![("demo/mc/cross".to_string(), 3)],
             "the matching subscription is the answer"
         );
         assert_eq!(
@@ -2265,7 +2265,7 @@ mod sub_interest_reply_tests {
     /// the guard: deleting it leaves this green, because the drain-time one
     /// still catches the item. That check is a pressure filter with its own
     /// red in `an_unrelated_unregister_stages_no_aggregate_retraction`.
-    #[cfg(feature = "declare-undeclare")]
+    #[cfg(all(feature = "declare-undeclare", feature = "keyexpr-wildcard-double"))]
     #[test]
     fn an_aggregate_declaration_survives_while_another_subscription_matches() {
         let mut observer = ApplicationLayerObserver::new();
@@ -2341,7 +2341,7 @@ mod sub_interest_reply_tests {
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
                 INTEREST,
-                Some("reenter/**"),
+                Some("reenter/a"),
                 /*aggregate=*/ true,
                 /*current=*/ true,
                 /*future=*/ true,
@@ -2430,7 +2430,7 @@ mod sub_interest_reply_tests {
             .respond_to_subscriber_interest_borrowed(
                 &mut observer.peers.subscribers,
                 INTEREST,
-                Some("reenter/**"),
+                Some("reenter/a"),
                 /*aggregate=*/ true,
                 /*current=*/ true,
                 /*future=*/ true,

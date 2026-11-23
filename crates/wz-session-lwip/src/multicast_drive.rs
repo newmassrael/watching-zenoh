@@ -1145,7 +1145,11 @@ mod tests {
         // A literal-keyexpr Query for "demo/mc", request id 7, at SN 0.
         let query = encode_frame_with_request(
             0,
-            build_request_query(7, 0, Some("demo/mc")).expect("query fixture"),
+            build_request_query(
+                7,
+                wz_session_core::wire_key::WireKey::literal("demo/mc").expect("a literal key"),
+            )
+            .expect("query fixture"),
             true,
         );
         socket.send_to(group, port, &query).expect("inject Query");

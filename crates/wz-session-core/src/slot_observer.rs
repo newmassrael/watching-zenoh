@@ -1954,7 +1954,7 @@ mod lent_tests {
     }
 
     /// The patterns of a lent observer's subscriptions lie in the key arena it was handed, a block
-    /// each as long as the pattern, and match as they did inline: a subscription on `demo/a/**`
+    /// each as long as the pattern, and match as they did inline: a subscription on `demo/a/x`
     /// matches `demo/a/x` and not `demo/b`. Its unregistration gives the block back, and the next
     /// pattern of that length takes the same bytes.
     #[test]
@@ -1965,13 +1965,13 @@ mod lent_tests {
         let mut observer = lent_in(2, keys);
         let id = observer
             .subscribers
-            .register_sink("demo/a/**", Locality::Any, sink())
+            .register_sink("demo/a/x", Locality::Any, sink())
             .expect("a row and a block are free");
         assert!(observer.subscribers.has_local_matching("demo/a/x"));
         assert!(!observer.subscribers.has_local_matching("demo/b"));
         assert_eq!(
             keys.counts().used,
-            block_bytes("demo/a/**".len()).expect("short"),
+            block_bytes("demo/a/x".len()).expect("short"),
             "one block of the pattern's length"
         );
         let peak = keys.counts().peak;
@@ -1979,7 +1979,7 @@ mod lent_tests {
         assert_eq!(keys.counts().used, 0, "the block went back");
         observer
             .subscribers
-            .register_sink("demo/c/**", Locality::Any, sink())
+            .register_sink("demo/c/y", Locality::Any, sink())
             .expect("the block given back holds the next");
         assert!(observer.subscribers.has_local_matching("demo/c/y"));
         assert_eq!(keys.counts().peak, peak, "the same bytes, taken again");
@@ -2118,7 +2118,7 @@ mod lent_tests {
             .respond_to_subscriber_interest_borrowed(
                 &mut peer,
                 7,
-                Some("demo/**"),
+                Some("demo/a"),
                 false,
                 true,
                 true,

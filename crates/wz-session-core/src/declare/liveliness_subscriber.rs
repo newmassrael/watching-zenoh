@@ -1800,9 +1800,9 @@ mod tests {
         let mut reg = LivelinessSubscriberRegistry::new();
         let ours: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         let theirs: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "ours/*", false, make_subscriber(ours.clone()))
+        reg.register(1, "ours/dev", false, make_subscriber(ours.clone()))
             .unwrap();
-        reg.register(2, "theirs/*", false, make_subscriber(theirs.clone()))
+        reg.register(2, "theirs/dev", false, make_subscriber(theirs.clone()))
             .unwrap();
 
         let mut peer = HashMap::new();
@@ -1869,6 +1869,7 @@ mod tests {
         assert_eq!(reg.keyexpr(7), Some("a"), "first registration retained");
     }
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn decl_token_dispatches_put_sample_on_pattern_match() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1909,6 +1910,7 @@ mod tests {
     /// the one-sided matcher treats as a pattern. Here they are swapped. One
     /// test passing while the other could not is exactly what a one-sided
     /// predicate looks like from outside.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn decl_token_on_a_wildcard_reaches_a_concrete_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2132,14 +2134,14 @@ mod tests {
         let with_history: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(
             1,
-            "liveliness/**",
+            "liveliness/a",
             false,
             make_subscriber(future_only.clone()),
         )
         .unwrap();
         reg.register(
             2,
-            "liveliness/**",
+            "liveliness/a",
             true,
             make_subscriber(with_history.clone()),
         )
@@ -2267,7 +2269,7 @@ mod tests {
         assert_eq!(reg.peer_token_count(), 2);
 
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/*", true, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/a", true, make_subscriber(sink.clone()))
             .unwrap();
 
         let replayed = sink.lock().unwrap().clone();
@@ -2334,7 +2336,7 @@ mod tests {
         );
 
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", true, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/a", true, make_subscriber(sink.clone()))
             .unwrap();
         assert_eq!(sink.lock().unwrap().len(), 1, "replayed once at declare");
 
@@ -2362,8 +2364,16 @@ mod tests {
     fn link_loss_flushes_every_remote_token_as_a_delete() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        // One subscriber on each token's key, all into one sink: each Delete reaches exactly the
+        // subscriber of its own key, so the sink reads the order the flush fires in.
+        for (subscriber, ke) in [
+            (1u64, "liveliness/a"),
+            (2, "liveliness/b"),
+            (3, "liveliness/c"),
+        ] {
+            reg.register(subscriber, ke, false, make_subscriber(sink.clone()))
+                .unwrap();
+        }
         for (id, ke) in [
             (7u64, "liveliness/a"),
             (3, "liveliness/b"),
@@ -2484,8 +2494,13 @@ mod tests {
     fn undecl_token_dispatches_delete_sample_using_remembered_keyexpr() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        reg.register(
+            1,
+            "liveliness/svc/api",
+            false,
+            make_subscriber(sink.clone()),
+        )
+        .unwrap();
 
         let decl =
             DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
@@ -2638,8 +2653,12 @@ mod tests {
 
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
-            .unwrap();
+        // A subscriber on each key, both into one sink, so the sink reads the order the tokens
+        // are told in.
+        for (subscriber, key) in [(1u64, "liveliness/first"), (2, "liveliness/second")] {
+            reg.register(subscriber, key, false, make_subscriber(sink.clone()))
+                .unwrap();
+        }
         for key in ["liveliness/first", "liveliness/second", "liveliness/first"] {
             reg.dispatch_declare(
                 &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(0, 0, Some(key))),
@@ -2847,7 +2866,7 @@ mod tests {
 
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+        reg.register(1, "liveliness/dev", false, make_subscriber(sink.clone()))
             .unwrap();
         reg.dispatch_declare(&msg(), &peer);
         let captured = sink.lock().unwrap().clone();
@@ -2862,7 +2881,7 @@ mod tests {
         let unresolved: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         bare.register(
             1,
-            "liveliness/**",
+            "liveliness/dev",
             false,
             make_subscriber(unresolved.clone()),
         )
@@ -2945,6 +2964,10 @@ mod tests {
         assert_eq!(captured[0].2, 99);
     }
 
+    #[cfg(all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double"
+    ))]
     #[test]
     fn multiple_subscribers_fire_in_registration_order_on_overlap() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -3106,7 +3129,7 @@ mod tests {
         let mut reg = LivelinessSubscriberRegistry::new();
         let cap: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>> =
             Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "live/**", false, make_subscriber(cap.clone()))
+        reg.register(1, "live/dev/3", false, make_subscriber(cap.clone()))
             .unwrap();
 
         let fired = reg.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 77);

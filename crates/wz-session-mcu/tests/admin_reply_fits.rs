@@ -110,9 +110,12 @@ fn peer_row() -> AdminSession {
 
 fn get(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
-        RequestQueryBuilder::new(rid, 0, Some(keyexpr))
-            .build()
-            .expect("build"),
+        RequestQueryBuilder::new(
+            rid,
+            wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+        )
+        .build()
+        .expect("build"),
     ))
 }
 

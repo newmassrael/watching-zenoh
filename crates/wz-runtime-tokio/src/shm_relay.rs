@@ -670,9 +670,11 @@ mod tests {
     /// A Request whose query carries `descriptor` as its value.
     #[cfg(feature = "codec-request")]
     fn a_query_with_the_value(descriptor: &ShmDescriptor) -> wz_session_core::wire::RequestOwned {
-        let mut request =
-            wz_session_core::request_build::build_request_query(1, 0, Some("demo/relay"))
-                .expect("a Query");
+        let mut request = wz_session_core::request_build::build_request_query(
+            1,
+            wz_session_core::wire_key::WireKey::literal("demo/relay").expect("a literal key"),
+        )
+        .expect("a Query");
         let wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) = &mut request.body
         else {
             panic!("a Query body");

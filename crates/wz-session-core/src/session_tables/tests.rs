@@ -4,8 +4,58 @@
 use super::*;
 use crate::bounded::{Static, ARENA_ALIGN};
 use crate::limits::SessionLimits;
+use crate::row_callback::{CClosure, CallLatch};
 use core::ptr::NonNull;
 use std::vec::Vec;
+
+/// A test's callback the tables call only while they are held.
+macro_rules! called_while_held {
+    ($($ty:ty),*) => {$(
+        impl RowCallback for $ty {
+            type Call = core::convert::Infallible;
+            const READS_ROW_IN_PLACE: bool = false;
+            fn begin(&self) -> Option<core::convert::Infallible> {
+                None
+            }
+            unsafe fn end(call: core::convert::Infallible) -> bool {
+                match call {}
+            }
+            fn retire(&self) -> bool {
+                true
+            }
+        }
+    )*};
+}
+
+called_while_held!(u32);
+#[cfg(feature = "alloc")]
+called_while_held!(FrameEnds);
+
+/// A C closure whose call is the number `n`, with no context and no drop.
+fn latched(n: u32) -> CClosure<u32> {
+    // SAFETY: neither the call, a number, nor the absent drop reads the context.
+    unsafe { CClosure::new(n, core::ptr::null_mut(), None) }
+}
+
+/// Callbacks a call of runs after the tables are let go: a C closure each.
+enum Latched {}
+
+impl RowCallbacks for Latched {
+    type Subscriber = CClosure<u32>;
+    type Queryable = CClosure<u32>;
+    type LivelinessSubscriber = CClosure<u32>;
+    type Matching = CClosure<u32>;
+    type Reply = u32;
+}
+
+/// The tables of the static policy, whose rows never move, with latched callbacks.
+type LatchedTables = SessionTables<Latched, Static>;
+
+/// End `call`, begun on a row of `R`'s that has not moved since.
+fn ended<R: RowCallback>(call: R::Call) -> bool {
+    // SAFETY: the tables these tests begin calls on are not moved while a call runs.
+    unsafe { R::end(call) }
+}
 
 /// Callbacks the tests can tell apart: a number each.
 enum Calls {}
@@ -160,41 +210,69 @@ fn an_undeclared_entity_hands_its_row_back_and_its_handle_goes_stale() {
 }
 
 #[test]
-fn a_subscriber_undeclared_while_its_callback_runs_comes_back_at_the_last_unpin() {
-    let mut tables = Tables::new();
-    let sub = subscribe(&mut tables, "a", Locality::Any, 7);
-    let pinned = tables.pin_subscriber(sub.handle).unwrap();
+fn a_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() {
+    let mut tables = LatchedTables::new();
+    let sub = tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
+        .unwrap();
+    let call = tables.begin_subscriber(sub.handle).unwrap();
+    assert_eq!(call.call, 7);
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
     assert_eq!(undeclared.id, sub.id);
-    assert!(undeclared.row.is_none());
-    // No later sample reaches it, and the running call still reads it.
-    assert!(reached(&tables, "a", false).is_empty());
-    assert_eq!(tables.subscribers().pinned(&pinned).unwrap().callback(), &7);
+    assert!(undeclared.row.is_none(), "a call of it runs");
+    // No later sample reaches it and no call of it begins, while the running call still holds it.
+    assert!(tables.subscribers_for("a", false).next().is_none());
+    assert!(tables.begin_subscriber(sub.handle).is_none());
     assert!(tables.subscribers().holds_slot(sub.handle));
-    assert_eq!(tables.unpin_subscriber(pinned).unwrap().into_callback(), 7);
+    assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
+    assert!(tables.release_subscriber(sub.handle).is_some());
     assert!(!tables.subscribers().holds_slot(sub.handle));
     assert!(tables.subscribers().is_empty());
 }
 
 #[test]
-fn every_pinned_kind_is_handed_back_by_its_last_unpin() {
-    let mut tables = Tables::new();
+fn a_row_no_call_of_which_runs_is_let_go_when_it_is_undeclared() {
+    let mut tables = LatchedTables::new();
+    let sub = tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
+        .unwrap();
+    let call = tables.begin_subscriber(sub.handle).unwrap();
+    assert!(
+        !ended::<CClosure<u32>>(call),
+        "a live row is let go of by no call"
+    );
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert!(
+        undeclared.row.is_some(),
+        "no call runs: the undeclarer lets it go"
+    );
+    assert!(tables.release_subscriber(sub.handle).is_none());
+}
+
+#[test]
+fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
+    let mut tables = LatchedTables::new();
     let qbl = tables
-        .declare_queryable("q", Locality::Any, false, KeyForm::default(), 1)
+        .declare_queryable("q", Locality::Any, false, KeyForm::default(), latched(1))
         .unwrap();
     let live = tables
-        .declare_liveliness_subscriber("l", false, KeyForm::default(), 2)
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), latched(2))
         .unwrap();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "m", false)
+        .unwrap()
+        .handle;
     let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "m", false, 3)
+        .declare_matching_listener(filter, latched(3))
         .unwrap();
     let get = tables.begin_get(1, "g", 10, 4).unwrap();
-    let pins = (
-        tables.pin_queryable(qbl.handle).unwrap(),
-        tables.pin_liveliness_subscriber(live.handle).unwrap(),
-        tables.pin_matching_listener(listener.handle).unwrap(),
+    let calls = (
+        tables.begin_queryable(qbl.handle).unwrap(),
+        tables.begin_liveliness_subscriber(live.handle).unwrap(),
+        tables.begin_matching_listener(listener).unwrap(),
         tables.pin_get(get.handle).unwrap(),
     );
+    assert_eq!((calls.0.call, calls.1.call, calls.2.call), (1, 2, 3));
     assert!(tables
         .undeclare_queryable(qbl.handle)
         .unwrap()
@@ -205,31 +283,21 @@ fn every_pinned_kind_is_handed_back_by_its_last_unpin() {
         .unwrap()
         .row
         .is_none());
-    assert!(tables
-        .undeclare_matching_listener(listener.handle)
-        .unwrap()
-        .row
-        .is_none());
+    assert!(matches!(
+        tables.undeclare_matching_listener(listener),
+        Some(Removal::AfterCalls)
+    ));
     assert!(matches!(
         tables.end_get(get.handle),
         Some(Removal::AfterCalls)
     ));
-    assert_eq!(tables.unpin_queryable(pins.0).unwrap().into_callback(), 1);
-    assert_eq!(
-        tables
-            .unpin_liveliness_subscriber(pins.1)
-            .unwrap()
-            .into_callback(),
-        2
-    );
-    assert_eq!(
-        tables
-            .unpin_matching_listener(pins.2)
-            .unwrap()
-            .into_callback(),
-        3
-    );
-    assert_eq!(tables.unpin_get(pins.3).unwrap().into_callback(), 4);
+    assert!(ended::<CClosure<u32>>(calls.0));
+    assert!(tables.release_queryable(qbl.handle).is_some());
+    assert!(ended::<CClosure<u32>>(calls.1));
+    assert!(tables.release_liveliness_subscriber(live.handle).is_some());
+    assert!(ended::<CClosure<u32>>(calls.2));
+    assert!(tables.release_matching_listener(listener).is_some());
+    assert_eq!(tables.unpin_get(calls.3).unwrap().into_callback(), 4);
 }
 
 #[test]
@@ -361,7 +429,7 @@ fn queries_tokens_and_liveliness_reach_by_their_keys() {
 }
 
 #[test]
-fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
+fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let mut tables = Tables::new();
     let first = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
@@ -371,10 +439,7 @@ fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
     assert_eq!(second.interest, None);
-    let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "k", false, 9)
-        .unwrap();
-    assert_eq!(listener.interest, None);
+    let listener = tables.declare_matching_listener(first.handle, 9).unwrap();
     // Another kind on the same key asks apart.
     let querier = tables
         .declare_write_filter(
@@ -389,43 +454,86 @@ fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
     assert_eq!(tables.interests().len(), 2);
     let interest = tables.write_filters().get(first.handle).unwrap().interest();
     assert_eq!(tables.interest_key(interest), Some("k"));
-    assert_eq!(tables.interests().get(interest).unwrap().holds(), 3);
-    // The Interest's Final goes with its last holder.
+    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
         tables
-            .undeclare_write_filter(first.handle)
+            .matching_listeners()
+            .get(listener)
+            .unwrap()
+            .interest(),
+        interest,
+        "a listener reads its filter's Interest"
+    );
+    // The Interest's Final goes with its last holder; the listener goes with its filter.
+    let mut gone = Vec::new();
+    assert_eq!(
+        tables
+            .undeclare_write_filter(first.handle, |handle, removal| gone.push((handle, removal)))
             .unwrap()
             .interest_final,
         None
     );
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].0, listener);
+    assert!(matches!(&gone[0].1, Removal::Taken(row) if *row.callback() == 9));
+    assert!(tables.matching_listeners().get(listener).is_none());
     assert_eq!(
         tables
-            .undeclare_write_filter(second.handle)
+            .undeclare_write_filter(second.handle, |_, _| unreachable!("no listener on it"))
             .unwrap()
             .interest_final,
-        None
+        Some(asked)
     );
-    let unwatched = tables.undeclare_matching_listener(listener.handle).unwrap();
-    assert_eq!(unwatched.interest_final, Some(asked));
-    assert_eq!(unwatched.row.unwrap().into_callback(), 9);
     assert_eq!(tables.interests().len(), 1);
 }
 
 #[test]
-fn a_full_listener_table_refuses_before_an_interest_is_asked() {
+fn a_listener_on_no_filter_is_refused_with_its_callback() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let _ = tables.undeclare_write_filter(filter, |_, _| {});
+    let refused = tables.declare_matching_listener(filter, 5).unwrap_err();
+    assert_eq!(refused.why, RegisterError::OwnerGone);
+    assert_eq!(refused.callback, 5);
+}
+
+#[test]
+fn a_filter_undeclared_while_its_listener_is_called_leaves_it_to_the_last_call() {
+    let mut tables = LatchedTables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let listener = tables
+        .declare_matching_listener(filter, latched(4))
+        .unwrap();
+    let call = tables.begin_matching_listener(listener).unwrap();
+    let mut gone = Vec::new();
+    let _ = tables.undeclare_write_filter(filter, |handle, removal| gone.push((handle, removal)));
+    assert!(matches!(gone.as_slice(), [(handle, Removal::AfterCalls)] if *handle == listener));
+    assert!(tables.begin_matching_listener(listener).is_none());
+    assert!(ended::<CClosure<u32>>(call));
+    assert!(tables.release_matching_listener(listener).is_some());
+}
+
+#[test]
+fn a_full_listener_table_refuses_and_hands_the_callback_back() {
     let mut tables = Tables::new();
     tables.limit_to(&TableRows {
         matching_listeners: 0,
         ..rows()
     });
-    let refused = tables
-        .declare_matching_listener(Plane::Subscribers, "k", false, 4)
-        .unwrap_err();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let refused = tables.declare_matching_listener(filter, 4).unwrap_err();
     assert_eq!(refused.why, RegisterError::TableFull);
     assert_eq!(refused.callback, 4);
-    assert!(tables.interests().is_empty());
-    // No id was spent on an Interest that was never asked.
-    assert_eq!(tables.declare_token("t", KeyForm::default()).unwrap().id, 1);
+    assert_eq!(tables.interests().len(), 1, "the filter's alone");
 }
 
 #[test]
@@ -445,7 +553,7 @@ fn a_write_filter_keeps_the_peers_answer_until_their_tables_change() {
     peers.written.set(1);
     assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
     assert_eq!(peers.asked.get(), 2);
-    let _ = tables.undeclare_write_filter(filter);
+    let _ = tables.undeclare_write_filter(filter, |_, _| {});
     assert_eq!(tables.write_filter_open(filter, &peers), None);
 }
 
@@ -493,10 +601,11 @@ fn only_a_complete_queryable_counts_where_completeness_is_required() {
 #[test]
 fn a_matching_listener_is_told_each_change_once() {
     let mut tables = Tables::new();
-    let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "k", true, 3)
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap()
         .handle;
+    let listener = tables.declare_matching_listener(filter, 3).unwrap();
     let mut cursor = 0;
     assert_eq!(tables.next_matching_change(&mut cursor, &NoPeers), None);
     let sub = subscribe(&mut tables, "k", Locality::Any, 1);
@@ -786,9 +895,24 @@ fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
     assert_eq!(tables.next_entity_id(), None);
 }
 
-/// A sink that counts what it is handed.
+/// A sink that counts what it is handed, and whose calls may also run after the tables are let go.
 #[derive(Default)]
-struct Counted(usize);
+struct Counted(usize, CallLatch);
+
+impl RowCallback for Counted {
+    type Call = NonNull<CallLatch>;
+    const READS_ROW_IN_PLACE: bool = true;
+    fn begin(&self) -> Option<NonNull<CallLatch>> {
+        self.1.begin().then(|| NonNull::from(&self.1))
+    }
+    unsafe fn end(call: NonNull<CallLatch>) -> bool {
+        // SAFETY: the caller's: the row the latch lies in has not moved and is not let go of.
+        unsafe { call.as_ref() }.end()
+    }
+    fn retire(&self) -> bool {
+        self.1.retire()
+    }
+}
 
 impl crate::sink::SampleSink for Counted {
     fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {
@@ -1024,24 +1148,25 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
 
 /// A subscriber undeclared while a call of its callback runs leaves every delivery at once, the
 /// cache's answers among them, and the session-local half of a matching verdict, while its row
-/// waits in its place for the last unpin.
+/// waits in its place for its last call to end.
 #[test]
 fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     use crate::pubsub::LocalSubscribers;
     let count = |sink: &mut Counted| sink.0 += 1;
-    let mut tables = SessionTables::<Sinks>::new();
+    let mut tables = SessionTables::<Sinks, Static>::new();
     let sub = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
     assert_eq!(tables.fire_matching("a/x", true, false, count), 1);
     assert!(tables.has_local_matching("a/x"));
-    let pinned = tables.pin_subscriber(sub.handle).unwrap();
+    let call = tables.begin_subscriber(sub.handle).unwrap();
     let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
-    assert!(undeclared.row.is_none(), "handed back by the last unpin");
+    assert!(undeclared.row.is_none(), "let go of by the last call");
     assert_eq!(tables.fire_matching("a/x", true, false, count), 0);
     assert_eq!(tables.fire_matching("a/x", false, true, count), 0);
     assert!(!tables.has_local_matching("a/x"));
-    let row = tables.unpin_subscriber(pinned).unwrap();
+    assert!(ended::<Counted>(call));
+    let row = tables.release_subscriber(sub.handle).unwrap();
     assert_eq!(
         row.callback().0,
         1,
@@ -1185,9 +1310,9 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
         .declare_subscriber("c", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
     let mut peer: SubscriberPeer = SubscriberPeer::default();
-    // A CURRENT interest on a/**: one subscription answers it, then the Final.
+    // A CURRENT interest on a/b: one subscription answers it, then the Final.
     assert_eq!(
-        peer.answer_subscriber_interest(&mut tables, 7, Some("a/**"), false, true, false),
+        peer.answer_subscriber_interest(&mut tables, 7, Some("a/b"), false, true, false),
         1
     );
     let staged = peer.take_staged_sub_interest_replies();
@@ -1210,7 +1335,7 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
     assert_eq!(after, Some(sub.id + 3));
     // A FUTURE interest is told of a subscription registered after it.
     assert_eq!(
-        peer.answer_subscriber_interest(&mut tables, 8, Some("d/*"), false, false, true),
+        peer.answer_subscriber_interest(&mut tables, 8, Some("d/e"), false, false, true),
         0
     );
     let _ = peer.take_staged_sub_interest_replies();

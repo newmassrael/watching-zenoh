@@ -4286,13 +4286,16 @@ mod record_walk_tests {
         let mut records = vec![push_record("a/1"), oam_record(2), push_record("a/3")];
         #[cfg(feature = "codec-request")]
         records.push(
-            crate::request_build::RequestQueryBuilder::new(12, 0, Some("q/1"))
-                .request_qos(0x0D)
-                .build()
-                .expect("build")
-                .try_as_borrowed()
-                .expect("a view")
-                .encode_to_vec(),
+            crate::request_build::RequestQueryBuilder::new(
+                12,
+                crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+            )
+            .request_qos(0x0D)
+            .build()
+            .expect("build")
+            .try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec(),
         );
         #[cfg(feature = "codec-response")]
         {
@@ -4666,9 +4669,12 @@ mod record_walk_tests {
     #[cfg(all(feature = "codec-request", feature = "codec-response"))]
     #[test]
     fn the_lent_walk_lends_requests_and_responses_and_refuses_them_alike() {
-        let request = crate::request_build::RequestQueryBuilder::new(3, 0, Some("q/1"))
-            .build()
-            .expect("build");
+        let request = crate::request_build::RequestQueryBuilder::new(
+            3,
+            crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
         let response = crate::response_build::ResponseReplyBuilder::new(
             3,
             crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
@@ -5750,7 +5756,13 @@ mod mandatory_extension_rule_tests {
 
     #[test]
     fn a_request_defines_the_node_id_and_the_target_and_its_query_nothing() {
-        let request = || crate::request_build::build_request_query(1, 0, Some("k")).unwrap();
+        let request = || {
+            crate::request_build::build_request_query(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            )
+            .unwrap()
+        };
         every_header("request envelope", &[NODE_ID, TARGET], |header| {
             let mut request = request();
             request.extensions = Some(crate::held_list::one_entry(entry(header)));

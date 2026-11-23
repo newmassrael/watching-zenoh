@@ -5183,7 +5183,13 @@ mod tests {
                 messages: vec![
                     NetworkMessage::Declare(Box::new(build_declare_kexpr(2, key).unwrap())),
                     NetworkMessage::Declare(Box::new(build_declare_queryable(3, 2, None).unwrap())),
-                    NetworkMessage::Request(Box::new(build_request_query(1, 2, None).unwrap())),
+                    NetworkMessage::Request(Box::new(
+                        build_request_query(
+                            1,
+                            crate::wire_key::WireKey::from_parts(2, None).expect("a key"),
+                        )
+                        .unwrap(),
+                    )),
                     NetworkMessage::Interest(
                         build_interest_exact(
                             4,

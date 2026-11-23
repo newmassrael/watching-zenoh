@@ -955,7 +955,11 @@ mod tests {
         assert_eq!(message_kinds(&del), &[DownsamplingMessage::Delete]);
 
         let query = NetworkMessage::Request(Box::new(
-            build_request_query(1, 0, Some("demo/q")).expect("build query"),
+            build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build query"),
         ));
         assert_eq!(message_kinds(&query), &[DownsamplingMessage::Query]);
 

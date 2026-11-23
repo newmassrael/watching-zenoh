@@ -52,7 +52,6 @@ use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 use super::{LegSink, SubscriberRow};
 use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::FilterPlane;
-use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::BoxedMatchingSink;
@@ -468,19 +467,17 @@ impl Registry {
     pub(super) fn peers_declare(&self, plane: FilterPlane, keyexpr: &str) -> bool {
         #[cfg(test)]
         self.peer_looks.set(self.peer_looks.get() + 1);
+        // Asked from the borrowed key: a poll builds no criterion.
         match plane {
-            FilterPlane::Subscribers => {
-                let subscribers = PublisherCriterion::new(keyexpr, Locality::Remote);
-                self.faces()
-                    .any(|face| face.peer.remote_subscribers.has_matching_for(&subscribers))
-            }
+            FilterPlane::Subscribers => self
+                .faces()
+                .any(|face| face.peer.remote_subscribers.has_matching(keyexpr)),
             #[cfg(any(feature = "query", feature = "queryable"))]
-            FilterPlane::Queryables { complete_required } => {
-                let queryables =
-                    QuerierCriterion::new(keyexpr, Locality::Remote, complete_required);
-                self.faces()
-                    .any(|face| face.peer.remote_queryables.has_matching_for(&queryables))
-            }
+            FilterPlane::Queryables { complete_required } => self.faces().any(|face| {
+                face.peer
+                    .remote_queryables
+                    .answers_query(keyexpr, complete_required)
+            }),
             // A build without a querier or a queryable holds no queryable a peer declared.
             #[cfg(not(any(feature = "query", feature = "queryable")))]
             FilterPlane::Queryables { .. } => false,

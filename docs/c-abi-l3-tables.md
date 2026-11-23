@@ -88,12 +88,15 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   entity names the key expression declaration its key starts with by the handle of that row, not
   by a copy of its id and suffix: the wire form (`SessionTables::wire_of`) is the declaration's
   id and the rest of the entity's own key. Holding the declaration is a count in its row, released
-  when the entity is undeclared; the last release retracts the declaration. A filter and a
-  listener keep no key: they read the key of the Interest they hold.
-- **Interests.** A write filter and a matching listener hold one Interest each, shared by every
-  filter and listener on the same kind and key; a new holder of an existing Interest sends
-  nothing, the last release sends its Final. The Interest table's bound is the sum of the two, so
-  a filter or a listener the table has room for always finds room for its Interest.
+  when the entity is undeclared; the last release retracts the declaration. A filter keeps no
+  key: it reads the key of the Interest it holds.
+- **Interests.** A write filter holds one Interest, shared by every filter on the same kind and
+  key; a new holder of an existing Interest sends nothing, the last release sends its Final. The
+  Interest table's bound is the filters', so a filter the table has room for always finds room
+  for its Interest.
+- **Matching listeners.** A listener is declared on a write filter (its publisher's or
+  querier's), whose row owns it: it reads the filter's kind, key and Interest, and undeclaring the
+  filter undeclares every listener on it, each by the latch rule of P11 below.
 - **Ids.** One entity id space (the wire's `EntityId`, from 1, refused once spent rather than
   wrapped); key expression ids from 1, skipping any still declared; request ids skipping any
   still pending.
@@ -102,13 +105,17 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   `IdsExhausted`), which the port already maps to its `Refusal`, and hands the callback back so
   the caller drops it where it holds no lock. The order is fixed: table room, then the key, then
   the id, so a refused declaration spends no id and keeps no key.
-- **Callbacks (P11).** A row owns its callback (`F::Subscriber` and its kin: a C triple or a
-  shared Rust `Fn`, chosen once per build by `RowCallbacks`). A delivery pins the row it calls
-  (`pin_subscriber`); undeclaring a pinned row retires it: the row leaves every lookup and
-  iteration at once, keeps its slot and its generation, and is handed back by the last
-  `unpin_*`, which is where its `drop` runs, after the last call. The undeclaring caller returns
-  only once `holds_slot(handle)` of the row's table is false, so after the last call and the
-  drop, as zenoh-pico's undeclare waits for the entity's lock.
+- **Callbacks (P11).** A row owns its callback (`F::Subscriber` and its kin, each a
+  `row_callback::RowCallback`: a C closure's three values with an inline atomic latch,
+  `CClosure`, or a shared Rust closure, `ArcCallback`, chosen once per build by `RowCallbacks`).
+  A call is begun with the tables held (`begin_subscriber`), made after they are let go, and
+  ended on the latch with no lock (`RowCallback::end`). Undeclaring retires the row: it leaves
+  every lookup and iteration at once and no call of it begins; when no call runs it is handed
+  back at once, else it keeps its slot and its generation and the call that ends last lets it go
+  (`release_subscriber`), which is where its `drop` runs. The undeclaring caller returns only
+  once `holds_slot(handle)` of the row's table is false, so after the last call and the drop, as
+  zenoh-pico's undeclare waits for the entity's lock. A form whose call reads the row where it
+  lies (the C one) is held only by tables whose rows never move (lent or static).
 
 ## 4. The API
 
@@ -122,8 +129,10 @@ fn undeclare_subscriber(&mut self, h: SubscriberHandle) -> Option<Undeclared<Sub
 // ... the same pair for queryables, tokens and liveliness subscribers.
 fn declare_write_filter(&mut self, plane: Plane, key: &str, count_local: bool)
     -> Result<Watching<kind::WriteFilter>, RegisterError>;
-fn declare_matching_listener(&mut self, plane: Plane, key: &str, count_local: bool, cb: F::Matching)
-    -> Result<Watching<kind::MatchingListener>, Refused<F::Matching>>;
+fn declare_matching_listener(&mut self, filter: WriteFilterHandle, cb: F::Matching)
+    -> Result<MatchingListenerHandle, Refused<F::Matching>>;
+fn undeclare_write_filter(&mut self, h: WriteFilterHandle,
+    each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>)) -> Option<Unwatched<WriteFilterRow>>;
 fn begin_get(&mut self, face: FaceId, key: &str, deadline: u64, cb: F::Reply)
     -> Result<GetBegun, Refused<F::Reply>>;
 
@@ -142,8 +151,8 @@ fn subscribers_for<'a>(&'a self, key: &'a str, local: bool) -> impl Iterator<Ite
 fn queryables_for<'a>(&'a self, key: &'a str, local: bool) -> impl Iterator<...>;
 fn liveliness_subscribers_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
 fn tokens_for<'a>(&'a self, key: &'a str) -> impl Iterator<...>;
-fn pin_subscriber(&mut self, h: SubscriberHandle) -> Option<Pinned<kind::Subscriber>>;
-fn unpin_subscriber(&mut self, p: Pinned<kind::Subscriber>) -> Option<Subscriber<F, P>>;
+fn begin_subscriber(&self, h: SubscriberHandle) -> Option<<F::Subscriber as RowCallback>::Call>;
+fn release_subscriber(&mut self, h: SubscriberHandle) -> Option<Subscriber<F, P>>;
 fn holds_slot(&self, h: Handle<K>) -> bool; // on each table: the undeclare's wait
 ```
 

@@ -23766,8 +23766,11 @@ mod tests {
         let kept = told.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
         sink_hosting.reset();
-        let request = wz_session_core::request_build::build_request_query(77, 0, Some("zenoh/g"))
-            .expect("request");
+        let request = wz_session_core::request_build::build_request_query(
+            77,
+            wz_session_core::wire_key::WireKey::literal("zenoh/g").expect("a literal key"),
+        )
+        .expect("request");
         fwd.local_get(&request);
         assert_eq!(sink_hosting.frame_count(), 1);
         let forwarded = forwarded_request(&sink_hosting.frame_bytes(0));
@@ -26591,8 +26594,11 @@ mod tests {
         );
         let asking = Arc::clone(&fwd);
         let asked = std::thread::spawn(move || {
-            let request = wz_session_core::request_build::build_request_query(1, 0, Some("demo/q"))
-                .expect("build request");
+            let request = wz_session_core::request_build::build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build request");
             asking.local_get(&request);
         });
         assert!(
@@ -26638,9 +26644,12 @@ mod tests {
             "demo/outer",
             false,
             Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
-                let request =
-                    wz_session_core::request_build::build_request_query(2, 0, Some("demo/inner"))
-                        .expect("build request");
+                let request = wz_session_core::request_build::build_request_query(
+                    2,
+                    wz_session_core::wire_key::WireKey::literal("demo/inner")
+                        .expect("a literal key"),
+                )
+                .expect("build request");
                 asking.local_get(&request);
                 let undeclared = asking.unhost_queryable(inner);
                 let _ = outer_done.lock().unwrap().send(undeclared);
@@ -26650,9 +26659,11 @@ mod tests {
         let subscribers = fwd.on_tables().tables.local_subscribers.len();
         let routing = Arc::clone(&fwd);
         let routed = std::thread::spawn(move || {
-            let request =
-                wz_session_core::request_build::build_request_query(1, 0, Some("demo/outer"))
-                    .expect("build request");
+            let request = wz_session_core::request_build::build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/outer").expect("a literal key"),
+            )
+            .expect("build request");
             forward_one(
                 &routing,
                 FaceId(0),
@@ -26710,9 +26721,11 @@ mod tests {
             .map(|(rid, key)| {
                 let asking = Arc::clone(&fwd);
                 std::thread::spawn(move || {
-                    let request =
-                        wz_session_core::request_build::build_request_query(rid, 0, Some(key))
-                            .expect("build request");
+                    let request = wz_session_core::request_build::build_request_query(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(key).expect("a literal key"),
+                    )
+                    .expect("build request");
                     asking.local_get(&request);
                 })
             })
@@ -29598,8 +29611,11 @@ mod tests {
     /// ext_nodeid — the inbound neighbour is the querier), rid `rid`.
     fn request_best(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
         NetworkMessage::Request(Box::new(
-            wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
-                .expect("build request"),
+            wz_session_core::request_build::build_request_query(
+                rid,
+                wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+            )
+            .expect("build request"),
         ))
     }
 
@@ -29612,8 +29628,7 @@ mod tests {
         NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query_with_target(
                 rid,
-                0,
-                Some(keyexpr),
+                wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
                 target,
             )
             .expect("build request"),
@@ -30665,8 +30680,11 @@ mod tests {
         sink_a.reset();
         // An aliased wireexpr (mapping id 9, no suffix) with no prior DeclKexpr for 9.
         let request = NetworkMessage::Request(Box::new(
-            wz_session_core::request_build::build_request_query(80, 9, None)
-                .expect("build request"),
+            wz_session_core::request_build::build_request_query(
+                80,
+                wz_session_core::wire_key::WireKey::from_parts(9, None).expect("a key"),
+            )
+            .expect("build request"),
         ));
         forward_one(&fwd, FaceId(0), request);
         assert_eq!(
@@ -30704,8 +30722,11 @@ mod tests {
         sink_client.reset();
         // A Request whose ext_nodeid psid (99) is NOT mapped on A's link -> the
         // source resolves to None -> the within-tier peer leg is dropped.
-        let mut req = wz_session_core::request_build::build_request_query(90, 0, Some("demo/q"))
-            .expect("build request");
+        let mut req = wz_session_core::request_build::build_request_query(
+            90,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+        )
+        .expect("build request");
         set_request_source(&mut req, 99).expect("within the bound");
         forward_one(&fwd, FaceId(0), NetworkMessage::Request(Box::new(req)));
         assert_eq!(
@@ -30751,8 +30772,11 @@ mod tests {
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
         sink_queryable.reset();
 
-        let request = wz_session_core::request_build::build_request_query(77, 0, Some("demo/q"))
-            .expect("build request");
+        let request = wz_session_core::request_build::build_request_query(
+            77,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+        )
+        .expect("build request");
         fwd.local_get(&request);
 
         assert_eq!(sink_queryable.frame_count(), 1, "the queryable is asked");
@@ -30882,8 +30906,11 @@ mod tests {
         let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = heard.clone();
         fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
-        let request = wz_session_core::request_build::build_request_query(5, 0, Some("demo/none"))
-            .expect("build request");
+        let request = wz_session_core::request_build::build_request_query(
+            5,
+            wz_session_core::wire_key::WireKey::literal("demo/none").expect("a literal key"),
+        )
+        .expect("build request");
         fwd.local_get(&request);
         assert_eq!(
             *heard.lock().unwrap(),
@@ -31224,11 +31251,13 @@ mod tests {
         sink_a.reset();
         sink_c.reset();
 
-        let request =
-            wz_session_core::request_build::RequestQueryBuilder::new(99, 0, Some("demo/q"))
-                .request_qos(asked.raw)
-                .build()
-                .expect("build request");
+        let request = wz_session_core::request_build::RequestQueryBuilder::new(
+            99,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+        )
+        .request_qos(asked.raw)
+        .build()
+        .expect("build request");
         forward_one(&fwd, FaceId(0), NetworkMessage::Request(Box::new(request)));
         let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
 
@@ -31607,8 +31636,7 @@ mod tests {
         let request = NetworkMessage::Request(Box::new(
             wz_session_core::request_build::build_request_query_with_timeout_ms(
                 90,
-                0,
-                Some("demo/q"),
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
                 5,
             )
             .expect("build request"),
@@ -32746,8 +32774,11 @@ mod tests {
             )),
         );
         sink_h.reset();
-        let request = wz_session_core::request_build::build_request_query(42, 9, None)
-            .expect("aliased query request");
+        let request = wz_session_core::request_build::build_request_query(
+            42,
+            wz_session_core::wire_key::WireKey::from_parts(9, None).expect("a key"),
+        )
+        .expect("aliased query request");
         forward_one(&fwd, FaceId(1), NetworkMessage::Request(Box::new(request)));
         assert_eq!(
             recorded_request_keyexprs(&sink_h),
@@ -33740,9 +33771,11 @@ mod tests {
             rid: wz_session_core::wire_id::RequestId,
             conf_flags: u8,
         ) -> NetworkMessage {
-            let mut request =
-                wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
-                    .expect("build request");
+            let mut request = wz_session_core::request_build::build_request_query(
+                rid,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build request");
             let present =
                 wz_session_core::held_list::edit_chain(&mut request.extensions, |chain| {
                     set_ts_stack(chain, Some(&started(conf_flags)))

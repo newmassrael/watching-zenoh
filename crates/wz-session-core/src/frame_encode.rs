@@ -1828,7 +1828,11 @@ mod tests {
         }
         #[cfg(feature = "codec-request")]
         {
-            let request = build_request_query(42, 7, None).unwrap();
+            let request = build_request_query(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            )
+            .unwrap();
             assert_eq!(
                 encoded_len(&request_body(&request)),
                 wz_codecs::request::RequestWire::measure(&request).len()
@@ -2201,11 +2205,22 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
-        let request = build_request_query(42, 7, None).unwrap();
+        let request = build_request_query(
+            42,
+            crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+        )
+        .unwrap();
         let request_bytes = request.wire();
 
-        let wire_reliable =
-            encode_frame_with_request(0, build_request_query(42, 7, None).unwrap(), true);
+        let wire_reliable = encode_frame_with_request(
+            0,
+            build_request_query(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            )
+            .unwrap(),
+            true,
+        );
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -2218,8 +2233,15 @@ mod tests {
             "Frame body tail must be Request.wire() bytes verbatim",
         );
 
-        let wire_best_effort =
-            encode_frame_with_request(0, build_request_query(42, 7, None).unwrap(), false);
+        let wire_best_effort = encode_frame_with_request(
+            0,
+            build_request_query(
+                42,
+                crate::wire_key::WireKey::from_parts(7, None).expect("a key"),
+            )
+            .unwrap(),
+            false,
+        );
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
