@@ -354,7 +354,10 @@ impl SampleView for PlainSample<'_> {
         self.keyexpr
     }
     fn payload(&self) -> &[u8] {
-        &self.frame.as_slice()[self.payload_range()]
+        self.frame
+            .as_slice()
+            .get(self.payload_range())
+            .unwrap_or_default()
     }
     fn kind(&self) -> SampleKind {
         SampleKind::Put
@@ -398,7 +401,7 @@ impl SampleView for PlainSample<'_> {
             payload: self.payload_shared_owned()?,
             single_run_len: self
                 .single_run
-                .then(|| (self.range.1 - self.range.0) as usize),
+                .then(|| self.range.1.saturating_sub(self.range.0) as usize),
         })
     }
 }

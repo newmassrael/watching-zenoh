@@ -393,8 +393,6 @@ pub mod registry_error;
 // SampleSink` rewrite landed (R311gb-2b); statechart injection is NOT a
 // `SampleSink` but a port-threading inbound adapter (see `switchboard`,
 // R311gh).
-// Totality debt TD-124 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod sink;
 
 // R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
