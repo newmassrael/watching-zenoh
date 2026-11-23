@@ -534,6 +534,24 @@ impl RawAddr {
     }
 }
 
+/// Bind or connect `fd` to `at`: `call` is `libc::bind` or `libc::connect`, handed `at` in the
+/// kernel's form. The `errno` when the call fails. The one way a socket here is given an address,
+/// so each opener calls it and carries no conversion of its own.
+#[inline(never)]
+pub(crate) fn call_at(
+    fd: c_int,
+    at: SocketAddr,
+    call: unsafe extern "C" fn(c_int, *const libc::sockaddr, libc::socklen_t) -> c_int,
+) -> Result<(), c_int> {
+    let raw = RawAddr::of(at);
+    // SAFETY: `raw` is a live socket address of the length passed, which `call` only reads.
+    if unsafe { call(fd, raw.as_ptr(), raw.size()) } == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
 /// The address a `getsockname` or `getpeername` of `fd` reports: the `errno` when the call fails,
 /// `EAFNOSUPPORT` when it names a family other than the two.
 #[inline(never)]
@@ -575,12 +593,7 @@ impl PosixUdpSocket {
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
             set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).map_err(PosixNetError::ReusePort)?;
         }
-        let local = RawAddr::of(at);
-        // SAFETY: `local` is a live socket address of the length passed.
-        let rc = unsafe { libc::bind(fd, local.as_ptr(), local.size()) };
-        if rc != 0 {
-            return Err(PosixNetError::Bind(errno()));
-        }
+        call_at(fd, at, libc::bind).map_err(PosixNetError::Bind)?;
         if at.port() == 0 {
             // The locators the link reports and the source every reply comes from name this
             // port; keeping the 0 that was asked for would render `udp/<ip>:0` for a link that
