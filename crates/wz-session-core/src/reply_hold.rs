@@ -164,7 +164,7 @@ pub struct HeldReply<O, P: Storage> {
     bytes: BoundedVec<u8, HOLD_ROW_BYTES, P::Scratch>,
 }
 
-impl<O: Copy, P: Storage> HeldReply<O, P> {
+impl<O, P: Storage> HeldReply<O, P> {
     /// An empty row of `owner`'s, filled by [`Self::fill`].
     fn empty(owner: O) -> Self {
         Self {
