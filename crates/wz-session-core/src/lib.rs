@@ -508,8 +508,6 @@ pub mod epoch;
 // These three modules carry their documentation in their own `//!` and none here: rustdoc
 // resolves the links of a module's inner documentation in the module's PARENT when the
 // declaration also carries outer documentation, and every link in them is written for the module.
-// Totality debt TD-040 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod event_ring;
 
 // The Hybrid Logical Clock arithmetic over the `epoch` port. The word is 64 bits, so the module
