@@ -272,9 +272,10 @@ def stdlib_forms(stdlib: str) -> list[str]:
     return list(FORMS) if stdlib == "std" else ["single"]
 
 
-def nostd_features(features: list[str], table: dict[str, list[str]]) -> list[str]:
+def nostd_features(features: list[str], table: dict[str, list[str]], host: str = NOSTD_FEATURE) -> list[str]:
     """The feature list of the library without `std` for a profile's list on the cooperative
-    engine: `NOSTD_FEATURE` in the place of `engine-coop`, `std` left out, the rest as it is.
+    engine: `host` in the place of `engine-coop` (`NOSTD_FEATURE` for a Windows package; the run of
+    zenoh-pico's programs on Linux names `os-posix`), `std` left out, the rest as it is.
     `table` is the crate's feature table, read for what each feature turns on. A list on the tokio
     engine has no such form, and a feature that still turns `std` on would build the library with
     it after all, which the crate refuses (`src/lib.rs`): both are refused here by name, before a
@@ -282,7 +283,7 @@ def nostd_features(features: list[str], table: dict[str, list[str]]) -> list[str
     if "engine-coop" not in features:
         raise Refusal("the library without `std` is a form of the cooperative engine, and the "
                       "profile's list names no `engine-coop`")
-    out = [NOSTD_FEATURE] + [f for f in features if f not in ("engine-coop", "std")]
+    out = [host] + [f for f in features if f not in ("engine-coop", "std")]
     try:
         with_std = [f for f in out if "std" in wz_config.enabled_features(table, [f])]
     except KeyError as err:
@@ -1524,6 +1525,9 @@ def selftest() -> int:
              "timed": ["clock-source"]}
     expect("the list without `std` names os-windows for engine-coop, keeps the rest in order, drops std",
            nostd_features(["engine-coop", "std", "peer", "link-udp"], table) == ["os-windows", "peer", "link-udp"])
+    expect("the list without `std` names the host form it is asked for",
+           nostd_features(["engine-coop", "std", "peer"], {**table, "os-posix": ["dep:x"]}, "os-posix")
+           == ["os-posix", "peer"])
     for features, word in ((["engine-tokio", "std", "peer"], "engine-coop"),
                            (["engine-coop", "std", "timed"], "timed"),
                            (["engine-coop", "absent"], "absent")):

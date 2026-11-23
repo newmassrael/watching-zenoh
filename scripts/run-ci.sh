@@ -3590,6 +3590,11 @@ layer_c0_test_discipline() {
     # in one run: the ceiling gate's cells and the symbol diff, held here by its selftest.
     _runci_leg kit_size_delta.selftest -- python3 scripts/lib/kit_size_delta.py --selftest
     _runci_leg pico_windows_package.selftest -- python3 scripts/lib/pico_windows_package.py --selftest
+    # The runner of zenoh-pico's own programs on a built library (the Platform workflow's
+    # `pico-upstream-windows`, scripts/pico-upstream-programs.sh on Linux): its program table held to
+    # the vendored tree, its scenarios to each other, and its readers and verdict on synthetic input.
+    # A text read, no build; the runs themselves need a library, a router and a compiler.
+    _runci_leg pico_upstream_programs.selftest -- python3 scripts/lib/pico_upstream_programs.py --selftest
     # R311y879 — WHICH READER each narrow zint field gets, pinned against the
     # codec UPSTREAM reads it with. The three censuses above ask whether the
     # decode covers the wire and whether a consumer reaches it; this asks
