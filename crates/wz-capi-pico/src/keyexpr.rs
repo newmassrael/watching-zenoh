@@ -1706,78 +1706,89 @@ mod key_text_tests {
     }
 }
 
-// The cooperative engine, which keeps a key arena: a session that listens on the loopback and
-// dials nothing. A build that can open over the program's transport reaches its engine through the
-// port, which an engine opened here on the host's own links is too; one that opens over the host's
-// links alone names the engine's own type, which these sessions are not built as.
-#[cfg(all(
-    test,
-    feature = "engine-coop",
-    feature = "peer",
-    feature = "app-transport"
-))]
+// The cooperative engine, which keeps a key arena: a session the build opens as `z_open` opens it,
+// listening on the loopback, its engine the build's own `Engine`. The room a test needs is made by
+// filling the session's arena, as a program's own keys fill it, not by a smaller arena.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
 mod arena_key_tests {
     use super::*;
-    use wz_capi_port::SessionDrive;
-    use wz_session_core::key_arena::block_bytes;
-    use wz_session_core::limit_binding::Quota;
-    use wz_session_core::limits::SessionLimits;
-    use wz_session_core::policy::{SessionPolicy, SnResolution};
-    use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
-    use wz_session_core::session_timeouts::SessionTimeouts;
+    use crate::session::{
+        listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
+        z_session_loan_mut, z_session_move,
+    };
+    use wz_capi_port::SessionKeys;
 
-    /// The engine of a session that listens on a port of the loopback under `limits`.
-    fn listening(
-        limits: SessionLimits,
-    ) -> Arc<wz_capi_coop::CoopEngine<crate::coop_host::Links, crate::coop_host::Clock>> {
-        let tx_queue = TxQueueConf::pico_of_snapshot(&SessionPolicy::defaults(), &limits);
-        let config = wz_capi_coop::CoopConfig {
-            endpoints: Vec::new(),
-            whatami: WhatAmI::Peer,
-            zid: Some(vec![0xc1; 4]),
-            batch_size: 1024,
-            lease_ms: 10_000,
-            keep_alive: KeepAliveConf::PICO,
-            sn_resolution: SnResolution::default(),
-            link_rx: LinkRxConf::default(),
-            tx_queue,
-            timeouts: SessionTimeouts::spec_defaults(),
-            open_timeout_ms: 1_000,
-            redial_ms: None,
-            idle_wait_ms: 100,
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
-            max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
-            groups: Vec::new(),
-            clock_moves: None,
-            limits,
-        };
-        wz_capi_coop::CoopEngine::open(
-            crate::coop_host::links().waited_by_owner(),
-            crate::coop_host::clock(),
-            crate::coop_host::entropy(),
-            config,
-        )
-        .expect("a session that listens opens")
+    /// A session that listens on a port of the loopback, opened as a program opens one, and the
+    /// engine it runs on.
+    fn listening() -> (z_owned_session_t, Arc<Engine>) {
+        let session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        (session, engine)
     }
 
-    /// The build's limits with the key arena lowered to `bytes`.
-    fn with_key_arena(bytes: usize) -> SessionLimits {
-        let mut limits = SessionLimits::defaults();
-        limits
-            .select_key_arena_bytes(bytes)
-            .expect("this build lets a test lower the key arena");
-        limits
+    /// Close and let go of a session [`listening`] opened.
+    fn close(mut session: z_owned_session_t) {
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// The session's key arena, which the cooperative engine always keeps.
+    fn keys(engine: &Arc<Engine>) -> &dyn SessionKeys {
+        engine
+            .key_arena()
+            .expect("the cooperative engine keeps a key arena")
+    }
+
+    /// Keys of `text`, each a block of its own, held until the arena has no room for one more.
+    fn fill_with(engine: &Arc<Engine>, text: &str) -> Vec<HeldKey> {
+        let mut held = Vec::new();
+        loop {
+            match keys(engine).hold_key(text) {
+                Ok(key) => held.push(key),
+                Err(why) => {
+                    assert_eq!(
+                        why,
+                        KeyNotHeld::NoRoom,
+                        "only the arena's room ends the fill"
+                    );
+                    return held;
+                }
+            }
+        }
+    }
+
+    /// Fill the key arena with keys of `len` bytes, and what is left past them with keys of one
+    /// byte, the shortest block, until no key at all has room; then give back the `room` keys of
+    /// `len` bytes held last. The arena is left with the room of `room` such keys and none for any
+    /// other: a key no longer than `len` takes one of those blocks or is refused.
+    fn fill_leaving(engine: &Arc<Engine>, len: usize, room: usize) -> Vec<HeldKey> {
+        let mut held = fill_with(engine, &"f".repeat(len));
+        assert!(
+            held.len() >= room,
+            "the arena holds {room} keys of {len} bytes"
+        );
+        let shortest = fill_with(engine, "f");
+        for key in held.split_off(held.len() - room) {
+            keys(engine).release_key(key);
+        }
+        held.extend(shortest);
+        held
+    }
+
+    /// Give back every key [`fill_leaving`] held.
+    fn give_back(engine: &Arc<Engine>, held: Vec<HeldKey>) {
+        for key in held {
+            keys(engine).release_key(key);
+        }
     }
 
     /// Whether the session's key arena has room for one more key of `len` bytes, asked and let go.
     fn room_for(engine: &Arc<Engine>, len: usize) -> bool {
-        let keys = engine
-            .key_arena()
-            .expect("the cooperative engine keeps a key arena");
-        match keys.hold_key(&"k".repeat(len)) {
+        match keys(engine).hold_key(&"k".repeat(len)) {
             Ok(key) => {
-                keys.release_key(key);
+                keys(engine).release_key(key);
                 true
             }
             Err(_) => false,
@@ -1785,12 +1796,12 @@ mod arena_key_tests {
     }
 
     /// A key the session declares whole is kept in the block of the declaration's own row: one
-    /// block between them, so an arena of two blocks has room for one key more. Its share reads
+    /// block between them, so with room for two such keys one is left after it. Its share reads
     /// it after the first holder is gone.
     #[test]
     fn a_whole_declaration_and_its_key_take_one_block() {
-        let coop = listening(with_key_arena(2 * block_bytes(10).expect("short")));
-        let engine: Arc<Engine> = coop.clone();
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 2);
         let key = DeclaredKeyexpr::declare(&engine, "demo/pk/a1", None).expect("declared");
         assert!(matches!(key.literal, KeyText::Session(_)));
         assert_eq!(key.literal(), "demo/pk/a1");
@@ -1798,10 +1809,12 @@ mod arena_key_tests {
         let shared = key.share();
         drop(key);
         assert_eq!(shared.literal(), "demo/pk/a1", "the share reads the key");
-        let held = DeclaredKeyexpr::declare(&engine, "demo/pk/b2", None).expect("the second block");
+        let second = DeclaredKeyexpr::declare(&engine, "demo/pk/b2", None).expect("the last block");
         assert!(!room_for(&engine, 10), "the two blocks are taken");
-        drop((shared, held));
+        drop((shared, second));
         assert!(room_for(&engine, 10), "and given back with their holders");
+        give_back(&engine, held);
+        close(session);
     }
 
     /// A key declared by its prefix is kept before anything is declared: with room for the key
@@ -1809,22 +1822,24 @@ mod arena_key_tests {
     /// key's block goes back.
     #[test]
     fn a_prefix_declaration_the_arena_cannot_hold_leaves_nothing() {
-        let coop = listening(with_key_arena(block_bytes(10).expect("short")));
-        let engine: Arc<Engine> = coop.clone();
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 1);
         assert_eq!(
             DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/pk/**", None).err(),
             Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         assert!(engine.keyexpr_declarations().is_empty(), "nothing declared");
         assert!(room_for(&engine, 10), "the key's block went back");
+        give_back(&engine, held);
+        close(session);
     }
 
-    /// Keys declared and let go of, many times past what the arena holds at once, each take the
+    /// Keys declared and let go of, many times past the room the arena has left, each take the
     /// block the one before gave back.
     #[test]
     fn declarations_past_the_arena_take_the_blocks_given_back() {
-        let coop = listening(with_key_arena(block_bytes(10).expect("short")));
-        let engine: Arc<Engine> = coop.clone();
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 1);
         for round in 0..10 {
             let text = format!("demo/pk/c{round}");
             let key = DeclaredKeyexpr::declare(&engine, &text, None).expect("the block given back");
@@ -1832,27 +1847,28 @@ mod arena_key_tests {
         }
         assert!(engine.keyexpr_declarations().is_empty());
         assert!(room_for(&engine, 10));
+        give_back(&engine, held);
+        close(session);
     }
 
     /// A key past the session's `MAX_KEYEXPR_BYTES` is a value it cannot take; after the close a
     /// key is a copy of its own, and one held from before still reads.
     #[test]
     fn a_key_too_long_is_invalid_and_a_closed_sessions_key_is_a_copy() {
-        let mut limits = SessionLimits::defaults();
-        limits
-            .select_max_keyexpr_bytes(Quota::at_most(8))
-            .expect("this build lets a test lower the key bound");
-        let coop = listening(limits);
-        let engine: Arc<Engine> = coop.clone();
+        let (mut session, engine) = listening();
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
         assert_eq!(
-            KeyText::of_session(&engine, "demo/too/long").err(),
+            KeyText::of_session(&engine, &"k".repeat(longest + 1)).err(),
             Some(Z_EINVAL)
         );
         let held = KeyText::of_session(&engine, "demo/a").expect("a short key");
         assert!(matches!(held, KeyText::Session(_)));
-        SessionDrive::close(&*coop);
+        // SAFETY: the session is live and owned here.
+        let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(closed, Z_OK);
         let copy = KeyText::of_session(&engine, "demo/b").expect("a copy of its own");
         assert!(matches!(copy, KeyText::Owned(_)));
         assert_eq!(held.share().as_str(), "demo/a");
+        close(session);
     }
 }
