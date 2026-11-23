@@ -1395,17 +1395,18 @@ impl Arena {
         if rows > N {
             return Err(LendRefused::OverCeiling { rows, ceiling: N });
         }
-        // A table counts its rows in 32 bits (`LentSeq`).
+        let left = self.bytes - self.lent;
+        let span = match Self::table_bytes::<T>(rows) {
+            Some(span) if span <= left => span,
+            asked => return Err(LendRefused::Exhausted { asked, left }),
+        };
+        // A table counts its rows in 32 bits (`LentSeq`): only rows of no bytes, or an arena
+        // past 4 GiB, reach a count past them.
         let Ok(room) = u32::try_from(rows) else {
             return Err(LendRefused::OverCeiling {
                 rows,
                 ceiling: u32::MAX as usize,
             });
-        };
-        let left = self.bytes - self.lent;
-        let span = match Self::table_bytes::<T>(rows) {
-            Some(span) if span <= left => span,
-            asked => return Err(LendRefused::Exhausted { asked, left }),
         };
         // SAFETY: the span starts `lent` bytes into the arena, a multiple of `ARENA_ALIGN` from a
         // base aligned to it, so it is aligned for `T` (asserted above); it lies inside the
