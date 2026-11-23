@@ -765,8 +765,6 @@ pub mod session_init_params;
 // LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
 // wz-runtime-tokio because they are tokio-specific.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-067 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod link;
 
 /// What a session reports of the peers it holds: a snapshot of each established face and its
