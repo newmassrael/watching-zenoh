@@ -563,9 +563,12 @@ impl<const BODY: usize, const SESSIONS: usize, O: InBand> ObserverSinks
     type Subscriber = NoSink;
     type SubscriberId = wz_session_core::pubsub::SubscriptionId;
     type QueryableId = wz_session_core::query::QueryableId;
+    type LivelinessSubscriberId = u64;
     type Delivery = ();
-    type Tables<P: Storage> = RegistryTables<Self::Subscriber, Self::Queryable, P>;
+    type Tables<P: Storage> =
+        RegistryTables<Self::Subscriber, Self::Queryable, Self::LivelinessSubscriber, P>;
     type Queryable = AdminQuerySink<BODY, SESSIONS, O>;
+    type LivelinessSubscriber = NoSink;
     type Declared = NoSink;
     type Undeclared = NoSink;
 }

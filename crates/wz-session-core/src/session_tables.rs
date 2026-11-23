@@ -378,6 +378,9 @@ pub struct LivelinessSubscriberRow<Key, Cb> {
     id: EntityId,
     key: EntityKey<Key>,
     history: bool,
+    /// Set by the responder's `Declare(DeclFinal)` that ends its history. A cell, so the mark is
+    /// set through a shared row, which a row whose calls read it in place is only ever reached by.
+    history_complete: Cell<bool>,
     callback: Cb,
 }
 
@@ -395,6 +398,12 @@ impl<Key, Cb> LivelinessSubscriberRow<Key, Cb> {
     /// Whether it asked for the tokens alive when it was declared.
     pub fn history(&self) -> bool {
         self.history
+    }
+
+    /// Whether it asked for the tokens alive when it was declared and the responder has ended
+    /// that history.
+    pub fn history_complete(&self) -> bool {
+        self.history && self.history_complete.get()
     }
 
     /// Its callback.
@@ -1346,6 +1355,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 id,
                 key,
                 history,
+                history_complete: Cell::new(false),
                 callback,
             },
             LivelinessSubscriberRow::into_callback,
@@ -1919,6 +1929,22 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         (P::own_space(&self.keyexprs), &mut self.queryables)
     }
 
+    /// The liveliness subscribers to tell, with the key expressions the session declared beside
+    /// them as its own id space: a peer's token names its key through the one while the other is
+    /// told, so the two are borrowed apart.
+    #[cfg(feature = "storage-profile")]
+    pub fn liveliness_mut(
+        &mut self,
+    ) -> (
+        crate::wireexpr_resolve::OwnSpace<'_>,
+        &mut LivelinessSubscribers<F, P>,
+    ) {
+        (
+            P::own_space(&self.keyexprs),
+            &mut self.liveliness_subscribers,
+        )
+    }
+
     /// The liveliness tokens.
     pub fn tokens(&self) -> &Tokens<P> {
         &self.tokens
@@ -2282,6 +2308,82 @@ impl<Key: KeyBacking, Cb: RowCallback, P: Storage> crate::query::LocalQueryables
         deliver: D,
     ) -> usize {
         fire_queryables(self, keyexpr, keyexpr_facts, is_remote, target, deliver)
+    }
+}
+
+/// As the subscribers' rows: a row whose calls read it where it lies is handed shared, one only
+/// the tables' holder reaches exclusively. A row is found by its entity id, which is its
+/// Interest's.
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage>
+    crate::declare::liveliness_subscriber::LocalLivelinessSubscribers
+    for SlotMap<
+        kind::LivelinessSubscriber,
+        LivelinessSubscriberRow<Key, Cb>,
+        { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
+        P,
+    >
+{
+    type Sink = Cb;
+    type RowId = LivelinessSubscriberHandle;
+
+    fn fire_matching<D: FnMut(LivelinessSubscriberHandle, RowAccess<'_, Cb>)>(
+        &mut self,
+        keyexpr: &str,
+        historical: bool,
+        mut deliver: D,
+    ) -> usize {
+        let reaches = |row: &LivelinessSubscriberRow<Key, Cb>| {
+            (!historical || row.history) && keyexpr_intersects(text(&row.key.key), keyexpr)
+        };
+        let mut fired: usize = 0;
+        if Cb::READS_ROW_IN_PLACE {
+            for (_, handle, row) in self.live_handles() {
+                if reaches(row) {
+                    deliver(handle, RowAccess::InPlace(&row.callback));
+                    fired = fired.saturating_add(1);
+                }
+            }
+        } else {
+            for (_, handle, row) in self.live_handles_mut() {
+                if reaches(&*row) {
+                    deliver(handle, RowAccess::Held(&mut row.callback));
+                    fired = fired.saturating_add(1);
+                }
+            }
+        }
+        fired
+    }
+
+    fn pattern_of(&self, interest_id: u64) -> Option<&str> {
+        self.iter()
+            .find(|(_, row)| u64::from(row.id) == interest_id)
+            .map(|(_, row)| text(&row.key.key))
+    }
+
+    fn row_of(
+        &mut self,
+        interest_id: u64,
+    ) -> Option<(LivelinessSubscriberHandle, RowAccess<'_, Cb>)> {
+        let handle = self
+            .iter()
+            .find(|(_, row)| u64::from(row.id) == interest_id)
+            .map(|(handle, _)| handle)?;
+        if Cb::READS_ROW_IN_PLACE {
+            self.get(handle)
+                .map(|row| (handle, RowAccess::InPlace(&row.callback)))
+        } else {
+            self.get_mut(handle)
+                .map(|row| (handle, RowAccess::Held(&mut row.callback)))
+        }
+    }
+
+    fn mark_history_complete(&mut self, interest_id: u64) {
+        if let Some((_, row)) = self
+            .iter()
+            .find(|(_, row)| u64::from(row.id) == interest_id)
+        {
+            row.history_complete.set(true);
+        }
     }
 }
 
