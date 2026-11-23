@@ -378,8 +378,9 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
         !observer.read_app(|app_half| app_half.subscribers.shm_negotiated()),
         "precondition: this registry has not been stamped as negotiated"
     );
-    observer.with_app(|app_half| {
+    observer.with_parts(|app_half, face_half| {
         app_half.subscribers.dispatch(
+            &mut *face_half.subscribers,
             &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
             wz_session_core::reliability::Reliability::Reliable,
         )
@@ -403,8 +404,9 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
     // ── Arm B: same everything, negotiation ON ────────────────────────────
     // Proves Arm A measured the gate and not a broken fixture.
     observer.with_app(|app_half| app_half.subscribers.set_shm_negotiated(true));
-    observer.with_app(|app_half| {
+    observer.with_parts(|app_half, face_half| {
         app_half.subscribers.dispatch(
+            &mut *face_half.subscribers,
             &wz_session_core::network_message::NetworkMessage::Push(Box::new(build_push())),
             wz_session_core::reliability::Reliability::Reliable,
         )
