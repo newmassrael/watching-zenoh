@@ -208,6 +208,13 @@ pub const WZ_EXT_ERR_PAYLOAD_ABSENT: ZResult = -23;
 /// was.
 pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
 
+/// A scout (`z_scout`, or the lookup of a `z_open` whose config names no locator) was asked on a
+/// thread whose own scouting window is still delivering: from inside a scout's callback. The
+/// cooperative engine has one table of Hellos, which that window holds until its callbacks return,
+/// so the scout is refused at once rather than wait on itself. wz's own code, for the reason
+/// [`WZ_EXT_ERR_POLICY_OFF`] is.
+pub const WZ_EXT_ERR_SCOUT_REENTERED: ZResult = -25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +257,7 @@ mod tests {
             WZ_EXT_ERR_PAYLOAD_RANGE,
             WZ_EXT_ERR_PAYLOAD_ABSENT,
             WZ_EXT_ERR_PAYLOAD_WIRE,
+            WZ_EXT_ERR_SCOUT_REENTERED,
         ];
         for (at, code) in wz.iter().enumerate() {
             assert!(*code < 0, "{code} must read as a failure");

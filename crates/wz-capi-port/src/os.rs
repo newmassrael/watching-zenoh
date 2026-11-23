@@ -33,6 +33,8 @@
 //! void  wz_os_mutex_free(void *mutex);
 //! void *wz_os_condvar_new(void);               /* NULL when none is left */
 //! void  wz_os_condvar_wait(void *condvar, void *mutex); /* mutex held; held again on return */
+//! int   wz_os_condvar_wait_ms(void *condvar, void *mutex, uint32_t ms); /* as above, at most ms;
+//!                                                 0 when notified, otherwise the time ran out */
 //! void  wz_os_condvar_notify_one(void *condvar);
 //! void  wz_os_condvar_notify_all(void *condvar);
 //! void  wz_os_condvar_free(void *condvar);
@@ -184,6 +186,21 @@ mod host {
             self.0.wait(guard).unwrap_or_else(PoisonError::into_inner)
         }
 
+        /// [`Self::wait`] for at most `ms` milliseconds: the guard, and whether the time ran out
+        /// with no notification. A wake may come early, so the caller waits in a loop on its own
+        /// condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let (guard, waited) = self
+                .0
+                .wait_timeout(guard, std::time::Duration::from_millis(ms))
+                .unwrap_or_else(PoisonError::into_inner);
+            (guard, waited.timed_out())
+        }
+
         /// Wake one waiting thread, if one waits.
         pub fn notify_one(&self) {
             self.0.notify_one();
@@ -214,6 +231,7 @@ mod kernel {
         fn wz_os_mutex_free(mutex: *mut c_void);
         fn wz_os_condvar_new() -> *mut c_void;
         fn wz_os_condvar_wait(condvar: *mut c_void, mutex: *mut c_void);
+        fn wz_os_condvar_wait_ms(condvar: *mut c_void, mutex: *mut c_void, ms: u32) -> c_int;
         fn wz_os_condvar_notify_one(condvar: *mut c_void);
         fn wz_os_condvar_notify_all(condvar: *mut c_void);
         fn wz_os_condvar_free(condvar: *mut c_void);
@@ -441,6 +459,21 @@ mod kernel {
             // sleeps and holds again before the call returns, so the guard still holds it after.
             unsafe { wz_os_condvar_wait(self.raw.as_ptr(), guard.mutex.raw.as_ptr()) };
             guard
+        }
+
+        /// [`Self::wait`] for at most `ms` milliseconds (a longer wait is one of `u32::MAX`): the
+        /// guard, and whether the time ran out with no notification. A wake may come early, so the
+        /// caller waits in a loop on its own condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let ms = u32::try_from(ms).unwrap_or(u32::MAX);
+            // SAFETY: as for `wait`.
+            let woken =
+                unsafe { wz_os_condvar_wait_ms(self.raw.as_ptr(), guard.mutex.raw.as_ptr(), ms) };
+            (guard, woken != 0)
         }
 
         /// Wake one waiting thread, if one waits.
@@ -697,6 +730,21 @@ mod sys {
             guard
         }
 
+        /// [`Self::wait`] for at most `ms` milliseconds of the host's monotonic clock: the guard,
+        /// and whether the time ran out with no notification. A wake may come early, so the caller
+        /// waits in a loop on its own condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let deadline =
+                wz_host_sync::monotonic_ns().saturating_add(ms.saturating_mul(1_000_000));
+            // SAFETY: as for `wait`.
+            let notified = unsafe { self.raw.wait_until(&guard.mutex.raw, deadline) };
+            (guard, !notified)
+        }
+
         /// Wake one waiting thread, if one waits.
         pub fn notify_one(&self) {
             self.raw.notify_one();
@@ -830,6 +878,34 @@ mod tests {
         assert_ne!(there, here, "a thread running beside has a word of its own");
         release.send(()).expect("the thread waits");
         beside.join().expect("the thread");
+    }
+
+    /// A timed wait no notification ends runs out after at least its time, and one a notification
+    /// ends says it did not run out. Turned red by a timed wait that never returns, returns early,
+    /// or reads a notification as the time running out.
+    #[test]
+    fn a_timed_wait_runs_out_or_is_woken() {
+        let shared = alloc::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let started = std::time::Instant::now();
+        let (guard, timed_out) = shared.1.wait_timeout_ms(shared.0.lock(), 30);
+        assert!(timed_out, "nothing notified");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+        drop(guard);
+        let notifier = alloc::sync::Arc::clone(&shared);
+        let (handle, _) = spawn(move || {
+            sleep_ms(20);
+            *notifier.0.lock() = true;
+            notifier.1.notify_all();
+        })
+        .expect("a host gives a thread");
+        let mut ready = shared.0.lock();
+        let mut ran_out = false;
+        while !*ready && !ran_out {
+            (ready, ran_out) = shared.1.wait_timeout_ms(ready, 5_000);
+        }
+        assert!(*ready && !ran_out, "the notification ended the wait");
+        drop(ready);
+        handle.join();
     }
 
     #[test]

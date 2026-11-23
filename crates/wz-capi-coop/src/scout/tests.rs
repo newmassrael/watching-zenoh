@@ -12,12 +12,21 @@ use wz_runtime_coop::udp_link::DatagramSocket;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::scouting::ScoutMember;
 use wz_runtime_posix::PosixClock;
+use wz_session_core::caps;
 use wz_session_core::scout_initiator::ScoutRxIgnored;
-use wz_session_core::scouting_host::{decode_scouted_hello, ScoutWindow};
+use wz_session_core::scouting_host::{
+    decode_scouted_hello, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+};
 
 use super::*;
 
 const WHAT: u8 = 0x03;
+
+/// A table for a window, where a test keeps it: on the heap, as a host's scout keeps none of its
+/// own on a stack.
+fn table() -> Box<HelloTable> {
+    Box::new(HelloTable::new())
+}
 
 /// A Hello datagram `[S_MID_HELLO | L][version][cbyte][zid][n][len][locator]...`: `whatami` in the
 /// low two bits of the cbyte and the zid length less one in the high nibble, as the wire spells
@@ -201,6 +210,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         Some([0xAA, 0xBB].into()),
         5_000,
         2048,
+        &mut table(),
     )
     .expect("the responder answered");
     assert_eq!(first.zid[0], 0x11);
@@ -214,6 +224,7 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         Some([0xAA, 0xBB].into()),
         300,
         2048,
+        &mut table(),
         |hello| seen.push(hello.zid[0]),
     );
     assert_eq!(delivered, 2);
@@ -238,6 +249,7 @@ fn the_window_over_one_datagram_socket_asks_an_ipv6_responder() {
         Some([0xAA, 0xBB].into()),
         5_000,
         2048,
+        &mut table(),
     )
     .expect("the IPv6 responder answered");
     assert_eq!(first.zid[0], 0x66);
@@ -256,6 +268,7 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
         None,
         100,
         2048,
+        &mut table(),
     );
     assert!(none.is_none());
 }
@@ -377,6 +390,7 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         WHAT,
         Some([0x77; 16].into()),
         150,
+        &mut table(),
         |_| seen += 1,
     );
     assert_eq!((delivered, seen), (0, 0));
@@ -388,6 +402,69 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         WHAT,
         Some([0x77; 16].into()),
         100,
+        &mut table(),
     )
     .is_none());
+}
+
+/// The Rust preset's window keeps zenoh's collection: it records every Hello, past the rows a lent
+/// table has, each with its locators. A window over a lent table records `MAX_SCOUT_HELLOS` and
+/// counts the rest. Turned red by a bound on the collection, or a lent table that grows past its
+/// rows.
+#[test]
+fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
+    let past = caps::MAX_SCOUT_HELLOS + 2;
+    let hellos: Vec<Vec<u8>> = (1..=past)
+        .map(|zid| hello_datagram(1, &[zid as u8], &["tcp/10.0.0.1:7447"]))
+        .collect();
+    let params = ScoutParams {
+        what: WHAT,
+        zid: Some([0xAA].into()),
+        timeout_ms: 1_000,
+        exit_on_first: false,
+    };
+    let pump = |window: &mut ScoutWindow<CoopRuntime<PosixClock>>| {
+        assert!(window.open().is_some());
+        window.sent(0, true);
+        for datagram in &hellos {
+            window.datagram(datagram);
+        }
+    };
+
+    let mut collected = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
+    pump(&mut collected);
+    let all = collected.actions().scouted_hellos();
+    assert_eq!(all.len(), past, "the collection records every Hello");
+    assert_eq!(all[past - 1].locators, ["tcp/10.0.0.1:7447"]);
+    assert_eq!(collected.actions().hellos_refused(), 0);
+
+    let mut lent = table();
+    {
+        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        // SAFETY: `lent` outlives the place, dropped at the end of this block, and nothing else
+        // reaches it meanwhile.
+        let window = unsafe { place.build_over(params, &mut lent) };
+        pump(window);
+        assert_eq!(window.actions().hellos_refused(), 2);
+    }
+    assert_eq!(lent.len(), caps::MAX_SCOUT_HELLOS);
+    assert_eq!(lent.refused(), 2);
+    assert_eq!(lent.first().map(|row| row.zid[0]), Some(1));
+}
+
+/// A window's state holds no table, so neither its actions nor the place the window is built in
+/// carries the table's rows on a stack: the table is its holder's, lent by pointer. Turned red by a
+/// table, or one of its rows, moved into the window's state.
+#[test]
+fn a_windows_state_holds_no_table() {
+    let actions = core::mem::size_of::<ScoutingActions<CoopRuntime<PosixClock>>>();
+    let row = core::mem::size_of::<HelloRow>();
+    assert!(
+        actions < row,
+        "the actions ({actions} bytes) are smaller than one row ({row} bytes)"
+    );
+    assert!(
+        core::mem::size_of::<HelloTable>() > caps::MAX_SCOUT_HELLOS * row,
+        "CONTROL: the table holds its rows inline"
+    );
 }
