@@ -220,12 +220,6 @@ pub mod policy_binding;
 // The value of a limit (a quota, or a parameter's integer), the values of it a build allows, and
 // the types that carry it to the stage that selects it. Unconditional, no_std and no_alloc, like
 // `policy_binding`. Documented from inside.
-// Totality debt TD-082 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
 pub mod limit_binding;
 
 // The limits a stage after the build may decide: one type per limit and the snapshots
