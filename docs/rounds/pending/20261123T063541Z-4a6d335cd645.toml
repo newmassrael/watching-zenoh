@@ -1,0 +1,25 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"]
+decision = '''
+Repay both debts the fan-in lane filed (Round 4617) and keep transport-fragmentation COMPLETE, by the owner's decision of 2026-11-23: no regrade, c.partial-atoms stays 2. The AP Router's per-chain cap was the 1 MiB pool slot, used also as the sender's refusal bound; it is now no bound of the build's (REASSEMBLY_CHAIN_CAP), so the session's transport/link/rx/max_message_size (upstream's 1 GiB) alone bounds a chain, as upstream's. The reserved arena keeps a chain in its slot while it fits and moves it to the heap past it; the shared dispatcher is unchanged. The refused put was lost on the node path only: RouterForwarder::publish_with answered Ok whatever its faces did. The node now refuses a publication past its own bound before any face is sent it and returns PublishError, which Publisher::put and the C ABI report.
+'''
+changes = '''
+crates/wz-runtime-tokio/src/reassembly.rs: REASSEMBLY_CHAIN_CAP (usize::MAX, pub) replaces REASSEMBLY_SLOT_SIZE and RX_MAX_MESSAGE_SIZE_CEILING as the AP Router's cap; session_glue.rs hands it to the sender.
+crates/wz-runtime-tokio/src/zero_copy.rs: PooledChain is a slot or, past SLOT_SIZE, a heap buffer (Stage::Spilled); the slot goes home at the move; PooledStaging no longer asserts CAP <= SLOT_SIZE; two tests.
+crates/wz-runtime-tokio/src/router_forward.rs: the node's max_reassembly_bytes and set_max_reassembly_bytes; publish, publish_qos, publish_with and publish_delete return PublishError and refuse a Push past the bound before routing; one test.
+crates/wz-zenoh/src/api/session.rs: the node's refusal worded for the put; test a_put_the_node_refuses_is_the_puts_error.
+crates/wz-capi-c: wz_capi_c_session_max_message_bytes reports REASSEMBLY_CHAIN_CAP (SIZE_MAX), header comment; fragmentation_roundtrip sends 1 MiB + 1024 and 4,000,000 B, and its batch parser reads a fragment's chain marker as not QoS.
+sources/network/reassembly_pool_ap.scxml comment and out/ regenerated (source hash only); session_actions.rs doc; feature_gate_diagnostic.py moves wz-runtime-tokio transport-fragmentation to @defer impl-method; reason-review-pins re-pins session-close-ingress on two files.
+Store: debt-ap-reassembly-cap-one-mebibyte and debt-oversize-publish-refusal-not-reported deprecated (CLOSED); transport-fragmentation reason records the 4 MB reading, grade unchanged.
+'''
+verification = '''
+pico-compare.sh fanin on pc2 (1 publisher x 4,000,000 B at 20 Hz for 3 s, block, PP/WW/PW/WP) on HEAD 26b0c62e: delivered 1.0 on every pair (was 0 on WW, PW, WP); lat p50 PP 949 us, WW 10,750 us, PW 6,275 us, WP 7,967 us.
+wz-runtime-tokio --features runtime-zero-copy --lib zero_copy:: 16 passed; --features routing-router-hat --lib router_forward 359 passed, with transport-qos,transport-fragmentation 364 passed; --features transport-fragmentation --test it layer3_reassembly/udp_frag/udp_chaos 12 passed.
+wz-zenoh a_put_the_node_refuses_is_the_puts_error passed; wz-capi-c --lib limits 2 passed, --test it fragmentation_roundtrip 3 passed (4 MB arrives whole, reliable SNs consecutive across the chain).
+clippy -D warnings, all targets: wz-runtime-tokio (router-hat+fragmentation; runtime-zero-copy), wz-capi-c, wz-zenoh; cargo check wz-ap-demo.
+pre-push round-fed gates plus upstream_citation_anchor_gate --check --resolve: 170 of 172; feature_gate_diagnostic and silent_skip_gate fail the same on origin/main (another track's); completeness_gate --check ok; validate-workspace orphans 30+0, T3 warn 4, unchanged.
+'''
+carry = '''
+Large-sample latency: wz is about 6 to 11 times upstream at 4 MB (p50 WW 10.8 ms vs PP 0.95 ms; put p99 9.5 ms vs 1.5 ms), one 3 s round; measure with rounds and profile the fragment TX and the heap chain growth before filing.
+Tell the no-heap C ABI track (watching-zenoh-1e, not reachable this round): the C ABI node path (z_publisher_put on a node -> node_publish) had the same Ok-on-refusal hop and now reports WZ_CAPI_C_E_VALUE_TOO_LARGE; the registry path already did; wz_capi_c_session_max_message_bytes now answers SIZE_MAX.
+Two-host fan-in (pc2, pc4), TTFM, the kernel-segment split and the lane's rows in scripts/host-bench/ap_matrix.py.
+'''
