@@ -11,6 +11,7 @@
 
 use alloc::sync::{Arc, Weak};
 use core::ffi::{c_char, c_void, CStr};
+use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
@@ -149,7 +150,7 @@ impl KeyText {
         match keys.hold_key(text) {
             Ok(key) => Ok(Self::Session(SessionKey {
                 engine: shared.clone(),
-                key: Some(key),
+                key: ManuallyDrop::new(key),
             })),
             Err(why) => match refusal_of(why) {
                 Some(code) => Err(code),
@@ -171,7 +172,7 @@ impl KeyText {
     pub(crate) fn share(&self) -> Self {
         match self {
             Self::Owned(text) => Self::Owned(text.clone()),
-            Self::Session(key) => Self::Session(key.share()),
+            Self::Session(key) => key.share(),
         }
     }
 }
@@ -192,30 +193,38 @@ fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
 /// lies in, for as long as it lives.
 pub(crate) struct SessionKey {
     engine: Arc<Engine>,
-    /// Always held; taken only by the drop, which hands it back to the engine.
-    key: Option<HeldKey>,
+    /// Taken only by the drop, which hands it back to the engine.
+    key: ManuallyDrop<HeldKey>,
 }
 
 impl SessionKey {
     fn as_str(&self) -> &str {
-        self.key.as_ref().map_or("", HeldKey::as_str)
+        self.key.as_str()
     }
 
-    fn share(&self) -> Self {
-        let key = match (&self.key, self.engine.key_arena()) {
-            (Some(key), Some(keys)) => Some(keys.share_key(key)),
-            _ => None,
-        };
-        Self {
-            engine: self.engine.clone(),
-            key,
+    /// One more holder of the key's block. Out of line, one body for every object that shares a
+    /// key: each share takes the session's lock, which a copy inlined in each caller would repeat.
+    #[inline(never)]
+    fn share(&self) -> KeyText {
+        match self.engine.key_arena() {
+            Some(keys) => KeyText::Session(Self {
+                engine: self.engine.clone(),
+                key: ManuallyDrop::new(keys.share_key(&self.key)),
+            }),
+            // An engine that keeps no key arena made no key of one; a copy reads the same.
+            None => KeyText::Owned(self.as_str().to_owned()),
         }
     }
 }
 
 impl Drop for SessionKey {
+    /// Out of line, one body for every object that keeps a key: the release takes the session's
+    /// lock, which a copy inlined in the drop of each object that holds a key would repeat.
+    #[inline(never)]
     fn drop(&mut self) {
-        if let (Some(key), Some(keys)) = (self.key.take(), self.engine.key_arena()) {
+        // SAFETY: the key is taken here, once, and the field is not read again.
+        let key = unsafe { ManuallyDrop::take(&mut self.key) };
+        if let Some(keys) = self.engine.key_arena() {
             keys.release_key(key);
         }
     }
@@ -443,40 +452,46 @@ impl DeclaredKeyexpr {
         // pico `_z_keyexpr_declare_prefix`: an empty prefix declares nothing.
         // Its multicast skip has no counterpart here — this ABI's sessions are
         // unicast.
-        if prefix_len == 0 {
-            return Ok(Self {
-                literal: KeyText::of_session(shared, literal)?,
-                declaration: None,
-            });
-        }
-        // A key the declaration does not cover whole is kept before anything is declared, so one
-        // the session's key arena has no room for is refused having sent nothing; one it covers
-        // whole is kept after, in the block of the declaration's own row, which it then shares.
-        let early = if prefix_len < literal.len() {
-            Some(KeyText::of_session(shared, literal)?)
+        let declares = prefix_len > 0;
+        // A key the declaration covers whole is kept after it, in the block of the declaration's
+        // own row, which it then shares; a declaration made first is let go of when the text is
+        // refused. Any other key is kept before anything is declared, so one the session's key
+        // arena has no room for is refused having sent nothing.
+        let first = if declares && prefix_len == literal.len() {
+            Some(declare_prefix(shared, literal, prefix_len)?)
         } else {
             None
         };
-        // A session that holds no more declarations, its table at the limit it opened under or
-        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
-        let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
-            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
-        // Made before the key's text is held, so a refusal of the text lets go of the hold.
-        let declaration = Arc::new(WireDeclaration {
-            session: Arc::downgrade(shared),
-            id,
-            prefix_len,
-        });
-        let literal = match early {
-            Some(text) => text,
-            None => KeyText::of_session(shared, literal)?,
+        let text = KeyText::of_session(shared, literal)?;
+        let declaration = match first {
+            Some(declaration) => Some(declaration),
+            None if declares => Some(declare_prefix(shared, literal, prefix_len)?),
+            None => None,
         };
         Ok(Self {
-            literal,
-            declaration: Some(declaration),
+            literal: text,
+            declaration,
         })
     }
+}
+
+/// The first `prefix_len` bytes of `literal` declared on `shared` (pico
+/// `_z_keyexpr_declare_prefix`). A session that holds no more declarations, its table at the
+/// limit it opened under or its ids spent, refuses as pico refuses one it cannot hold, having sent
+/// nothing.
+fn declare_prefix(
+    shared: &Arc<Engine>,
+    literal: &str,
+    prefix_len: usize,
+) -> Result<Arc<WireDeclaration>, ZResult> {
+    let id = shared
+        .acquire_keyexpr(&literal[..prefix_len])
+        .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+    Ok(Arc::new(WireDeclaration {
+        session: Arc::downgrade(shared),
+        id,
+        prefix_len,
+    }))
 }
 
 /// pico `_z_keyexpr_non_wild_prefix_len`: the length up to the `/` before the
