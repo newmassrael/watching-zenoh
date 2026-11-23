@@ -733,7 +733,10 @@ bool wz_capi_c_internal_segment_sender_check(
  * extensions, payload and their headers), so a value is a little smaller
  * than it, by the key and a few tens of bytes: use the number to say a
  * limit and to size values, and the code above to know a particular put
- * was over. Z_ENULL for a null or closed `session` or a null `out`. */
+ * was over. SIZE_MAX says the session refuses no message for its size,
+ * which is this build's answer (a peer still drops a message past its own
+ * transport/link/rx/max_message_size). Z_ENULL for a null or closed
+ * `session` or a null `out`. */
 z_result_t wz_capi_c_session_max_message_bytes(const z_loaned_session_t *session,
                                                size_t *out);
 

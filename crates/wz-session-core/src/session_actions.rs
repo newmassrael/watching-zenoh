@@ -6703,10 +6703,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Declare the largest message this profile can reassemble, in bytes —
-    /// see [`SessionCore::max_reassembly_bytes`]. The host passes its own
-    /// reassembly pool's slot size (the AP tokio host: the
-    /// `reassembly_pool_ap` `SLOT_SIZE`); nothing negotiates it, because it
-    /// describes THIS side's staging budget, not the peer's.
+    /// see [`SessionCore::max_reassembly_bytes`]. The host passes the bound its
+    /// own reassembly Router is built with (the AP tokio host:
+    /// `wz_runtime_tokio::reassembly`'s chain bound, which is none, so it passes
+    /// `usize::MAX` and refuses nothing, as upstream's sender does not); nothing
+    /// negotiates it, because it describes THIS side's staging budget, not the
+    /// peer's.
     ///
     /// Configured once, before data flows. Sends above the cap are refused
     /// with [`SendWireError::ExceedsReassemblyCap`] rather than emitted into

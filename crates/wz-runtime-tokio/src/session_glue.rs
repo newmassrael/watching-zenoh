@@ -477,9 +477,10 @@ pub fn new_session_actions<T: TimeSource>(
     // fragmented into a chain this host's own dispatcher would drop
     // mid-stage. The value is the SAME constant `TokioReassembly` stages
     // against — a TX bound that merely agreed with the RX bound would drift
-    // the first time one of them moved.
+    // the first time one of them moved. The AP build has no bound of its own
+    // (`crate::reassembly::REASSEMBLY_CHAIN_CAP`), so nothing is refused here.
     #[cfg(feature = "transport-fragmentation")]
-    actions.set_max_reassembly_bytes(crate::reassembly::REASSEMBLY_SLOT_SIZE);
+    actions.set_max_reassembly_bytes(crate::reassembly::REASSEMBLY_CHAIN_CAP);
     // A link whose writer will pull what the session stages (a stream link's) gets the
     // session's batch window open for good: the data plane stages into one open frame per
     // priority and the writer flushes it when it has nothing else to write. The hook holds

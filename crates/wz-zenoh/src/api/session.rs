@@ -2709,10 +2709,13 @@ mod tokio_engine {
                     });
             }
         }
+        // The node's refusal, made before any face is sent the publication (a codec that cannot
+        // build it, or a message longer than the node may send), is the put's answer, as the
+        // registry's refused leg is (`FanoutError::ExceedsCapacity`).
         let published = forwarder.publish_with(publication.key, &payload, &options);
         published.map_err(|error| {
             zerror!(
-                "the router could not publish on {}: {error:?}",
+                "the router could not publish on {}: {error}",
                 publication.key
             )
             .into()
@@ -9303,6 +9306,36 @@ mod tests {
             session.0.subscriptions().len(),
             before + usize::from(result.is_ok()),
             "the session holds the subscription of a declaration that was taken, and no other"
+        );
+    }
+
+    /// A put the node refuses is the put's own error, and is published nowhere: a node used to
+    /// answer `Ok` whatever it did not send (the fan-in lane, Round 4617). The node refuses a
+    /// publication longer than it may send before any face is sent it; the build's bound is none,
+    /// so the test declares one.
+    #[test]
+    fn a_put_the_node_refuses_is_the_puts_error() {
+        let session = with_the_node(|| open(peer("a1b2fe40")).wait().expect("opens"));
+        let Engine::Router(router) = &*session.0.engine else {
+            panic!("a peer that listens and does not scout is a node");
+        };
+        router.node.forwarder().set_max_reassembly_bytes(100);
+        let error = session
+            .put("demo/refused", vec![0x5Au8; 200])
+            .wait()
+            .expect_err("a put past the node's bound");
+        assert!(error.to_string().contains("demo/refused"), "{error}");
+        session
+            .put("demo/refused", vec![0x5Au8; 20])
+            .wait()
+            .expect("a put within the bound");
+        let publisher = session
+            .declare_publisher("demo/refused")
+            .wait()
+            .expect("declares");
+        assert!(
+            publisher.put(vec![0x5Au8; 200]).wait().is_err(),
+            "a declared publisher's put is refused the same"
         );
     }
 
