@@ -10971,6 +10971,62 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// [`Self::dispatch_network_message_in`] for a send at `stage`. Inlined, so a caller that
+    /// names its stage, as every caller does, links only the body for that stage: a send of its
+    /// own (`Fresh`) is the body with every other stage's question answered when it is
+    /// compiled, and a build none of whose senders probes, reserves or schedules carries no code
+    /// for those stages.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn dispatch_network_message_at<P>(
+        &self,
+        stage: DispatchStage,
+        priority: Priority,
+        reliable: bool,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: usize,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
+    ) -> Result<Dispatched, SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
+    {
+        if stage == DispatchStage::Fresh {
+            self.dispatch_network_message_in::<false, P>(
+                stage,
+                priority,
+                reliable,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
+        } else {
+            self.dispatch_network_message_in::<true, P>(
+                stage,
+                priority,
+                reliable,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
+        }
+    }
+
     /// Transport-framing chokepoint for every outbound network message —
     /// zenoh-pico `_z_transport_tx_send_n_msg_inner` parity
     /// (`src/transport/common/tx.c`). The chokepoint OWNS the frame
@@ -11025,7 +11081,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // host build, eight copies; 1.3 KB on the slot profile, three), differing in nothing but the
     // call that writes the message. The stack bound follows the call through the pointer by the
     // rule of `stack_call_contracts.json` that claims its site.
-    fn dispatch_network_message_at<P>(
+    fn dispatch_network_message_in<const STAGED: bool, P>(
         &self,
         stage: DispatchStage,
         priority: Priority,
@@ -11045,6 +11101,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // A send of its caller's own: every other stage's question is answered here.
+        let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
         // R2371 (`transport-stats`) — the NETWORK-message counters. Charged in
         // this function and not at `emit_on_link` because one wire write
