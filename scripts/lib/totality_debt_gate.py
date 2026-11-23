@@ -106,7 +106,7 @@ SITE_PATTERNS: dict[str, re.Pattern[str]] = {
 LAST_ID = 229
 
 #: The register's lint cells: every lint every row lists.
-CELLS = 182
+CELLS = 180
 
 ID_COMMENT = re.compile(r"^\s*// Totality debt (TD-\d{3}) \(docs/c-abi-architecture\.md section 7\)\.\s*$")
 ROW = re.compile(r"^\|\s*(TD-\d{3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|")

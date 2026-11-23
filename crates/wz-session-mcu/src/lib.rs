@@ -90,8 +90,6 @@ pub mod control_port;
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract;
 // Where an application that is not the session's event leaves a query to be asked.
-// Totality debt TD-215 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "query-get")]
 pub mod get_mailbox;
 // R311lt — the multicast group session's drive loop, pump and slot table, over

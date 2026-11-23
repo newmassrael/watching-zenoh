@@ -114,9 +114,14 @@ impl<R, const N: usize> GetMailbox<R, N> {
                 continue;
             }
             let mut key: KeyBytes = [0u8; caps::MAX_KEYEXPR_BYTES];
-            key[..request.keyexpr.len()].copy_from_slice(request.keyexpr.as_bytes());
+            // Both lengths were checked against the arrays above.
+            if let Some(into) = key.get_mut(..request.keyexpr.len()) {
+                into.copy_from_slice(request.keyexpr.as_bytes());
+            }
             let mut parameters = [0u8; GET_PARAMETERS_BYTES];
-            parameters[..request.parameters.len()].copy_from_slice(request.parameters);
+            if let Some(into) = parameters.get_mut(..request.parameters.len()) {
+                into.copy_from_slice(request.parameters);
+            }
             *row = Some(Row {
                 key,
                 key_len: request.keyexpr.len(),
@@ -161,14 +166,17 @@ impl<R, const N: usize> GetMailbox<R, N> {
             };
             // The key is a `&str` copied whole, so it reads back as that text; a row that does
             // not is one nobody could have posted, and is freed rather than asked.
-            let Ok(keyexpr) = core::str::from_utf8(&held.key[..held.key_len]) else {
+            let Some(Ok(keyexpr)) = held.key.get(..held.key_len).map(core::str::from_utf8) else {
                 *row = None;
-                self.rejected.set(self.rejected.get() + 1);
+                self.rejected.set(self.rejected.get().saturating_add(1));
                 continue;
             };
             let request = GetRequest {
                 keyexpr,
-                parameters: &held.parameters[..held.parameters_len],
+                parameters: held
+                    .parameters
+                    .get(..held.parameters_len)
+                    .unwrap_or_default(),
                 consolidation: held.consolidation,
                 target: held.target,
                 timeout_ms: held.timeout_ms,
@@ -179,7 +187,7 @@ impl<R, const N: usize> GetMailbox<R, N> {
                 Disposition::Retry => {}
                 Disposition::Reject => {
                     *row = None;
-                    self.rejected.set(self.rejected.get() + 1);
+                    self.rejected.set(self.rejected.get().saturating_add(1));
                 }
             }
         }
