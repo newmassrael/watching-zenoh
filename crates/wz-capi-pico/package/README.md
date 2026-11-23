@@ -87,6 +87,19 @@ are built from the same sources and the same profile, and a program is written t
   a core of another major version of the interface, whose `wz_ext_interface_major_<n>` it does not
   find.
 
+A release carries the one library only. The split form is built with Rust's standard library, to
+compare against: its additional library has no form without it.
+
+## With or without Rust's standard library
+
+A package's name and the `stdlib` of its `manifest.json` say which library it holds. A release
+carries the library without Rust's standard library (`-nostd` in the name, `nostd` in the
+manifest): it is built over the system's own calls (Winsock, the Win32 locks, threads and clocks,
+the system's random number generator), takes its memory from the process heap, and does not
+unwind, so a panic inside it ends the process. A package without that word holds the library with
+Rust's standard library, built to compare and measure against, which no release carries. A program
+is written, compiled, linked and run the same against either.
+
 ## Running a program
 
 Put `wz_capi_pico.dll` beside the program's executable or on its `PATH`; keep the `.pdb` beside
@@ -245,10 +258,11 @@ and reports a file that differs, one that is missing and one the manifest does n
 
 ## Where a release's packages are
 
-A release of watching-zenoh (a `v<version>` tag) carries the four packages, x64 and x86, each as
-one library and as two, as assets of its GitHub release, each zip with its `.zip.sha256`, and one
-`SHA256SUMS` naming the four. `sha256sum -c SHA256SUMS` in the download directory (or
-`Get-FileHash -Algorithm SHA256` of a zip, compared with its line) checks that a download is the zip
+A release of watching-zenoh (a `v<version>` tag) carries two packages, x64 and x86, each the one
+library without Rust's standard library (`-nostd` in the name), as assets of its GitHub release,
+each zip with its `.zip.sha256`, and one `SHA256SUMS` naming the two. `sha256sum -c SHA256SUMS`
+in the download directory (or `Get-FileHash -Algorithm SHA256` of a zip, compared with its line)
+checks that a download is the zip
 the release workflow built and tested; `docs/release.md` in the repository says how a release is
 made and how to check one.
 

@@ -6,7 +6,7 @@
 width of Windows: x64 and x86.
 
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
-                            [--stdlib std|nostd]
+                            [--stdlib nostd|std]
     pico_windows_package.py --measure [--arch x64|x86]
     pico_windows_package.py --verify DIR|ZIP
     pico_windows_package.py --test ZIP
@@ -32,13 +32,15 @@ library and symbols, from the profile's one feature list (docs/capi-pico-additio
 program links every library of its package; the split package's name says `split` and its manifest
 `form` and `libraries`.
 
-`--stdlib` names the standard library the DLL is built with, `std` when it names none: `std`, the
-host's, the form a release ships; or `nostd`, the MCU build over the system's own calls in its place
-(`os-windows` for `engine-coop`, no `std`: docs/c-abi-engine-and-memory.md, E4 and phase P4),
-built with the `capi-nostd` profile and configuration and, for the debug build, the dev profile with
-`panic = "abort"`. It is a form of the cooperative engine and of the one library: a profile on the
-tokio engine, a capability that still selects `std` and the split form are refused by name. Its
-name and its manifest's `stdlib` say `nostd`. Each DLL's sizes are printed as it is packaged.
+`--stdlib` names the standard library the DLL is built with, `nostd` when it names none: `nostd`,
+the form a release ships (owner, 2026-11-23: docs/c-abi-engine-and-memory.md, E7), the MCU build
+over the system's own calls in the place of `std` (`os-windows` for `engine-coop`: E4 and phase
+P4), built with the `capi-nostd` profile and configuration and, for the debug build, the dev profile
+with `panic = "abort"`; or `std`, the host's, which no release carries and which is built to compare
+and measure against. The library without `std` is a form of the cooperative engine and of the one
+library: a profile on the tokio engine, a capability that still selects `std` and the split form
+are refused by name. Its name and its manifest's `stdlib` say `nostd`, and a name with no such word
+is a library with `std`. Each DLL's sizes are printed as it is packaged.
 
 `--measure` builds the size gate's client (`scripts/lib/capability_cost_gate.py`, cases
 `pico-client-coop` and `pico-client-coop-nostd`: the same features, profile and configuration) for
@@ -60,7 +62,8 @@ sample through it.
 
 `--release` holds the packages a release workflow is about to attach (the zips and their
 `.zip.sha256` files in `DIR`) to the release cut at `TAG` from the checkout's `HEAD`, on any host:
-exactly one package of every width and form, each zip matching its `.zip.sha256` and its manifest,
+exactly one package of every width and of every form of the standard library a release carries
+(`RELEASE_STDLIBS`), and none of another, each zip matching its `.zip.sha256` and its manifest,
 each built from `HEAD` with no change uncommitted and named as `--build` names it, all of one
 version and profile, and `TAG` naming that version (`v<version>` or `v<version>-<suffix>`). Then
 it writes `DIR/SHA256SUMS`, the `.zip.sha256` lines of every zip in name order; nothing is written
@@ -135,10 +138,12 @@ FORMS = {
 }
 # The standard library a package's DLL is built with (`--stdlib`): `std`, the host's, or `nostd`,
 # the cooperative engine over the system's own calls in its place (`NOSTD_FEATURE` named where
-# the profile names `engine-coop`). A release carries the forms of `RELEASE_STDLIBS` until the
-# owner switches it.
+# the profile names `engine-coop`). A release carries the library without `std` alone (owner,
+# 2026-11-23); the one with it is built to compare and measure against, so `--build` makes the
+# released form unless told another.
 STDLIBS = ("std", "nostd")
-RELEASE_STDLIBS = ("std",)
+DEFAULT_STDLIB = "nostd"
+RELEASE_STDLIBS = ("nostd",)
 NOSTD_FEATURE = "os-windows"
 # How a library without `std` is built (crates/Cargo.toml, crates/.cargo/capi-nostd.toml): the
 # release build with the `capi-nostd` profile (abort, fat LTO) and its configuration, and the debug
@@ -259,6 +264,12 @@ def stdlib_of(manifest: dict) -> str:
     if stdlib not in STDLIBS:
         raise Refusal(f"`{stdlib}` is the standard library of no package ({', '.join(STDLIBS)})")
     return stdlib
+
+
+def stdlib_forms(stdlib: str) -> list[str]:
+    """The forms a package of standard library `stdlib` is made in: every form with `std`, and the
+    one library without it, since the additional library (`EXT_CRATE`) has no form without `std`."""
+    return list(FORMS) if stdlib == "std" else ["single"]
 
 
 def nostd_features(features: list[str], table: dict[str, list[str]]) -> list[str]:
@@ -713,10 +724,11 @@ def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
 
 def build_selection(options: list[str]) -> tuple[list[str], list[str], str]:
     """The widths, forms and standard library `--build`'s options name (`--arch A`, `--form F`,
-    `--stdlib S`, each at most once): every width and every form for an option not given, and
-    `std`. The library without `std` is made in the one form, which is then every form for an
-    option not given. A word that is no option, an option given twice or without its value, a value
-    no package is made for and the split form without `std` are refused."""
+    `--stdlib S`, each at most once): every width, every form of the standard library and
+    `DEFAULT_STDLIB` for an option not given. The library without `std` is made in the one form,
+    which is then every form for an option not given. A word that is no option, an option given twice
+    or without its value, a value no package is made for and the split form without `std` are
+    refused."""
     chosen: dict[str, str] = {}
     rest = list(options)
     while rest:
@@ -725,11 +737,11 @@ def build_selection(options: list[str]) -> tuple[list[str], list[str], str]:
             raise Refusal(f"`{option}` is not an option of --build here (--arch A, --form F, --stdlib S, "
                           "each once)")
         chosen[option] = rest.pop(0)
-    stdlib = chosen.get("--stdlib", "std")
+    stdlib = chosen.get("--stdlib", DEFAULT_STDLIB)
     if stdlib not in STDLIBS:
         raise Refusal(f"`{stdlib}` is not a standard library a package is built with ({', '.join(STDLIBS)})")
     arches = [chosen["--arch"]] if "--arch" in chosen else list(ARCHES)
-    every_form = list(FORMS) if stdlib == "std" else ["single"]
+    every_form = stdlib_forms(stdlib)
     forms = [chosen["--form"]] if "--form" in chosen else every_form
     for arch in arches:
         if arch not in ARCHES:
@@ -817,7 +829,7 @@ def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> 
     return dll
 
 
-def build(out: pathlib.Path, profile: str, arch: str, form: str, stdlib: str = "std") -> pathlib.Path:
+def build(out: pathlib.Path, profile: str, arch: str, form: str, stdlib: str = DEFAULT_STDLIB) -> pathlib.Path:
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
@@ -827,7 +839,7 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str, stdlib: str = "
         raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
     if stdlib not in STDLIBS:
         raise Refusal(f"`{stdlib}` is not a standard library a package is built with ({', '.join(STDLIBS)})")
-    if stdlib == "nostd" and form != "single":
+    if form not in stdlib_forms(stdlib):
         raise Refusal(f"the {form} form is built with `std`: its additional library ({EXT_CRATE}) has no "
                       "form without it")
     target = ARCHES[arch][0]
@@ -1124,7 +1136,7 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
     text of the SHA256SUMS that names them (meant to be written only when there is no finding)."""
     findings: list[str] = []
     sums: list[str] = []
-    seen: dict[tuple[str, str], str] = {}
+    seen: dict[tuple[str, str, str], str] = {}
     versions: set[str] = set()
     profiles: set[str] = set()
     archives = sorted(directory.glob("*.zip"))
@@ -1158,7 +1170,7 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
             findings.append(f"{archive.name}: {err}")
             continue
         if stdlib not in RELEASE_STDLIBS:
-            findings.append(f"{archive.name}: built {stdlib}, a form no release carries yet "
+            findings.append(f"{archive.name}: built {stdlib}, a form no release carries "
                             f"({', '.join(RELEASE_STDLIBS)})")
             continue
         version = str(manifest.get("version", ""))
@@ -1173,12 +1185,14 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
         name = package_name(version, profile, arch, commit, form, stdlib)
         if archive.name != f"{name}.zip" or manifest.get("name") != name:
             findings.append(f"{archive.name}: its manifest makes it {name}.zip")
-        if (arch, form) in seen:
-            findings.append(f"{archive.name}: a second package of {arch} {form}, beside {seen[(arch, form)]}")
-        seen.setdefault((arch, form), archive.name)
+        if (arch, form, stdlib) in seen:
+            findings.append(f"{archive.name}: a second package of {arch} {form} {stdlib}, "
+                            f"beside {seen[(arch, form, stdlib)]}")
+        seen.setdefault((arch, form, stdlib), archive.name)
         versions.add(version)
         profiles.add(profile)
-    missing = [f"{arch} {form}" for arch in ARCHES for form in FORMS if (arch, form) not in seen]
+    missing = [f"{arch} {form} {stdlib}" for stdlib in RELEASE_STDLIBS for arch in ARCHES
+               for form in stdlib_forms(stdlib) if (arch, form, stdlib) not in seen]
     if missing:
         findings.append(f"no package of {', '.join(missing)}")
     if len(versions) > 1:
@@ -1469,18 +1483,25 @@ def selftest() -> int:
            ext_features(["std", "engine-tokio", "replay-cache", "unstable-api", "e2e-sender"],
                         {"e2e-sender", "replay-cache", "std", "unstable-api"})
            == ["std", "replay-cache", "unstable-api", "e2e-sender"])
-    expect("no option builds every width in every form, with `std`",
-           build_selection([]) == (list(ARCHES), list(FORMS), "std"))
+    expect("no option builds every width in the one form without `std`, the form a release ships",
+           build_selection([]) == (list(ARCHES), ["single"], "nostd") and DEFAULT_STDLIB in RELEASE_STDLIBS)
+    expect("the library with `std` is built in every form, every width when none is named",
+           build_selection(["--stdlib", "std"]) == (list(ARCHES), list(FORMS), "std"))
     expect("an option narrows its axis only",
-           build_selection(["--form", "split"]) == (list(ARCHES), ["split"], "std")
-           and build_selection(["--form", "single", "--arch", "x86"]) == (["x86"], ["single"], "std"))
+           build_selection(["--stdlib", "std", "--form", "split"]) == (list(ARCHES), ["split"], "std")
+           and build_selection(["--form", "single", "--arch", "x86", "--stdlib", "std"])
+           == (["x86"], ["single"], "std")
+           and build_selection(["--arch", "x86"]) == (["x86"], ["single"], "nostd"))
+    expect("the forms of each standard library are the ones a package is made in",
+           stdlib_forms("std") == list(FORMS) and stdlib_forms("nostd") == ["single"])
     expect("the library without `std` is built in the one form, every width when none is named",
            build_selection(["--stdlib", "nostd"]) == (list(ARCHES), ["single"], "nostd")
            and build_selection(["--stdlib", "nostd", "--arch", "x64", "--form", "single"])
            == (["x64"], ["single"], "nostd"))
     for options in (["--form"], ["--form", "split", "--form", "single"], ["--arch", "arm64"],
                     ["--form", "double"], ["--target", "x"], ["--stdlib", "alloc"],
-                    ["--stdlib", "nostd", "--form", "split"], ["--stdlib", "std", "--stdlib", "nostd"]):
+                    ["--stdlib", "nostd", "--form", "split"], ["--form", "split"],
+                    ["--stdlib", "std", "--stdlib", "nostd"]):
         try:
             build_selection(options)
             expect(f"--build {' '.join(options)} is refused", False)
@@ -1567,7 +1588,7 @@ def selftest() -> int:
             for arch, form, differs in rows:
                 built = {"commit": differs.get("commit", commit), "tree_clean": differs.get("clean", True)}
                 version = differs.get("version", "0.1.0")
-                stdlib = differs.get("stdlib", "std")
+                stdlib = differs.get("stdlib", RELEASE_STDLIBS[0])
                 name = package_name(version, "p", arch, built["commit"], form, stdlib)
                 stage = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / name
                 stage.mkdir()
@@ -1581,14 +1602,17 @@ def selftest() -> int:
                 (out / f"{name}.zip.sha256").write_text(sha256_line(archive), encoding="ascii", newline="\n")
             return out
 
-        every = [(arch, form, {}) for arch in ARCHES for form in FORMS]
+        released = RELEASE_STDLIBS[0]
+        every = [(arch, form, {}) for arch in ARCHES for form in stdlib_forms(released)]
+        expect("a release is the library without `std` alone, one package per width",
+               RELEASE_STDLIBS == ("nostd",) and every == [(arch, "single", {}) for arch in ARCHES])
         good = release_dir(every)
         findings, sums = release_findings(good, commit, "v0.1.0")
-        expect(f"one package of every width and form, of the release's commit, is a release ({findings})",
+        expect(f"one package of every width and released form, of the release's commit, is a release ({findings})",
                findings == [])
         expect("the sums are every zip's own .zip.sha256 line, in name order",
                sums == "".join(p.read_text(encoding="ascii") for p in sorted(good.glob("*.zip.sha256")))
-               and len(sums.splitlines()) == len(ARCHES) * len(FORMS))
+               and len(sums.splitlines()) == len(every))
         expect("a tag with a suffix names the version", release_findings(good, commit, "v0.1.0-rc1")[0] == [])
         expect("a tag of another version is a finding",
                release_findings(good, commit, "v0.2.0")[0]
@@ -1600,7 +1624,7 @@ def selftest() -> int:
                sum(f.endswith(f"the release is of {other}") for f in findings) == len(every))
         findings, _ = release_findings(release_dir(every[:-1]), commit, "v0.1.0")
         expect("a width and form with no package is named",
-               findings == [f"no package of {every[-1][0]} {every[-1][1]}"])
+               findings == [f"no package of {every[-1][0]} {every[-1][1]} {released}"])
         findings, _ = release_findings(release_dir(every[:-1] + [(every[-1][0], every[-1][1], {"clean": False})]),
                                        commit, "v0.1.0")
         expect("a package built from a tree with changes is a finding",
@@ -1634,13 +1658,22 @@ def selftest() -> int:
         expect("a second package of one width and form, under another name, is a finding",
                any(f.startswith(f"{copy_name}: its manifest makes it") for f in findings)
                and any(": a second package of " in f for f in findings))
-        findings, _ = release_findings(release_dir(every + [("x64", "single", {"stdlib": "nostd"})]),
-                                       commit, "v0.1.0")
-        expect("a package without `std` beside a full release is a finding: no release carries that form yet",
-               len(findings) == 1 and findings[0].endswith("built nostd, a form no release carries yet (std)"))
-        expect("an empty directory names every width and form", release_findings(
+        for arch, form in (("x64", "single"), ("x86", "split")):
+            findings, _ = release_findings(release_dir(every + [(arch, form, {"stdlib": "std"})]),
+                                           commit, "v0.1.0")
+            expect(f"a package with `std` ({arch} {form}) beside a full release is a finding: it is built to "
+                   "compare against, and no release carries it",
+                   len(findings) == 1 and findings[0].endswith("built std, a form no release carries (nostd)"))
+        findings, _ = release_findings(release_dir([(arch, form, {"stdlib": "std"}) for arch in ARCHES
+                                                    for form in FORMS]), commit, "v0.1.0")
+        expect("the packages with `std` alone are no release: each is a finding, and every released one is missing",
+               sum(f.endswith("built std, a form no release carries (nostd)") for f in findings)
+               == len(ARCHES) * len(FORMS)
+               and f"no package of {', '.join(f'{arch} single {released}' for arch in ARCHES)}" in findings)
+        expect("an empty directory names every width and released form", release_findings(
             pathlib.Path(tempfile.mkdtemp(dir=tmp)), commit, "v0.1.0")[0]
-            == ["no package of " + ", ".join(f"{arch} {form}" for arch in ARCHES for form in FORMS)])
+            == ["no package of " + ", ".join(f"{arch} {form} {released}" for arch in ARCHES
+                                             for form in stdlib_forms(released))])
 
     # A pipe read as text without a stated encoding is decoded with the host's code page, which on a
     # Windows runner is not the UTF-8 the tools write: every read of a tool here names its encoding.

@@ -96,19 +96,6 @@
       "note": "added on 2026-11-22 with no main run read yet"
     },
     {
-      "workflow": ".github/workflows/platform.yml",
-      "job": "package-windows",
-      "step": null,
-      "kind": "continue-on-error",
-      "why_soft": "the expression is true only on the two nostd rows: the Windows package with its DLL built without std (os-windows), whose examples and check program run against it and whose size gate client is measured in both forms; the std rows of the job are a gate already",
-      "gate_when": "both nostd rows read green on two consecutive main runs; then the job drops continue-on-error and every row is a gate",
-      "promote_after_green": 2,
-      "allowed_consecutive_red": 1,
-      "declared": "2026-11-22",
-      "expires": "2026-12-22",
-      "note": "added on 2026-11-22 with no main run read yet; the std rows are read too and are expected green, as the gate they already are"
-    },
-    {
       "workflow": ".github/workflows/release.yml",
       "job": "release",
       "step": "cargo publish --dry-run (zenoh-pico-sys)",

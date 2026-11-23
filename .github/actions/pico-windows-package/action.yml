@@ -11,11 +11,12 @@
 # The profile is fixed here, not an input: the package a release ships is the one the Platform lane
 # tests. Composite steps take no `timeout-minutes`, so the caller's job timeout bounds the build.
 #
-# `stdlib` names the standard library the DLL is built with: `std` (the default, and the form a
-# release ships until the owner switches it) or `nostd`, the library without it over the system's
-# own calls (`os-windows`, docs/c-abi-engine-and-memory.md P4), which is made in the one form. A
-# `nostd` package also prints the sizes of the size gate's client built for its width in both forms
-# (`--measure`), which only a Windows host can read.
+# `stdlib` names the standard library the DLL is built with: `nostd` (the default, and the form a
+# release ships: owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7), the library without it over
+# the system's own calls (`os-windows`, P4), which is made in the one form; or `std`, the host's,
+# built to compare and measure against and carried by no release. `measure` prints the sizes of the
+# size gate's client built for the width in both forms (`--measure`), which only a Windows host can
+# read; the Platform lane asks for it, a release does not.
 name: pico library Windows package
 description: Build the pico C ABI library's Windows package of one width and form, then test its zip
 inputs:
@@ -26,9 +27,13 @@ inputs:
     description: The form of the library (`single` or `split`), as `pico_windows_package.py --form` takes it
     required: true
   stdlib:
-    description: The standard library the DLL is built with (`std` or `nostd`), as `pico_windows_package.py --stdlib` takes it
+    description: The standard library the DLL is built with (`nostd` or `std`), as `pico_windows_package.py --stdlib` takes it
     required: false
-    default: std
+    default: nostd
+  measure:
+    description: Whether to print the sizes of the size gate's client in both forms (`true` or `false`), as `pico_windows_package.py --measure` prints them
+    required: false
+    default: 'false'
 outputs:
   directory:
     description: The directory holding the package's zip and its `.zip.sha256`
@@ -98,7 +103,7 @@ runs:
     # section table, and the ratio of the form without `std` to the one with it. Printed, gating
     # nothing yet; after the package's test, so a measurement never stands in for it.
     - name: the sizes of the client with and without std (printed)
-      if: ${{ inputs.stdlib == 'nostd' }}
+      if: ${{ inputs.measure == 'true' }}
       shell: bash
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}

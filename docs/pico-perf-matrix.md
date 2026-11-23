@@ -430,11 +430,11 @@ committed table of the reading's platform. Layer C0 holds the population of both
 **A run.** On Linux, in a checkout of the commit the package was built from: `windows-plan` derives arm P's
 switches from this tree's declaration, feature table and pinned pico, and refuses a package whose commit differs
 from the tree in any of them. The package is the `package-windows` artifact of that commit's Platform run (x64,
-the single library).
+the single library without `std`, the form a release ships: `docs/c-abi-engine-and-memory.md` E7).
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
-gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
+gh run download <platform run id> -n pico-windows-package-x64-single-nostd -D "$out"
 zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
 python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD
