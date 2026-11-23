@@ -483,7 +483,11 @@ pub(crate) struct HelloState {
 impl HelloState {
     /// A hello that owns copies of `locators`.
     fn new(zid: z_id_t, whatami: z_whatami_t, locators: Vec<String>) -> Box<Self> {
-        let locators = StringArrayState::new(locators);
+        Self::owning(zid, whatami, StringArrayState::new(locators))
+    }
+
+    /// A hello that owns `locators`.
+    fn owning(zid: z_id_t, whatami: z_whatami_t, locators: Box<StringArrayState>) -> Box<Self> {
         let locators_loan = loan_of(&locators);
         Box::new(Self {
             zid,
@@ -640,9 +644,12 @@ pub unsafe extern "C" fn z_hello_locators(
     if out.is_null() {
         return;
     }
-    let items = hello_state(hello).map_or_else(Vec::new, |s| s.locators().to_strings());
+    let items = hello_state(hello).map_or_else(
+        || StringArrayState::new(Vec::new()),
+        |s| s.locators().copied(),
+    );
     *out = z_owned_string_array_t {
-        handle: Box::into_raw(StringArrayState::new(items)) as *mut c_void,
+        handle: Box::into_raw(items) as *mut c_void,
         _pad: [core::ptr::null_mut(); 3],
     };
 }
@@ -846,7 +853,7 @@ unsafe fn drop_kept(handle: *mut c_void) {
 /// process pools keeps every locator, as its engine's sessions keep theirs.
 #[cfg(not(wz_process_pools))]
 fn keep(hello: &HelloState) -> Option<*mut c_void> {
-    let kept = HelloState::new(hello.zid, hello.whatami, hello.locators().to_strings());
+    let kept = HelloState::owning(hello.zid, hello.whatami, hello.locators().copied());
     Some(Box::into_raw(kept).cast::<c_void>())
 }
 
