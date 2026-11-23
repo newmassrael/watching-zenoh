@@ -5371,6 +5371,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 }
 
+// The operations a door of a C ABI calls on the session's tables are out of line: the engine is
+// one type per build, so each is one body the doors call, counted as the engine's, and not a
+// copy inside each door.
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     for CoopEngine<L, C>
 {
@@ -5575,6 +5578,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Ok(core.0.redeclare())
     }
 
+    #[inline(never)]
     fn publish_on_wire_all(
         &self,
         keyexpr: &str,
@@ -5594,6 +5598,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Ok(sent)
     }
 
+    #[inline(never)]
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: &str,
@@ -5670,6 +5675,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(id)
     }
 
+    #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
         // A liveliness subscriber's id is one of these too (the port's one id space): its
         // registration goes and its Interest ends.
@@ -5734,6 +5740,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.deliver();
     }
 
+    #[inline(never)]
     fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         let mut core = self.live()?;
         let core = &mut core.0;
@@ -5793,6 +5800,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(id)
     }
 
+    #[inline(never)]
     fn release_keyexpr(&self, mapping_id: ExprId) {
         let Some(mut core) = self.live() else {
             return;
@@ -5947,6 +5955,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         drop(self.take_target(TargetKey::Matching(id)));
     }
 
+    #[inline(never)]
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -6054,6 +6063,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Self::holds_back_in(&core.0, id)
     }
 
+    #[inline(never)]
     fn undeclare_write_filter(&self, id: FilterId) {
         let Some(mut core) = self.live() else {
             return;
@@ -6073,6 +6083,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
     }
 
+    #[inline(never)]
     fn put_plain_filtered(
         &self,
         filter: FilterId,
