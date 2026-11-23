@@ -1047,6 +1047,41 @@ def _attributes_above(lines: list[str], index: int) -> list[str]:
     return out
 
 
+def _next_item_line(lines: list[str], start: int) -> str | None:
+    """The first line at or after `start` that is not blank, a comment or an attribute.
+
+    A MULTI-LINE attribute is skipped whole: its opener starts `#[` with the
+    brackets unbalanced, and the walk consumes lines until they balance. Before
+    this, an item written
+
+        #[cfg(feature = "key-set-closed")]
+        #[allow(
+            clippy::indexing_slicing,
+        )]
+        pub mod key_catalogue;
+
+    presented `clippy::indexing_slicing,` as the item line, which is not `pub `,
+    so the feature lost its derived probe and read as undecided.
+    """
+    j = start
+    while j < len(lines):
+        s = lines[j].strip()
+        if s == "" or s.startswith("//"):
+            j += 1
+            continue
+        if s.startswith("#["):
+            depth = s.count("[") - s.count("]")
+            k = j
+            while depth > 0 and k + 1 < len(lines) and k - j < _ATTR_SPAN:
+                k += 1
+                t = lines[k].strip()
+                depth += t.count("[") - t.count("]")
+            j = k + 1
+            continue
+        return lines[j]
+    return None
+
+
 def negated_names(lines: list[str]) -> set[str]:
     """Names declared under `cfg(not(feature = ...))` in this file.
 
@@ -1057,14 +1092,10 @@ def negated_names(lines: list[str]) -> set[str]:
     for i, line in enumerate(lines):
         if not NEGATED_CFG.match(line):
             continue
-        for j in range(i + 1, len(lines)):
-            s = lines[j].strip()
-            if s == "" or s.startswith("//") or s.startswith("#["):
-                continue
-            m = PATH_ITEM.match(lines[j])
-            if m:
-                out.add(m.group(1) or m.group(2))
-            break
+        following = _next_item_line(lines, i + 1)
+        m = PATH_ITEM.match(following) if following is not None else None
+        if m:
+            out.add(m.group(1) or m.group(2))
     return out
 
 
@@ -1243,13 +1274,7 @@ def submodule_probes(
                 extras.add(alternative[0])
             if unreachable:
                 continue
-            following = None
-            for j in range(i + 1, len(lines)):
-                s = lines[j].strip()
-                if s == "" or s.startswith("//") or s.startswith("#["):
-                    continue
-                following = lines[j]
-                break
+            following = _next_item_line(lines, i + 1)
             if following is None:
                 continue
             im = PATH_ITEM.match(following)
@@ -1301,13 +1326,7 @@ def derived_probes(package: str, crate_path: str) -> dict[str, list[tuple[str, s
         feats = ROOT_FEATURE.findall(line.strip())
         if not feats:
             continue
-        following = None
-        for j in range(i + 1, len(lines)):
-            s = lines[j].strip()
-            if s == "" or s.startswith("//") or s.startswith("#["):
-                continue
-            following = lines[j]
-            break
+        following = _next_item_line(lines, i + 1)
         if following is None or not following.startswith("pub "):
             continue
         for pattern in ROOT_ITEM:
