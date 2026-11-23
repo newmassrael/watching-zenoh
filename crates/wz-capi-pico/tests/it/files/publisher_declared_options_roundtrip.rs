@@ -326,6 +326,10 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
              none of their own"
         );
 
+        // Each arm's publisher is let go before the next is declared: a session of the pico
+        // preset holds as many publishers as zenoh-pico's own programs do (`MAX_PUBLISHERS`).
+        z_undeclare_publisher(z_publisher_move(&mut declared));
+
         // ARM 2 - the NEGATIVE arms, on the same subscriber. A publisher declared
         // with nothing, and one declared with the defaults written out, send the
         // defaults: without them a build that stamped the declared-arm QoS on
@@ -361,6 +365,8 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
             "and its delete does too"
         );
 
+        z_undeclare_publisher(z_publisher_move(&mut by_null));
+
         seen.lock().unwrap().clear();
         let written_ke = view(c"demo/po/written");
         let mut written_options: z_publisher_options_t = std::mem::zeroed();
@@ -384,6 +390,8 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
             "a publisher declared with z_publisher_options_default() sends the default \
              QoS: its priority is Z_PRIORITY_DEFAULT and not the enum's zero"
         );
+
+        z_undeclare_publisher(z_publisher_move(&mut by_default));
 
         // ARM 3 - the QoS WITHOUT a declared encoding. A put that brings nothing of
         // its own is then sent from the facts worked out once at declare, not from
@@ -438,9 +446,6 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
         );
 
         z_undeclare_publisher(z_publisher_move(&mut qos_only));
-        z_undeclare_publisher(z_publisher_move(&mut declared));
-        z_undeclare_publisher(z_publisher_move(&mut by_null));
-        z_undeclare_publisher(z_publisher_move(&mut by_default));
         z_undeclare_subscriber(z_subscriber_move(&mut subscriber));
         z_close(z_session_loan_mut(&mut dialer), std::ptr::null());
         z_session_drop(z_session_move(&mut dialer));

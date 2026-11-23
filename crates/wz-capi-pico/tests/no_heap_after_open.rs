@@ -959,12 +959,15 @@ impl Bench {
         );
     }
 
+    /// Declare a publisher and undeclare it, on the listening session: the dialler holds the
+    /// publishers the other families go through, as many as a session of the pico preset holds
+    /// (`MAX_PUBLISHERS`), and the one this family declares would be past them.
     unsafe fn publisher_declare(&self) {
         let ke = view(DATA_KEY);
         let mut publisher: z_owned_publisher_t = std::mem::zeroed();
         assert_eq!(
             z_declare_publisher(
-                z_session_loan(self.pair.dialler()),
+                z_session_loan(self.pair.listener()),
                 &mut publisher,
                 z_view_keyexpr_loan(&ke),
                 std::ptr::null(),
