@@ -350,13 +350,6 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// on the lent policy ([`Self::lent`]). A pattern with no room there is refused as a full
     /// table refuses the subscription ([`RegisterError::TableFull`]).
     keys: P::Keys,
-    /// The Puts the in-place receive path could not deliver lent and delivered
-    /// through the owned projection instead, by why; see [`InPlaceFallbacks`].
-    #[cfg(all(
-        feature = "storage-profile",
-        any(feature = "pubsub-put", feature = "pubsub-delete")
-    ))]
-    in_place_fallbacks: InPlaceFallbacks,
 }
 
 /// What a PEER writes into the subscriber registry, and what is staged back to it:
@@ -389,6 +382,13 @@ pub struct SubscriberPeer<P: Storage = Profile> {
     /// acknowledged are the peer's, whichever table of subscriptions the push is delivered to.
     #[cfg(feature = "transport-shm")]
     shm: crate::extshm::ShmReceiveState,
+    /// The Puts from this peer the in-place receive path could not deliver lent and delivered
+    /// through the owned projection instead, by why; see [`InPlaceFallbacks`].
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    in_place_fallbacks: InPlaceFallbacks,
     /// Which peer the image declares this session's peer to be, once the session knows its zid
     /// (`PeerAllowance::class_of`): the row of the
     /// allowance a message from it is asked against. `None` is a peer not declared, which a closed
@@ -588,6 +588,21 @@ pub struct InPlaceFallbacks {
     /// to the stack, which is an owned value the lent form has none of, so the owned path takes it.
     #[cfg(feature = "pubsub-ts-stack")]
     pub instrumented: u32,
+}
+
+#[cfg(all(
+    feature = "storage-profile",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+impl InPlaceFallbacks {
+    /// Nothing fell back, as `Default` makes it; `const`, so a peer's side of the static
+    /// policy that counts them can be a `static`.
+    pub const NONE: Self = Self {
+        sliced: 0,
+        keyexpr_past_bound: 0,
+        #[cfg(feature = "pubsub-ts-stack")]
+        instrumented: 0,
+    };
 }
 
 /// The counted refusals of the session-local subscriber-interest staging, by
@@ -844,11 +859,6 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             ),
             key_gate: KeyGate::of_build(),
             keys: Default::default(),
-            #[cfg(all(
-                feature = "storage-profile",
-                any(feature = "pubsub-put", feature = "pubsub-delete")
-            ))]
-            in_place_fallbacks: InPlaceFallbacks::default(),
         }
     }
 }
@@ -972,16 +982,6 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             false,
             |sink| sink.deliver(view),
         )
-    }
-
-    /// What the in-place receive path's Puts cost in owned fallbacks since this
-    /// registry was built; see [`InPlaceFallbacks`].
-    #[cfg(all(
-        feature = "storage-profile",
-        any(feature = "pubsub-put", feature = "pubsub-delete")
-    ))]
-    pub fn in_place_fallbacks(&self) -> InPlaceFallbacks {
-        self.in_place_fallbacks
     }
 
     /// The declaration id the next subscription or aggregate reply takes, or
@@ -2262,7 +2262,7 @@ impl<C: SampleSink, P: Storage> Subscriber<C, P> {
     /// The row as the matcher reads it.
     fn row_ref(&self) -> RowRef<'_> {
         RowRef {
-            pattern: &*self.pattern,
+            pattern: &self.pattern,
             facts: self.pattern_facts,
             origin: self.allowed_origin,
         }
@@ -2277,7 +2277,7 @@ impl<C: SampleSink, P: Storage> SubscriberRows
     fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut C)>(&mut self, mut f: F) {
         for (position, subscriber) in self.iter_mut().enumerate() {
             let row = RowRef {
-                pattern: &*subscriber.pattern,
+                pattern: &subscriber.pattern,
                 facts: subscriber.pattern_facts,
                 origin: subscriber.allowed_origin,
             };
@@ -2711,6 +2711,11 @@ impl<P: Storage> Default for SubscriberPeer<P> {
             interests: InterestSide::default(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::new(),
+            #[cfg(all(
+                feature = "storage-profile",
+                any(feature = "pubsub-put", feature = "pubsub-delete")
+            ))]
+            in_place_fallbacks: InPlaceFallbacks::NONE,
             class: None,
             _policy: core::marker::PhantomData,
         }
@@ -2738,6 +2743,11 @@ impl SubscriberPeer<crate::bounded::Static> {
             interests: InterestSide::new_static(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::new(),
+            #[cfg(all(
+                feature = "storage-profile",
+                any(feature = "pubsub-put", feature = "pubsub-delete")
+            ))]
+            in_place_fallbacks: InPlaceFallbacks::NONE,
             class: None,
             _policy: core::marker::PhantomData,
         }
@@ -2824,6 +2834,16 @@ impl SubscriberPeer<Profile> {
 }
 
 impl<P: Storage> SubscriberPeer<P> {
+    /// What the in-place receive path's Puts from this peer cost in owned fallbacks; see
+    /// [`InPlaceFallbacks`].
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    pub fn in_place_fallbacks(&self) -> InPlaceFallbacks {
+        self.in_place_fallbacks
+    }
+
     /// transport-shm — install the AP SHM resolver (the `std` mmap-open impl). The
     /// single mutation entry point for the gated `shm_resolver` field, called once
     /// at AP bring-up (the wz-runtime-tokio `Session::set_shm_resolver` forwarder),
@@ -4443,6 +4463,15 @@ impl<C: SampleSink, P: Storage> SubscriberRegistry<C, P> {
     #[cfg(feature = "transport-shm")]
     pub fn shm_unnegotiated_drops(&self) -> u64 {
         self.peer.shm_unnegotiated_drops()
+    }
+
+    /// [`SubscriberPeer::in_place_fallbacks`] for this registry's peer.
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    pub fn in_place_fallbacks(&self) -> InPlaceFallbacks {
+        self.peer.in_place_fallbacks()
     }
 
     /// [`SubscriberPeer::take_staged_sub_interest_replies`] for this registry's

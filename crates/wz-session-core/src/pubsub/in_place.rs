@@ -255,20 +255,20 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
             #[cfg(feature = "pubsub-put")]
             Err(Fallback::Sliced) => {
-                self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
+                peer.in_place_fallbacks.sliced = peer.in_place_fallbacks.sliced.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
             Err(Fallback::KeyexprPastBound) => {
-                self.in_place_fallbacks.keyexpr_past_bound =
-                    self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
+                peer.in_place_fallbacks.keyexpr_past_bound =
+                    peer.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
                 #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
             #[cfg(feature = "pubsub-ts-stack")]
             Err(Fallback::Instrumented) => {
-                self.in_place_fallbacks.instrumented =
-                    self.in_place_fallbacks.instrumented.saturating_add(1);
+                peer.in_place_fallbacks.instrumented =
+                    peer.in_place_fallbacks.instrumented.saturating_add(1);
                 #[cfg(not(feature = "rx-lent-only"))]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
