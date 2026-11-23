@@ -275,8 +275,6 @@ pub mod fragment_pacing;
 /// synchronisation, so each runtime composes it with its own `Mutex`. Its bound is a limit's
 /// quota ([`limit_binding::Quota`]), whose no bound is upstream's behaviour. Unconditional,
 /// no_std and no_alloc.
-// Totality debt TD-147 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod quota;
 
 /// A position in the sequence of declarations a node owes a peer: [`replay_cursor::ReplayCursor`],
