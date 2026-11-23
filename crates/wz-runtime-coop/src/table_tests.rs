@@ -5,7 +5,8 @@
 //! (`CoopRuntime::reserved`), against what it promises beside the static table's own tests
 //! (`static_tests`): a grown table spawns the same tasks again without allocating; a reserved one
 //! allocates nothing after it is made and refuses past its rows, counted; the tasks are dropped
-//! with the runtime; and a waker kept past the runtime still points at a cell.
+//! with the runtime; a waker kept past the runtime still points at a cell; and the timer table,
+//! reserved or grown, holds a sleep without allocating once it has the entry.
 //!
 //! The allocations are counted on the thread that runs the test, by the allocator below: a test
 //! binary has one, and the other tests of the crate run through it uncounted.
@@ -15,15 +16,15 @@ extern crate std;
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::rc::Rc;
 
-use wz_runtime_core::{Runtime, RuntimeError};
+use wz_runtime_core::{Runtime, RuntimeError, TimeSource};
 
 use crate::executor::{yield_now, Refusals, SpawnRefusal};
-use crate::{ClockSource, CoopLocalSet, CoopRuntime, RuntimeRows};
+use crate::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 
 /// The allocator of this test binary: the system's, counting on a thread that asked it to.
 struct Counting;
@@ -202,6 +203,7 @@ fn a_reserved_table_takes_its_rows_and_refuses_one_more_counted() {
         RuntimeRows {
             tasks: 2,
             task_bytes: 128,
+            timers: 1,
         },
     );
     let local = CoopLocalSet::new(&runtime);
@@ -262,6 +264,7 @@ fn a_reserved_table_refuses_a_task_one_byte_larger_than_its_cells() {
         RuntimeRows {
             tasks: 1,
             task_bytes: BYTES,
+            timers: 1,
         },
     );
     let local = CoopLocalSet::new(&fits);
@@ -275,6 +278,7 @@ fn a_reserved_table_refuses_a_task_one_byte_larger_than_its_cells() {
         RuntimeRows {
             tasks: 1,
             task_bytes: BYTES - 1,
+            timers: 1,
         },
     );
     let local = CoopLocalSet::new(&short);
@@ -295,6 +299,7 @@ fn a_reserved_runtime_allocates_when_it_is_made_and_never_after() {
             RuntimeRows {
                 tasks: 3,
                 task_bytes: 256,
+                timers: 1,
             },
         )
     });
@@ -325,18 +330,141 @@ fn the_rows_say_the_bytes_a_reserved_table_takes() {
     let rows = RuntimeRows {
         tasks: 3,
         task_bytes: 100,
+        timers: 2,
     };
     let cell = core::mem::size_of::<crate::executor::TaskCell>();
+    let entry = core::mem::size_of::<crate::timer::TimerSlot>();
     assert_eq!(
         rows.reserved_bytes(),
-        3 * (112 + cell),
-        "each cell's bytes rounded to 16"
+        3 * (112 + cell) + 2 * entry,
+        "each cell's bytes rounded to 16, its bookkeeping, and each timer entry"
     );
     let none = RuntimeRows {
         tasks: 0,
         task_bytes: 4096,
+        timers: 0,
     };
     assert_eq!(none.reserved_bytes(), 0);
+}
+
+/// A clock a test moves by hand. One per test, so it is a static of the test.
+struct Hand(&'static AtomicU64);
+
+impl ClockSource for Hand {
+    fn now_us(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A task of `local` that sleeps `ms` on `runtime`'s clock and answers `answer`.
+fn sleeper(
+    runtime: &CoopRuntime<Hand>,
+    local: &CoopLocalSet<Hand>,
+    ms: u64,
+    answer: u32,
+) -> crate::CoopLocalJoinHandle<u32> {
+    let time = CoopTime::new(runtime);
+    local.spawn_local(async move {
+        time.sleep(ms).await;
+        answer
+    })
+}
+
+#[test]
+fn a_reserved_timer_table_refuses_counted_and_the_sleep_still_ends_by_polling() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let runtime = CoopRuntime::reserved(
+        Hand(&NOW),
+        RuntimeRows {
+            tasks: 3,
+            task_bytes: 256,
+            timers: 1,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    assert_eq!(runtime.timers().capacity(), 1);
+    let first = sleeper(&runtime, &local, 5, 1);
+    let second = sleeper(&runtime, &local, 5, 2);
+    local.run_until_idle();
+    assert_eq!(runtime.timers().pending_count(), 1, "one entry, taken");
+    assert!(
+        runtime.timer_refusals() >= 1,
+        "the second sleep was refused an entry and counted"
+    );
+    assert_eq!(
+        runtime.timers().capacity(),
+        1,
+        "a reserved table does not grow"
+    );
+    NOW.store(10_000, Ordering::SeqCst);
+    assert_eq!(local.block_on_local(first).expect("by its deadline"), 1);
+    assert_eq!(
+        local
+            .block_on_local(second)
+            .expect("by polling, then by its deadline"),
+        2
+    );
+    assert_eq!(runtime.timers().pending_count(), 0);
+}
+
+#[test]
+fn a_reserved_runtime_takes_no_memory_for_a_sleep() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let runtime = CoopRuntime::reserved(
+        Hand(&NOW),
+        RuntimeRows {
+            tasks: 2,
+            task_bytes: 256,
+            timers: 2,
+        },
+    );
+    let local = CoopLocalSet::new(&runtime);
+    let (answer, made) = allocations(|| {
+        let handle = sleeper(&runtime, &local, 5, 9);
+        local.run_until_idle();
+        assert_eq!(runtime.timers().pending_count(), 1);
+        NOW.store(10_000, Ordering::SeqCst);
+        local.block_on_local(handle).expect("by its deadline")
+    });
+    assert_eq!(answer, 9);
+    assert_eq!(made, 0, "the sleep's entry is one of the table's");
+    assert_eq!(runtime.timer_refusals(), 0);
+}
+
+#[test]
+fn a_grown_timer_table_takes_every_sleep_and_reuses_its_entries() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let runtime = CoopRuntime::new(Hand(&NOW));
+    let local = CoopLocalSet::new(&runtime);
+    let round = |deadline_ms: u64| {
+        let handles: std::vec::Vec<_> = (0..5u32)
+            .map(|n| sleeper(&runtime, &local, deadline_ms, n))
+            .collect();
+        local.run_until_idle();
+        assert_eq!(
+            runtime.timers().pending_count(),
+            5,
+            "every sleep has an entry"
+        );
+        NOW.fetch_add(deadline_ms * 1000 + 1, Ordering::SeqCst);
+        handles
+            .into_iter()
+            .map(|handle| local.block_on_local(handle).expect("by its deadline"))
+            .sum::<u32>()
+    };
+    assert_eq!(round(5), 10);
+    assert_eq!(runtime.timer_refusals(), 0, "a grown table refuses none");
+    assert_eq!(runtime.timers().capacity(), 5);
+    assert_eq!(runtime.timers().pending_count(), 0);
+    // The same sleeps again find the entries and the cells free: the table does not grow, and
+    // nothing but the list of handles this test keeps is allocated.
+    let (sum, made) = allocations(|| round(10));
+    assert_eq!(sum, 10);
+    assert_eq!(runtime.timers().capacity(), 5);
+    assert_eq!(
+        made, 1,
+        "the test's own list of five handles, and nothing of the runtime's"
+    );
 }
 
 #[test]

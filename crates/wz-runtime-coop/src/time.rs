@@ -182,7 +182,7 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
 }
 
 /// Register `waker` for `deadline_us` on the runtime's timer queue; when the queue
-/// has no entry to give (the static table of `session-slot` is full) wake the task
+/// has no entry to give (a fixed table, an image's or a reserved one, is full) wake the task
 /// for the next pass instead, so the sleep still ends, by polling, as it did
 /// before the queue existed. `true` when the deadline is registered.
 fn arm<C: ClockSource>(inner: &InnerRef<C>, deadline_us: u64, cx: &mut Context<'_>) -> bool {

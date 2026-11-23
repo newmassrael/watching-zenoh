@@ -164,18 +164,10 @@ pub mod sync;
 #[cfg(feature = "runtime")]
 pub(crate) mod atomic;
 
-// One task pool for every profile: a table of cells, each holding a task's future and then its
-// output, in a `static` the image declares (`session-slot`), reserved when the runtime is made, or
-// grown on demand (the heap profile). The handles, the local set and the wakers are references to
-// its cells (see the `executor` module doc). The timer queue keeps a static form and a heap form
-// of its own under one public name.
-//
-// A pair is declared under two DIFFERENT names and the public name is an alias
-// of whichever the build keeps, because two `mod` declarations of one name in one
-// scope are a defect under every feature combination (rustc says so only for a
-// build that enables both, and `duplicate_module_lint` says so for the tree). The
-// two forms are `#[doc(hidden)]`: the module the crate documents and its users
-// name is `timer`.
+// One task pool and one timer queue for every profile: tables of cells and of entries, in a
+// `static` the image declares (`session-slot`), reserved when the runtime is made, or grown on
+// demand (the heap profile). The handles, the local set and the wakers are references to the task
+// cells (see the `executor` module doc).
 #[cfg(feature = "runtime")]
 pub mod executor;
 #[cfg(feature = "runtime")]
@@ -192,18 +184,8 @@ mod static_tests;
 mod table_tests;
 #[cfg(feature = "runtime")]
 pub mod time;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[doc(hidden)]
-#[path = "timer.rs"]
-pub mod timer_heap;
-#[cfg(feature = "session-slot")]
-#[doc(hidden)]
-#[path = "static_timer.rs"]
-pub mod timer_static;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use timer_heap as timer;
-#[cfg(feature = "session-slot")]
-pub use timer_static as timer;
+#[cfg(feature = "runtime")]
+pub mod timer;
 #[cfg(feature = "runtime")]
 mod yield_now;
 

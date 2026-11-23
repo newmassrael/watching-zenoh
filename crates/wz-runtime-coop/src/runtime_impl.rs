@@ -207,24 +207,29 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// allocates the runtime's state.
     #[cfg(not(feature = "session-slot"))]
     pub fn new(clock: C) -> Self {
-        Self::over(clock, ExecutorState::growing())
+        Self::over(clock, ExecutorState::growing(), TimerQueue::growing())
     }
 
-    /// A runtime whose task table is reserved now, as `rows` says, and never grows: a spawn past
-    /// it, or of a task larger than its cells, is refused and counted
-    /// ([`Self::task_refusals`]), and no spawn allocates. What an engine that owes no allocation
-    /// after its open makes at its open.
+    /// A runtime whose task table and timer table are reserved now, as `rows` says, and never
+    /// grow: a spawn past the tasks, or of a task larger than its cells, is refused and counted
+    /// ([`Self::task_refusals`]); a sleep past the timers is refused an entry, counted
+    /// ([`Self::timer_refusals`]), and ends by polling. No spawn and no sleep allocates. What an
+    /// engine that owes no allocation after its open makes at its open.
     #[cfg(not(feature = "session-slot"))]
     pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
-        Self::over(clock, ExecutorState::reserved(rows.tasks, rows.task_bytes))
+        Self::over(
+            clock,
+            ExecutorState::reserved(rows.tasks, rows.task_bytes),
+            TimerQueue::reserved(rows.timers),
+        )
     }
 
     #[cfg(not(feature = "session-slot"))]
-    fn over(clock: C, executor: ExecutorState) -> Self {
+    fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
                 executor,
-                timers: TimerQueue::new(),
+                timers,
                 clock,
             }),
             driver: PhantomData,
@@ -232,8 +237,8 @@ impl<C: ClockSource> CoopRuntime<C> {
     }
 }
 
-/// What a reserved runtime holds ([`CoopRuntime::reserved`]): its tasks and the bytes each may
-/// take, a future and its output together.
+/// What a reserved runtime holds ([`CoopRuntime::reserved`]): its tasks, the bytes each may
+/// take (a future and its output together), and the deadlines that may wait at once.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeRows {
@@ -242,20 +247,27 @@ pub struct RuntimeRows {
     /// The bytes of a task's cell: its future and its output, as
     /// [`crate::executor::cell_bytes_of`] counts them.
     pub task_bytes: usize,
+    /// The deadlines (a sleep, a timeout) that may wait at once.
+    pub timers: usize,
 }
 
 #[cfg(not(feature = "session-slot"))]
 impl RuntimeRows {
     /// The bytes the tables take: each task cell's bytes, rounded up to the cells' alignment, and
-    /// its bookkeeping. What a report of the memory reserved at open adds for the runtime.
+    /// its bookkeeping, and each timer entry. What a report of the memory reserved at open adds
+    /// for the runtime.
     pub const fn reserved_bytes(&self) -> usize {
         let stride = self
             .task_bytes
             .div_ceil(crate::executor::CELL_ALIGN)
             .saturating_mul(crate::executor::CELL_ALIGN);
-        self.tasks.saturating_mul(
+        let tasks = self.tasks.saturating_mul(
             stride.saturating_add(core::mem::size_of::<crate::executor::TaskCell>()),
-        )
+        );
+        let timers = self
+            .timers
+            .saturating_mul(core::mem::size_of::<crate::timer::TimerSlot>());
+        tasks.saturating_add(timers)
     }
 }
 
@@ -442,7 +454,6 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
 
     /// The sleeps the timer table refused an entry (each woke itself for the next
     /// pass instead).
-    #[cfg(feature = "session-slot")]
     pub fn timer_refusals(&self) -> u32 {
         self.inner.timers.refusals()
     }
