@@ -1245,17 +1245,21 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
         engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink())
     };
     assert!(
-        declare("demo/@adv/pub/**").is_some(),
+        declare("demo/@adv/pub/**").is_ok(),
         "the history's late-publisher detection"
     );
     assert!(
-        declare("demo/**/@adv/pub/**").is_some(),
+        declare("demo/**/@adv/pub/**").is_ok(),
         "the program's own publisher detection"
     );
     until(&engine, "the router to see both Interests", || {
         router.seen(|s| s.interests) >= 2
     });
-    assert_eq!(declare("demo/third"), None, "CONTROL: the third is refused");
+    assert_eq!(
+        declare("demo/third"),
+        Err(wz_capi_port::Refusal::TableFull),
+        "CONTROL: the third is refused"
+    );
 }
 
 /// The pico preset's delivery lane is the least lane the build accepts at the preset's other

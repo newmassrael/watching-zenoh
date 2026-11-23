@@ -48,7 +48,7 @@ use crate::pubsub::{
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
+use crate::result::{refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
@@ -134,14 +134,14 @@ impl TokenState {
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
-        let Some(id) = session.engine.declare_liveliness_token_on_wire(
-            keyexpr,
-            key.wire(Arc::as_ref(&session.engine)),
-            Some(key.retraction_key(Arc::as_ref(&session.engine))),
-        ) else {
-            // The session holds no more tokens: its table is full or its ids are spent.
-            return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
+        let id = session
+            .engine
+            .declare_liveliness_token_on_wire(
+                keyexpr,
+                key.wire(Arc::as_ref(&session.engine)),
+                Some(key.retraction_key(Arc::as_ref(&session.engine))),
+            )
+            .map_err(|refused| refusal_code(refused, Door::Token))?;
         Ok(Self {
             shared: session.engine.clone(),
             id,
@@ -371,12 +371,15 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         };
         let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
-        let Some(id) =
-            engine.declare_liveliness_subscriber_on_wire(&ke, wire, history, sample_sink(cclosure))
-        else {
-            // The session holds no more liveliness subscribers: its table is full or its ids are
-            // spent. The sink was dropped with the refusal.
-            return Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        let id = match engine.declare_liveliness_subscriber_on_wire(
+            &ke,
+            wire,
+            history,
+            sample_sink(cclosure),
+        ) {
+            Ok(id) => id,
+            // The sink was dropped with the refusal.
+            Err(refused) => return refusal_code(refused, Door::Entity),
         };
         let state = slot.fill(SubscriberState {
             shared: engine,
@@ -671,8 +674,8 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
             history,
             sample_sink(cclosure),
         ) {
-            Some(_) => Z_OK,
-            None => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            Ok(_) => Z_OK,
+            Err(refused) => refusal_code(refused, Door::Entity),
         }
     })
 }

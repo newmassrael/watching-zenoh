@@ -326,7 +326,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
 
     let token =
         engine.declare_liveliness_token_on_wire("wz/port/spent/t/last", WireKey::literal(), None);
-    assert_eq!(token, Some(u32::MAX), "the last entity id is handed out");
+    assert_eq!(token, Ok(u32::MAX), "the last entity id is handed out");
     let refused = engine.declare_queryable_on_wire(
         "wz/port/spent/q",
         WireKey::literal(),
@@ -335,7 +335,11 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         None,
         answer(),
     );
-    assert_eq!(refused, None, "a queryable past the last id is refused");
+    assert_eq!(
+        refused,
+        Err(Refusal::NoEntityId),
+        "a queryable past the last id is refused"
+    );
     assert_eq!(
         queryables("wz/port/spent/q"),
         Some(false),
@@ -347,7 +351,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
             WireKey::literal(),
             None,
         ),
-        None,
+        Err(Refusal::NoEntityId),
         "a token past the last id is refused"
     );
     assert_eq!(
@@ -566,12 +570,14 @@ fn a_matching_listener_through_the_port_follows_a_subscriber_of_the_other_node()
 
     let told: Arc<Mutex<Vec<bool>>> = Arc::default();
     let sink = Arc::clone(&told);
-    let listener = engine.declare_matching_listener(
-        FilterPlane::Subscribers,
-        "wz/port/match/a",
-        Arc::new(move |matching| sink.lock().unwrap().push(matching)),
-        false,
-    );
+    let listener = engine
+        .declare_matching_listener(
+            FilterPlane::Subscribers,
+            "wz/port/match/a",
+            Arc::new(move |matching| sink.lock().unwrap().push(matching)),
+            false,
+        )
+        .expect("a node holds every matching listener it is asked for");
     assert_eq!(
         engine.matching_status(
             FilterPlane::Subscribers,
@@ -668,9 +674,11 @@ fn a_face_watch_through_the_port_is_told_of_a_link_coming_and_going() {
     type Told = Vec<(FaceEventKind, [u8; 16], u8)>;
     let events: Arc<Mutex<Told>> = Arc::default();
     let sink = Arc::clone(&events);
-    let watch = engine.watch_faces(Arc::new(move |kind, face| {
-        sink.lock().unwrap().push((kind, face.zid, face.whatami));
-    }));
+    let watch = engine
+        .watch_faces(Arc::new(move |kind, face| {
+            sink.lock().unwrap().push((kind, face.zid, face.whatami));
+        }))
+        .expect("an open node watches its faces");
 
     let locator = router.listen_locators()[0].clone();
     let peer = Client::open(vec![locator]);
@@ -776,7 +784,6 @@ fn a_node_that_dials_a_node_holds_it_as_a_face() {
 /// takes a stated call as if nothing were stated.
 #[test]
 fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
-    use wz_capi_port::LinksNotHonoured;
     use wz_session_core::admission_retry::AdmissionRetry;
     use wz_session_core::link_restriction::LinkRestriction;
     use wz_session_core::sink::SampleView;
@@ -826,32 +833,24 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         ),
     ] {
         assert_eq!(
-            engine.get_stated(key, &WireKey::literal(), &stated, None, &mut || {
-                legs += 1;
-                Box::new(|_: &dyn ReplyView| {})
-            }),
-            Err(named),
-            "a get that states {named:?}, through the door that names the refusal"
-        );
-        assert_eq!(
             engine.get_on_wire(key, &WireKey::literal(), &stated, None, &mut || {
                 legs += 1;
                 Box::new(|_: &dyn ReplyView| {})
             }),
-            Some(0),
-            "a get that states {named:?}, handed to the door of no statement, asks no link"
+            Err(Refusal::NotHonoured(named)),
+            "a get that states {named:?} is refused by that statement and asks no link"
         );
     }
     assert_eq!(legs, 0, "no leg was minted for a get that states something");
     assert_eq!(
-        engine.get_stated(
+        engine.get_on_wire(
             key,
             &WireKey::literal(),
             &QueryOptions::default(),
             None,
             &mut || Box::new(|_: &dyn ReplyView| {})
         ),
-        Ok(Some(1)),
+        Ok(1),
         "a get that states no set is the node's one leg"
     );
 
@@ -866,7 +865,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink.clone()
         ),
-        Err(LinksNotHonoured),
+        Err(Refusal::NotHonoured(StatementNotHonoured::Links)),
         "a limited subscriber"
     );
     let taken = engine
@@ -878,19 +877,17 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             None,
             sink,
         )
-        .expect("no set is never refused")
-        .expect("a node has an id for a subscriber");
+        .expect("no set is never refused, and a node has an id for a subscriber");
     engine.undeclare_subscriber(taken);
 
     assert_eq!(
         engine.declare_liveliness_token_on_link_set(key, WireKey::literal(), one, None),
-        Err(LinksNotHonoured),
+        Err(Refusal::NotHonoured(StatementNotHonoured::Links)),
         "a limited token"
     );
     let token = engine
         .declare_liveliness_token_on_link_set(key, WireKey::literal(), LinkRestriction::Any, None)
-        .expect("no set is never refused")
-        .expect("a node has an id for a token");
+        .expect("no set is never refused, and a node has an id for a token");
     engine.undeclare_liveliness_token(token);
 
     router.close();
@@ -1123,7 +1120,7 @@ mod shared_memory {
                     None,
                     &mut || Box::new(|_: &dyn ReplyView| {}),
                 ),
-                Some(1),
+                Ok(1),
                 "a node asks with a chunk on one leg"
             );
         });
@@ -1167,14 +1164,16 @@ mod shared_memory {
         let (told, _) = subscribe(&engine);
         let value = chunk();
         until_each_is_told(&[&asked], || {
-            other.get_shm_on_wire(
-                ASKED,
-                &WireKey::literal(),
-                &QueryOptions::default(),
-                value.send_handle(),
-                None,
-                &mut || Box::new(|_: &dyn ReplyView| {}),
-            );
+            other
+                .get_shm_on_wire(
+                    ASKED,
+                    &WireKey::literal(),
+                    &QueryOptions::default(),
+                    value.send_handle(),
+                    None,
+                    &mut || Box::new(|_: &dyn ReplyView| {}),
+                )
+                .expect("a client asks with a chunk");
         });
         until_each_is_told(&[&told], || {
             other
@@ -1240,7 +1239,45 @@ mod shared_memory {
         let got: Got = Arc::default();
         until_each_is_told(&[&got], || {
             let sink = Arc::clone(&got);
-            engine.get_on_wire(
+            engine
+                .get_on_wire(
+                    ASKED,
+                    &WireKey::literal(),
+                    &QueryOptions::default(),
+                    None,
+                    &mut || {
+                        let sink = Arc::clone(&sink);
+                        Box::new(move |reply: &dyn ReplyView| {
+                            if reply.kind() == ReplyKind::Put {
+                                let shared = reply
+                                    .payload_shared()
+                                    .and_then(|bytes| bytes.shm_chunk())
+                                    .is_some();
+                                sink.lock()
+                                    .unwrap()
+                                    .push((reply.payload().to_vec(), shared));
+                            }
+                        })
+                    },
+                )
+                .expect("a session asks queries");
+        });
+
+        assert_eq!(
+            first(&got, "the node's own get"),
+            (BODY.to_vec(), true),
+            "the node's own get was not handed the chunk the client replied with"
+        );
+        shared.close();
+        node.close();
+    }
+
+    /// Ask `ASKED` through `engine`'s port, keeping in `got` each Put reply's payload and
+    /// whether it was handed as a chunk of shared memory rather than as bytes.
+    fn ask_keeping_replies(engine: &Arc<dyn SessionEngine>, got: &Got) {
+        let sink = Arc::clone(got);
+        engine
+            .get_on_wire(
                 ASKED,
                 &WireKey::literal(),
                 &QueryOptions::default(),
@@ -1259,42 +1296,8 @@ mod shared_memory {
                         }
                     })
                 },
-            );
-        });
-
-        assert_eq!(
-            first(&got, "the node's own get"),
-            (BODY.to_vec(), true),
-            "the node's own get was not handed the chunk the client replied with"
-        );
-        shared.close();
-        node.close();
-    }
-
-    /// Ask `ASKED` through `engine`'s port, keeping in `got` each Put reply's payload and
-    /// whether it was handed as a chunk of shared memory rather than as bytes.
-    fn ask_keeping_replies(engine: &Arc<dyn SessionEngine>, got: &Got) {
-        let sink = Arc::clone(got);
-        engine.get_on_wire(
-            ASKED,
-            &WireKey::literal(),
-            &QueryOptions::default(),
-            None,
-            &mut || {
-                let sink = Arc::clone(&sink);
-                Box::new(move |reply: &dyn ReplyView| {
-                    if reply.kind() == ReplyKind::Put {
-                        let shared = reply
-                            .payload_shared()
-                            .and_then(|bytes| bytes.shm_chunk())
-                            .is_some();
-                        sink.lock()
-                            .unwrap()
-                            .push((reply.payload().to_vec(), shared));
-                    }
-                })
-            },
-        );
+            )
+            .expect("the engine asks queries");
     }
 
     /// A reply the node's own queryable makes with a chunk goes to a client that negotiated

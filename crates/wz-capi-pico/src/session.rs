@@ -1547,6 +1547,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 drive.close();
                 return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
             }
+            // The engine would not tell the connectivity plane its faces.
+            #[cfg(feature = "connectivity")]
+            if let Some(refused) = ext.face_watch_refused() {
+                drop(ext);
+                drive.close();
+                return crate::result::refusal_code(refused, crate::result::Door::Session);
+            }
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
             let handle = PicoSessionHandle::new(drive, ext);
@@ -1880,6 +1887,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         drop(ext);
         drive.close();
         return crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+    }
+    // The engine would not tell the connectivity plane its faces.
+    #[cfg(feature = "connectivity")]
+    if let Some(refused) = ext.face_watch_refused() {
+        drop(ext);
+        drive.close();
+        return crate::result::refusal_code(refused, crate::result::Door::Session);
     }
     #[cfg(feature = "admin-space")]
     let ext = ext.with_transport_endpoint(transport_endpoint);
@@ -2356,11 +2370,14 @@ pub unsafe extern "C" fn zp_send_join(
 ) -> ZResult {
     guarded(|| {
         let live = live_session_result(zs);
-        // Either engine's groups, through the port.
+        // Either engine's groups, through the port; a session closed meanwhile answers as one
+        // closed before the call.
         #[cfg(feature = "multicast-transport")]
         if live == Z_OK {
             if let Some(handle) = session_handle(zs) {
-                engine_ref(handle).send_join_on_groups();
+                if let Err(refused) = engine_ref(handle).send_join_on_groups() {
+                    return crate::result::refusal_code(refused, crate::result::Door::Session);
+                }
             }
         }
         live

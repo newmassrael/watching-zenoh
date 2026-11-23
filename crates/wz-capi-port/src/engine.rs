@@ -32,13 +32,13 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
-use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, NoRoomToHold, QblId, QueryableSink, ReplyCallback, StatementNotHonoured, SubId,
-    SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -108,9 +108,10 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Ask every multicast group the session joined to send its JOIN now, between two beacons,
     /// which then keeps its cadence from it (zenoh-pico's `zp_send_join`): how many groups were
-    /// asked. An engine that joins no group asks none, the provided answer.
-    fn send_join_on_groups(&self) -> usize {
-        0
+    /// asked, `0` for a session that joined none. A closed session asks nothing and is refused
+    /// ([`Refusal::Closed`]). An engine that joins no group asks none, the provided answer.
+    fn send_join_on_groups(&self) -> Result<usize, Refusal> {
+        Ok(0)
     }
 
     /// A snapshot of every established face: the peer's identity and the negotiated booleans of
@@ -124,12 +125,13 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Tell `sink` each time a face comes up or goes down, from now on, and answer the id that
     /// stops it ([`Self::unwatch_faces`]). The sink runs where the session hands out its
-    /// callbacks and never under the session's lock, so it may reach back into the session. An
-    /// engine built without the connectivity plane tells nobody of anything, which is the
+    /// callbacks and never under the session's lock, so it may reach back into the session.
+    /// Refused, with `sink` let go of, on a closed session, which no face comes up on, and with
+    /// [`Refusal::NotBuilt`] by an engine built without the connectivity plane, which is the
     /// provided answer.
-    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+    fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
         let _ = sink;
-        0
+        Err(Refusal::NotBuilt)
     }
 
     /// Stop the face watch `id`: `true` when one was registered under it.
@@ -141,15 +143,19 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Tell `sink` what the peers of the session declare and retract of the kind `plane` names,
     /// on every link the session holds and every link that comes up later, until
     /// [`Self::undeclare_decl_watch`] is called with the id answered ([`crate::decl_watch`]).
-    /// An engine that does not watch refuses by name, which is the provided answer: a watch that
-    /// was taken and never told anything would read as peers that declare nothing.
+    /// Refused, with `sink` let go of and nothing installed: [`Refusal::NotBuilt`] by an engine
+    /// that does not watch, which is the provided answer (a watch that was taken and never told
+    /// anything would read as peers that declare nothing), or by one built without the plane of
+    /// the kind asked for; [`Refusal::Closed`] on a closed session; [`Refusal::TableFull`] when the
+    /// session's table of observers of what a peer declares is at its bound
+    /// (`MAX_DECL_OBSERVERS`).
     fn declare_decl_watch(
         &self,
         plane: DeclPlane,
         sink: DeclWatchSink,
-    ) -> Result<DeclWatchId, DeclWatchRefused> {
+    ) -> Result<DeclWatchId, Refusal> {
         let _ = (plane, sink);
-        Err(DeclWatchRefused::NotProvided)
+        Err(Refusal::NotBuilt)
     }
 
     /// Stop the declaration watch `id` and let go of its sink: `true` when one was declared under
@@ -249,10 +255,10 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
     /// beside its id, when the declaring ABI's reference library names one.
     ///
-    /// `None` when the session has handed out every declaration id it can put on the wire, as
-    /// [`Self::declare_queryable_on_wire`] and [`Self::declare_liveliness_token_on_wire`] answer:
-    /// nothing is declared and nothing is sent, rather than an id a live declaration may still
-    /// hold being handed out again.
+    /// Refused, with `sink` let go of, nothing declared and nothing sent, as every declaration
+    /// of the port is: [`Refusal::NoEntityId`] once the session has handed out every declaration
+    /// id it can put on the wire, rather than an id a live declaration may still hold being
+    /// handed out again; a full table, a key the session cannot hold, or a closed session.
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: &str,
@@ -260,14 +266,16 @@ pub trait SessionEngine: Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId>;
+    ) -> Result<SubId, Refusal>;
 
     /// Retract subscriber `id`. Retracting one already retracted does nothing.
     fn undeclare_subscriber(&self, id: SubId);
 
-    /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: its mapping id, or
-    /// `None` when the session has no id left to give.
-    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId>;
+    /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: its mapping id.
+    /// Refused when the session has no id left to give ([`Refusal::NoEntityId`]), no row or key
+    /// room left, or is closed; and with [`Refusal::NotBuilt`] by an engine that names every key
+    /// whole and holds no declaration.
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Result<ExprId, Refusal>;
 
     /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
     fn release_keyexpr(&self, mapping_id: ExprId);
@@ -290,28 +298,31 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// callback (`vendor/zenoh-pico/src/api/api.c` @
     /// `_z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`)
     /// and zenoh's querier asks for complete queryables when its target is `ALL_COMPLETE`.
+    ///
+    /// A refused listener answers why, with `sink` already let go of and nothing asked of a peer:
+    /// the caller has no listener to retract.
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId;
+    ) -> Result<MatchId, Refusal>;
 
     /// [`Self::declare_matching_listener`] for an entity whose `locality` says whose declarations
     /// count: the peers' (`Remote`), the session's own (`SessionLocal`), or both (`Any`), as
     /// upstream's matching status reads an entity by the destination it was declared with. A
-    /// listener of the session's own entities alone asks no peer. `None` from an engine with no
-    /// such listener in this build, which is the provided answer.
+    /// listener of the session's own entities alone asks no peer. [`Refusal::NotBuilt`] from an
+    /// engine with no such listener in this build, which is the provided answer.
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
+    ) -> Result<MatchId, Refusal> {
         let _ = (plane, keyexpr, sink, locality);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Whether anything `plane` counts matches `keyexpr`, from the declarations `locality` admits,
@@ -337,8 +348,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     ///
     /// The filter's Interest takes the session's next entity id whether it is sent or not, as
     /// zenoh-pico's does (`vendor/zenoh-pico/src/net/primitives.c` @
-    /// `intr._id = _z_get_entity_id(zn);`), so `None` once the session has handed out every id
-    /// ([`Self::next_entity_id`]): a filter that could not ask would hold every write back.
+    /// `intr._id = _z_get_entity_id(zn);`), so it is refused once the session has handed out every
+    /// id ([`Self::next_entity_id`]): a filter that could not ask would hold every write back. A
+    /// refused filter answers why, with nothing held, asked or numbered.
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
@@ -346,7 +358,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
-    ) -> Option<FilterId>;
+    ) -> Result<FilterId, Refusal>;
 
     /// Whether filter `id` says nothing matches, so a write is not sent (zenoh-pico's
     /// `_z_write_filter_active`).
@@ -392,8 +404,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
     /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`
     /// is the key its undeclaration names beside its id, when the declaring ABI's reference
-    /// library names one. `None` from an engine with no queryable in this build, which is the
-    /// provided answer, and from a session that has handed out every entity id.
+    /// library names one. Refused as [`Self::declare_subscriber_on_wire`] is, and with
+    /// [`Refusal::NotBuilt`] by an engine with no queryable in this build, which is the provided
+    /// answer.
     fn declare_queryable_on_wire(
         &self,
         keyexpr: &str,
@@ -402,9 +415,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Option<QblId> {
+    ) -> Result<QblId, Refusal> {
         let _ = (keyexpr, wire, complete, allowed_origin, retraction, sink);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Retract queryable `id`. Retracting one already retracted, or one never declared, does
@@ -418,9 +431,10 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// platform default, never none) or the loss of its link. Its replies are token
     /// declarations, with the token's key as the reply's. `leg` and `fan` are as
     /// [`Self::get_on_wire`]'s: `leg` mints each leg's [`ReplyCallback`], whose drop is that
-    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, or
-    /// `None` from an engine with no liveliness get in this build, which is the provided
-    /// answer.
+    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
+    /// for a get that reached nobody; refused as [`Self::get_on_wire`] is, and with
+    /// [`Refusal::NotBuilt`] by an engine with no liveliness get in this build, which is the
+    /// provided answer.
     fn liveliness_get_on_wire(
         &self,
         keyexpr: &str,
@@ -428,24 +442,24 @@ pub trait SessionEngine: Send + Sync + 'static {
         timeout_ms: u32,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let _ = (keyexpr, wire, timeout_ms, fan, leg);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Declare a liveliness token on `keyexpr`, announced as `wire`, to every peer the session
     /// reaches now and later. `retraction` is the key its undeclaration names beside its id,
-    /// when the declaring ABI's reference library names one. `None` from an engine with no
-    /// liveliness in this build, which is the provided answer, and from a session that has
-    /// handed out every entity id.
+    /// when the declaring ABI's reference library names one. Refused as
+    /// [`Self::declare_subscriber_on_wire`] is, and with [`Refusal::NotBuilt`] by an engine with
+    /// no liveliness in this build, which is the provided answer.
     fn declare_liveliness_token_on_wire(
         &self,
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
+    ) -> Result<TokenId, Refusal> {
         let _ = (keyexpr, wire, retraction);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Retract token `id`, which tells the peers' liveliness subscribers it is gone. Retracting
@@ -457,17 +471,18 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Subscribe to the liveliness tokens the peers hold on `keyexpr`, asking for them as `wire`
     /// names it, through callbacks `sink` mints; with `history`, the tokens already alive are
     /// delivered first. It is a subscriber like any other to retract
-    /// ([`Self::undeclare_subscriber`]): the ids are one space. `None` from an engine with no
-    /// liveliness in this build, which is the provided answer.
+    /// ([`Self::undeclare_subscriber`]): the ids are one space. Refused as
+    /// [`Self::declare_subscriber_on_wire`] is, and with [`Refusal::NotBuilt`] by an engine with
+    /// no liveliness in this build, which is the provided answer.
     fn declare_liveliness_subscriber_on_wire(
         &self,
         keyexpr: &str,
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         let _ = (keyexpr, wire, history, sink);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
@@ -475,8 +490,16 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
     /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
     /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
-    /// legs are issued stops the issuing. The number of legs issued, or `None` from an engine
-    /// with no requesting end in this build, which is the provided answer.
+    /// legs are issued stops the issuing.
+    ///
+    /// The number of legs issued, `0` for a get that reached nobody (its destination admits
+    /// nobody, or no link is up), which is over at once. A refused get issued no leg (`leg` was
+    /// not called) and sent nothing, and answers why: the session is closed; a peer or queryable it
+    /// had to ask found no room in the table that holds the session's pending gets
+    /// ([`Refusal::TableFull`]; where some found room, the legs that found it are issued); the
+    /// query states what this engine does not carry out ([`Refusal::NotHonoured`]: a set of links,
+    /// or the one node it is addressed to, which asked of every link would widen it); or the engine
+    /// has no requesting end in this build ([`Refusal::NotBuilt`], the provided answer).
     fn get_on_wire(
         &self,
         keyexpr: &str,
@@ -484,26 +507,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let _ = (keyexpr, wire, opts, fan, leg);
-        None
-    }
-
-    /// [`Self::get_on_wire`], a get the session could not hold pending told apart from one that
-    /// reached nobody: `Err` when no leg was issued (`leg` was not called) and nothing was sent,
-    /// and a peer or queryable it had to ask found no room in the table that holds the session's
-    /// pending gets. Where some found room and some did not, the legs that found it are issued, as
-    /// [`Self::get_on_wire`] issues them. The provided answer is [`Self::get_on_wire`]'s, for an
-    /// engine whose pending gets are not held to a table of its own.
-    fn get_held(
-        &self,
-        keyexpr: &str,
-        wire: &WireKey,
-        opts: &QueryOptions,
-        fan: Option<&CancellableFan>,
-        leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, NoRoomToHold> {
-        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
+        Err(Refusal::NotBuilt)
     }
 
     /// [`Self::get_on_wire`] for a query whose VALUE is a buffer of shared memory some owner of a
@@ -521,7 +527,7 @@ pub trait SessionEngine: Send + Sync + 'static {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         let mut opts = opts.clone();
         opts.payload = Some(value.bytes().to_vec());
         self.get_on_wire(keyexpr, wire, &opts, fan, leg)
@@ -535,8 +541,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     // engine.
 
     /// [`Self::declare_subscriber_on_wire`] limited to the links of `links`: declared to the nodes
-    /// behind those links only. `Err` when the engine cannot honour a set it was given, and
-    /// nothing is declared.
+    /// behind those links only. A set the engine cannot honour is refused as that statement
+    /// ([`Refusal::NotHonoured`]), and nothing is declared.
     fn declare_subscriber_on_link_set(
         &self,
         keyexpr: &str,
@@ -545,9 +551,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Option<SubId>, LinksNotHonoured> {
+    ) -> Result<SubId, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink))
+        self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink)
     }
 
     /// [`Self::declare_queryable_on_wire`] limited to the links of `links`, as
@@ -562,16 +568,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<Option<QblId>, LinksNotHonoured> {
+    ) -> Result<QblId, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.declare_queryable_on_wire(
-            keyexpr,
-            wire,
-            complete,
-            allowed_origin,
-            retraction,
-            sink,
-        ))
+        self.declare_queryable_on_wire(keyexpr, wire, complete, allowed_origin, retraction, sink)
     }
 
     /// [`Self::declare_liveliness_token_on_wire`] limited to the links of `links`: announced to
@@ -582,9 +581,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         wire: WireKey,
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
-    ) -> Result<Option<TokenId>, LinksNotHonoured> {
+    ) -> Result<TokenId, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.declare_liveliness_token_on_wire(keyexpr, wire, retraction))
+        self.declare_liveliness_token_on_wire(keyexpr, wire, retraction)
     }
 
     /// [`Self::declare_liveliness_subscriber_on_wire`] limited to the links of `links`: its
@@ -596,14 +595,14 @@ pub trait SessionEngine: Send + Sync + 'static {
         history: bool,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Result<Option<SubId>, LinksNotHonoured> {
+    ) -> Result<SubId, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink))
+        self.declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
     }
 
     /// [`Self::liveliness_get_on_wire`] limited to the links of `links`: asked of the nodes behind
-    /// those links only. `Err` when the engine cannot honour a set it was given, and no leg is
-    /// issued (`leg` is not called).
+    /// those links only. A set the engine cannot honour is refused as that statement
+    /// ([`Refusal::NotHonoured`]), and no leg is issued (`leg` is not called).
     fn liveliness_get_on_link_set(
         &self,
         keyexpr: &str,
@@ -612,27 +611,9 @@ pub trait SessionEngine: Send + Sync + 'static {
         links: LinkRestriction,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, LinksNotHonoured> {
+    ) -> Result<usize, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
-        Ok(self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg))
-    }
-
-    /// [`Self::get_on_wire`] for a query that may state what not every engine honours: a set of
-    /// links (`opts.links`) or the one node it is addressed to (`opts.target_peer`). `Err` names
-    /// the first statement the engine cannot honour, and no leg is issued. An engine that cannot
-    /// honour one and is handed it through [`Self::get_on_wire`] asks no link and issues no leg,
-    /// so such a get is never widened to every link; this is the door that says why. The provided
-    /// answer honours neither.
-    fn get_stated(
-        &self,
-        keyexpr: &str,
-        wire: &WireKey,
-        opts: &QueryOptions,
-        fan: Option<&CancellableFan>,
-        leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Result<Option<usize>, StatementNotHonoured> {
-        StatementNotHonoured::of_query(opts)?;
-        Ok(self.get_on_wire(keyexpr, wire, opts, fan, leg))
+        self.liveliness_get_on_wire(keyexpr, wire, timeout_ms, fan, leg)
     }
 
     /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
@@ -643,11 +624,12 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
     /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
     /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
-    /// session, so a tick is as late as the program is slow to step. `None` from an engine with
-    /// no periodic jobs in this build, which is the provided answer.
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
+    /// session, so a tick is as late as the program is slow to step. Refused when the session's
+    /// table of jobs is full or the session is closed, and with [`Refusal::NotBuilt`] by an
+    /// engine with no periodic jobs in this build, which is the provided answer.
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
         let _ = (period_ms, tick);
-        None
+        Err(Refusal::NotBuilt)
     }
 
     /// End the periodic job `id`. A tick already running is not interrupted, and none starts

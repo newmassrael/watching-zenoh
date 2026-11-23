@@ -3086,19 +3086,18 @@ unsafe fn declare_subscriber_with(
         state.keep_background(released);
         None
     };
-    // A session that holds no more subscribers, its table at the limit it opened under or its
-    // declaration ids spent, refuses the subscriber as pico refuses an entity it cannot hold;
-    // the engine dropped the sink, so the closure's drop has run.
+    // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
+    // the closure's drop has run.
     let closure = Arc::new(cclosure);
-    let Some(id) = engine.declare_subscriber_on_wire(
-        ke,
-        wire,
-        subscriber_origin(options),
-        retraction,
-        Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
-    ) else {
-        return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-    };
+    let id = engine
+        .declare_subscriber_on_wire(
+            ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
+        )
+        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
     Ok(match (slot, released) {
         (Some(slot), Some(released)) => Some((
             slot,

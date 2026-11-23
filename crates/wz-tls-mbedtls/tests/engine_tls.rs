@@ -205,18 +205,20 @@ fn client(
 fn hearing(session: &Engine) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
-    session.declare_subscriber_on_wire(
-        "demo/t/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
-        }),
-    );
+    session
+        .declare_subscriber_on_wire(
+            "demo/t/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            Arc::new(move || {
+                let into = into.clone();
+                Box::new(move |sample: &dyn SampleView| {
+                    into.lock().unwrap().push(sample.payload().to_vec());
+                })
+            }),
+        )
+        .expect("the session declares the subscriber");
     heard
 }
 

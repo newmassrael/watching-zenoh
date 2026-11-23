@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterPlane, MatchingSink, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+    FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
@@ -65,7 +65,11 @@ impl Counts {
     }
 }
 
-fn declare(engine: &super::Engine, key: &str, sink: SubscriberSink) -> Option<wz_capi_port::SubId> {
+fn declare(
+    engine: &super::Engine,
+    key: &str,
+    sink: SubscriberSink,
+) -> Result<wz_capi_port::SubId, Refusal> {
     engine.declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
 }
 
@@ -124,10 +128,9 @@ fn the_close_leaves_no_callback_in_the_table() {
     declare(&engine, "demo/drop/a", counts.subscriber_sink()).expect("declared");
     let sink: MatchingSink = Arc::new(|_matching: bool| {});
     let alive = Arc::downgrade(&sink);
-    assert_ne!(
-        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false),
-        0
-    );
+    assert!(engine
+        .declare_matching_listener(FilterPlane::Subscribers, "demo/drop/m", sink, false)
+        .is_ok());
     assert_eq!(engine.callbacks_held(), 2, "one for each declaration");
     assert_eq!(engine.subscriber_rows(), 1);
     SessionDrive::close(&*engine);
@@ -152,7 +155,7 @@ fn a_refused_subscribers_factory_is_dropped_once_and_mints_nothing() {
     let refused = Counts::default();
     assert_eq!(
         declare(&engine, "demo/drop/b", refused.subscriber_sink()),
-        None
+        Err(Refusal::TableFull)
     );
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
     assert_eq!(refused.callbacks_dropped(), 0);
@@ -165,7 +168,7 @@ fn a_refused_subscribers_factory_is_dropped_once_and_mints_nothing() {
 }
 
 /// A matching listener's sink is let go of on its undeclaration, at the close, and with a
-/// refusal: none of them outlives its end.
+/// refusal, whether its table is full or its session closed: none of them outlives its end.
 #[test]
 fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
     let limits = lowered(|l| l.select_max_matching_listeners(Quota::at_most(1)));
@@ -177,8 +180,7 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
 
     let undeclared: MatchingSink = Arc::new(|_matching: bool| {});
     let undeclared_alive = Arc::downgrade(&undeclared);
-    let id = listen(undeclared);
-    assert_ne!(id, 0);
+    let id = listen(undeclared).expect("a row is free");
     assert!(
         undeclared_alive.upgrade().is_some(),
         "a declared sink is held"
@@ -191,10 +193,10 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
 
     let held: MatchingSink = Arc::new(|_matching: bool| {});
     let held_alive = Arc::downgrade(&held);
-    assert_ne!(listen(held), 0);
+    assert!(listen(held).is_ok());
     let refused: MatchingSink = Arc::new(|_matching: bool| {});
     let refused_alive = Arc::downgrade(&refused);
-    assert_eq!(listen(refused), 0);
+    assert_eq!(listen(refused), Err(Refusal::TableFull));
     assert!(
         refused_alive.upgrade().is_none(),
         "refused, it is let go of"
@@ -202,6 +204,14 @@ fn a_matching_listeners_sink_is_let_go_of_on_each_end() {
 
     SessionDrive::close(&*engine);
     assert!(held_alive.upgrade().is_none(), "closed, it is let go of");
+
+    let late: MatchingSink = Arc::new(|_matching: bool| {});
+    let late_alive = Arc::downgrade(&late);
+    assert_eq!(listen(late), Err(Refusal::Closed));
+    assert!(
+        late_alive.upgrade().is_none(),
+        "refused by the closed session, it is let go of"
+    );
 }
 
 /// A liveliness subscriber's callback is let go of once on its undeclaration and once at the
@@ -239,7 +249,7 @@ fn a_liveliness_subscribers_callback_is_dropped_once_on_each_end() {
     let held = Counts::default();
     declare("demo/drop/l2", &held).expect("the row given back");
     let refused = Counts::default();
-    assert_eq!(declare("demo/drop/l3", &refused), None);
+    assert_eq!(declare("demo/drop/l3", &refused), Err(Refusal::TableFull));
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
 
     SessionDrive::close(&*engine);
@@ -292,7 +302,7 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
     let held = Counts::default();
     declare("demo/drop/q2", &held).expect("the row given back");
     let refused = Counts::default();
-    assert_eq!(declare("demo/drop/q3", &refused), None);
+    assert_eq!(declare("demo/drop/q3", &refused), Err(Refusal::TableFull));
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
 
     SessionDrive::close(&*engine);

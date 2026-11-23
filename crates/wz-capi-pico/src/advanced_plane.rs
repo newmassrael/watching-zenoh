@@ -115,6 +115,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             period_ms,
             tick,
         )
+        .ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no

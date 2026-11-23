@@ -526,20 +526,22 @@ mod stalled_link {
         });
         let heard = Arc::new(AtomicUsize::new(0));
         let into = Arc::clone(&heard);
-        reading.declare_subscriber_on_wire(
-            "demo/beside",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
-                    if sample.payload() == b"beside" {
-                        into.fetch_add(1, Ordering::SeqCst);
-                    }
-                })
-            }),
-        );
+        reading
+            .declare_subscriber_on_wire(
+                "demo/beside",
+                WireKey::literal(),
+                Locality::Any,
+                None,
+                Arc::new(move || {
+                    let into = Arc::clone(&into);
+                    Box::new(move |sample: &dyn SampleView| {
+                        if sample.payload() == b"beside" {
+                            into.fetch_add(1, Ordering::SeqCst);
+                        }
+                    })
+                }),
+            )
+            .expect("the session declares the subscriber");
         SessionDrive::start_read_task(&*reading).expect("the reading client's read task starts");
         let started = Instant::now();
         while publisher.faces_up() < 2 {
