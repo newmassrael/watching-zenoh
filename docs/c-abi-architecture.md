@@ -251,7 +251,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-055 | `wz-session-core` | `text_out` | `indexing_slicing`, `arithmetic_side_effects` | 14 | open |
 | TD-057 | `wz-session-core` | `transport_compose` | `expect_used`, `arithmetic_side_effects` | 13 | open |
 | TD-058 | `wz-session-core` | `declare` | `expect_used`, `arithmetic_side_effects` | 12 | in flight |
-| TD-063 | `wz-session-core` | `multicast_join` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 11 | open |
+| TD-063 | `wz-session-core` | `multicast_join` | `expect_used` | 11 | open |
 | TD-065 | `wz-session-core` | `tx_lease` | `arithmetic_side_effects` | 11 | open |
 | TD-066 | `wz-session-core` | `inbound` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
 | TD-067 | `wz-session-core` | `link` | `indexing_slicing`, `arithmetic_side_effects` | 10 | open |
@@ -362,7 +362,9 @@ fixed-capacity twin of `one_entry`, and `NamedKeyexpr::entry` holds a body of at
 whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves.
 TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen bytes by its
 constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
-constructor from a value whose type holds the bound pays it. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+constructor from a value whose type holds the bound pays it. TD-063 (`multicast_join`) is the
+same: `encode_join` writes a beacon whose zid and SN body reach the codec's bounded fields
+through `Bounded::new`, over a sink that cannot refuse. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
 TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
