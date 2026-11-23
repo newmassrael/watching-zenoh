@@ -629,7 +629,10 @@ pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) 
 /// On each delivery it marshals the wz `SampleView` into a borrowed
 /// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
 /// borrowed keyexpr / payload) is valid only for the duration of that call —
-/// pico's contract, which is why the C side must copy anything it keeps.
+/// pico's contract, which is why the C side must copy anything it keeps. The advanced subscriber,
+/// which runs its own sink, is what calls it (a plain subscriber hands the engine its closure whole,
+/// `subscriber_sink`).
+#[cfg(any(test, feature = "advanced"))]
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
