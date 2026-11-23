@@ -91,6 +91,8 @@ struct Links(Queue);
 impl SessionLinks for Links {
     type Pump = Feed;
 
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Err(LinkOpenError::Unsupported)
     }

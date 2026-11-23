@@ -34,12 +34,27 @@ const DIAL_MS: u64 = 3_000;
 /// What a call behind the read task may take while a dial is under way: far below [`DIAL_MS`].
 const PROMPT: Duration = Duration::from_millis(1_000);
 
-/// A dial whose connection is never made nor refused.
-struct Unanswered;
+/// What the host's links pump.
+type Pump = <PosixLinks as SessionLinks>::Pump;
 
-impl<P> PendingDial<P> for Unanswered {
-    fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>> {
-        None
+/// A dial of [`SlowDials`]: the host's own, or one whose connection is never made nor refused.
+enum SlowDial {
+    Host(<PosixLinks as SessionLinks>::Dial),
+    Unanswered,
+}
+
+impl PendingDial<Pump> for SlowDial {
+    fn poll(&mut self) -> Option<Result<OpenedLink<Pump>, LinkOpenError>> {
+        match self {
+            SlowDial::Host(dial) => dial.poll(),
+            SlowDial::Unanswered => None,
+        }
+    }
+}
+
+impl From<OpenedLink<Pump>> for SlowDial {
+    fn from(opened: OpenedLink<Pump>) -> Self {
+        SlowDial::Host(opened.into())
     }
 }
 
@@ -52,7 +67,9 @@ struct SlowDials {
 }
 
 impl SessionLinks for SlowDials {
-    type Pump = <PosixLinks as SessionLinks>::Pump;
+    type Pump = Pump;
+
+    type Dial = SlowDial;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         self.inner.open_acceptor(port)
@@ -72,15 +89,12 @@ impl SessionLinks for SlowDials {
         Err(LinkOpenError::Refused)
     }
 
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+    fn begin_initiator(&self, to: Locator) -> Result<SlowDial, LinkOpenError> {
         if !self.slow.load(Ordering::SeqCst) {
-            return self.inner.begin_initiator(to);
+            return self.inner.begin_initiator(to).map(SlowDial::Host);
         }
         self.dials.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(Unanswered))
+        Ok(SlowDial::Unanswered)
     }
 }
 

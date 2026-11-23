@@ -1340,7 +1340,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
-    links: LinkSupervisor<L, Face<C, L::Pump>>,
+    links: LinkSupervisor<L, Face<C, L>>,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     groups: Vec<GroupFace>,
@@ -1418,25 +1418,26 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
 
 /// One face of the session: the link it holds, and where the telling of the session's
 /// declarations to that link's peer stands (`replay`).
-struct Face<C: ClockSource + 'static, P> {
+struct Face<C: ClockSource + 'static, L: SessionLinks> {
     id: FaceId,
-    link: Link<LinkSession<C>, P>,
+    link: Link<LinkSession<C>, L::Dial>,
     replay: Replay,
 }
 
-impl<C: ClockSource + 'static, P> FaceRecord for Face<C, P> {
+impl<C: ClockSource + 'static, L: SessionLinks> FaceRecord for Face<C, L> {
     type Session = LinkSession<C>;
-    type Pump = P;
+    type Pump = L::Pump;
+    type Dial = L::Dial;
 
     fn id(&self) -> FaceId {
         self.id
     }
 
-    fn link(&self) -> &Link<LinkSession<C>, P> {
+    fn link(&self) -> &Link<LinkSession<C>, L::Dial> {
         &self.link
     }
 
-    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, P> {
+    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, L::Dial> {
         &mut self.link
     }
 }
@@ -2048,7 +2049,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The dial role's face, which the session holds for its whole life.
-    fn dial(&self) -> &Face<C, L::Pump> {
+    fn dial(&self) -> &Face<C, L> {
         &self.links.faces()[0]
     }
 
@@ -2134,11 +2135,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Begin face `face`'s dial of `endpoint`, which the network answers later
     /// (`SessionLinks::begin_initiator`). [`OpenError::Unreachable`] when the endpoint does not
     /// parse or the network refuses the dial at once.
-    fn begin_dial(
-        &self,
-        face: FaceId,
-        endpoint: &str,
-    ) -> Result<Box<dyn PendingDial<L::Pump>>, OpenError> {
+    fn begin_dial(&self, face: FaceId, endpoint: &str) -> Result<L::Dial, OpenError> {
         let to = parse_locator(endpoint).map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(endpoint, Refusal::Locator(refused)))
         })?;
@@ -2371,7 +2368,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         from: usize,
         mut last: OpenError,
-    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
         for at in from..self.config.endpoints.len() {
             let mut pending = match self.begin_dial(DIAL_FACE, &self.config.endpoints[at]) {
                 Ok(pending) => pending,
@@ -2418,7 +2415,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         next: usize,
         deadline_us: u64,
         answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
-    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
         let opened = answer.map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(
                 self.endpoint_text(endpoint),
@@ -2453,7 +2450,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         from: usize,
         last: OpenError,
         redial_ms: Option<u64>,
-    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Dial>, OpenError> {
         match (self.dial_from(from, last), redial_ms) {
             (Ok(link), _) => Ok(link),
             (Err(OpenError::EntropyUnavailable), _) => Err(OpenError::EntropyUnavailable),
@@ -3009,7 +3006,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// declarations at the pace the dial role's face is. Every face the open admits has its place
     /// in the table; one past them, which the callers refuse before they make it, is let go of
     /// with its tables.
-    fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Pump>) {
+    fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Dial>) {
         let pacing = self.dial().replay.pacing();
         let face = Face {
             id,

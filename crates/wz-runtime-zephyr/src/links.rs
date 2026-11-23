@@ -88,6 +88,8 @@ impl ZephyrLinks {
 impl SessionLinks for ZephyrLinks {
     type Pump = Rc<ZephyrUdpDriver>;
 
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
     // Its links are the datagram socket's, which opens IPv6 only on an image whose stack has it.
     const IPV6: bool = <ZephyrUdpSocket as wz_runtime_coop::udp_link::DatagramSocket>::IPV6;
 

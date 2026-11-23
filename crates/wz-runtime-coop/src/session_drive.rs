@@ -806,6 +806,12 @@ pub trait SessionLinks {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;
 
+    /// A dial this stack began ([`Self::begin_initiator`]), held by value where the session holds
+    /// its face: one type for each stack, so a dial is neither boxed nor called through a table of
+    /// its own. A link made at once is one ([`From`]), which is what [`Dialled`] is for a stack
+    /// whose dials do not wait.
+    type Dial: PendingDial<Self::Pump> + From<OpenedLink<Self::Pump>> + 'static;
+
     /// Whether the stack opens links to an IPv6 end. `false` for a stack built without IPv6:
     /// what reads an endpoint for it refuses a bracketed address as one it never dials and reads
     /// IPv4 text alone, so an image of such a stack carries no reader of IPv6 text. A constant,
@@ -837,13 +843,8 @@ pub trait SessionLinks {
     /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the
     /// session meanwhile. The default makes the link here, as [`Self::open_initiator`] does, which
     /// is the answer of a stack whose dials do not wait.
-    #[cfg(feature = "alloc")]
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
-        let opened = self.open_initiator(to)?;
-        Ok(Box::new(Dialled::new(opened)))
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
+        self.open_initiator(to).map(Into::into)
     }
 
     /// A listener on `at`, which yields one link for each connection a peer opens to it. A stack
@@ -935,6 +936,13 @@ impl<P> Dialled<P> {
 impl<P> PendingDial<P> for Dialled<P> {
     fn poll(&mut self) -> Option<Result<OpenedLink<P>, LinkOpenError>> {
         self.0.take().map(Ok)
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<P> From<OpenedLink<P>> for Dialled<P> {
+    fn from(opened: OpenedLink<P>) -> Self {
+        Self::new(opened)
     }
 }
 

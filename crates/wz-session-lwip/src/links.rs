@@ -170,6 +170,8 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
 impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L> {
     type Pump = LwipSessionLink<L>;
 
+    type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+
     // The port's lwIP has no IPv6 (`Self::bind_driver` refuses that family).
     const IPV6: bool = false;
 

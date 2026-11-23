@@ -379,8 +379,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written.
-fn announce_on<C: ClockSource + 'static, P>(
-    faces: &mut [Face<C, P>],
+fn announce_on<C: ClockSource + 'static, L: SessionLinks>(
+    faces: &mut [Face<C, L>],
     place: usize,
     on_refusal: OnRefusal,
     send: impl Fn(&McuActions<C>) -> bool,

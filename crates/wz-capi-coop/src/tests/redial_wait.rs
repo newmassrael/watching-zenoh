@@ -54,6 +54,8 @@ struct SlowRefusals {
 impl SessionLinks for SlowRefusals {
     type Pump = <PosixLinks as SessionLinks>::Pump;
 
+    type Dial = <PosixLinks as SessionLinks>::Dial;
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         self.inner.open_acceptor(port)
     }

@@ -64,8 +64,8 @@ use crate::group_transport::{GroupSend, GroupTransport};
 use crate::ip_stack::{HeapIpDriver, IpDriver};
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator, OpenedLink,
-    PendingDial, SessionLinks,
+    Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator,
+    OpenedLink, PendingDial, SessionLinks,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -714,6 +714,33 @@ impl StreamDial for AppStreamDial {
     }
 }
 
+/// A dial of [`AppLinks`] ([`SessionLinks::begin_initiator`]): a link made when it was begun, or
+/// one the program was asked to open and has not reported up.
+pub struct AppDial(AppDialing);
+
+/// Where an [`AppDial`] stands.
+// Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
+#[allow(clippy::large_enum_variant)]
+enum AppDialing {
+    Made(Dialled<Rc<AppDriver>>),
+    Pending(PendingAppLink),
+}
+
+impl PendingDial<Rc<AppDriver>> for AppDial {
+    fn poll(&mut self) -> Option<Result<OpenedLink<Rc<AppDriver>>, LinkOpenError>> {
+        match &mut self.0 {
+            AppDialing::Made(made) => made.poll(),
+            AppDialing::Pending(pending) => pending.poll(),
+        }
+    }
+}
+
+impl From<OpenedLink<Rc<AppDriver>>> for AppDial {
+    fn from(opened: OpenedLink<Rc<AppDriver>>) -> Self {
+        Self(AppDialing::Made(Dialled::new(opened)))
+    }
+}
+
 /// A link the program was asked to open and has not reported up ([`AppLinks`]'s begun dial):
 /// asked without waiting whether it is up. Dropped before it is, it releases the link, which the
 /// program is told to close.
@@ -1177,6 +1204,8 @@ pub type AppDriver = HeapIpDriver<AppDatagramSocket, AppStreamSocket>;
 impl SessionLinks for AppLinks {
     type Pump = Rc<AppDriver>;
 
+    type Dial = AppDial;
+
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // A datagram port that takes whoever sends first is a socket of the system's; the
         // program's transport accepts streams and datagram sources on listeners
@@ -1224,10 +1253,7 @@ impl SessionLinks for AppLinks {
     /// on the session's clock, in place of the `OPEN_WAIT_MS` a waiting open is held to. The
     /// buffers are claimed before the program is asked, as a waiting open's are, and go back with
     /// an open that is refused or given up.
-    fn begin_initiator(
-        &self,
-        to: Locator,
-    ) -> Result<Box<dyn PendingDial<Self::Pump>>, LinkOpenError> {
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
         let (kind, rx, datagram) = match to.proto {
             LinkProto::Udp => (AppLinkKind::Datagram, self.datagram_rx, true),
             LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
@@ -1235,7 +1261,7 @@ impl SessionLinks for AppLinks {
         };
         let buffers = heap_link_buffers(self.lent.as_ref(), rx, 0, 0)?;
         let handle = self.transport.begin_open(kind, &to.to_string());
-        Ok(Box::new(PendingAppLink {
+        Ok(AppDial(AppDialing::Pending(PendingAppLink {
             held: Some(Held {
                 transport: Arc::clone(&self.transport.transport),
                 handle,
@@ -1245,7 +1271,7 @@ impl SessionLinks for AppLinks {
             to: to.at,
             datagram,
             owner_waits: self.owner_waits,
-        }))
+        })))
     }
 
     fn open_listener(

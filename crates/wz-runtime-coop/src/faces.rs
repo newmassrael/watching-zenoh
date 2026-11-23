@@ -61,14 +61,17 @@ pub trait FaceRecord {
     /// What the drive loop pumps for the face's link, which a dial under way makes.
     type Pump;
 
+    /// A dial under way of the face's link ([`SessionLinks::Dial`]).
+    type Dial: PendingDial<Self::Pump>;
+
     /// The face's number.
     fn id(&self) -> FaceId;
 
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session, Self::Pump>;
+    fn link(&self) -> &Link<Self::Session, Self::Dial>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Pump>;
+    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Dial>;
 }
 
 /// One link of a face: the session's half of it (`S`), the task that runs it, the link as the
@@ -138,7 +141,7 @@ impl<S> Deref for Wire<S> {
 /// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
 /// dial under way is held in its face's link, so a face has one dial at most and the faces' table
 /// is the dials' table too.
-pub enum Link<S, P> {
+pub enum Link<S, D> {
     /// Established: the session's sends go through it.
     Up(Wire<S>),
     /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
@@ -155,7 +158,7 @@ pub enum Link<S, P> {
     /// A dial under way, given up at `deadline_us`, as is the handshake that follows it.
     Dialing {
         /// The dial, asked at each move of the face ([`LinkSupervisor::advance`]).
-        dial: Dial<P>,
+        dial: Dial<D>,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the dial is given up.
@@ -175,7 +178,7 @@ pub enum Link<S, P> {
     },
 }
 
-impl<S, P> Link<S, P> {
+impl<S, D> Link<S, D> {
     /// The link's wire while it is up or in its handshake.
     pub fn wire(&self) -> Option<&Wire<S>> {
         match self {
@@ -205,15 +208,16 @@ impl DialEndpoint {
     }
 }
 
-/// A face's dial under way: the endpoint it dials, and the network's answer still to come.
-pub struct Dial<P> {
+/// A face's dial under way: the endpoint it dials, and the network's answer still to come, the
+/// stack's own dial `D` held by value.
+pub struct Dial<D> {
     endpoint: DialEndpoint,
-    pending: Box<dyn PendingDial<P>>,
+    pending: D,
 }
 
-impl<P> Dial<P> {
+impl<D> Dial<D> {
     /// The dial `pending` of `endpoint`.
-    pub fn new(endpoint: DialEndpoint, pending: Box<dyn PendingDial<P>>) -> Self {
+    pub fn new(endpoint: DialEndpoint, pending: D) -> Self {
         Self { endpoint, pending }
     }
 }
@@ -340,7 +344,7 @@ pub struct LinkSupervisor<L: SessionLinks, F> {
     next_face: FaceId,
 }
 
-impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump>> LinkSupervisor<L, F> {
+impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>> LinkSupervisor<L, F> {
     /// The faces of a session over `links`, `dial` the dial role's: room for `faces` faces in
     /// all (one at least, the dial role's), each with a dial under way at most, and `waits` waits
     /// a read makes at once, reserved now. The ports are the open's, taken as it listens
@@ -399,7 +403,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump>> LinkSupervisor<L, F> {
     }
 
     /// Begin a dial of `to`, which the network answers later.
-    pub fn begin_dial(&self, to: Locator) -> Result<Box<dyn PendingDial<L::Pump>>, LinkOpenError> {
+    pub fn begin_dial(&self, to: Locator) -> Result<L::Dial, LinkOpenError> {
         self.links.begin_initiator(to)
     }
 
@@ -444,7 +448,7 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump>> LinkSupervisor<L, F> {
     }
 
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Pump>) {
+    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Dial>) {
         if let Some(face) = self.faces.get_mut(at) {
             *face.link_mut() = link;
         }
@@ -728,7 +732,7 @@ mod tests {
         }
     }
 
-    type TestLink = Link<Session, Rc<Quiet>>;
+    type TestLink = Link<Session, Answer>;
 
     struct TestFace {
         id: FaceId,
@@ -738,6 +742,7 @@ mod tests {
     impl FaceRecord for TestFace {
         type Session = Session;
         type Pump = Rc<Quiet>;
+        type Dial = Answer;
 
         fn id(&self) -> FaceId {
             self.id
@@ -774,6 +779,7 @@ mod tests {
 
     impl SessionLinks for Net {
         type Pump = Rc<Quiet>;
+        type Dial = Answer;
 
         fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Rc<Quiet>>, LinkOpenError> {
             Err(LinkOpenError::Unsupported)
@@ -793,6 +799,12 @@ mod tests {
         }
     }
 
+    impl From<OpenedLink<Rc<Quiet>>> for Answer {
+        fn from(opened: OpenedLink<Rc<Quiet>>) -> Self {
+            Answer(Some(Ok(opened)))
+        }
+    }
+
     /// A face dialling `endpoint` with a dial that answers `answer`.
     fn dialing(
         endpoint: DialEndpoint,
@@ -801,7 +813,7 @@ mod tests {
         deadline_us: u64,
     ) -> TestLink {
         Link::Dialing {
-            dial: Dial::new(endpoint, Box::new(Answer(answer))),
+            dial: Dial::new(endpoint, Answer(answer)),
             next,
             deadline_us,
         }
