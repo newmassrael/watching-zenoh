@@ -1306,11 +1306,7 @@ pub mod push_build;
 // outer doc: the module documents itself, and rustdoc would resolve its own links from here.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 // Totality debt TD-044 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used)]
 pub mod encoded_push;
 
 /// A literal-keyexpr `Put` as the codec's BORROWED `Push` over the caller's own text

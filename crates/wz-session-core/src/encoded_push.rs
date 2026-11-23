@@ -122,13 +122,14 @@ impl<'a> LeafPush<'a> {
             .filter(|entry| !names_the_source(entry.header))
             .count();
         let chained = if kept > 0 { FLAG_PUSH_Z } else { 0 };
-        let received_head = 1 + WireexprWire::measure(&push.keyexpr).len();
+        let received_head = WireexprWire::measure(&push.keyexpr).len().saturating_add(1);
         let literal_head = match &self.key {
             LeafKey::Own => 0,
-            LeafKey::Literal(local) => 1 + WireexprLocalWire::measure(local).len(),
+            LeafKey::Literal(local) => WireexprLocalWire::measure(local).len().saturating_add(1),
         };
-        let mut bytes =
-            Vec::with_capacity(literal_head + crate::frame_encode::push_capacity_hint(push));
+        let mut bytes = Vec::with_capacity(
+            literal_head.saturating_add(crate::frame_encode::push_capacity_hint(push)),
+        );
         if let LeafKey::Literal(local) = &self.key {
             // A literal is in the sender's mapping and carries its key as a suffix.
             bytes.push(
@@ -149,34 +150,40 @@ impl<'a> LeafPush<'a> {
         }
         let tail_at = match self.key {
             LeafKey::Own => {
-                bytes[0] = (bytes[0] & !FLAG_PUSH_Z) | chained;
+                // The received header, which the body's writer wrote first.
+                if let Some(header) = bytes.first_mut() {
+                    *header = (*header & !FLAG_PUSH_Z) | chained;
+                }
                 received_head
             }
             LeafKey::Literal(_) => literal_head,
         };
         // The extensions and the body move up over the received head and the entries left out.
-        let mut from = literal_head + received_head;
+        // Every offset below is inside the bytes just written: the entries move down, never up.
+        let mut from = literal_head.saturating_add(received_head);
         let mut to = tail_at;
         let mut left = kept;
         for entry in chain {
             let len = ExtEntryWire::measure(entry).len();
             if !names_the_source(entry.header) {
-                bytes.copy_within(from..from + len, to);
-                left -= 1;
-                bytes[to] = if left > 0 {
-                    bytes[to] | EXT_FLAG_Z
-                } else {
-                    bytes[to] & !EXT_FLAG_Z
-                };
-                to += len;
+                bytes.copy_within(from..from.saturating_add(len), to);
+                left = left.saturating_sub(1);
+                if let Some(header) = bytes.get_mut(to) {
+                    *header = if left > 0 {
+                        *header | EXT_FLAG_Z
+                    } else {
+                        *header & !EXT_FLAG_Z
+                    };
+                }
+                to = to.saturating_add(len);
             }
-            from += len;
+            from = from.saturating_add(len);
         }
         let end = bytes.len();
         bytes.copy_within(from..end, to);
-        bytes.truncate(to + (end - from));
+        bytes.truncate(to.saturating_add(end.saturating_sub(from)));
         #[cfg(feature = "transport-stats")]
-        let keyexpr_at = tail_at - self.keyexpr.len()..tail_at;
+        let keyexpr_at = tail_at.saturating_sub(self.keyexpr.len())..tail_at;
         #[cfg(feature = "transport-stats")]
         debug_assert_eq!(
             bytes.get(keyexpr_at.clone()),
@@ -241,13 +248,14 @@ impl EncodedPush {
 
     /// The extensions and the body, which every key form shares.
     pub fn tail(&self) -> &[u8] {
-        &self.bytes[self.tail_at..]
+        // `tail_at` is where the encoder put the end of the head.
+        self.bytes.get(self.tail_at..).unwrap_or_default()
     }
 
     /// The Push under the key form it was encoded under.
     pub fn spliced(&self) -> SplicedPush<'_> {
         SplicedPush {
-            head: &self.bytes[..self.tail_at],
+            head: self.bytes.get(..self.tail_at).unwrap_or_default(),
             encoded: self,
         }
     }
@@ -261,10 +269,12 @@ impl EncodedPush {
             WireexprSource::body(key),
             WireexprVariantSource::WireexprLocal(_)
         );
-        let header = (self.bytes[0] & !(FLAG_PUSH_N | FLAG_PUSH_M))
+        // An encoded Push starts with its header.
+        let header = (self.bytes.first().copied().unwrap_or_default()
+            & !(FLAG_PUSH_N | FLAG_PUSH_M))
             | if n { FLAG_PUSH_N } else { 0 }
             | if m { FLAG_PUSH_M } else { 0 };
-        let mut bytes = Vec::with_capacity(1 + WireexprWire::measure(key).len());
+        let mut bytes = Vec::with_capacity(WireexprWire::measure(key).len().saturating_add(1));
         bytes.push(header);
         match WireexprWire::encode_source(key, &mut VecSink::new(&mut bytes)) {
             Ok(()) => {}
@@ -330,7 +340,7 @@ impl SplicedPush<'_> {
 
     /// The bytes the Push is framed as.
     pub fn encoded_len(&self) -> usize {
-        self.head.len() + self.encoded.tail().len()
+        self.head.len().saturating_add(self.encoded.tail().len())
     }
 
     /// Write the Push into `sink`: its head, then what it shares.
