@@ -1193,6 +1193,18 @@ impl ExecutorState {
         // Every cell in the table's order, then the end of the table, whose section settles the
         // cell polled last.
         for next in self.each_cell().map(Some).chain(core::iter::once(None)) {
+            // A cell nothing woke and nothing aborted is left out of the pass's sections when no
+            // cell is owed its settling: a pass over a table at rest takes no section. A flag
+            // raised after this look is seen by the next pass, as one raised after the section is.
+            let quiet = next.map_or(true, |cell| {
+                !cell.wake.load(Ordering::Acquire) && !cell.cancel.load(Ordering::Acquire)
+            });
+            if quiet && owed.is_none() {
+                if next.is_none() {
+                    return;
+                }
+                continue;
+            }
             let (settled, mut act) = crate::cs::with(|cs| {
                 let settled = match owed {
                     Some((cell, left)) => Self::settle(cell, left, cs),
@@ -1748,5 +1760,46 @@ mod tests {
         assert_eq!(state.capacity(), 2);
         ExecutorState::release(first);
         ExecutorState::release(second);
+    }
+
+    /// A pass polls the task a waker raised and sweeps the one its handle aborted, and leaves the
+    /// tasks nothing woke where they are.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_pass_polls_what_was_woken_sweeps_what_was_aborted_and_leaves_the_rest() {
+        static POLLS: [core::sync::atomic::AtomicU32; 3] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 3];
+        struct Counted(usize);
+        impl Future for Counted {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                POLLS[self.0].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+        let polls = || {
+            POLLS
+                .iter()
+                .map(|polls| polls.load(core::sync::atomic::Ordering::SeqCst))
+                .collect::<Vec<u32>>()
+        };
+        let state = ExecutorState::reserved(3, 64);
+        let cells: Vec<&'static TaskCell> = (0..3)
+            .map(|at| state.spawn(Counted(at), 0).map_err(|refused| refused.why))
+            .collect::<Result<_, _>>()
+            .expect("a cell each");
+        state.run_until_idle();
+        assert_eq!(polls(), [1, 1, 1], "a task is ready when it is spawned");
+        state.run_until_idle();
+        assert_eq!(polls(), [1, 1, 1], "nothing woke them");
+        cells[1].wake.store(true, Ordering::Release);
+        cells[2].cancel.store(true, Ordering::Release);
+        state.run_until_idle();
+        assert_eq!(polls(), [1, 2, 1], "the woken task is polled, and only it");
+        assert!(
+            cells[2].with_meta(|meta| meta.state == State::Done),
+            "the aborted one is swept"
+        );
+        assert!(cells[0].with_meta(|meta| meta.state == State::Live));
     }
 }
