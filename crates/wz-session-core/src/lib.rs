@@ -2291,8 +2291,6 @@ pub mod reset_generations;
 // this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so
 // that the crate's own adapter runs). No production build names it.
 #[cfg(feature = "lifecycle-contract")]
-// Totality debt TD-104 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod lifecycle_contract;
 
 /// The session lifecycle as a QUERY: close a session and be answered with a

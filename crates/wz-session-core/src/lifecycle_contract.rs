@@ -106,10 +106,9 @@ impl Case {
     }
 }
 
+/// A zid whose first byte is `first` and the rest zero: the little-endian bytes of the number.
 const fn zid(first: u8) -> [u8; CREDENTIAL_ZID_BYTES] {
-    let mut z = [0u8; CREDENTIAL_ZID_BYTES];
-    z[0] = first;
-    z
+    (first as u128).to_le_bytes()
 }
 
 const OPENING: &str = "{\"verdict\":\"opening\"}";
@@ -177,12 +176,7 @@ pub const CASES: &[Case] = &[
         OpenOutcome::Accepted,
         "abc",
         OPENING,
-        Some({
-            let mut z = [0u8; CREDENTIAL_ZID_BYTES];
-            z[0] = 0xbc;
-            z[1] = 0x0a;
-            z
-        }),
+        Some(0x0abc_u128.to_le_bytes()),
     ),
     bound(
         "a loop that is gone is refused by name",
