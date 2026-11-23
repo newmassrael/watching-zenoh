@@ -1775,6 +1775,10 @@ pub enum DatagramPath {
     /// transport message, or (a compressed batch, a Fragment with no Router) copied and
     /// dispatched by [`dispatch_link_event`].
     Copied(CopyReason),
+    /// The unit was not read at all: the Router its session's links share was held by another
+    /// receive (`crate::unicast_rx::SharedReassembly`), which a session's one task never makes.
+    /// Counted, so that a case the engine rules out shows if it ever happens.
+    RouterHeld,
 }
 
 /// Why [`dispatch_datagram`] copied a unit instead of reading it where it lies.
