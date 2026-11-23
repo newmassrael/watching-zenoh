@@ -155,7 +155,7 @@ fn a_refused_subscribers_factory_is_dropped_once_and_mints_nothing() {
     let refused = Counts::default();
     assert_eq!(
         declare(&engine, "demo/drop/b", refused.subscriber_sink()),
-        None
+        Err(Refusal::TableFull)
     );
     assert_eq!(refused.minted(), 0, "no callback for a refusal");
     assert_eq!(refused.callbacks_dropped(), 0);
