@@ -213,7 +213,7 @@ use crate::sample::Reliability;
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 use crate::sample::{Sample, SampleKind, TimestampHint};
-use crate::sink::{SampleDelivery, SampleSink, SampleView};
+use crate::sink::{RowAccess, SampleDelivery, SampleSink, SampleView};
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
 use crate::transport_profile::owned::InterestOwned;
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
@@ -1415,7 +1415,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
                 view.keyexpr(),
                 class,
                 PeerDelivery::default(),
-                |_, sink: &mut C| sink.deliver(view),
+                |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
             );
         }
         // The application's own message: no key gate, matched as it is.
@@ -1426,7 +1426,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
             view.keyexpr(),
             false,
             false,
-            |_, sink: &mut C| sink.deliver(view),
+            |id, row| SampleDelivery::<C, _>::deliver(&mut (), id, row, view),
         )
     }
 
@@ -1439,7 +1439,7 @@ impl<C, P: Storage> SubscriberTable<C, P> {
         &mut self,
         key: KeyId,
         text: &str,
-        deliver: impl FnMut(SubscriptionId, &mut C),
+        deliver: impl FnMut(SubscriptionId, RowAccess<'_, C>),
     ) -> Option<usize> {
         #[cfg(feature = "key-set-closed")]
         {
@@ -2074,7 +2074,7 @@ fn fire_by_selection<C, P: Storage>(
     catalogue: &crate::key_catalogue::KeyCatalogue<'_>,
     key: KeyId,
     text: &str,
-    mut deliver: impl FnMut(SubscriptionId, &mut C),
+    mut deliver: impl FnMut(SubscriptionId, RowAccess<'_, C>),
 ) -> usize {
     let selection = catalogue.selection(key, EntityKind::Subscriber);
     let mut fired = 0usize;
@@ -2087,7 +2087,7 @@ fn fire_by_selection<C, P: Storage>(
             None => keyexpr_intersects_text(&subscriber.pattern, text),
         };
         if reached {
-            deliver(subscriber.id, &mut subscriber.sink);
+            deliver(subscriber.id, RowAccess::Held(&mut subscriber.sink));
             fired = fired.saturating_add(1);
         }
     }
@@ -2216,15 +2216,18 @@ pub(crate) trait SubscriberRows {
     type RowId: Copy;
 
     /// Hand `f` each row with its position, its id and its sink, in the table's order: one pass
-    /// over the rows, with no lookup of a position.
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, Self::RowId, &mut Self::Sink)>(&mut self, f: F);
+    /// over the rows, with no lookup of a position. A row read in place is handed shared.
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, Self::RowId, RowAccess<'_, Self::Sink>)>(
+        &mut self,
+        f: F,
+    );
 
     /// Whether `f` holds for any row, asked in the table's order until it does.
     fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, f: F) -> bool;
 
     /// The id and the sink of the row at `position`, `None` where no row is: what a remembered
     /// match, which keeps positions, is delivered through.
-    fn sink_at(&mut self, position: usize) -> Option<(Self::RowId, &mut Self::Sink)>;
+    fn sink_at(&mut self, position: usize) -> Option<(Self::RowId, RowAccess<'_, Self::Sink>)>;
 }
 
 impl<C, P: Storage> Subscriber<C, P> {
@@ -2244,14 +2247,22 @@ impl<C, P: Storage> SubscriberRows
     type Sink = C;
     type RowId = SubscriptionId;
 
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriptionId, &mut C)>(&mut self, mut f: F) {
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriptionId, RowAccess<'_, C>)>(
+        &mut self,
+        mut f: F,
+    ) {
         for (position, subscriber) in self.iter_mut().enumerate() {
             let row = RowRef {
                 pattern: &subscriber.pattern,
                 facts: subscriber.pattern_facts,
                 origin: subscriber.allowed_origin,
             };
-            f(position, row, subscriber.id, &mut subscriber.sink);
+            f(
+                position,
+                row,
+                subscriber.id,
+                RowAccess::Held(&mut subscriber.sink),
+            );
         }
     }
 
@@ -2259,9 +2270,9 @@ impl<C, P: Storage> SubscriberRows
         self.iter().any(|subscriber| f(subscriber.row_ref()))
     }
 
-    fn sink_at(&mut self, position: usize) -> Option<(SubscriptionId, &mut C)> {
+    fn sink_at(&mut self, position: usize) -> Option<(SubscriptionId, RowAccess<'_, C>)> {
         self.get_mut(position)
-            .map(|subscriber| (subscriber.id, &mut subscriber.sink))
+            .map(|subscriber| (subscriber.id, RowAccess::Held(&mut subscriber.sink)))
     }
 }
 
@@ -2303,7 +2314,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
     key: &str,
     is_remote: bool,
     repeats_previous: bool,
-    mut deliver: impl FnMut(R::RowId, &mut R::Sink),
+    mut deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
 ) -> usize {
     // No slots: the memory is out, and the message is matched by the scan alone.
     if memo.slot_count() == 0 {
@@ -2389,7 +2400,7 @@ pub(crate) fn scan_subscribers<R: SubscriberRows>(
     rows: &mut R,
     keyexpr: &str,
     is_remote: bool,
-    mut deliver: impl FnMut(R::RowId, &mut R::Sink),
+    mut deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
     mut hit: impl FnMut(usize),
 ) -> Option<usize> {
     #[cfg(test)]
@@ -4084,7 +4095,7 @@ pub trait LocalSubscribers {
     /// [`Self::epoch`] is answered from what it matched then, and `repeats_previous` is the
     /// caller's word that `key` is the key of the call just before. No key gate is asked: a table
     /// that closes its key set gates and selects a peer's message before it matches one.
-    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         local: bool,
@@ -4098,7 +4109,7 @@ pub trait LocalSubscribers {
     /// it or select its subscribers by the key's number, else to every subscription
     /// [`Self::fire_matching`] reaches from a peer. `class` is the row of the image's
     /// allowance the session found for the peer. How many sinks were handed it.
-    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         class: Option<ClassId>,
@@ -4200,7 +4211,7 @@ impl<C, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
         any_local_match(&self.subscribers, key)
     }
 
-    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         local: bool,
@@ -4218,7 +4229,7 @@ impl<C, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
         )
     }
 
-    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         class: Option<ClassId>,
@@ -4256,7 +4267,7 @@ impl<C, P: Storage> LocalSubscribers for SubscriberTable<C, P> {
     #[cfg(feature = "alloc")]
     fn end_plain_frame<X: SampleDelivery<Self::Sink, Self::RowId>>(&mut self, cx: &mut X) {
         for subscriber in self.subscribers.iter_mut() {
-            cx.end_plain_frame(subscriber.id, &mut subscriber.sink);
+            cx.end_plain_frame(subscriber.id, RowAccess::Held(&mut subscriber.sink));
         }
     }
 }
@@ -9428,12 +9439,16 @@ mod local_subscribers_tests {
         assert!(!LocalSubscribers::has_local_matching(&table, "b"));
         let mut calls = 0usize;
         assert_eq!(
-            table.fire_matching("a/b", false, false, |_, _sink: &mut BoxedSink| calls += 1),
+            table.fire_matching("a/b", false, false, |_, _row: RowAccess<'_, BoxedSink>| {
+                calls += 1
+            }),
             2
         );
         assert_eq!(calls, 2, "from a peer, both subscriptions hear it");
         assert_eq!(
-            table.fire_matching("a/b", true, false, |_, _sink: &mut BoxedSink| calls += 1),
+            table.fire_matching("a/b", true, false, |_, _row: RowAccess<'_, BoxedSink>| {
+                calls += 1
+            }),
             1
         );
         assert_eq!(
@@ -9473,15 +9488,17 @@ mod local_subscribers_tests {
             reliability: Reliability::Reliable,
         };
         assert_eq!(
-            table.fire_matching("a/b", true, false, |_, sink: &mut BoxedSink| sink
-                .deliver(&sample)),
+            table.fire_matching("a/b", true, false, |id, row: RowAccess<'_, BoxedSink>| {
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+            }),
             1
         );
         assert_eq!(any_heard.load(Ordering::Relaxed), 1);
         assert_eq!(remote_heard.load(Ordering::Relaxed), 0);
         assert_eq!(
-            table.fire_matching("a/b", false, false, |_, sink: &mut BoxedSink| sink
-                .deliver(&sample)),
+            table.fire_matching("a/b", false, false, |id, row: RowAccess<'_, BoxedSink>| {
+                SampleDelivery::<BoxedSink, _>::deliver(&mut (), id, row, &sample)
+            }),
             2
         );
         assert_eq!(any_heard.load(Ordering::Relaxed), 2);

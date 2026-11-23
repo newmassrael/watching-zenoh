@@ -260,22 +260,54 @@ pub trait SampleSink {
     fn end_plain_frame(&mut self) {}
 }
 
+/// How a table hands a matched subscriber row to the context it is delivered through: as a
+/// shared reference where calls of the row may read it where it lies on another thread while the
+/// table is held ([`RowCallback::READS_ROW_IN_PLACE`](crate::row_callback::RowCallback)), so the
+/// dispatch never makes an exclusive reference to a row someone else reads, and exclusively where
+/// only the holder of the table reaches the row.
+pub enum RowAccess<'r, Row> {
+    /// A row read where it lies by calls that may outlive the table's hold.
+    InPlace(&'r Row),
+    /// A row only the holder of the table reaches.
+    Held(&'r mut Row),
+}
+
+impl<'r, Row> RowAccess<'r, Row> {
+    /// The row, to read.
+    pub fn row(&self) -> &Row {
+        match self {
+            Self::InPlace(row) => row,
+            Self::Held(row) => row,
+        }
+    }
+
+    /// The row to change, where the table holds it alone; `None` for a row read in place.
+    pub fn held(self) -> Option<&'r mut Row> {
+        match self {
+            Self::InPlace(_) => None,
+            Self::Held(row) => Some(row),
+        }
+    }
+}
+
 /// What a matched subscriber row is delivered through: the context the dispatch is handed with
 /// the sample, so a row holds its own facts and no reference to the state it is delivered into.
 /// Each call names the row by the id its table gives it (`Id`), so what the context records of a
 /// delivery names the row the table's own way and the row keeps no copy of its id.
 ///
-/// `()` is the context of a row that delivers itself (`Row: SampleSink`): the heap profile's
-/// closures and a node's closed sinks.
+/// `()` is the context of a row that delivers itself (`Row: SampleSink`), which the table holds
+/// alone: the heap profile's closures and a node's closed sinks. A row read in place is delivered
+/// by a context of its own, through the shared row; `()` hands it nothing, and no row type that
+/// is read in place is a [`SampleSink`].
 pub trait SampleDelivery<Row, Id> {
     /// Deliver one matched sample to `row`, the row `id`. The view is borrowed for the call.
-    fn deliver(&mut self, id: Id, row: &mut Row, sample: &dyn SampleView);
+    fn deliver(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView);
 
     /// Deliver one matched plain `Put` of a received frame ([`PlainSample`]); the default is
     /// [`Self::deliver`]. A context that overrides it to gather a frame's samples also overrides
     /// [`Self::end_plain_frame`].
     #[cfg(feature = "alloc")]
-    fn deliver_plain(&mut self, id: Id, row: &mut Row, sample: &PlainSample<'_>) {
+    fn deliver_plain(&mut self, id: Id, row: RowAccess<'_, Row>, sample: &PlainSample<'_>) {
         self.deliver(id, row, sample);
     }
 
@@ -283,24 +315,30 @@ pub trait SampleDelivery<Row, Id> {
     /// `row`: called for every row after each such frame, matched or not, so it must cost nothing
     /// when nothing was gathered.
     #[cfg(feature = "alloc")]
-    fn end_plain_frame(&mut self, id: Id, row: &mut Row) {
+    fn end_plain_frame(&mut self, id: Id, row: RowAccess<'_, Row>) {
         let _ = (id, row);
     }
 }
 
 impl<Row: SampleSink, Id> SampleDelivery<Row, Id> for () {
-    fn deliver(&mut self, _id: Id, row: &mut Row, sample: &dyn SampleView) {
-        row.deliver(sample);
+    fn deliver(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: &dyn SampleView) {
+        if let Some(row) = row.held() {
+            row.deliver(sample);
+        }
     }
 
     #[cfg(feature = "alloc")]
-    fn deliver_plain(&mut self, _id: Id, row: &mut Row, sample: &PlainSample<'_>) {
-        row.deliver_plain(sample);
+    fn deliver_plain(&mut self, _id: Id, row: RowAccess<'_, Row>, sample: &PlainSample<'_>) {
+        if let Some(row) = row.held() {
+            row.deliver_plain(sample);
+        }
     }
 
     #[cfg(feature = "alloc")]
-    fn end_plain_frame(&mut self, _id: Id, row: &mut Row) {
-        row.end_plain_frame();
+    fn end_plain_frame(&mut self, _id: Id, row: RowAccess<'_, Row>) {
+        if let Some(row) = row.held() {
+            row.end_plain_frame();
+        }
     }
 }
 

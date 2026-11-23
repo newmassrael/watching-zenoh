@@ -6,6 +6,8 @@ use crate::bounded::{Static, ARENA_ALIGN};
 use crate::limits::SessionLimits;
 use crate::reply_acceptance::ReplyAcceptance;
 use crate::row_callback::{CClosure, CallLatch};
+use crate::sink::RowAccess;
+use core::cell::Cell;
 use core::ptr::NonNull;
 use std::vec::Vec;
 
@@ -954,7 +956,14 @@ fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
 
 /// A sink that counts what it is handed, and whose calls may also run after the tables are let go.
 #[derive(Default)]
-struct Counted(usize, CallLatch);
+struct Counted(Cell<usize>, CallLatch);
+
+impl Counted {
+    /// Count one more delivery, through the shared row a delivery reads in place.
+    fn hear(&self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
 
 impl RowCallback for Counted {
     type Call = NonNull<CallLatch>;
@@ -973,7 +982,7 @@ impl RowCallback for Counted {
 
 impl crate::sink::SampleSink for Counted {
     fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {
-        self.0 += 1;
+        self.hear();
     }
 }
 
@@ -1022,7 +1031,7 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     assert!(tables.has_local_matching("a/b"));
     assert!(!tables.has_local_matching("b"));
-    let count = |_, sink: &mut Counted| sink.0 += 1;
+    let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
     assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
     assert_eq!(heard(&tables, any.handle), 1);
     assert_eq!(heard(&tables, remote.handle), 1);
@@ -1043,7 +1052,7 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
 
 /// How many samples the subscriber `handle` names was handed.
 fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
-    tables.subscribers().get(handle).unwrap().callback().0
+    tables.subscribers().get(handle).unwrap().callback().0.get()
 }
 
 /// A key delivered again at the same epoch is answered from the match cache, the same function
@@ -1055,7 +1064,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
     use crate::bounded::Heap;
     use crate::pubsub::{LocalSubscribers, MATCH_SCANS};
     let scans = || MATCH_SCANS.with(|count| count.get());
-    let count = |_, sink: &mut Counted| sink.0 += 1;
+    let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
     let mut tables = SessionTables::<Sinks, Heap>::new();
     tables.limit_memo_to(4);
     assert_eq!(tables.memo_slot_count(), 4);
@@ -1072,7 +1081,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
         "matched once, then answered from the cache"
     );
     let gone = tables.undeclare_subscriber(first.handle).unwrap();
-    assert_eq!(gone.row.unwrap().callback().0, 3);
+    assert_eq!(gone.row.unwrap().callback().0.get(), 3);
     let second = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
@@ -1094,7 +1103,8 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
             .get(second.handle)
             .unwrap()
             .callback()
-            .0,
+            .0
+            .get(),
         1
     );
     tables.limit_memo_to(0);
@@ -1111,7 +1121,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
 #[test]
 fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     use crate::pubsub::LocalSubscribers;
-    let count = |_, sink: &mut Counted| sink.0 += 1;
+    let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
     let mut tables = SessionTables::<Sinks, Static>::new();
     let sub = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
@@ -1127,7 +1137,7 @@ fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     assert!(ended::<Counted>(call));
     let row = tables.release_subscriber(sub.handle).unwrap();
     assert_eq!(
-        row.callback().0,
+        row.callback().0.get(),
         1,
         "delivered to once, before it was undeclared"
     );
@@ -1141,7 +1151,7 @@ fn a_peers_message_is_matched_afresh_where_it_may_not_allocate() {
     use crate::bounded::Heap;
     use crate::pubsub::{LocalSubscribers, PeerDelivery, MATCH_SCANS};
     let scans = || MATCH_SCANS.with(|count| count.get());
-    let count = |_, sink: &mut Counted| sink.0 += 1;
+    let count = |_, row: RowAccess<'_, Counted>| row.row().hear();
     let mut tables = SessionTables::<Sinks, Heap>::new();
     tables.limit_memo_to(4);
     let peers = tables
@@ -1178,11 +1188,23 @@ fn a_peers_message_is_matched_afresh_where_it_may_not_allocate() {
     }
     assert_eq!(scans() - start, 1, "the cache answers the second");
     assert_eq!(
-        tables.subscribers().get(peers.handle).unwrap().callback().0,
+        tables
+            .subscribers()
+            .get(peers.handle)
+            .unwrap()
+            .callback()
+            .0
+            .get(),
         4
     );
     assert_eq!(
-        tables.subscribers().get(own.handle).unwrap().callback().0,
+        tables
+            .subscribers()
+            .get(own.handle)
+            .unwrap()
+            .callback()
+            .0
+            .get(),
         0,
         "a subscriber of the session's own messages hears no peer"
     );
@@ -1252,10 +1274,10 @@ impl crate::sink::SampleDelivery<Counted, SubscriberHandle> for Handed {
     fn deliver(
         &mut self,
         id: SubscriberHandle,
-        row: &mut Counted,
+        row: RowAccess<'_, Counted>,
         _sample: &dyn crate::sink::SampleView,
     ) {
-        row.0 += 1;
+        row.row().hear();
         self.0.push(id);
     }
 }

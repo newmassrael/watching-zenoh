@@ -552,6 +552,23 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         Some((handle, self.rows.get_mut(place)?.as_mut()?))
     }
 
+    /// The live row at `place`, whatever its generation, with its handle, to read:
+    /// [`Self::live_handle_at_mut`] for a reader that must not change the row.
+    pub(crate) fn live_handle_at(&self, place: usize) -> Option<(Handle<K>, &T)> {
+        let slot = self.meta.get(place)?;
+        if slot.state != State::Live {
+            return None;
+        }
+        let handle = Handle::at(place, slot.generation)?;
+        Some((handle, self.rows.get(place)?.as_ref()?))
+    }
+
+    /// Every live row with its place and its handle, in slot order, to read.
+    pub(crate) fn live_handles(&self) -> impl Iterator<Item = (usize, Handle<K>, &T)> + '_ {
+        self.iter()
+            .map(|(handle, row)| (handle.place(), handle, row))
+    }
+
     /// Every live row with its place and its handle, in slot order, to change.
     pub(crate) fn live_handles_mut(
         &mut self,
