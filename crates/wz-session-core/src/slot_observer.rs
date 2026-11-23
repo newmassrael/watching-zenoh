@@ -260,6 +260,9 @@ pub struct SlotObserverOf<
     /// The application's listeners on the queryables a peer declares.
     #[cfg(feature = "declare-queryable")]
     pub remote_queryables: RemoteQueryableTable<K::Declared, K::Undeclared, P, M>,
+    /// The matching sink type of a build that holds neither remote table, and so no listener.
+    #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+    matching: core::marker::PhantomData<M>,
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
     pub liveliness:
@@ -584,6 +587,8 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 addr_of_mut!((*at).remote_queryables),
                 RemoteQueryableTable::with_sink_backing(),
             );
+            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+            ptr::write(addr_of_mut!((*at).matching), core::marker::PhantomData);
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).liveliness), LivelinessRegistry::new());
             #[cfg(feature = "liveliness-token")]
@@ -611,6 +616,8 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 remote_subscribers: _,
             #[cfg(feature = "declare-queryable")]
                 remote_queryables: _,
+            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+                matching: _,
             #[cfg(feature = "liveliness-token")]
                 liveliness: _,
             #[cfg(feature = "liveliness-token")]
@@ -650,6 +657,8 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
             remote_subscribers: RemoteSubscriberTable::lent(arena, watchers)?,
             #[cfg(feature = "declare-queryable")]
             remote_queryables: RemoteQueryableTable::lent(arena, watchers)?,
+            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+            matching: core::marker::PhantomData,
             #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::lent(arena, watchers)?,
             #[cfg(feature = "liveliness-token")]
