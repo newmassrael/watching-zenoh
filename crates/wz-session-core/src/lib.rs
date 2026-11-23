@@ -1205,12 +1205,6 @@ pub mod json5;
 /// R2824 — the grammar of `json5` with no allocator: the scans both the tree
 /// builder and the no-heap readers walk, so there is one JSON5 in this crate.
 /// Unconditional, because it needs nothing.
-// Totality debt TD-009 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod json5_lex;
 
 /// R2830 — the connection-retry schedule (zenoh's `ConnectionRetryConf`),

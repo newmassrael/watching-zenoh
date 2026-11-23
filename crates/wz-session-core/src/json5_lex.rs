@@ -145,7 +145,7 @@ impl<'a> Lexer<'a> {
 
     /// The current byte offset.
     pub fn pos(&self) -> usize {
-        self.base + self.pos
+        self.base.saturating_add(self.pos)
     }
 
     /// Whether the whole input has been consumed.
@@ -166,19 +166,34 @@ impl<'a> Lexer<'a> {
         self.bytes.get(self.pos).copied()
     }
 
+    /// The byte `ahead` past the next one, not consumed.
+    fn peek_at(&self, ahead: usize) -> Option<u8> {
+        self.bytes.get(self.pos..)?.get(ahead).copied()
+    }
+
+    /// Move past `n` bytes the caller has just peeked; never past the end.
+    fn advance(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.bytes.len());
+    }
+
     /// Consume one byte, which the caller has just peeked.
     pub fn bump(&mut self) {
-        self.pos += 1;
+        self.advance(1);
     }
 
     /// Consume `byte` or fail naming `expected`.
-    pub fn expect(&mut self, byte: u8, expected: &'static str) -> Result<(), Json5Error> {
+    pub fn consume(&mut self, byte: u8, expected: &'static str) -> Result<(), Json5Error> {
         if self.peek() == Some(byte) {
-            self.pos += 1;
+            self.advance(1);
             Ok(())
         } else {
             Err(self.err(expected))
         }
+    }
+
+    /// [`Self::consume`] under the name its first callers use.
+    pub fn expect(&mut self, byte: u8, expected: &'static str) -> Result<(), Json5Error> {
+        self.consume(byte, expected)
     }
 
     /// Whitespace and both comment forms. An unterminated block comment is an
@@ -187,31 +202,31 @@ impl<'a> Lexer<'a> {
     pub fn skip_trivia(&mut self) -> Result<(), Json5Error> {
         loop {
             match self.peek() {
-                Some(b' ' | b'\t' | b'\r' | b'\n') => self.pos += 1,
-                Some(b'/') => match self.bytes.get(self.pos + 1) {
+                Some(b' ' | b'\t' | b'\r' | b'\n') => self.advance(1),
+                Some(b'/') => match self.peek_at(1) {
                     Some(b'/') => {
-                        self.pos += 2;
+                        self.advance(2);
                         while let Some(c) = self.peek() {
                             if c == b'\n' {
                                 break;
                             }
-                            self.pos += 1;
+                            self.advance(1);
                         }
                     }
                     Some(b'*') => {
                         let start = self.pos;
-                        self.pos += 2;
+                        self.advance(2);
                         loop {
                             match self.peek() {
                                 None => {
                                     self.pos = start;
                                     return Err(self.err("*/ closing a block comment"));
                                 }
-                                Some(b'*') if self.bytes.get(self.pos + 1) == Some(&b'/') => {
-                                    self.pos += 2;
+                                Some(b'*') if self.peek_at(1) == Some(b'/') => {
+                                    self.advance(2);
                                     break;
                                 }
-                                Some(_) => self.pos += 1,
+                                Some(_) => self.advance(1),
                             }
                         }
                     }
@@ -240,8 +255,12 @@ impl<'a> Lexer<'a> {
             ("false", Json5Keyword::False),
             ("null", Json5Keyword::Null),
         ] {
-            if self.bytes[self.pos..].starts_with(word.as_bytes()) {
-                self.pos += word.len();
+            if self
+                .bytes
+                .get(self.pos..)
+                .is_some_and(|rest| rest.starts_with(word.as_bytes()))
+            {
+                self.advance(word.len());
                 return Ok(kw);
             }
         }
@@ -258,18 +277,19 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' {
-                self.pos += 1;
+                self.advance(1);
             } else {
                 break;
             }
         }
-        if self.pos == start || self.bytes[start].is_ascii_digit() {
+        let raw = self.bytes.get(start..self.pos).unwrap_or_default();
+        if raw.is_empty() || raw.first().is_some_and(u8::is_ascii_digit) {
             self.pos = start;
             return Err(self.err("a member name"));
         }
         Ok(Json5Str {
-            raw: &self.bytes[start..self.pos],
-            at: self.base + start,
+            raw,
+            at: self.base.saturating_add(start),
             quoted: false,
         })
     }
@@ -277,14 +297,17 @@ impl<'a> Lexer<'a> {
     /// A quoted string, checked in full (escapes and UTF-8) and returned
     /// undecoded. The lexer must be at the opening quote.
     pub fn string(&mut self) -> Result<Json5Str<'a>, Json5Error> {
-        let quote = self.bytes[self.pos];
-        self.pos += 1;
+        let Some(quote) = self.peek() else {
+            return Err(self.err("a quoted string"));
+        };
+        self.advance(1);
         let body_start = self.pos;
         self.walk_string_body(Some(quote), None)?;
         // walk_string_body stops just past the closing quote.
+        let body_end = self.pos.saturating_sub(1);
         Ok(Json5Str {
-            raw: &self.bytes[body_start..self.pos - 1],
-            at: self.base + body_start,
+            raw: self.bytes.get(body_start..body_end).unwrap_or_default(),
+            at: self.base.saturating_add(body_start),
             quoted: true,
         })
     }
@@ -312,14 +335,14 @@ impl<'a> Lexer<'a> {
                     None => Ok(()),
                 };
             };
-            self.pos += 1;
+            self.advance(1);
             match c {
                 c if Some(c) == quote => return Ok(()),
                 b'\\' => {
                     let Some(esc) = self.peek() else {
                         return Err(self.err("an escape after backslash"));
                     };
-                    self.pos += 1;
+                    self.advance(1);
                     let piece = match esc {
                         b'"' => "\"",
                         b'\'' => "'",
@@ -336,7 +359,7 @@ impl<'a> Lexer<'a> {
                         b'\n' => "",
                         b'\r' => {
                             if self.peek() == Some(b'\n') {
-                                self.pos += 1;
+                                self.advance(1);
                             }
                             ""
                         }
@@ -348,7 +371,7 @@ impl<'a> Lexer<'a> {
                             continue;
                         }
                         _ => {
-                            self.pos -= 1;
+                            self.pos = self.pos.saturating_sub(1);
                             return Err(self.err("a known escape"));
                         }
                     };
@@ -356,11 +379,12 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {
                     // Take the whole UTF-8 sequence, not the lead byte.
-                    let start = self.pos - 1;
-                    while self.pos < self.bytes.len() && self.bytes[self.pos] & 0xC0 == 0x80 {
-                        self.pos += 1;
+                    let start = self.pos.saturating_sub(1);
+                    while self.peek().is_some_and(|b| b & 0xC0 == 0x80) {
+                        self.advance(1);
                     }
-                    match core::str::from_utf8(&self.bytes[start..self.pos]) {
+                    match core::str::from_utf8(self.bytes.get(start..self.pos).unwrap_or_default())
+                    {
                         Ok(s) => {
                             let at = self.pos;
                             self.pos = start;
@@ -383,32 +407,35 @@ impl<'a> Lexer<'a> {
     fn unicode_escape(&mut self) -> Result<char, Json5Error> {
         let hi = self.hex4()?;
         if (0xD800..0xDC00).contains(&hi) {
-            if self.peek() != Some(b'\\') || self.bytes.get(self.pos + 1) != Some(&b'u') {
+            if self.peek() != Some(b'\\') || self.peek_at(1) != Some(b'u') {
                 return Err(self.err("a low surrogate escape"));
             }
-            self.pos += 2;
+            self.advance(2);
             let lo = self.hex4()?;
             if !(0xDC00..0xE000).contains(&lo) {
                 return Err(self.err("a low surrogate escape"));
             }
-            let cp = 0x1_0000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+            // The two ranges just checked make the masks the offsets into them,
+            // and the sum at most 0x10FFFF.
+            let cp = (((hi & 0x3FF) << 10) | (lo & 0x3FF)).wrapping_add(0x1_0000);
             return char::from_u32(cp).ok_or_else(|| self.err("a Unicode scalar"));
         }
         char::from_u32(hi).ok_or_else(|| self.err("a Unicode scalar"))
     }
 
     fn hex4(&mut self) -> Result<u32, Json5Error> {
-        if self.pos + 4 > self.bytes.len() {
+        let bytes = self.bytes;
+        let Some(digits) = bytes.get(self.pos..).and_then(|rest| rest.get(..4)) else {
             return Err(self.err("four hex digits"));
-        }
+        };
         let mut v = 0u32;
-        for i in 0..4 {
-            let d = (self.bytes[self.pos + i] as char)
+        for &b in digits {
+            let d = char::from(b)
                 .to_digit(16)
                 .ok_or_else(|| self.err("four hex digits"))?;
-            v = v * 16 + d;
+            v = (v << 4) | d;
         }
-        self.pos += 4;
+        self.advance(4);
         Ok(v)
     }
 
@@ -418,16 +445,15 @@ impl<'a> Lexer<'a> {
     pub fn number(&mut self) -> Result<&'a str, Json5Error> {
         let start = self.pos;
         if matches!(self.peek(), Some(b'-' | b'+')) {
-            self.pos += 1;
+            self.advance(1);
         }
         let digits_start = self.pos;
-        let hex =
-            self.peek() == Some(b'0') && matches!(self.bytes.get(self.pos + 1), Some(b'x' | b'X'));
+        let hex = self.peek() == Some(b'0') && matches!(self.peek_at(1), Some(b'x' | b'X'));
         if hex {
-            self.pos += 2;
+            self.advance(2);
             let hd = self.pos;
             while matches!(self.peek(), Some(c) if c.is_ascii_hexdigit()) {
-                self.pos += 1;
+                self.advance(1);
             }
             if self.pos == hd {
                 self.pos = start;
@@ -435,12 +461,12 @@ impl<'a> Lexer<'a> {
             }
         } else {
             while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                self.pos += 1;
+                self.advance(1);
             }
             if self.peek() == Some(b'.') {
-                self.pos += 1;
+                self.advance(1);
                 while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    self.pos += 1;
+                    self.advance(1);
                 }
             }
             if self.pos == digits_start {
@@ -448,13 +474,13 @@ impl<'a> Lexer<'a> {
                 return Err(self.err("a number"));
             }
             if matches!(self.peek(), Some(b'e' | b'E')) {
-                self.pos += 1;
+                self.advance(1);
                 if matches!(self.peek(), Some(b'-' | b'+')) {
-                    self.pos += 1;
+                    self.advance(1);
                 }
                 let ed = self.pos;
                 while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    self.pos += 1;
+                    self.advance(1);
                 }
                 if self.pos == ed {
                     self.pos = start;
@@ -463,7 +489,7 @@ impl<'a> Lexer<'a> {
             }
         }
         // Every byte consumed above is ASCII.
-        Ok(core::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or(""))
+        Ok(core::str::from_utf8(self.bytes.get(start..self.pos).unwrap_or_default()).unwrap_or(""))
     }
 
     /// Skip one whole value of any shape, checking it as it goes. For a reader
@@ -473,15 +499,15 @@ impl<'a> Lexer<'a> {
     pub fn skip_value(&mut self, max_depth: usize) -> Result<(), Json5Error> {
         match self.peek() {
             Some(b'{') => {
-                if max_depth == 0 {
+                let Some(inner) = max_depth.checked_sub(1) else {
                     return Err(self.err("a shallower value"));
-                }
-                self.pos += 1;
+                };
+                self.advance(1);
                 loop {
                     self.skip_trivia()?;
                     match self.peek() {
                         Some(b'}') => {
-                            self.pos += 1;
+                            self.advance(1);
                             return Ok(());
                         }
                         None => return Err(self.err("} closing an object")),
@@ -489,36 +515,36 @@ impl<'a> Lexer<'a> {
                     }
                     self.member_name()?;
                     self.skip_trivia()?;
-                    self.expect(b':', ": after a member name")?;
+                    self.consume(b':', ": after a member name")?;
                     self.skip_trivia()?;
-                    self.skip_value(max_depth - 1)?;
+                    self.skip_value(inner)?;
                     self.skip_trivia()?;
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => self.advance(1),
                         Some(b'}') => {}
                         _ => return Err(self.err(", or } after a member")),
                     }
                 }
             }
             Some(b'[') => {
-                if max_depth == 0 {
+                let Some(inner) = max_depth.checked_sub(1) else {
                     return Err(self.err("a shallower value"));
-                }
-                self.pos += 1;
+                };
+                self.advance(1);
                 loop {
                     self.skip_trivia()?;
                     match self.peek() {
                         Some(b']') => {
-                            self.pos += 1;
+                            self.advance(1);
                             return Ok(());
                         }
                         None => return Err(self.err("] closing an array")),
                         _ => {}
                     }
-                    self.skip_value(max_depth - 1)?;
+                    self.skip_value(inner)?;
                     self.skip_trivia()?;
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => self.advance(1),
                         Some(b']') => {}
                         _ => return Err(self.err(", or ] after an element")),
                     }
