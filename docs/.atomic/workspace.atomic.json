@@ -6975,6 +6975,26 @@
         "SwappableLink and LocalSwappableLink (wz-session-core reconnect.rs) do not forward set_idle_flush, tx_staged, try_reserve_rooms_for, link_subject and link_endpoints, so a session opened with reconnect never batches.",
         "From Round 4609: the debug frames of FaceLoopIo::new (84,168), dial_locator_on (80,824) and the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage (151,944); whether drive_multicast_session_running joins a shared drive."
       ]
+    },
+    "Round 4614": {
+      "decision_summary": "A TCP and a UDP link to one peer, aggregated into one session with no class declared on either end, now have a real-socket witness that they split the channels by their protocols' classes: best-effort rides UDP, reliable rides TCP, as upstream's link select does. Round 2943 made an undeclared link's class its protocol's and held it over recording drivers only; the real-socket legs were two TCP links. The question came from a published automotive middleware comparison (arXiv 2505.02734) that measured upstream's best-effort over one TCP endpoint, upstream's publisher reliability being a link-selection marker, not a retransmission. The leg runs in both link orders, each discriminating one channel, and a mutation that drops the protocol class fails each order at its own assertion. No product code changed: wz already behaves as upstream does.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/it/files/session_multilink_e2e.rs: `open_multilink_udp_link` (the datagram twin of `open_multilink_link`: the acceptor peeks the initiator's InitSyn datagram, the initiator binds and connects an ephemeral socket) and `a_tcp_and_a_udp_link_split_the_channels`, run as `..._udp_first` and `..._tcp_first`; all three gated on `transport-link-udp`.",
+        "scripts/run-ci.sh: Layer C1ba's session-extqos arm of `session_multilink_e2e` builds with `transport-link-udp` too and its count goes 9 -> 11; the lane's `ML_FEATURES` carries no UDP link, so the two cases ride that arm rather than a build of their own."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-runtime-tokio --features transport-multilink --test it session_multilink_e2e::a_tcp_and_a_udp`: 2 passed, 308 filtered out (ran=2).",
+        "The C1ba arm's own command (`--no-default-features`, `ML_FEATURES,transport-qos,session-extqos,transport-link-udp`, `session_multilink_e2e`): 11 passed; with `ML_FEATURES,transport-link-udp` alone 8 passed.",
+        "`cargo clippy -p wz-runtime-tokio --tests -- -D warnings` clean on the default build with `transport-multilink` and on the arm's `--no-default-features` build (the only warnings are the vendored `ring` crate's); rustfmt --check of the test file clean.",
+        "Each order fails by construction if the class fell back to the any tier: the udp_first order asserts the reliable Put on link 2, the tcp_first order the best-effort Put on link 2, the first live link being link 1 in both."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Interop leg not written: a stock zenoh peer dialling a wz acceptor over a tcp and a udp endpoint with `max_links` 2, with wz recording which link each frame arrived on, would hold the same split from the foreign side.",
+        "Next step of the same track: a large-message fan-in lane between two hosts (several publishers of 4 MB samples to one subscriber over 1 Gbps, which oversubscribes the link), to read the queue and drop behaviour under Block and Drop congestion control against upstream at the same configuration."
+      ]
     }
   },
   "inventory_entries": {
