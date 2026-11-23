@@ -413,12 +413,22 @@ def hosted_runs(workflows: dict | list[dict]) -> dict[str, Hosted]:
     keys those jobs agree on, and every provisioning line any of them runs before it, in
     order. Each job reads the top-level env of its own workflow."""
     found: dict[str, list[Hosted]] = {}
+    produced = _artifact_provisioning(workflows)
     for workflow in workflows if isinstance(workflows, list) else [workflows]:
         top = workflow.get("env") or {}
         for job in (workflow.get("jobs") or {}).values():
             job_env = job.get("env") or {}
             prep: list[tuple[dict[str, str], list[str]]] = []
             for step in job.get("steps") or []:
+                taken = _artifact_named(step, "actions/download-artifact")
+                if taken is not None:
+                    # A job that takes another job's run artifact takes what that job built for
+                    # it: a unit has no artifact to download, so it provisions as the producer
+                    # did before publishing it.
+                    for p in produced.get(taken, []):
+                        if p not in prep:
+                            prep.append(p)
+                    continue
                 env = _carried({**top, **job_env, **(step.get("env") or {})})
                 for raw in (step.get("run") or "").splitlines():
                     line = raw.strip()
@@ -441,6 +451,42 @@ def hosted_runs(workflows: dict | list[dict]) -> dict[str, Hosted]:
                     prep.append(p)
         merged[lane] = Hosted(env, prep)
     return merged
+
+
+def _artifact_named(step: dict, action: str) -> str | None:
+    """The artifact name a step that `uses` `action` (any version) names, else `None`."""
+    uses = step.get("uses") or ""
+    if uses.split("@", 1)[0] != action:
+        return None
+    name = (step.get("with") or {}).get("name")
+    return str(name) if name is not None else None
+
+
+def _artifact_provisioning(
+    workflows: dict | list[dict],
+) -> dict[str, list[tuple[dict[str, str], list[str]]]]:
+    """For each run artifact a job publishes (`actions/upload-artifact`), the provisioning lines
+    that job runs before the step that publishes it, under that job's env."""
+    produced: dict[str, list[tuple[dict[str, str], list[str]]]] = {}
+    for workflow in workflows if isinstance(workflows, list) else [workflows]:
+        top = workflow.get("env") or {}
+        for job in (workflow.get("jobs") or {}).values():
+            job_env = job.get("env") or {}
+            prep: list[tuple[dict[str, str], list[str]]] = []
+            for step in job.get("steps") or []:
+                name = _artifact_named(step, "actions/upload-artifact")
+                if name is not None:
+                    produced.setdefault(name, [])
+                    for p in prep:
+                        if p not in produced[name]:
+                            produced[name].append(p)
+                    continue
+                env = _carried({**top, **job_env, **(step.get("env") or {})})
+                for raw in (step.get("run") or "").splitlines():
+                    m = PREP.match(raw.strip())
+                    if m:
+                        prep.append((env, [m.group(1), *m.group(2).split()]))
+    return produced
 
 
 def read_workflows() -> list[dict]:
@@ -626,6 +672,27 @@ def selftest() -> int:
             cases += 1
         else:
             raise AssertionError(f"{what} for a lane the table lacks was planned instead of refused")
+    # A lane whose job takes another job's run artifact is provisioned as the producer was before
+    # it published the artifact; a job that publishes nothing is not followed.
+    carried = hosted_runs({
+        "jobs": {
+            "maker": {"steps": [
+                {"run": "bash scripts/build-zenohd.sh", "env": {"ZENOHD_ALLOW_CLONE": "1"}},
+                {"uses": "actions/upload-artifact@v4", "with": {"name": "oracle"}},
+                {"run": "bash scripts/build-after-the-publish.sh"},
+            ]},
+            "taker": {"steps": [
+                {"uses": "actions/download-artifact@v4", "with": {"name": "oracle"}},
+                {"uses": "actions/download-artifact@v4", "with": {"name": "nobody-publishes-this"}},
+                {"run": "bash scripts/run-ci.sh --layer Q"},
+            ]},
+        },
+    })
+    assert carried["Q"].prep == [({"ZENOHD_ALLOW_CLONE": "1"}, ["scripts/build-zenohd.sh"])], (
+        f"the taker's lane provisions {carried['Q'].prep}, want the producer's build before its "
+        f"publish and nothing after it"
+    )
+    cases += 1
     merged = lane_commands()
     assert merged["C1cc"] == ["valgrind"] and merged["Q"] == ["arm-none-eabi-gcc", "qemu-system-arm"], merged
     assert not any("qemu-user" in p or "qemu-arm" == p for progs in merged.values() for p in progs), (
