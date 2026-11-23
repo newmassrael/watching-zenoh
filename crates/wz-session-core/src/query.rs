@@ -3226,24 +3226,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
         replies: &mut ReplyStage<S>,
     ) -> usize {
-        let projection = project_owned_query(
-            query,
-            value,
-            #[cfg(feature = "pubsub-ts-stack")]
-            None,
-        );
-        fire_query(
-            self,
-            &mut (),
-            Asker {
-                remote: false,
-                requester: None,
-            },
-            envelope,
-            keyexpr,
-            projection,
-            replies,
-        )
+        ask_local_queryables(self, &mut (), envelope, keyexpr, query, value, replies)
     }
 
     /// [`Self::local_query_with_value`] for a query that is instrumented: every matched queryable
@@ -3274,6 +3257,44 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             replies,
         )
     }
+}
+
+/// The session's own query on `keyexpr` asked of `queryables`, each matched row through `cx`
+/// ([`QueryDelivery`]): [`QueryableRegistry::local_query_with_value`] for a table of either kind and
+/// a context of the caller's, so a table whose rows are asked by a context of their own answers
+/// the session's own gets by the rule its peers' queries are answered by. How many rows were asked.
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+pub fn ask_local_queryables<L: LocalQueryables, X: QueryDelivery<L::Sink, L::RowId>, S: Storage>(
+    queryables: &mut L,
+    cx: &mut X,
+    envelope: QueryEnvelope,
+    keyexpr: &str,
+    query: &QueryOwned,
+    value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+    replies: &mut ReplyStage<S>,
+) -> usize {
+    let projection = project_owned_query(
+        query,
+        value,
+        #[cfg(feature = "pubsub-ts-stack")]
+        None,
+    );
+    fire_query(
+        queryables,
+        cx,
+        Asker {
+            remote: false,
+            requester: None,
+        },
+        envelope,
+        keyexpr,
+        projection,
+        replies,
+    )
 }
 
 /// The dispatch of what this face's peer asks: a Request routed through the session's queryables,
@@ -6649,6 +6670,72 @@ mod tests {
     /// cannot pass. And the refusal reaches the HANDLER as an `Err`, as
     /// upstream's `reply(..).wait()` does — read here through the dispatcher,
     /// which is the only way a registered queryable ever sees the seam.
+    /// A context that records the id of each queryable it is asked through and calls no row.
+    struct AskedIds(Vec<QueryableId>);
+
+    impl<C> QueryDelivery<C, QueryableId> for AskedIds {
+        fn ask(
+            &mut self,
+            id: QueryableId,
+            _row: crate::sink::RowAccess<'_, C>,
+            _query: &crate::query_sink::ProvenQuery<'_>,
+            _responder: &mut QueryResponder<'_>,
+        ) {
+            self.0.push(id);
+        }
+    }
+
+    /// The session's own query is asked through the context it is handed: the queryable that
+    /// answers the session is named by its id, the one that answers only peers is not asked, and
+    /// no row's own callback runs.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_sessions_own_query_asks_through_the_context_it_is_handed() {
+        let called = Arc::new(AtomicUsize::new(0));
+        let counting = |called: &Arc<AtomicUsize>| {
+            let called = called.clone();
+            move |_q: &dyn crate::query_sink::QueryView,
+                  _r: &mut dyn crate::query_sink::ReplyOut| {
+                called.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let mut reg = QueryableRegistry::new();
+        let answers_the_session = reg
+            .register_with_locality("demo/a", crate::locality::Locality::Any, counting(&called))
+            .expect("no quota is stated on this table");
+        reg.register_with_locality(
+            "demo/a",
+            crate::locality::Locality::Remote,
+            counting(&called),
+        )
+        .expect("no quota is stated on this table");
+        let query = Query::default()
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap();
+        let mut replies = ReplyStage::new();
+        let mut cx = AskedIds(Vec::new());
+        let asked = ask_local_queryables(
+            &mut reg,
+            &mut cx,
+            QueryEnvelope {
+                rid: 7,
+                target: None,
+                qos: QosLevel::DEFAULT,
+            },
+            "demo/a",
+            &query,
+            None,
+            &mut replies,
+        );
+        assert_eq!(asked, 1);
+        assert_eq!(cx.0, vec![answers_the_session]);
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            0,
+            "the context called no row"
+        );
+    }
+
     #[test]
     fn a_reply_staged_outside_the_query_is_refused() {
         let outcomes = Arc::new(Mutex::new(Vec::new()));
