@@ -45,8 +45,11 @@ compile_error!(
 // per-session slot profile (`session-slot` without `alloc`) compiles the session
 // machinery against fixed storage and links NO allocator: a `Vec`, a `String` or a
 // `Box` named by code that profile compiles is refused here, by the compiler, and is
-// not left for the image's link to find.
-#[cfg(feature = "alloc")]
+// not left for the image's link to find. A unit test links std (below), so the test build of
+// that profile has the allocator anyway and its tests name `alloc` as every other build's do;
+// the library that profile ships is the build without `test`, which still refuses it (Layer G and
+// the no-default-features clippy of this crate build exactly that).
+#[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
 // R311ds — host-run unit tests use std (Arc + Mutex capture cells for
