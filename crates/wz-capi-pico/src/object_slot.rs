@@ -510,8 +510,13 @@ mod tests {
             engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
-        use wz_capi_port::EntityKind;
 
+        // How many publisher places `engine` has free: each claimed, then all given back.
+        let free = |engine: &Arc<crate::session::Engine>| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Publisher)).collect();
+            claimed.len()
+        };
         let open = || {
             let session = listening_on_loopback();
             // SAFETY: the session is live and owned by this frame.
@@ -521,12 +526,13 @@ mod tests {
         };
         let (mut one, one_engine) = open();
         let (mut other, other_engine) = open();
-        let (lent, places) = one_engine
-            .place_lender()
-            .expect("the engine lends places")
-            .place_counts(EntityKind::Publisher);
-        assert_eq!(lent, 0);
+        let places = free(&one_engine);
         assert!(places > 0, "the session's limit admits publishers");
+        assert_eq!(
+            free(&one_engine),
+            places,
+            "a claim given back is free again"
+        );
 
         let drops = core::cell::Cell::new(0);
         let held: Vec<*mut Counted<'_>> = (0..places)
@@ -544,11 +550,9 @@ mod tests {
             .expect("another session's places are its own")
             .fill(Counted(&drops));
         assert_eq!(
-            other_engine
-                .place_lender()
-                .expect("the engine lends places")
-                .place_counts(EntityKind::Publisher),
-            (1, places)
+            free(&other_engine),
+            places - 1,
+            "the other lent one of its own"
         );
         for object in held {
             // SAFETY: each object was filled above and is released once.
@@ -557,38 +561,14 @@ mod tests {
         // SAFETY: as above.
         unsafe { release_entity(theirs) };
         assert_eq!(drops.get(), places + 1, "each object is dropped once");
-        assert_eq!(
-            one_engine
-                .place_lender()
-                .expect("the engine lends places")
-                .place_counts(EntityKind::Publisher),
-            (0, places)
-        );
-        assert_eq!(
-            other_engine
-                .place_lender()
-                .expect("the engine lends places")
-                .place_counts(EntityKind::Publisher),
-            (0, places)
-        );
+        assert_eq!(free(&one_engine), places);
+        assert_eq!(free(&other_engine), places);
 
         let unfilled =
             Slot::<u64>::take_entity(&one_engine, Kind::Publisher).expect("a place given back");
-        assert_eq!(
-            one_engine
-                .place_lender()
-                .expect("the engine lends places")
-                .place_counts(EntityKind::Publisher),
-            (1, places)
-        );
+        assert_eq!(free(&one_engine), places - 1);
         drop(unfilled);
-        assert_eq!(
-            one_engine
-                .place_lender()
-                .expect("the engine lends places")
-                .place_counts(EntityKind::Publisher),
-            (0, places)
-        );
+        assert_eq!(free(&one_engine), places);
         assert!(
             Slot::<u64>::take_entity(&one_engine, Kind::Sample).is_none(),
             "a kind that is no entity has no place"

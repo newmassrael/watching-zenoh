@@ -1369,6 +1369,7 @@ impl EntityPlaces {
     }
 
     /// How many places of `kind` are lent, and how many the arena holds.
+    #[cfg(test)]
     pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
         self.of(kind)
             .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))

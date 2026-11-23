@@ -3927,6 +3927,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Ok(())
     }
 
+    /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
+    /// most.
+    #[cfg(test)]
+    pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.core.lock().0.places.counts(kind)
+    }
+
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
     /// ([`ArenaPlan::reserved_bytes`]).
     pub fn arena_bytes(&self) -> usize {
@@ -7139,10 +7146,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
     /// which the ABI's object of the entity holds off.
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
-    }
-
-    fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
-        self.core.lock().0.places.counts(kind)
     }
 }
 
