@@ -502,19 +502,20 @@ impl z_owned_session_t {
 
 /// What a session's report of its memory is computed from (`crate::session_memory`): `limits`,
 /// the snapshot the open resolved from the config and hands the engine, how many links the session
-/// may hold by what it listens on, and the numbers its links are opened with from that snapshot,
+/// may hold by what it listens on and whether it dials a peer, and the numbers its links are opened with from that snapshot,
 /// `tx_queue` and what `pico_link_rx` and `pico_unicast_batch` read. The report is of the
 /// session the program holds, so it is never read from the build's values.
 #[cfg(feature = "session-memory")]
 fn memory_basis(
     listen: Option<&str>,
+    dials: bool,
     tx_queue: &TxQueueConf,
     limits: &SessionLimits,
 ) -> crate::session_memory::MemoryBasis {
     let rx = pico_link_rx(limits);
     crate::session_memory::MemoryBasis {
         limits: *limits,
-        links: crate::session_memory::links_of(listen, limits),
+        links: crate::session_memory::links_of(listen, dials, limits),
         queue_batches: tx_queue.sizes.iter().sum(),
         batch_bytes: usize::from(pico_unicast_batch(limits)),
         rx_bytes: rx.buffer_size,
@@ -1352,7 +1353,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     } = request;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
-    let memory = memory_basis(listen.as_deref(), &tx_queue, &limits);
+    let memory = memory_basis(listen.as_deref(), !connect.is_empty(), &tx_queue, &limits);
     // This ABI stays on one attempt: the retry the zenoh-c open gained reads
     // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
     // config keys, and this shim resolves pico's numeric keys instead.
@@ -1617,6 +1618,57 @@ fn app_links_on<C>(
     links
 }
 
+/// The faces a session holds besides the one it dials: none for one that listens on nothing
+/// (`admitted` `None`), as pico's client holds its one transport, and for one that listens, of
+/// the `admitted` peers its `MAX_FACES` admits: pico's unicast transport keeps the peer it
+/// dialled and the peers it accepted in one list (`vendor/zenoh-pico/src/transport/manager.c` @
+/// `ret = _z_transport_peer_unicast_add(&zt->_transport._unicast, &tp_param, *_z_link_get_socket(zl),`)
+/// and refuses an inbound link once that list holds `Z_LISTEN_MAX_CONNECTION_NB` peers
+/// (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+/// `if (_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB) {`), so
+/// a dial that holds a peer is one of them. The dial is one at most: a session dials the first of
+/// its connect endpoints that answers, and this ABI's config names one. A session that listens and
+/// dials nothing gives every one to the links it accepts; its dial face holds no peer.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn faces_besides_dial(admitted: Option<usize>, dials: bool) -> usize {
+    match admitted {
+        None => 0,
+        Some(admitted) if dials => admitted.saturating_sub(1),
+        Some(admitted) => admitted,
+    }
+}
+
+#[cfg(all(test, not(feature = "engine-tokio")))]
+mod faces_besides_dial_tests {
+    use super::faces_besides_dial;
+
+    /// A listener that dials a peer holds it as one of the peers its limit admits, as pico's
+    /// unicast transport counts its dialled peer among its `Z_LISTEN_MAX_CONNECTION_NB`.
+    #[test]
+    fn a_listener_that_dials_holds_its_peer_as_one_of_its_faces() {
+        assert_eq!(faces_besides_dial(Some(10), true), 9);
+        assert_eq!(
+            faces_besides_dial(Some(0), true),
+            0,
+            "no face is owed past none"
+        );
+    }
+
+    /// A listener that dials nothing gives every face its limit admits to the links it accepts:
+    /// its dial face holds no peer.
+    #[test]
+    fn a_listener_that_dials_nothing_gives_every_face_to_accepts() {
+        assert_eq!(faces_besides_dial(Some(10), false), 10);
+    }
+
+    /// A session that listens on nothing holds no face besides its dial, whether it dials.
+    #[test]
+    fn a_client_holds_no_face_besides_its_dial() {
+        assert_eq!(faces_besides_dial(None, true), 0);
+        assert_eq!(faces_besides_dial(None, false), 0);
+    }
+}
+
 /// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
 /// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
 /// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
@@ -1658,7 +1710,12 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let limits = request.limits;
     let (tx_queue, sn_resolution) = pico_link_policy(&policy, &limits);
     #[cfg(feature = "session-memory")]
-    let memory = memory_basis(request.listen.as_deref(), &tx_queue, &limits);
+    let memory = memory_basis(
+        request.listen.as_deref(),
+        !request.connect.is_empty(),
+        &tx_queue,
+        &limits,
+    );
     // The engine takes the id as the config states it, up to sixteen bytes: the form an INIT
     // carries.
     let zid = request.zid;
@@ -1719,13 +1776,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let links = crate::coop_host::links().with_rx_capacity(limits.pico_unicast_batch_bytes());
     // A session that listens on nothing holds the one link it dials, as pico's client holds its
     // one transport, so its arena lays out the buffers and the tables of no other face; one that
-    // listens holds as many as its limits admit, pico's `Z_LISTEN_MAX_CONNECTION_NB` at the pico
-    // preset. A limit over the build's is refused as the open's arena refuses one.
+    // listens holds as many peers as its limits admit, pico's `Z_LISTEN_MAX_CONNECTION_NB` at the
+    // pico preset, the one it dials among them (`faces_besides_dial`). A limit over the build's is
+    // refused as the open's arena refuses one.
     let max_faces = if listen.is_empty() {
-        0
+        faces_besides_dial(None, !connect.is_empty())
     } else {
         match wz_capi_coop::arena::admitted_faces(&limits) {
-            Ok(faces) => faces,
+            Ok(faces) => faces_besides_dial(Some(faces), !connect.is_empty()),
             Err(refused) => {
                 return coop_open_refusal(&wz_capi_coop::OpenError::Arena(refused));
             }
@@ -3066,7 +3124,7 @@ mod build_numbers {
             |limits| limits.select_pico_unicast_batch_bytes(value),
             |limits| {
                 let (tx_queue, _) = pico_link_policy(&SessionPolicy::defaults(), &limits);
-                let basis = memory_basis(None, &tx_queue, &limits);
+                let basis = memory_basis(None, true, &tx_queue, &limits);
                 assert_eq!(basis.limits, limits);
                 let queue = memory_row(&basis.report(), c"link transmit queues");
                 assert_eq!(queue.entry_bytes, value);
@@ -3086,7 +3144,7 @@ mod build_numbers {
         stated(
             |limits| limits.select_pico_frag_max_bytes(Quota::at_most(value)),
             |limits| {
-                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                let memory = memory_basis(None, true, &tx_queue(&limits), &limits).report();
                 let reassembly = memory_row(&memory, c"link reassembly");
                 assert_eq!((reassembly.count, reassembly.entry_bytes), (Some(2), value));
             },
@@ -3094,7 +3152,7 @@ mod build_numbers {
         stated(
             |limits| limits.select_pico_frag_max_bytes(Quota::UNBOUNDED),
             |limits| {
-                let memory = memory_basis(None, &tx_queue(&limits), &limits).report();
+                let memory = memory_basis(None, true, &tx_queue(&limits), &limits).report();
                 assert_eq!(memory_row(&memory, c"link reassembly").count, None);
                 assert_eq!(memory.total(), None);
             },
