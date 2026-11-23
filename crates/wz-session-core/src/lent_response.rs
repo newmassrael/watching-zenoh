@@ -689,8 +689,8 @@ impl<'a> ResponseWriter<'a> {
         let chain = filled(
             &mut chain,
             [
-                (parts.qos != QosLevel::DEFAULT).then(|| zint_entry(QOS_EXT_HEADER, &qos)),
-                parts.responder.is_some().then(|| ExtEntryParts {
+                (parts.qos != QosLevel::DEFAULT).then_some(zint_entry(QOS_EXT_HEADER, &qos)),
+                parts.responder.is_some().then_some(ExtEntryParts {
                     header: RESPONDER_EXT_HEADER,
                     body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
                 }),
@@ -794,7 +794,7 @@ impl<'a> ResponseWriter<'a> {
             .transpose()?;
         // The entries a build carries: the source info, then the attachment.
         #[cfg(feature = "reply-source-info")]
-        let source_info_entry = (!self.source_info.value().is_empty()).then(|| ExtEntryParts {
+        let source_info_entry = (!self.source_info.value().is_empty()).then_some(ExtEntryParts {
             header: crate::ext_header::body_eid::SOURCE_INFO,
             body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
         });

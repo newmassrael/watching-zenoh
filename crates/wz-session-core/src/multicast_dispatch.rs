@@ -2265,7 +2265,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             return 0;
         }
         let cap = self.config.lease_ms;
-        let mut expired = 0;
+        let mut expired = 0usize;
         for (idx, slot) in self.peers.iter_mut().enumerate() {
             if slot.is_free() {
                 continue;
