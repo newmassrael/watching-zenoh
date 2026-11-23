@@ -410,7 +410,7 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
     // bytes, and is leaked, so nothing else uses it and it outlives every lent table.
     let mut arena = unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) };
     let keys = arena
-        .lend_keys(1024)
+        .lend_keys(1024, SessionLimits::defaults().max_keyexpr_bytes_held())
         .expect("the arena is laid out for the key arena");
     PeerTables::<Lent>::lent(&mut arena, keys, rows, &SessionLimits::defaults())
         .expect("the arena is laid out for the tables")

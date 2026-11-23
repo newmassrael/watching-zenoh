@@ -1496,7 +1496,7 @@ mod lent_tests {
     /// are lent from is laid out by their plan alone.
     fn keys(bytes: usize) -> KeySpace {
         arena(KeySpace::span_bytes(bytes).expect("a small key arena"))
-            .lend_keys(bytes)
+            .lend_keys(bytes, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena is the key arena's span")
     }
 

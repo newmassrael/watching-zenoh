@@ -1801,11 +1801,11 @@ fn dispatch_all<C: ClockSource + 'static>(
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
-    /// `MAX_KEYEXPR_BYTES`, or when the key arena has no room for it: a key the session cannot
-    /// hold is refused, never cut short, and the declaration with it, before an id is taken or
-    /// anything is sent.
+    /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
+    /// key the session cannot hold is refused, never cut short, and the declaration with it,
+    /// before an id is taken or anything is sent.
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
-        if !self.config.limits.max_keyexpr_bytes().admits(keyexpr.len()) {
+        if !self.keys.holds_key(keyexpr.len()) {
             return None;
         }
         self.keys.key(keyexpr).ok()
@@ -3342,7 +3342,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let live_subs = arena
             .lend(entities.liveliness_subscribers)
             .map_err(OpenError::Arena)?;
-        let keys = arena.lend_keys(&plan).map_err(OpenError::Arena)?;
+        let keys = arena
+            .lend_keys(&plan, config.limits.max_keyexpr_bytes_held())
+            .map_err(OpenError::Arena)?;
         // The application's tables, lent from the rows the plan counts for them.
         let registry = Registry::new(
             &resolve_limits(&config),

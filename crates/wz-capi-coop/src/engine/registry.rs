@@ -975,7 +975,7 @@ mod tests {
         };
         let keys = arena
             .arena_mut()
-            .lend_keys(4096)
+            .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
         let registry = Registry::new(
             &SessionLimits::defaults(),
@@ -1263,7 +1263,7 @@ mod tests {
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
         let by_value_keys = by_value_arena
             .arena_mut()
-            .lend_keys(256)
+            .lend_keys(256, limits.max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
         let by_value_gets =
             Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
@@ -1273,7 +1273,7 @@ mod tests {
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
         let keys = arena
             .arena_mut()
-            .lend_keys(256)
+            .lend_keys(256, limits.max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
         let mut sets = Vec::new();
         lend_set(&mut sets, arena.arena_mut(), keys, gets, peer, &limits)

@@ -90,7 +90,7 @@ use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
-use wz_session_core::limits::SessionLimits;
+use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -843,10 +843,15 @@ impl SessionArena {
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
-    /// in, for the session's life. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_keys(&mut self, plan: &ArenaPlan) -> Result<KeySpace, ArenaRefused> {
+    /// in, for the session's life, each key at most `longest` bytes, the session's
+    /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_keys(
+        &mut self,
+        plan: &ArenaPlan,
+        longest: MaxKeyexprBytesHeld,
+    ) -> Result<KeySpace, ArenaRefused> {
         self.arena
-            .lend_keys(plan.key_bytes)
+            .lend_keys(plan.key_bytes, longest)
             .map_err(ArenaRefused::Lend)
     }
 
