@@ -2152,7 +2152,7 @@ impl PayloadFold {
             // around a record.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.spaces,
             sink,

@@ -2936,7 +2936,7 @@ impl crate::ordered_fold::OrderedFold for AggFold {
             // Placed: see `crate::payload`'s fold.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.spaces,
         );

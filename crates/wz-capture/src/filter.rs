@@ -73,11 +73,25 @@
 //! | `e2e.crc` | `ok` `error`; absent where the record carries no frame | `==` `!=` | as `e2e` |
 //! | `e2e.counter` | `none` `repeat` `out_of_range` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
 //! | `e2e.timeout` | `ok` `error` `unjudged`; absent as `e2e.crc` | `==` `!=` | as `e2e` |
+//! | `row` | an integer, the row's place in the documents' row order, from 0 | `==` `!=` `<` `<=` `>` `>=` | the plane was not given the row's facts, or was not told where the documents place it (a census, which writes no rows) |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one the field list document prints are one
 //! declaration (`selector_fields!`), and a test holds this table to it by
 //! offering the parser every name here.
+//!
+//! ## `row` is the place the documents give the row
+//!
+//! `packet` names the capture packet that carried the row's first byte, and a
+//! packet that carries several messages gives them all one number. `row` is
+//! the row's own: its place in the order the selection document writes its
+//! rows (the field document's rows, flow after flow), counted from 0. Every
+//! row a list ever produced holds its place, so a ceiling that takes the front
+//! of a list moves no number, and a document's `max_messages_shown_per_flow`
+//! moves none either. What does move a number is a flow written before the row
+//! gaining a row, which is why a door reads every `row` term against the
+//! dissection it renders ([`crate::filter::Filter::rows_numbered_by`]), once,
+//! before any row is judged.
 //!
 //! ## Any other word is a PATH into the record's dissection
 //!
@@ -562,7 +576,7 @@ pub enum Record {
 }
 
 /// THE ROW'S FACTS, as the `msg`, `src`, `dst`, `addr`, `sport`, `dport`,
-/// `port`, `link`, `flow` and `packet` terms read them.
+/// `port`, `link`, `flow`, `packet` and `row` terms read them.
 ///
 /// One value per message row, built by [`RowFacts::of`] for every reader of a
 /// row, so a census plane judging a record and the field document judging the
@@ -583,6 +597,10 @@ pub struct RowFacts<'a> {
     /// it (a datagram row's `packet`, a stream row's `first_byte.packet`), or
     /// `None` where the reader cannot place it.
     pub packet: Option<u64>,
+    /// The row's produced-index in its list: how many messages the list had
+    /// produced before it, which no front trim moves. What a `row` term looks
+    /// the row up by ([`RowOrdinals`]); `None` where the walk did not say.
+    pub produced: Option<u64>,
     /// The number of the message list the row belongs to (a live handle's
     /// `list_id`).
     pub flow: u64,
@@ -653,6 +671,7 @@ impl<'a> RowFacts<'a> {
     pub fn of(
         messages: &'a [&'a str],
         packet: Option<usize>,
+        produced: Option<u64>,
         list: usize,
         flow: &crate::link::FlowKey,
         direction: Direction,
@@ -666,6 +685,7 @@ impl<'a> RowFacts<'a> {
             messages,
             unread_remainder: false,
             packet: packet.map(|p| p as u64),
+            produced,
             flow: list as u64,
             link: flow.link(),
             src,
@@ -843,6 +863,7 @@ selector_fields! {
     E2eCrc => "e2e.crc",
     E2eCounter => "e2e.counter",
     E2eTimeout => "e2e.timeout",
+    Row => "row",
 }
 
 /// The words a `msg` term takes: every message name a row or a record can
@@ -929,7 +950,8 @@ impl Field {
             | Self::Dport
             | Self::Port
             | Self::Flow
-            | Self::Packet => ORDERED,
+            | Self::Packet
+            | Self::Row => ORDERED,
         }
     }
 
@@ -1222,6 +1244,20 @@ enum Term {
         op: Op,
         value: u64,
     },
+    /// The row's place in the documents' row order compares with the integer,
+    /// before the term was read against a dissection: no plane can place a row
+    /// by it, so it is undecided ([`Filter::rows_numbered_by`]).
+    Row {
+        op: Op,
+        value: u64,
+    },
+    /// A `row` term read against a dissection: the rows whose place satisfied
+    /// it, as `(list, produced-index)` sorted ascending, and the lists the
+    /// documents write, sorted. A row of any other list has no place.
+    RowIn {
+        rows: Vec<(u64, u64)>,
+        lists: Vec<u64>,
+    },
 }
 
 /// Which end of a row an address or port term asks about.
@@ -1435,6 +1471,16 @@ impl Term {
             Self::Packet { op, value } => match record.row.map(|r| r.packet) {
                 None | Some(None) => Truth::Unknown,
                 Some(Some(packet)) => Truth::of(op.apply(packet, *value)),
+            },
+            // A row's place is the documents' to give, and a plane that was
+            // not handed it cannot rank a row: undecided, never `no`.
+            Self::Row { .. } => Truth::Unknown,
+            Self::RowIn { rows, lists } => match record.row {
+                Some(row) if lists.binary_search(&row.flow).is_ok() => match row.produced {
+                    Some(at) => Truth::of(rows.binary_search(&(row.flow, at)).is_ok()),
+                    None => Truth::Unknown,
+                },
+                _ => Truth::Unknown,
             },
             Self::Key { pattern, negated } => match record.keyexpr {
                 // The undecidable case, and the one this module exists for: the
@@ -1886,8 +1932,32 @@ impl Filter {
                     | Term::Flow { .. }
                     | Term::FlowIn(_)
                     | Term::Packet { .. }
+                    | Term::Row { .. }
+                    | Term::RowIn { .. }
             )
         })
+    }
+
+    /// `true` when some term compares the row's place in the documents' row
+    /// order (`row`), which a door must read against the dissection it renders
+    /// first ([`Self::rows_numbered_by`]).
+    pub fn reads_row_ordinal(&self) -> bool {
+        self.root.any_term(&|term| matches!(term, Term::Row { .. }))
+    }
+
+    /// Read this selector's `row` terms against the places `ordinals` gives
+    /// the rows of one dissection, and return the filter that judges by them.
+    ///
+    /// The place of a row moves when a flow written before it gains a row, so
+    /// a term is read into the set of rows whose place satisfies it NOW, once
+    /// per document and before any row is judged: the verdict a row is given
+    /// then cannot depend on when in the walk it was reached. A filter kept
+    /// between calls that compares this result with the last one begins again
+    /// when the places moved, which is the case that needs it.
+    pub fn rows_numbered_by(&self, ordinals: &RowOrdinals) -> Filter {
+        Filter {
+            root: self.root.rows_numbered(ordinals),
+        }
     }
 
     /// Read this selector against the zids ONE capture names, and say what its
@@ -1954,6 +2024,81 @@ impl Node {
             )),
             Self::Term(_) => self.clone(),
         }
+    }
+
+    fn rows_numbered(&self, places: &RowOrdinals) -> Node {
+        match self {
+            Self::Any => Self::Any,
+            Self::Ambiguous => Self::Ambiguous,
+            Self::Or(nodes) => Self::Or(nodes.iter().map(|n| n.rows_numbered(places)).collect()),
+            Self::And(nodes) => Self::And(nodes.iter().map(|n| n.rows_numbered(places)).collect()),
+            Self::Not(inner) => Self::Not(alloc::boxed::Box::new(inner.rows_numbered(places))),
+            Self::Term(Term::Row { op, value }) => Self::Term(Term::RowIn {
+                rows: places.satisfying(*op, *value),
+                lists: places.lists.clone(),
+            }),
+            Self::Term(_) => self.clone(),
+        }
+    }
+}
+
+/// THE PLACE EACH ROW HAS IN THE DOCUMENTS' ROW ORDER, for one dissection: what
+/// a `row` term compares.
+///
+/// Built by the documents' own enumeration (`crate::fields_json`), so the
+/// number a term reads is the place the selection document writes the row at.
+/// Kept by `(list, produced-index)`, the coordinates a plane hands a row
+/// ([`RowFacts::flow`] and [`RowFacts::produced`]), which no front trim moves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowOrdinals {
+    /// `(list, produced-index, place)`, sorted by the first two.
+    rows: Vec<(u64, u64, u64)>,
+    /// The lists the documents write, sorted.
+    lists: Vec<u64>,
+}
+
+impl RowOrdinals {
+    /// Name `list` as one the documents write: a row of it with no place is a
+    /// row the walk did not reach, not one of a list no document writes.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn write_list(&mut self, list: usize) {
+        self.lists.push(list as u64);
+    }
+
+    /// Give the row at produced-index `produced` of `list` the place `place`.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn place(&mut self, list: usize, produced: u64, place: u64) {
+        self.rows.push((list as u64, produced, place));
+    }
+
+    /// The places, put in the order a term is looked up by. A row is placed
+    /// once, so no two entries share a list and a produced-index.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn sorted(mut self) -> Self {
+        self.rows.sort_unstable();
+        self.lists.sort_unstable();
+        self.lists.dedup();
+        self
+    }
+
+    /// The place of the row at produced-index `produced` of `list`, or `None`
+    /// for a row the documents do not write.
+    pub fn place_of(&self, list: usize, produced: u64) -> Option<u64> {
+        let key = (list as u64, produced);
+        let at = self.rows.binary_search_by_key(&key, |&(l, p, _)| (l, p));
+        at.ok().map(|at| self.rows[at].2)
+    }
+
+    /// The rows whose place satisfies `op value`, as `(list, produced-index)`
+    /// in the order they are kept.
+    fn satisfying(&self, op: Op, value: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        for &(list, produced, place) in &self.rows {
+            if op.apply(place, value) {
+                out.push((list, produced));
+            }
+        }
+        out
     }
 }
 
@@ -4320,6 +4465,10 @@ fn build_fixed(
             value: integer(&value, value_at)?,
         },
         Field::Packet => Term::Packet {
+            op,
+            value: integer(&value, value_at)?,
+        },
+        Field::Row => Term::Row {
             op,
             value: integer(&value, value_at)?,
         },

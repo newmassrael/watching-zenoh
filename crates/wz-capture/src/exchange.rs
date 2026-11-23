@@ -430,6 +430,8 @@ impl ExchangeScope {
 struct RowPlace {
     names: crate::filter::MessageNames,
     place: Option<(crate::link::FlowKey, Option<usize>)>,
+    /// The row's produced-index in its list, for a `row` term.
+    produced: Option<u64>,
     list: usize,
     direction: Direction,
     /// The flow's word for whether its bytes are zenoh, as the walk's census
@@ -446,6 +448,7 @@ impl RowPlace {
         Self {
             names: crate::filter::MessageNames::of(frame, Some(message.name())),
             place: ctx.place(),
+            produced: ctx.produced(),
             list: ctx.list(),
             direction: frame.direction,
             zenoh: ctx.zenoh(),
@@ -457,6 +460,7 @@ impl RowPlace {
         Some(crate::filter::RowFacts::of(
             self.names.as_slice(),
             packet,
+            self.produced,
             self.list,
             &flow,
             self.direction,
@@ -1539,7 +1543,7 @@ impl crate::ordered_fold::OrderedFold for ExchangeFold {
             // Placed and holding: see `crate::payload`'s fold.
             grouping
                 .context(list)
-                .placed(*flow, Some(packet))
+                .placed(*flow, Some(packet), frame.produced())
                 .holding(message),
             &mut self.open,
             &mut self.spaces,

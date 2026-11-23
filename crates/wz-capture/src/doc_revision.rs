@@ -5286,6 +5286,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // THE ROW'S PLACE JOINS THE LANGUAGE, and no key moves on either document.
+    //
+    // * One fixed field arrives, last in the table's order: `row`, an integer
+    //   with the six comparisons, the row's place in the order the selection
+    //   document writes its rows. A selector that names it reads `ok:true`, its
+    //   value is a `word`, and the verdict's unknown-field refusal may now offer
+    //   it among its nearest names.
+    // * The field list carries it under `fields` with the ordered operators and
+    //   no `words`.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 11,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 7,
+        keys: SELECTOR_FIELDS_R5_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -46083,7 +46110,8 @@ mod tests {
             // To 8 when `zenoh`, the flow's word, joined the fields.
             // To 9 when its words became the sequential test's three.
             // To 10 when the four `e2e` fields joined.
-            (SELECTOR_DIAGNOSE, 10),
+            // To 11 when `row`, the row's place in the documents, joined.
+            (SELECTOR_DIAGNOSE, 11),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
@@ -46094,7 +46122,8 @@ mod tests {
             // To 4 when its words became the sequential test's three.
             // To 5 when `renamed`, the renames of published paths, joined.
             // To 6 when the four `e2e` fields joined.
-            (SELECTOR_FIELDS, 6),
+            // To 7 when `row`, the row's place in the documents, joined.
+            (SELECTOR_FIELDS, 7),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             // To 3 when a line could be a `.proto` file, `schema_file`.

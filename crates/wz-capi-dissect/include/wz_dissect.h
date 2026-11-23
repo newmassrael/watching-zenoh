@@ -2579,6 +2579,7 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   e2e.crc      ok error                                    == !=
  *   e2e.counter  none repeat out_of_range unjudged           == !=
  *   e2e.timeout  ok error unjudged                           == !=
+ *   row          an integer, the row's place, from 0         == != < <= > >=
  *
  * THE END-TO-END JUDGE'S VERDICT. A Push carrying a put under a key a profile
  * rule covers is a FRAME, and so (since field-document revision 66, selection
@@ -2637,6 +2638,23 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  * numbering; a file's flows are numbered by position, stream flows first).
  * `packet` is the packet the document numbers the row by: a datagram row's
  * `packet`, a stream row's `first_byte.packet`, from 0.
+ *
+ * (selector_fields revision 7) `row` is the ROW'S OWN NUMBER, where `packet` is its packet's and
+ * the rows of one packet share it: the row's place, from 0, in the order the
+ * selection document writes its rows, which is the field document's rows flow
+ * after flow (THE ORDER OF ROWS, at the field document, gives it). Every row a
+ * list ever produced holds its place, so a ceiling that takes the front of a
+ * list moves no row's number, and a max_messages_shown_per_flow moves none
+ * either; where no ceiling has taken a row, a row's number is its index in the
+ * selection document's `rows`. A row's number moves when a flow written before
+ * it gains a row; a live handle's `seq` is the number that never moves. The
+ * doors that write those rows read a `row` term against the capture as they render it:
+ * the field documents, wz_dissect_live_selection and its siblings, and
+ * wz_dissect_live_selected_packets; wz_dissect_live_selection_since begins its
+ * memory again when the rows a `row` term picks have changed. A census and the
+ * values door write no such rows, and a `row` term there is UNDECIDED. A row of
+ * a list no document writes (a recovered QUIC stream, a serial line) has no
+ * place and is UNDECIDED too.
  *
  * `value` compares the application payload of a Put, a Reply or an Err as the
  * publisher put it: after the transport has decompressed and reassembled the
@@ -3967,7 +3985,7 @@ int wz_dissect_selector_term(const char *node, int verb, const char *selector,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":6},
+ *     {"document":{"name":"selector_fields","revision":7},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},

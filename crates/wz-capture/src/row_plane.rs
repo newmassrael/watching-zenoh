@@ -91,7 +91,7 @@ impl RowPlane {
                 .flatten();
             let ctx = grouping
                 .context(list)
-                .placed(flow, Some(packet))
+                .placed(flow, Some(packet), row.produced())
                 .holding(held.as_deref());
             plane.take(filter, ctx, origin, list, &row, held.as_deref(), exchanges);
         }
