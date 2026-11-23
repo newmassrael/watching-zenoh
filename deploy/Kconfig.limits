@@ -205,6 +205,7 @@ config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 
 config WZ_LIMIT_HELD_SESSIONS
 	int "HELD_SESSIONS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 4
 	help
 	  The sessions a program of the pico C ABI holds open at once: the slots of
@@ -213,6 +214,7 @@ config WZ_LIMIT_HELD_SESSIONS
 
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
+	default 5 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The owned samples a program of the pico C ABI holds at once (taken out of
@@ -222,6 +224,7 @@ config WZ_LIMIT_HELD_SAMPLES
 
 config WZ_LIMIT_HELD_REPLIES
 	int "HELD_REPLIES"
+	default 3 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The owned replies and reply errors a program of the pico C ABI holds at
@@ -231,6 +234,7 @@ config WZ_LIMIT_HELD_REPLIES
 
 config WZ_LIMIT_HELD_QUERIES
 	int "HELD_QUERIES"
+	default 3 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The owned queries a program of the pico C ABI holds at once, each keeping
@@ -240,6 +244,7 @@ config WZ_LIMIT_HELD_QUERIES
 
 config WZ_LIMIT_HELD_PAYLOADS
 	int "HELD_PAYLOADS"
+	default 3 if WZ_LIMITS_ZENOH_PICO
 	default 32
 	help
 	  The owned payloads (z_owned_bytes_t) a program of the pico C ABI holds at
@@ -260,6 +265,7 @@ config WZ_LIMIT_HELD_CONFIGS
 
 config WZ_LIMIT_HELD_HELLOS
 	int "HELD_HELLOS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
@@ -269,6 +275,7 @@ config WZ_LIMIT_HELD_HELLOS
 
 config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	int "HELD_PAYLOAD_BYTES"
+	default 32768 if WZ_LIMITS_ZENOH_PICO
 	default 131072
 	help
 	  The bytes the owned payloads, strings and slices a program of the pico C ABI
