@@ -491,7 +491,10 @@ impl GroupTxStage {
                 params: params.clone(),
                 conduits: RefCell::new(Conduits {
                     minted: MulticastTxConduits::new(mask),
-                    windows: core::array::from_fn(|_| MulticastBatch::new()),
+                    // Each conduit's window frame is written into storage taken now.
+                    windows: core::array::from_fn(|_| {
+                        MulticastBatch::with_budget(params.frame_budget())
+                    }),
                 }),
                 window_open: Cell::new(false),
                 lanes: RefCell::new(Lanes::of_group(params, quota)),

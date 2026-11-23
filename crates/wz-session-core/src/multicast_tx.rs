@@ -1333,6 +1333,19 @@ where
             }
         }
     }
+    // Opened inside a window, the frame is written into the window's own storage and stays open
+    // for the messages after it; one past the batch leaves as a chain below.
+    if !express {
+        if let Some(open) = window.as_deref_mut() {
+            let opened = open.open_with(reliable, sn, mtu, |buf| {
+                crate::frame_encode::encode_frame_envelope_into(buf, sn, flags, ext_qos, &body)
+                    .is_ok()
+            });
+            if opened {
+                return PushOutcome::Pushed;
+            }
+        }
+    }
     let frame = crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body);
     #[cfg(feature = "transport-fragmentation")]
     if frame.len() > mtu {
@@ -1416,6 +1429,8 @@ where
 ))]
 #[derive(Debug, Default)]
 pub struct MulticastBatch {
+    /// The open frame's bytes, in storage the batch keeps from one frame to the next.
+    buf: alloc::vec::Vec<u8>,
     open: Option<OpenFrame>,
 }
 
@@ -1429,9 +1444,8 @@ pub struct MulticastBatch {
         any(feature = "liveliness-token", feature = "declare-subscriber")
     )
 ))]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct OpenFrame {
-    bytes: alloc::vec::Vec<u8>,
     reliable: bool,
     sn: u64,
 }
@@ -1448,7 +1462,19 @@ struct OpenFrame {
 impl MulticastBatch {
     /// No frame open.
     pub const fn new() -> Self {
-        Self { open: None }
+        Self {
+            buf: alloc::vec::Vec::new(),
+            open: None,
+        }
+    }
+
+    /// No frame open, with storage for a frame of `budget` bytes taken now: the window's frames
+    /// are written into it, and none of them allocates.
+    pub fn with_budget(budget: usize) -> Self {
+        Self {
+            buf: alloc::vec::Vec::with_capacity(budget),
+            open: None,
+        }
     }
 
     /// Whether no frame is open.
@@ -1458,25 +1484,40 @@ impl MulticastBatch {
 
     /// Put the open frame, if one is, on `queue` as `priority`'s datagram, the way every datagram
     /// of the group goes onto it (compressed when the group compresses), and hold none after.
-    /// No room is asked: the frame was given its room when it was opened.
+    /// No room is asked: the frame was given its room when it was opened. A queue that lends a
+    /// slot takes a copy of the frame and the batch keeps its storage; otherwise the frame is
+    /// handed over as it is.
     pub fn flush<Q: MulticastTxQueue + ?Sized>(
         &mut self,
         priority: Priority,
         params: &crate::multicast_params::MulticastParams,
         queue: &mut Q,
     ) {
-        if let Some(open) = self.open.take() {
-            enqueue_wire(
-                queue,
-                params,
-                MulticastTxDatagram {
-                    priority,
-                    reliable: open.reliable,
-                    sn: open.sn,
-                    bytes: open.bytes,
-                },
-            );
+        let Some(open) = self.open.take() else {
+            return;
+        };
+        // A compressing group's frame is compressed on its way to the queue, which only the
+        // datagram handed over is.
+        if !params.compression {
+            let bytes = &self.buf;
+            let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
+                crate::tx_buf::TxBuf::append(slot, bytes).is_ok()
+            };
+            if queue.enqueue_lent(priority, open.reliable, open.sn, bytes.len(), &mut fill) {
+                self.buf.clear();
+                return;
+            }
         }
+        enqueue_wire(
+            queue,
+            params,
+            MulticastTxDatagram {
+                priority,
+                reliable: open.reliable,
+                sn: open.sn,
+                bytes: core::mem::take(&mut self.buf),
+            },
+        );
     }
 
     /// Append the message `body` encodes to the open frame, when one is open on the `reliable`
@@ -1486,32 +1527,52 @@ impl MulticastBatch {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        let Some(open) = self.open.as_mut() else {
+        let Some(open) = self.open else {
             return false;
         };
         if open.reliable != reliable {
             return false;
         }
-        let before = open.bytes.len();
+        let before = self.buf.len();
         let encoded = {
-            let mut sink = crate::tx_buf::TxSink::new(&mut open.bytes);
+            let mut capped = crate::tx_buf::CappedTxBuf::new(&mut self.buf, mtu);
+            let mut sink = crate::tx_buf::TxSink::new(&mut capped);
             body(&mut sink).is_ok()
         };
-        if encoded && open.bytes.len() <= mtu {
+        if encoded && self.buf.len() <= mtu {
             return true;
         }
-        open.bytes.truncate(before);
+        self.buf.truncate(before);
         false
     }
 
-    /// Hold `bytes`, a whole frame on the `reliable` channel that took `sn`, open.
+    /// Open a frame on the `reliable` channel that took `sn`, `write` writing it into the
+    /// batch's storage held to `mtu`: whether it was opened. A frame `write` cannot write
+    /// within `mtu` leaves the batch as it was, with no frame open.
+    fn open_with(
+        &mut self,
+        reliable: bool,
+        sn: u64,
+        mtu: usize,
+        write: impl FnOnce(&mut crate::tx_buf::CappedTxBuf<'_, '_>) -> bool,
+    ) -> bool {
+        debug_assert!(self.open.is_none(), "one frame is open at a time");
+        self.buf.clear();
+        let written = write(&mut crate::tx_buf::CappedTxBuf::new(&mut self.buf, mtu));
+        if written && self.buf.len() <= mtu {
+            self.open = Some(OpenFrame { reliable, sn });
+            return true;
+        }
+        self.buf.clear();
+        false
+    }
+
+    /// Hold `bytes`, a whole frame on the `reliable` channel that took `sn`, open: one past the
+    /// batch, which a build that cuts no chain holds as it is.
     fn hold(&mut self, reliable: bool, sn: u64, bytes: alloc::vec::Vec<u8>) {
         debug_assert!(self.open.is_none(), "one frame is open at a time");
-        self.open = Some(OpenFrame {
-            bytes,
-            reliable,
-            sn,
-        });
+        self.buf = bytes;
+        self.open = Some(OpenFrame { reliable, sn });
     }
 }
 
@@ -2976,6 +3037,45 @@ mod lend_tests {
         assert_eq!(sns, [0, 1, 2], "two fragments and the marker");
         let (_, marker, _) = queue.lent.last().expect("the marker");
         assert!(marker.len() < 16, "the marker carries no payload");
+    }
+
+    /// A batch window's frame is written into the window's own storage and leaves through a lent
+    /// slot when the window is flushed: one datagram carrying both messages, nothing on the heap,
+    /// and the window keeps its storage for the next frame.
+    #[test]
+    fn a_window_frame_leaves_through_a_lent_slot() {
+        let params = params(8_192, false);
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Lending::new(1_472, 65_600);
+        let mut window = MulticastBatch::with_budget(params.frame_budget());
+        for payload in [&b"one"[..], &b"two"[..]] {
+            let outcome = multicast_tx_push_batched(
+                put(payload, Priority::DEFAULT),
+                &mut tx,
+                &params,
+                &conf,
+                &mut queue,
+                &mut window,
+            );
+            assert_eq!(outcome, PushOutcome::Pushed);
+        }
+        assert!(
+            queue.lent.is_empty() && queue.heap.is_empty(),
+            "the window holds both"
+        );
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert!(queue.heap.is_empty(), "nothing was handed over on the heap");
+        assert_eq!(queue.lent.len(), 1, "one frame for both");
+        assert!(queue.lent[0].1.ends_with(b"two"));
+        assert!(window.is_empty());
+        assert!(
+            window.buf.capacity() >= params.frame_budget(),
+            "its storage is kept"
+        );
     }
 
     /// The SN walk through the lend is the heap path's: consecutive pushes mint
