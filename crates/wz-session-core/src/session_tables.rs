@@ -61,7 +61,7 @@ use crate::query::stage_queryable_interest;
 use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::row_callback::RowCallback;
-use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
+use crate::slot_map::{Handle, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 
 /// The markers that keep one table's handles from being taken by another.
@@ -167,8 +167,8 @@ pub trait RowCallbacks {
     type LivelinessSubscriber: RowCallback;
     /// A matching listener's.
     type Matching: RowCallback;
-    /// A pending get's.
-    type Reply;
+    /// A pending get's: what each of its replies is handed to, and its end.
+    type Reply: RowCallback;
 }
 
 /// What the faces' tables answer about what their peers declared.
@@ -513,30 +513,38 @@ impl<Cb> MatchingRow<Cb> {
     }
 }
 
-/// A get the session waits on.
+/// A get the session waits on: the request id its legs carry, the key its replies must
+/// intersect, how many legs still owe their Final, and when it ends unanswered.
 #[derive(Debug)]
 pub struct PendingGetRow<Key, Cb> {
     request: RequestId,
-    face: FaceId,
-    key: Key,
+    /// `None` for a get that takes a reply on any key (pico's `_anyke`).
+    gate: Option<Key>,
+    legs: u16,
     deadline: u64,
     callback: Cb,
 }
 
 impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
-    /// The request id its query carries.
+    /// The request id its query carries on every leg.
     pub fn request(&self) -> RequestId {
         self.request
     }
 
-    /// The face it was asked on.
-    pub fn face(&self) -> FaceId {
-        self.face
+    /// The key a reply must intersect, `None` when any key is taken.
+    pub fn gate(&self) -> Option<&str> {
+        self.gate.as_ref().map(KeyBacking::as_str)
     }
 
-    /// The key it asked about.
-    pub fn key(&self) -> &str {
-        self.key.as_str()
+    /// Whether `reply` is one of this get's to hand its callback: an Err always, a Put or a Del
+    /// on a key the gate intersects.
+    pub fn admits(&self, reply: &dyn crate::reply_sink::ReplyView) -> bool {
+        crate::reply_acceptance::admits_reply(self.gate(), reply)
+    }
+
+    /// How many legs still owe their Final.
+    pub fn legs(&self) -> u16 {
+        self.legs
     }
 
     /// When it ends unanswered, in the driver's clock.
@@ -686,6 +694,15 @@ pub struct Unwatched<R> {
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
+}
+
+/// What ending one leg of a get left of it.
+#[derive(Debug)]
+pub enum LegEnded<R> {
+    /// Other legs still owe their Final: how many.
+    Owed(u16),
+    /// That was the last leg: the get is over, its row as [`SessionTables::end_get`] hands it.
+    Over(Removal<R>),
 }
 
 /// A get begun: its row and the request id its query carries.
@@ -1521,11 +1538,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- pending gets ----------------------------------------------------------------------
 
-    /// Begin a get on `key`, asked on `face`, ending unanswered at `deadline`.
+    /// Begin a get whose replies pass `accept`, owed a Final by each of its `legs`, ending
+    /// unanswered at `deadline`: its row and the request id every leg's query carries.
+    ///
+    /// Refused in the order the other declarations are, so a refused get spends no request id
+    /// and keeps no key: table room, then the gate's key (`KeyexprTooLong` past what a row
+    /// holds, `TableFull` when the key arena has no room), and the callback is handed back.
     pub fn begin_get(
         &mut self,
-        face: FaceId,
-        key: &str,
+        accept: crate::reply_acceptance::ReplyAcceptance<'_>,
+        legs: u16,
         deadline: u64,
         callback: F::Reply,
     ) -> Result<GetBegun, Refused<F::Reply>> {
@@ -1535,20 +1557,25 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 callback,
             });
         }
-        let key = match KeyMaker::key(&self.keys, key) {
-            Ok(key) => key,
-            Err(why) => {
-                return Err(Refused {
-                    why: unkept(why),
-                    callback,
-                })
+        let gate = match accept {
+            crate::reply_acceptance::ReplyAcceptance::Any => None,
+            crate::reply_acceptance::ReplyAcceptance::Matching(key) => {
+                match KeyMaker::key(&self.keys, key) {
+                    Ok(key) => Some(key),
+                    Err(why) => {
+                        return Err(Refused {
+                            why: unkept(why),
+                            callback,
+                        })
+                    }
+                }
             }
         };
         let request = self.mint_request();
         let row = PendingGetRow {
             request,
-            face,
-            key,
+            gate,
+            legs,
             deadline,
             callback,
         };
@@ -1574,19 +1601,47 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         id
     }
 
-    /// The get asked on `face` under `request`.
-    pub fn pending_get(
-        &self,
-        face: FaceId,
-        request: RequestId,
-    ) -> Option<(PendingGetHandle, &PendingGet<F, P>)> {
+    /// The get whose legs carry `request`.
+    pub fn pending_get(&self, request: RequestId) -> Option<(PendingGetHandle, &PendingGet<F, P>)> {
         self.pending_gets
             .iter()
-            .find(|(_, row)| row.face == face && row.request == request)
+            .find(|(_, row)| row.request == request)
     }
 
-    /// End the get `handle` names: its row, or, while its callback runs, by its last unpin.
+    /// Begin a call of the get `handle` names, with a reply the tables admitted, the tables held:
+    /// what the call is made with once they are let go, `None` when no live row is named. See
+    /// [`Self::begin_subscriber`].
+    pub fn begin_reply(&self, handle: PendingGetHandle) -> Option<<F::Reply as RowCallback>::Call> {
+        const {
+            assert!(!<F::Reply as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+        }
+        self.pending_gets.get(handle)?.callback.begin()
+    }
+
+    /// Let go of the get `handle` named, ended while a call of it ran, once that call ended last:
+    /// its row, to drop where no lock is held.
+    pub fn release_get(&mut self, handle: PendingGetHandle) -> Option<PendingGet<F, P>> {
+        self.pending_gets.release(handle)
+    }
+
+    /// One leg of the get `handle` names has its Final, or will have none (its face is gone): what
+    /// is left of the get. The last leg ends it as [`Self::end_get`] does.
+    pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded<PendingGet<F, P>>> {
+        let row = self.pending_gets.get_mut(handle)?;
+        row.legs = row.legs.saturating_sub(1);
+        if row.legs > 0 {
+            return Some(LegEnded::Owed(row.legs));
+        }
+        self.end_get(handle).map(LegEnded::Over)
+    }
+
+    /// End the get `handle` names, whatever its legs still owe (its deadline passed, its asker
+    /// cancelled it): no call of its callback begins after this. Its row is handed back at once
+    /// when no call runs, else the call that ends last lets it go ([`Self::release_get`]).
     pub fn end_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
+        if !self.pending_gets.get(handle)?.callback.retire() {
+            let _held = self.pending_gets.pin(handle)?;
+        }
         self.pending_gets.remove(handle)
     }
 
@@ -1595,16 +1650,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         loop {
             let (handle, row) = self.pending_gets.next_from(cursor)?;
             if row.deadline <= now {
-                return Some(handle);
-            }
-        }
-    }
-
-    /// The next get at or after `cursor` asked on `face`: what a lost face ends.
-    pub fn next_get_on_face(&self, face: FaceId, cursor: &mut usize) -> Option<PendingGetHandle> {
-        loop {
-            let (handle, row) = self.pending_gets.next_from(cursor)?;
-            if row.face == face {
                 return Some(handle);
             }
         }
@@ -1744,17 +1789,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: MatchingListenerHandle,
     ) -> Option<Matching<F>> {
         self.matching.release(handle)
-    }
-
-    /// Pin the pending get `handle` names while its callback runs.
-    pub fn pin_get(&mut self, handle: PendingGetHandle) -> Option<Pinned<kind::PendingGet>> {
-        self.pending_gets.pin(handle)
-    }
-
-    /// Give back a pending get's pin: the row when it was ended while pinned and this was its last
-    /// pin.
-    pub fn unpin_get(&mut self, pinned: Pinned<kind::PendingGet>) -> Option<PendingGet<F, P>> {
-        self.pending_gets.unpin(pinned)
     }
 
     // ---- the tables, to read ---------------------------------------------------------------
