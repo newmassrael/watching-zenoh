@@ -437,66 +437,66 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
     );
 }
 
-/// A key longer than a row holds (`MAX_KEYEXPR_BYTES`) is refused, before an id is taken, a
-/// callback minted or anything sent; the key of the bound itself is taken.
+/// A key longer than a row holds (`MAX_KEYEXPR_BYTES`) is refused, before an id is taken, its
+/// callback let go of with the refusal, nothing sent; the key of the bound itself is taken.
 #[test]
 fn a_key_past_its_row_is_refused_and_sends_nothing() {
     use wz_session_core::caps::MAX_KEYEXPR_BYTES;
 
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, SessionLimits::defaults());
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let past = "k".repeat(MAX_KEYEXPR_BYTES + 1);
     let before = router.seen(|s| s.declares);
-    assert_eq!(declare_subscriber(&engine, &past, &minted), None);
+    assert_eq!(declare_subscriber(&engine, &past, &dropped), None);
     assert_eq!(engine.acquire_keyexpr(&past), None);
     assert_eq!(filter(&engine, FilterPlane::Subscribers, &past), None);
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
-        0,
-        "no callback for a refusal"
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the refused callback goes with the refusal"
     );
     assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
 
     let at = "k".repeat(MAX_KEYEXPR_BYTES);
     assert!(
-        declare_subscriber(&engine, &at, &minted).is_some(),
+        declare_subscriber(&engine, &at, &dropped).is_some(),
         "a key of the bound itself is taken"
     );
 }
 
 /// A key past the session's own `MAX_KEYEXPR_BYTES`, lowered under the build's, is refused as one
-/// past the build's is, before an id is taken, a callback minted or anything sent; a key of the
+/// past the build's is, before an id is taken or anything sent, its callback let go of; a key of the
 /// session's bound is taken.
 #[test]
 fn a_key_past_the_sessions_bound_is_refused_and_sends_nothing() {
     let limits = lowered(|l| l.select_max_keyexpr_bytes(Quota::at_most(8)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let past = "demo/k/10";
     let before = router.seen(|s| s.declares);
-    assert_eq!(declare_subscriber(&engine, past, &minted), None);
+    assert_eq!(declare_subscriber(&engine, past, &dropped), None);
     assert_eq!(engine.acquire_keyexpr(past), None);
     assert_eq!(filter(&engine, FilterPlane::Subscribers, past), None);
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
-        0,
-        "no callback for a refusal"
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the refused callback goes with the refusal"
     );
     assert_eq!(router.seen(|s| s.declares), before, "nothing was sent");
 
     assert!(
-        declare_subscriber(&engine, "demo/k/9", &minted).is_some(),
+        declare_subscriber(&engine, "demo/k/9", &dropped).is_some(),
         "a key of the session's bound is taken"
     );
 }
 
 /// The keyed rows of the session keep their keys in one key arena of `KEY_ARENA_BYTES`: a key
-/// that finds no room there is refused as a full table refuses, before an id is taken, a callback
-/// minted or anything sent, and the keys an undeclaration gives back are taken by the next
+/// that finds no room there is refused as a full table refuses, before an id is taken or anything
+/// sent, its callback let go of, and the keys an undeclaration gives back are taken by the next
 /// declaration.
 #[test]
 fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
@@ -510,27 +510,27 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
     assert_eq!(plan.key_bytes(), room);
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let before = router.seen(|s| s.declares);
-    let first = declare_subscriber(&engine, "demo/k/1", &minted).expect("room for a key");
-    declare_subscriber(&engine, "demo/k/2", &minted).expect("room for the second key");
+    let first = declare_subscriber(&engine, "demo/k/1", &dropped).expect("room for a key");
+    declare_subscriber(&engine, "demo/k/2", &dropped).expect("room for the second key");
     until(&engine, "the router to see both subscribers", || {
         router.seen(|s| s.declares) >= before + 2
     });
     let seen = router.seen(|s| s.declares);
 
-    assert_eq!(declare_subscriber(&engine, "demo/k/3", &minted), None);
+    assert_eq!(declare_subscriber(&engine, "demo/k/3", &dropped), None);
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
-        2,
-        "no callback for a refusal"
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the refused callback goes with the refusal, the two declared are held"
     );
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 
     engine.undeclare_subscriber(first);
     assert!(
-        declare_subscriber(&engine, "demo/k/3", &minted).is_some(),
+        declare_subscriber(&engine, "demo/k/3", &dropped).is_some(),
         "the key given back takes it"
     );
 }
@@ -542,11 +542,15 @@ fn a_key_past_the_key_arena_is_refused_and_a_key_given_back_is_taken_again() {
 fn a_wild_key_is_declared_and_reaches_the_router() {
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, SessionLimits::defaults());
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let before = router.seen(|s| s.declares);
-    declare_subscriber(&engine, "demo/wild/**", &minted).expect("a wild subscriber is declared");
+    declare_subscriber(&engine, "demo/wild/**", &dropped).expect("a wild subscriber is declared");
     until(&engine, "the router to see the wild subscriber", || {
         router.seen(|s| s.declares) > before
     });
-    assert_eq!(minted.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "the declared callback is held"
+    );
 }

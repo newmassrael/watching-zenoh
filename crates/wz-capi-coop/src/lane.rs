@@ -956,10 +956,6 @@ impl SampleLane {
         sample: &dyn SampleView,
         datagram: (*const u8, usize),
     ) {
-        #[cfg(feature = "local-subscriber")]
-        if self.captures(subscriber) {
-            return;
-        }
         let Some(lent) = LentEntry::of(subscriber, sample, datagram) else {
             self.offer(subscriber, sample);
             return;
