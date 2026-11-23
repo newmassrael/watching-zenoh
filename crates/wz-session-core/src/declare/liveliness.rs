@@ -23,6 +23,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 ))]
 use wz_codecs::lent::DeclareVariant;
 
+use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
@@ -58,12 +59,15 @@ use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf};
 /// "process X just subscribed to Y". Keeping the registries split
 /// matches zenoh-pico's structural separation and lets consumers
 /// reason about each surface independently.
-pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink> {
+///
+/// `P` is the storage of the observer lists: the build's [`Profile`], or [`Lent`] for the lists
+/// a session's arena lent at its open ([`Self::lent`]).
+pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
     /// R311gb (Track 2) — shared 2-list observer machinery composed from
     /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
     /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
     /// on AP, consumer-supplied closed `enum`s on MCU.
-    observers: DeclObserverPair<D, U>,
+    observers: DeclObserverPair<D, U, P>,
     /// How many token declarations were NOT announced because their keyexpr is
     /// longer than the bounded buffer the slot profile's receive path resolves
     /// into ([`Self::oversize`]). Stays zero on every build that reads the owned
@@ -71,13 +75,32 @@ pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink> {
     oversize: u32,
 }
 
-impl<D: DeclSink, U: UndeclSink> Default for LivelinessRegistry<D, U> {
+impl<D: DeclSink, U: UndeclSink, P: Storage> Default for LivelinessRegistry<D, U, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            observers: DeclObserverPair::default(),
+            oversize: 0,
+        }
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
+impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, Lent> {
+    /// A registry with no observer whose two observer lists are lent from `arena`, `rows` rows
+    /// each ([`DeclObserverPair::lent`]). Refused as that refuses.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            observers: DeclObserverPair::lent(arena, rows)?,
+            oversize: 0,
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        DeclObserverPair::<D, U, Lent>::arena_bytes(rows)
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, Profile> {
     /// New empty registry over explicit sink backings `D` / `U`. Both
     /// observer lists start empty; an empty registry processes inbound
     /// `Declare(Decl*Token)` records as no-ops.
@@ -91,7 +114,9 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
             oversize: 0,
         }
     }
+}
 
+impl<D: DeclSink, U: UndeclSink, P: Storage> LivelinessRegistry<D, U, P> {
     /// How many token declarations were refused for a keyexpr past the bounded
     /// buffer ([`crate::wireexpr_resolve::KeyexprBuf`]) and so not announced. Only
     /// the slot profile's receive path, which resolves into that buffer, can

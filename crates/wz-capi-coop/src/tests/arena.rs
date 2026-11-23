@@ -218,6 +218,36 @@ fn a_limit_lowered_at_open_lowers_its_row() {
     assert!(at_two.reserved_bytes() < built.reserved_bytes());
 }
 
+/// The watchers' lists of the application's observer take the row the plan lays out for them: the
+/// session's `MAX_DECL_OBSERVERS` rows of each list, as the observer lent under the same limits
+/// takes them, so a lowered value lowers the row. Turned red by a plan that leaves the lists out,
+/// or an observer that lends them other rows than the plan counts.
+#[test]
+fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
+    use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
+    type App = SlotObserverOf<HeapSinks, Lent>;
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let watchers = row(&built, "declaration watchers");
+    let rows = App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's value");
+    assert_eq!(rows, caps::MAX_DECL_OBSERVERS);
+    assert_eq!(watchers.count, 1, "one row of the lists' spans");
+    assert_eq!(Some(watchers.entry_bytes), App::decl_watcher_bytes(rows));
+    assert!(
+        watchers.entry_bytes > 0,
+        "a build that reads what a peer declares has watchers"
+    );
+    if caps::MAX_DECL_OBSERVERS > 1 {
+        let one = lowered(|l| l.select_max_decl_observers(Quota::at_most(1)));
+        let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
+        assert_eq!(
+            Some(row(&plan, "declaration watchers").entry_bytes),
+            App::decl_watcher_bytes(1)
+        );
+        assert!(plan.reserved_bytes() < built.reserved_bytes());
+    }
+}
+
 /// The limits of the engine's record of its declarations are the snapshot's, under the build's
 /// value: with nothing stated each table is lent the build's value, one stated lowers it, and one
 /// over the build's refuses the plan naming the limit and both values.
@@ -1005,9 +1035,12 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, and the key arena's one area of
-        // them, not a row of each.
-        if row.basis == "DELIVERY_LANE_BYTES" || row.basis == "KEY_ARENA_BYTES" {
+        // The lane's row is one buffer of the limit's bytes, the key arena's one area of them,
+        // and the watchers' one row of the spans of their lists, not a row of each.
+        if row.basis == "DELIVERY_LANE_BYTES"
+            || row.basis == "KEY_ARENA_BYTES"
+            || row.basis == "MAX_DECL_OBSERVERS"
+        {
             continue;
         }
         if let Some(value) = preset_of(&presets, row.basis) {

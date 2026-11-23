@@ -11,7 +11,9 @@
 //!
 //! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
 //!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
-//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`);
+//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
+//!   the lists of the watchers of what a peer declares, two for each plane that has them
+//!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
 //! - one table of the gets pending on a face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
 //!   `MAX_PENDING_LIVELINESS_GETS`) for each face the session may hold at once, which a face
 //!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
@@ -102,7 +104,7 @@ use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::reply_stage::ReplyStage;
 use wz_session_core::sink::BoxedSink;
-use wz_session_core::slot_observer::{RequesterRows, Requesters};
+use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
 use crate::engine::EntryBytes;
 use crate::CoopConfig;
@@ -137,7 +139,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 26;
+pub const ARENA_ROWS: usize = 27;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -410,6 +412,19 @@ impl ArenaPlan {
                 >::ROW_BYTES,
             );
         }
+        // The watchers' lists of the application's observer, lent with its tables
+        // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
+        let watchers = lent::<{ caps::MAX_DECL_OBSERVERS }>(
+            "MAX_DECL_OBSERVERS",
+            limits.max_decl_observers(),
+        )?;
+        plan.put(
+            "declaration watchers",
+            "MAX_DECL_OBSERVERS",
+            1,
+            SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(watchers)
+                .ok_or(ArenaRefused::TooLarge)?,
+        );
         plan.gets = GetTables {
             rows: RequesterRows {
                 queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
