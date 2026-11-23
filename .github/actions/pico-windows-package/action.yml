@@ -16,7 +16,10 @@
 # the system's own calls (`os-windows`, P4), which is made in the one form; or `std`, the host's,
 # built to compare and measure against and carried by no release. `measure` prints the sizes of the
 # size gate's client built for the width in both forms (`--measure`), which only a Windows host can
-# read; the Platform lane asks for it, a release does not.
+# read; the Platform lane asks for it, a release does not. `ceiling` holds the release DLL of the
+# package under zenoh-pico built as the same build by its row of `deploy/pico_host_ceiling.json`
+# (`--size-plan`, `scripts/host-bench/windows/size_ceiling.ps1`, `--size-judge`); only a package
+# of the form a release ships has a row.
 name: pico library Windows package
 description: Build the pico C ABI library's Windows package of one width and form, then test its zip
 inputs:
@@ -32,6 +35,10 @@ inputs:
     default: nostd
   measure:
     description: Whether to print the sizes of the size gate's client in both forms (`true` or `false`), as `pico_windows_package.py --measure` prints them
+    required: false
+    default: 'false'
+  ceiling:
+    description: Whether to hold the release DLL under zenoh-pico built as the same build by its ceiling row (`true` or `false`), as `pico_windows_package.py --size-judge` grades it
     required: false
     default: 'false'
 outputs:
@@ -108,3 +115,30 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
       run: python scripts/lib/pico_windows_package.py --measure --arch "$WZ_PACKAGE_ARCH"
+
+    # The release DLL's text against zenoh-pico's, both built on this runner in this job, held to the
+    # width's row of the ceiling (docs/upstream-parity.md D9). The plan derives the reference from the
+    # package's own manifest; the reference is built from an archive of the pinned submodule, as a
+    # Windows host given the same plan by hand builds it; the judge reads both DLLs and grades the
+    # ratio. A finding, an unfilled row or a ratio over its ratchet fails the step.
+    - name: the release DLL against zenoh-pico built as the same build, held to its ceiling row (gated)
+      if: ${{ inputs.ceiling == 'true' }}
+      shell: bash
+      env:
+        WZ_PACKAGE_ARCH: ${{ inputs.arch }}
+        WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
+      run: |
+        out="$(cygpath -u "$WZ_PACKAGE_OUT")"
+        set -- "$out"/*-windows-"$WZ_PACKAGE_ARCH"-*.zip
+        if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+          echo "pico-size-ceiling on Windows $WZ_PACKAGE_ARCH: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+        zip="$(cygpath -w "$1")"
+        work="$(cygpath -u "$RUNNER_TEMP")/pico-size-$WZ_PACKAGE_ARCH"
+        rm -rf "$work"
+        mkdir -p "$work"
+        python scripts/lib/pico_windows_package.py --size-plan "$zip" "$(cygpath -w "$work/plan.json")"
+        git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$(cygpath -w "$work/zenoh-pico.zip")" HEAD
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts/host-bench/windows/size_ceiling.ps1 -Plan "$(cygpath -w "$work/plan.json")" -PicoSource "$(cygpath -w "$work/zenoh-pico.zip")" -Work "$(cygpath -w "$work/build")" -Out "$(cygpath -w "$work/reading")"
+        python scripts/lib/pico_windows_package.py --size-judge "$zip" "$(cygpath -w "$work/reading")"

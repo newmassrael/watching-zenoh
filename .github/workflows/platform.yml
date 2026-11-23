@@ -48,6 +48,12 @@ on:
       # features, the header tree and licences it copies, and the schemas it ships.
       - ".github/actions/pico-windows-package/**"
       - "scripts/lib/pico_windows_package.py"
+      # The ceiling the nostd rows hold the release DLL to: its table, the rule of a row, the
+      # verdict it imports, and the script that builds zenoh-pico for the reading.
+      - "deploy/pico_host_ceiling.json"
+      - "scripts/lib/pico_host_ceiling.py"
+      - "scripts/lib/kit_compare.py"
+      - "scripts/host-bench/windows/size_ceiling.ps1"
       - "scripts/lib/wz_config.py"
       - "scripts/lib/upstream_switch_map.py"
       - "scripts/requirements-kconfig.txt"
@@ -1289,10 +1295,13 @@ jobs:
   # The rows `nostd` are the package a release ships (owner, 2026-11-23, docs/c-abi-engine-and-memory.md
   # E7, and the release workflow's `windows-packages`, which runs the same action on the same rows):
   # the DLL built without `std` (`os-windows` over the system's own calls, P4), in the one form, the
-  # examples and the check program compiled against it and run, and the sizes of the size gate's
+  # examples and the check program compiled against it and run, the sizes of the size gate's
   # client in both forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`),
-  # which only a Windows host can read. The rows `std` are the library with the host's standard
-  # library, kept to compare and measure against, in both forms: `single`, the one DLL, and `split`,
+  # which only a Windows host can read, and the release DLL held under zenoh-pico built as the
+  # same build in the same job, by its width's row of `deploy/pico_host_ceiling.json`
+  # (`pico-release-windows-x64`, `pico-release-windows-x86`; docs/upstream-parity.md D9). The
+  # rows `std` are the library with the host's standard library, kept to compare and measure
+  # against, in both forms: `single`, the one DLL, and `split`,
   # the core and the additional library built apart from the same feature list
   # (docs/capi-pico-additional-library.md), whose programs link both import libraries; the split form
   # has no row without `std` because its additional library has no form without it. The examples and
@@ -1338,6 +1347,7 @@ jobs:
           form: ${{ matrix.form }}
           stdlib: ${{ matrix.stdlib }}
           measure: ${{ matrix.stdlib == 'nostd' }}
+          ceiling: ${{ matrix.stdlib == 'nostd' }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4

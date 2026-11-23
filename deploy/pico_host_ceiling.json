@@ -1,5 +1,5 @@
 {
-  "about": "The pico ceiling of the host libraries (docs/upstream-parity.md decision D9, scripts/lib/capability_cost_gate.py, Layer C1cs). One row per pico case of the gate: the pico C ABI cdylib (the Linux .so and the Windows DLL) against zenoh-pico built as the same build. What is held is the RATIO of the two texts, not a byte count: both libraries are built on the same host in the same run, so what a host moves alike on both sides (its linker, its libc, its section layout) cancels, and one tree's ratio reads the same on two hosts within the gate's tolerance, where its bytes do not. A row is either locked, {\"verdict\": \"win\"} (the case must read wz smaller than pico, decision D1; a TIE or a LOSS fails, and no row or budget move clears it), or a ratchet, {\"ratio_at_most\": r} with the reading r was set from (r is that reading's ratio rounded up to four places, and the gate refuses any other r) and the open-debt item the case is registered under (decision D5: every case that is no WIN is a debt, paid largest ratio first). A ratchet only moves down: a reading over r by more than the tolerance fails, a reading under it by more prints the tighter row to commit, and a ratchet case that reads WIN fails until its row is locked. A row whose ratio_at_most is null is unfilled and fails --check with the row to paste; `--measure` prints the rows of the cases it builds.",
+  "about": "The pico ceiling of the host libraries (docs/upstream-parity.md decision D9; the rule of a row is scripts/lib/pico_host_ceiling.py's). One row per case of the two lanes that read it: each pico case of scripts/lib/capability_cost_gate.py (Layer C1cs), the Linux cdylib, and pico-release-windows-x64 and pico-release-windows-x86, the DLL a Windows release ships, which scripts/lib/pico_windows_package.py --size-judge grades in the Platform workflow's Windows package job; each against zenoh-pico built as the same build. What is held is the RATIO of the two texts, not a byte count: both libraries are built on the same host in the same run, so what a host moves alike on both sides (its linker, its libc, its section layout) cancels, and one tree's ratio reads the same on two hosts within the gate's tolerance, where its bytes do not. A row is either locked, {\"verdict\": \"win\"} (the case must read wz smaller than pico, decision D1; a TIE or a LOSS fails, and no row or budget move clears it), or a ratchet, {\"ratio_at_most\": r} with the reading r was set from (r is that reading's ratio rounded up to four places, and the gate refuses any other r) and the open-debt item the case is registered under (decision D5: every case that is no WIN is a debt, paid largest ratio first). A ratchet only moves down: a reading over r by more than the tolerance fails, a reading under it by more prints the tighter row to commit, and a ratchet case that reads WIN fails until its row is locked. A row whose ratio_at_most is null is unfilled and fails its lane with the row to paste: capability_cost_gate.py --check and --measure print the rows of the cases they build, --size-judge the row of its reading.",
   "schema": 1,
   "cases": {
     "pico-client": {
@@ -166,6 +166,16 @@
         "pico_pin": "6a881c21dad1",
         "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
       }
+    },
+    "pico-release-windows-x64": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": null
+    },
+    "pico-release-windows-x86": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": null
     }
   }
 }
