@@ -658,6 +658,18 @@ pub const RX_POOL_BUFFERS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::TX_POOL_SLOTS`] is bound.
+pub const TX_POOL_SLOTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 4294967295)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::SESSION_MAX_PEER_KEYEXPR_ALIASES`] is bound.
 pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

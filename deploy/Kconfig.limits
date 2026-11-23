@@ -535,6 +535,23 @@ config WZ_LIMIT_RX_POOL_BUFFERS
 	  links a session may hold is held to them. At least 1; a session may lower it and
 	  never raise it.
 
+config WZ_LIMIT_TX_POOL_SLOTS
+	int "TX_POOL_SLOTS"
+	range 1 4294967295
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 4
+	help
+	  How many outbound slots, each of the batch a session advertises, the links of a
+	  session share when its engine lends their buffers from the session's memory at
+	  open. A link holds one from the moment it encodes a frame until the frame is
+	  written; a frame the stream took in part keeps it until the link's later steps
+	  have written the rest. A batch frame left open for later messages keeps one only
+	  while the pool keeps another free, and is sent with the messages it holds
+	  otherwise. A link that finds every slot held is congested, as one whose stream
+	  takes nothing is: a droppable message is dropped. A pool as large as the links a
+	  session may hold keeps every link's slot its own, and is held to them. At least
+	  1; a session may lower it and never raise it.
+
 config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
 	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 	default 32 if WZ_LIMITS_ZENOH_PICO
