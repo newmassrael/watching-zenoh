@@ -505,7 +505,7 @@ where
     C: ClockSource + 'static,
     R: ReplySink + 'static,
     G: ReplySink + 'static,
-    K: ObserverSinks + 'static,
+    K: ObserverSinks<Delivery = ()> + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     let mut dispatch = SlotDispatch::new(observer, handle, requesters);

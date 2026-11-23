@@ -1605,7 +1605,11 @@ fn walk_records<'f>(
         if is_transport_mid(
             cursor
                 .peek_slice(1)
-                .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                .and_then(|byte| {
+                    byte.first()
+                        .copied()
+                        .ok_or(sce_forge_runtime::codec::CodecError::NeedMoreBytes)
+                })
                 .map_err(crate::parse_error::InboundParseError::Codec)?
                 & 0x1F,
         ) {
@@ -1657,7 +1661,11 @@ fn walk_records<'f>(
             if form == RecordForm::Lent {
                 let mid = cursor
                     .peek_slice(1)
-                    .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                    .and_then(|byte| {
+                        byte.first()
+                            .copied()
+                            .ok_or(sce_forge_runtime::codec::CodecError::NeedMoreBytes)
+                    })
                     .map_err(InboundParseError::Codec)?
                     & 0x1F;
                 if lend_record(mid, &mut cursor, each)? {
@@ -1959,7 +1967,11 @@ fn lend_any_record<'f>(
 ) -> Result<Walk, crate::parse_error::InboundParseError> {
     let mid = cursor
         .peek_slice(1)
-        .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+        .and_then(|byte| {
+            byte.first()
+                .copied()
+                .ok_or(sce_forge_runtime::codec::CodecError::NeedMoreBytes)
+        })
         .map_err(crate::parse_error::InboundParseError::Codec)?
         & 0x1F;
     match mid {
