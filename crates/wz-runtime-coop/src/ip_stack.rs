@@ -19,12 +19,8 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-// The port a stack listens on is shared by its links; the tests share a channel's answer.
-#[cfg(all(
-    feature = "alloc",
-    not(feature = "session-slot"),
-    any(test, feature = "udp-listen")
-))]
+// The port a stack listens on is shared by its links.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
@@ -2000,6 +1996,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_tls_dial_is_begun_and_asked_never_waited_for() {
+        use alloc::rc::Rc;
         use core::cell::Cell;
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
 
