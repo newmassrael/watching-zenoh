@@ -154,7 +154,7 @@ config WZ_LIMIT_MAX_DECL_OBSERVERS
 
 config WZ_LIMIT_MAX_LIVELINESS_SUBSCRIPTIONS
 	int "MAX_LIVELINESS_SUBSCRIPTIONS"
-	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
 	  The liveliness subscribers a session holds at once. Declaring one more

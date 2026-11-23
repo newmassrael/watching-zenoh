@@ -54,6 +54,7 @@ use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
+use crate::ffi::{LatchList, ReleaseLatch};
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_SYSTEM_OUT_OF_MEMORY};
@@ -130,6 +131,10 @@ pub(crate) struct WriteFilter {
     keyexpr: KeyText,
     count_local: bool,
     listeners: Mutex<Vec<MatchId>>,
+    /// The latches of the listeners' closures, which the filter's drop waits on: a listener goes
+    /// with its entity, and zenoh-pico's entity is gone only once no callback of its listeners is
+    /// running and their closures' drops have run.
+    released: LatchList,
 }
 
 impl WriteFilter {
@@ -164,14 +169,20 @@ impl WriteFilter {
             keyexpr,
             count_local,
             listeners: Mutex::new(Vec::new()),
+            released: LatchList::default(),
         })
     }
 
     /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on
     /// the entity's filter): `sink` is told whether what the filter counts matches, now and
     /// each time that changes. The listener is retracted with the filter, or before it by
-    /// its id. The engine is handed back with the id, for a handle that retracts it.
-    pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> (Arc<Engine>, MatchId) {
+    /// its id. The engine is handed back with the id, for a handle that retracts it. `released`
+    /// is the latch of the closure behind `sink`, which the filter's drop waits on.
+    pub(crate) fn declare_matching_listener(
+        &self,
+        sink: MatchingSink,
+        released: Arc<ReleaseLatch>,
+    ) -> (Arc<Engine>, MatchId) {
         let id = self.shared.declare_matching_listener(
             self.plane,
             self.keyexpr.as_str(),
@@ -179,6 +190,7 @@ impl WriteFilter {
             self.count_local,
         );
         self.listeners.lock().push(id);
+        self.released.keep(released);
         (self.shared.clone(), id)
     }
 
@@ -211,7 +223,9 @@ impl WriteFilter {
 }
 
 /// Retracting on DROP reaches every path that releases the entity: `z_undeclare_*` and
-/// `z_*_drop` alike. Retracting a listener its handle already retracted does nothing.
+/// `z_*_drop` alike. Retracting a listener its handle already retracted does nothing. The drop
+/// returns once every listener's closure has run its `drop(context)`: a callback still running
+/// on another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
         // Taken out first, so no lock is held while a listener goes: releasing its last
@@ -221,6 +235,7 @@ impl Drop for WriteFilter {
             self.shared.undeclare_matching_listener(id);
         }
         self.shared.undeclare_write_filter(self.id);
+        self.released.wait_all();
     }
 }
 

@@ -1808,6 +1808,35 @@ const fn counts(plane: FilterPlane) -> bool {
     }
 }
 
+/// What a matching listener watches: the criterion of the plane it counts, made only for a plane
+/// the build holds ([`counts`]). A listener on any other plane is refused where this is made,
+/// before anything is taken, so the registry is never handed a plane it has no table for.
+enum Watched {
+    Publishers(PublisherCriterion),
+    #[cfg(any(feature = "query", feature = "queryable"))]
+    Queriers(QuerierCriterion),
+}
+
+impl Watched {
+    /// The criterion a listener on `plane` over `keyexpr` counts with, the session's own
+    /// entities among it with `count_local` as its write filter's are (`counted`); `None` for a
+    /// plane this build does not hold.
+    fn of(plane: FilterPlane, keyexpr: &str, count_local: bool) -> Option<Self> {
+        let locality = counted(plane, count_local);
+        match plane {
+            FilterPlane::Subscribers => {
+                Some(Self::Publishers(PublisherCriterion::new(keyexpr, locality)))
+            }
+            #[cfg(any(feature = "query", feature = "queryable"))]
+            FilterPlane::Queryables { complete_required } => Some(Self::Queriers(
+                QuerierCriterion::new(keyexpr, locality, complete_required),
+            )),
+            #[cfg(not(any(feature = "query", feature = "queryable")))]
+            FilterPlane::Queryables { .. } => None,
+        }
+    }
+}
+
 /// The two planes' Interest kinds, an Interest held per plane and key.
 fn kinds(plane: FilterPlane) -> InterestKinds {
     match plane {
@@ -2682,6 +2711,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             Link::Held { .. } => true,
             _ => false,
         }
+    }
+
+    /// Whether the session holds a transport, as zenoh-pico's `_z_transport_get_common` finds
+    /// one: a link that is up, a port it listens on (a peer's unicast transport stands before any
+    /// peer comes), or a group it joined. A client whose router went away holds none until a dial
+    /// of it succeeds again.
+    fn holds_transport(&self) -> bool {
+        #[cfg(feature = "group")]
+        if !self.groups.is_empty() {
+            return true;
+        }
+        self.ups().next().is_some() || self.listens()
     }
 
     /// Whether the session listens on any port.
@@ -5095,12 +5136,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Whether a peer declared what `plane` counts on `keyexpr`.
-    fn peer_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
-        // Any face's peer: a write filter holds a write back only when none of them wants it.
-        core.registry.borrow().peers_declare(plane, keyexpr)
-    }
-
     /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
     /// own that a local put reaches (`local-subscriber`). The session answers nothing else
     /// locally, as zenoh-pico's default build does not.
@@ -5495,6 +5530,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         found
     }
 
+    fn has_transport(&self) -> bool {
+        self.live().is_some_and(|core| core.0.holds_transport())
+    }
+
     fn has_router_peer(&self) -> bool {
         self.live().is_some_and(|core| {
             core.0
@@ -5777,9 +5816,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // locally.
         count_local: bool,
     ) -> MatchId {
-        if !counts(plane) {
+        // A plane the build does not hold is refused first, with nothing taken.
+        let Some(watched) = Watched::of(plane, keyexpr, count_local) else {
             return 0;
-        }
+        };
         let Some(mut guard) = self.live() else {
             return 0;
         };
@@ -5810,36 +5850,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = core.next_match;
         core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, keyexpr);
-        let now = Self::peer_matches(core, plane, keyexpr) || local;
+        // The sink is in place before the watch is registered: a registration that already
+        // matches reports it as it registers, and a delivery on another thread may hand that out
+        // before this call reaches its own.
+        lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
+        // An already-matching registration is told so by the registry as it registers, as
+        // zenoh-pico tells it (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `_z_write_filter_ctx_add_callback`): that is the one report of it, and a second would
+        // take the first back (`MatchFlips::flip`).
         let watch = {
             let mut registry = core.registry.borrow_mut();
-            match plane {
-                FilterPlane::Subscribers => registry.watch_publishers(
-                    PublisherCriterion::new(keyexpr, counted(plane, count_local)),
-                    local,
-                    report,
-                ),
+            match watched {
+                Watched::Publishers(criterion) => {
+                    registry.watch_publishers(criterion, local, report)
+                }
                 #[cfg(any(feature = "query", feature = "queryable"))]
-                FilterPlane::Queryables { complete_required } => registry.watch_queriers(
-                    QuerierCriterion::new(keyexpr, counted(plane, count_local), complete_required),
-                    local,
-                    report,
-                ),
-                // Refused before its Interest was asked (`counts`).
-                #[cfg(not(any(feature = "query", feature = "queryable")))]
-                FilterPlane::Queryables { .. } => return 0,
+                Watched::Queriers(criterion) => registry.watch_queriers(criterion, local, report),
             }
         };
-        lock(&self.targets).push((TargetKey::Matching(id), Target::Matching(sink)));
-        // An already-matching registration is told so at once, as zenoh-pico tells it
-        // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
-        if now {
-            self.matching.lock().flip(id, true);
-        }
         keep(
             &mut core.matches,
             MatchEntry {
