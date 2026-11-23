@@ -2660,6 +2660,10 @@ program reserved none (object-pool). One more is refused at its open.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the sessions a program opens, and zenoh-pico allocates each on the heap with no constant; four lets a program hold a session per role it plays (a client, a peer, a test's two ends) with room left."
 
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its sessions by no count; each of its examples opens one, and its API tests hold two at once, the two ends of what they check (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_open(&s2, z_config_move(&c2), NULL));`). Every entity pool is sized for these sessions, so the preset holds the entities of two."
+
 [[limit]]
 id = "HELD_SAMPLES"
 kconfig = "WZ_LIMIT_HELD_SAMPLES"
@@ -2681,6 +2685,10 @@ the library reserves at its first object when the program reserved none
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the samples a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_SUBSCRIPTIONS's default, one held sample for each subscriber of a session."
+
+[limit.pico_preset]
+value = 5
+reason = "zenoh-pico bounds its samples by no count; its examples hold the most through a channel of three (`vendor/zenoh-pico/examples/unix/c11/z_pull.c` @ `size_t ring_size = 3;`, `vendor/zenoh-pico/examples/unix/c11/z_sub_channel.c` @ `z_fifo_channel_sample_new(&closure, &handler, 3);`): the three it keeps, the one handed in while it is full and the one the program took, five. Its API tests hold four at most, the samples an advanced subscriber recovers (`vendor/zenoh-pico/tests/z_api_advanced_pubsub_test.c` @ `for (int idx = 1; idx <= 4; idx++) {`)."
 
 [[limit]]
 id = "HELD_REPLIES"
@@ -2704,6 +2712,10 @@ its source untouched.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the replies a program holds, and zenoh-pico allocates each on the heap with no constant; sixteen is MAX_PENDING_QUERIES's default, one held reply for each get a session holds pending."
 
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its replies by no count; its examples' gets are answered once by the one queryable they run beside, and the one that keeps replies in a channel keeps one (`vendor/zenoh-pico/examples/unix/c11/z_get_channel.c` @ `z_ring_channel_reply_new(&closure, &handler, 1);`): the one kept, the one handed in and the one the program took, three. Its API tests take each reply before the next get."
+
 [[limit]]
 id = "HELD_QUERIES"
 kconfig = "WZ_LIMIT_HELD_QUERIES"
@@ -2726,6 +2738,10 @@ One more is refused, its source untouched.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the queries a program keeps, and zenoh-pico allocates each on the heap with no constant; eight is MAX_PENDING_FINALS's default, the queries a session holds for its callbacks at once."
 
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its queries by no count; its example that keeps queries in a channel is asked once by each get of the one querier it runs beside (`vendor/zenoh-pico/examples/unix/c11/z_queryable_channel.c` @ `z_ring_channel_query_new(&closure, &handler, 10);`): the one kept, the one handed in and the one the program took, three. Its API tests take each query before the next get."
+
 [[limit]]
 id = "HELD_PAYLOADS"
 kconfig = "WZ_LIMIT_HELD_PAYLOADS"
@@ -2747,6 +2763,10 @@ answers out of memory and leaves its payload null.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+
+[limit.pico_preset]
+value = 3
+reason = "zenoh-pico bounds its payloads by no count; its examples hold three at once at the most, the parts a writer joins (`vendor/zenoh-pico/examples/unix/c11/z_bytes.c` @ `z_owned_bytes_t b1, b2, b3;`), and its API tests no more. A held sample's or reply's payload is its own and takes none of these."
 
 [[limit]]
 id = "HELD_CONFIGS"
@@ -2797,6 +2817,10 @@ is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the hellos a program keeps, and zenoh-pico allocates each clone on the heap with no constant; sixteen is MAX_SCOUT_HELLOS's default, a kept hello for each Hello one scouting window records."
 
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico bounds its kept hellos by no count; none of its examples or API tests clones a hello, its scout reading each where the callback lends it (`vendor/zenoh-pico/examples/unix/c11/z_scout.c` @ `void callback(z_loaned_hello_t *hello, void *context) {`). One keeps z_hello_clone answering for a program that keeps the hello it found."
+
 [[limit]]
 id = "HELD_PAYLOAD_BYTES"
 kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
@@ -2819,6 +2843,10 @@ holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+
+[limit.pico_preset]
+value = 32768
+reason = "zenoh-pico bounds its payloads' bytes by no count. The largest payload a program or test of the preset builds is twice its FRAG_MAX_SIZE (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(FRAG_MAX_SIZE 4096 CACHE STRING`), the one the fragmentation test puts past the receiving ceiling (`crates/wz-capi-pico/tests/it/files/fragmentation_roundtrip.rs` @ `const TOO_BIG: usize = 2 * CEILING;`): 8,192 bytes and a 16-byte head take a block of 16,384. The other half holds what the held samples, replies, queries and strings of its examples carry, each a few tens of bytes. A program that builds a payload larger than a block of the area is refused where zenoh-pico would allocate it, as zenoh-pico is on a heap that small."
 
 [[limit]]
 id = "CONFIG_ENTRIES"
