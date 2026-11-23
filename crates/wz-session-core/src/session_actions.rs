@@ -3214,6 +3214,21 @@ enum DispatchStage {
     ReservedChain,
 }
 
+/// The storage a retraction written from its parts writes its `ext_keyexpr` body into: the body's
+/// header, an id of at most ten VLE bytes, and a suffix up to the longest keyexpr the build names
+/// (`MAX_KEYEXPR_BYTES`). A key past it is retracted by its id alone, as the owned retraction
+/// falls back when its key does not encode.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "declare-undeclare",
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token"
+    )
+))]
+const NAMED_KEY_BODY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
+
 /// A declaration written from its parts, as the arguments of the writer of
 /// [`crate::lent_control`] that makes it: every one a session with no allocator sends, and every
 /// one a lend-only session (`tx-lend-only`) sends, where an owned `DeclareOwned` would be built
@@ -16134,10 +16149,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A lend-only session writes the retraction from its parts.
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
                     id: subscriber_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16165,10 +16181,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body(key: Option<(crate::wire_id::ExprId, &str)>) -> Option<Vec<u8>> {
-        key.map(|(mapping_id, suffix)| {
-            crate::declare_ext_keyexpr::ext_wireexpr_body(mapping_id, suffix)
-        })
+    fn named_key_body(
+        key: Option<(crate::wire_id::ExprId, &str)>,
+        buf: &mut [u8; NAMED_KEY_BODY_BYTES],
+    ) -> Option<&[u8]> {
+        let (mapping_id, suffix) = key?;
+        let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(mapping_id, suffix, buf)?;
+        buf.get(..len)
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -16213,10 +16232,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_queryable_recorded(queryable_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
                     id: queryable_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16280,10 +16300,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_token_recorded(token_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
                     id: token_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
