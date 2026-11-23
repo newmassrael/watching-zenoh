@@ -583,8 +583,6 @@ pub mod event_log;
     feature = "message-catalog",
     feature = "replay-cache"
 ))]
-// Totality debt TD-186 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod ext_interface;
 // The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the supervision deadline of the observation plane).
