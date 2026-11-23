@@ -12,7 +12,7 @@ use wz_capi_port::{
     FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
     SubscriberSink, WireKey,
 };
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::{OutsideLimitDomain, Quota};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
@@ -89,9 +89,9 @@ fn filter(engine: &Engine, plane: FilterPlane, key: &str) -> Result<FilterId, Re
         plane,
         key,
         &WireKey::literal(),
-        Some(InterestForm {
+        Some(InterestAsk {
             mapping_id: 0,
-            suffix: Some(key.to_owned()),
+            suffix: Some(key),
             aggregate: false,
         }),
         false,

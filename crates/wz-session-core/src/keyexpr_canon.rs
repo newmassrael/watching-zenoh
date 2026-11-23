@@ -1884,6 +1884,35 @@ mod tests {
         walk_alphabet(agree);
     }
 
+    /// A text is judged its own canonical form exactly when the canonizer writes it back as it is,
+    /// in both dialects, a refused text being no canonical form. Turned red by a comparison that
+    /// reads a prefix of the canonical form as the whole of it, or the other way round.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_text_is_canonical_exactly_when_the_canonizer_writes_it_back() {
+        let agree = |text: &str| {
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                assert_eq!(
+                    is_canon(text, dialect),
+                    canonize_keyexpr_in(text, dialect).is_ok_and(|canon| canon.as_str() == text),
+                    "{text:?}, {dialect:?}"
+                );
+            }
+        };
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(agree);
+        for (text, canon) in [
+            ("a/b", true),
+            ("a/**/*", false),
+            ("a/*/**", true),
+            ("a//b", false),
+        ] {
+            assert_eq!(is_canon(text, KeyexprDialect::Pico), canon, "{text}");
+        }
+    }
+
     /// A wild key, which only the passes canonize, is taken whole into a key of the lent policy.
     #[test]
     fn a_wild_key_canonizes_into_a_key_of_the_lent_policy() {

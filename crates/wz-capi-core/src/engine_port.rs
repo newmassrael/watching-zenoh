@@ -8,11 +8,11 @@
 use std::any::Any;
 
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive, SessionEngine, SubId,
-    SubscriberSink, WireKey,
+    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId,
+    MatchingSink, PeerIdentity, ReadTaskStartRefused, Refusal, SessionClosed, SessionDrive,
+    SessionEngine, SubId, SubscriberSink, WireKey,
 };
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -336,6 +336,10 @@ impl SessionEngine for SharedSession {
         SharedSession::release_keyexpr(self, mapping_id)
     }
 
+    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::retain_keyexpr(self, mapping_id)
+    }
+
     fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         SharedSession::keyexpr_declarations(self)
     }
@@ -392,7 +396,7 @@ impl SessionEngine for SharedSession {
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A closed session declares nothing: a filter on it would hold every write back for good.
@@ -427,20 +431,54 @@ impl SessionEngine for SharedSession {
         SharedSession::put_plain_filtered(self, filter, keyexpr, mapping_id, payload, params)
     }
 
+    fn keep_write_filter_plain(
+        &self,
+        filter: FilterId,
+        plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
+        SharedSession::keep_write_filter_plain(self, filter, plain)
+    }
+
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        match opts {
+            // A link that names keys its own way is sent a bare write the general way.
+            #[cfg(feature = "shared-key-ids")]
+            None if SharedSession::names_keys_by_link(self) => {
+                if SharedSession::write_filter_holds_back(self, filter) {
+                    FilteredPut::Suppressed
+                } else {
+                    FilteredPut::NotPlain
+                }
+            }
+            None => SharedSession::put_kept_plain(self, filter, keyexpr, payload),
+            Some(opts) => {
+                if SharedSession::write_filter_holds_back(self, filter) {
+                    return FilteredPut::Suppressed;
+                }
+                FilteredPut::Sent(SharedSession::publish_on_wire_all(
+                    self, keyexpr, wire, payload, opts,
+                ))
+            }
+        }
+    }
+
     fn has_transport(&self) -> bool {
         !self.face_set().is_empty() || !SharedSession::listen_locators(self).is_empty()
     }
 
-    fn batch_start_all(&self) -> usize {
-        SharedSession::batch_start_all(self)
-    }
-
-    fn batch_flush_all(&self) -> usize {
-        SharedSession::batch_flush_all(self)
-    }
-
-    fn batch_stop_all(&self) -> usize {
-        SharedSession::batch_stop_all(self)
+    fn batch_all(&self, step: BatchStep) -> usize {
+        match step {
+            BatchStep::Start => SharedSession::batch_start_all(self),
+            BatchStep::Flush => SharedSession::batch_flush_all(self),
+            BatchStep::Stop => SharedSession::batch_stop_all(self),
+        }
     }
 
     #[cfg(feature = "queryable")]

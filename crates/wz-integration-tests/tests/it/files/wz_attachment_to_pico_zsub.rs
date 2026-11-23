@@ -210,7 +210,7 @@ async fn wz_put_attachment_decoded_by_pico_zsub_attachment() {
                 .publish(
                     PUBLISH_KEYEXPR,
                     PAYLOAD.as_bytes(),
-                    PublishOptions::put().with_attachment(attachment.clone()),
+                    PublishOptions::put().with_attachment(&attachment),
                 )
                 .expect("attachment publish builds and routes through the send seam");
             tokio::time::sleep(Duration::from_millis(150)).await;

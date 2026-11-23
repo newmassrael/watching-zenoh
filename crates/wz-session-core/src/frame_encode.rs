@@ -1745,22 +1745,24 @@ mod tests {
         use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 
         let long_key = "a/".repeat(100) + "z";
+        let stamp = TimestampHint {
+            time: u64::MAX,
+            zid: vec![0xAB; 16],
+        };
+        let encoded = EncodingHint {
+            packed_id: u32::MAX,
+            schema: Some(b"application/x-schema".repeat(3)),
+        };
         let everything = PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: u64::MAX,
-                zid: vec![0xAB; 16],
-            }),
-            encoding: Some(EncodingHint {
-                packed_id: u32::MAX,
-                schema: Some(b"application/x-schema".repeat(3)),
-            }),
+            timestamp: Some(&stamp),
+            encoding: Some(&encoded),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],
                 zid_len: 16,
                 eid: u32::MAX,
                 sn: u32::MAX,
             }),
-            attachment: Some(vec![7; 300]),
+            attachment: Some(&[7; 300]),
             qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

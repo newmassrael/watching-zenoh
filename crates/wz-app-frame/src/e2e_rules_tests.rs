@@ -977,6 +977,67 @@ fn a_sent_frame_is_the_reference_build_and_the_receiver_reads_it_back() {
     }
 }
 
+/// A frame written into the caller's buffer is the reference build, whether it is built in full
+/// or from the stream's cache; a buffer one byte short is refused and consumes no counter value;
+/// and the frame read where it lies reads as the frame written out.
+#[test]
+fn a_frame_written_in_place_is_the_reference_build_and_reads_back_in_place() {
+    for (p, values) in [
+        (left(), left_values(ADDR_A)),
+        (right(), right_values(ADDR_B)),
+    ] {
+        let options = SenderOptions {
+            crc_cache: true,
+            ..SenderOptions::default()
+        };
+        let mut tx = StreamSender::new(p.clone(), values.clone(), options).expect("made");
+        let mut out = [0u8; 64];
+        for payload in [&b"one"[..], b"one", b"two"] {
+            let need = tx.frame_bytes(payload.len());
+            let next = tx.next(0).expect("a stream");
+            assert_eq!(
+                tx.protect_into(0, payload, &mut out[..need - 1]),
+                Err(SendError::Capacity {
+                    need,
+                    have: need - 1
+                }),
+                "{}",
+                p.name()
+            );
+            assert_eq!(
+                tx.next(0).expect("a stream"),
+                next,
+                "a refusal consumes nothing"
+            );
+            let written = tx.protect_into(0, payload, &mut out).expect("written");
+            assert_eq!(written.len, need);
+            let frame_bytes = &out[..written.len];
+            assert_eq!(
+                frame_bytes,
+                frame(&p, &values, written.counter, payload).as_slice(),
+                "{}",
+                p.name()
+            );
+            let view = crate::e2e_frame::open_view(&p, frame_bytes).expect("a view");
+            let opened = open(&p, frame_bytes).expect("opened");
+            assert_eq!(
+                (view.crc_ok, view.counter(&p), view.length_matches_frame),
+                (
+                    opened.crc_ok,
+                    opened.counter(&p),
+                    opened.length_matches_frame
+                )
+            );
+            for (index, field) in opened.fields.iter().enumerate() {
+                assert_eq!(view.value(&p, index), field.value);
+                for (part, value) in field.parts.iter().enumerate() {
+                    assert_eq!(view.part(&p, index, part), *value);
+                }
+            }
+        }
+    }
+}
+
 /// A small generator of test input, so the sweep is the same on every run.
 struct Xorshift(u64);
 

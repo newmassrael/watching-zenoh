@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::locality::Locality;
@@ -33,12 +33,13 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
+use crate::entity_place::PlaceLender;
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
-    MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink, Tick,
-    TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink,
+    MatchId, MatchingSink, QblId, QueryableSink, Refusal, ReplyCallback, SubId, SubscriberSink,
+    Tick, TickerId, TokenId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -281,6 +282,13 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
     fn release_keyexpr(&self, mapping_id: ExprId);
 
+    /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
+    /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
+    /// wire. The engine's count is the one count of a declaration's holders. A declaration no
+    /// longer held takes none. Every engine states it: one that held a declaration and did not
+    /// count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, mapping_id: ExprId);
+
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
 
@@ -289,6 +297,14 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
     /// their own.
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        None
+    }
+
+    /// Where the C ABI's objects of the session's entities lie when the session's memory lays
+    /// places out for them at its open: one for each entity its limits admit, so one session's
+    /// entities spend no other's. `None`, the provided answer, from an engine whose sessions keep
+    /// no such places, whose ABI places its objects itself.
+    fn place_lender(&self) -> Option<&dyn PlaceLender> {
         None
     }
 
@@ -351,13 +367,14 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// zenoh-pico's does (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `intr._id = _z_get_entity_id(zn);`), so it is refused once the session has handed out every
     /// id ([`Self::next_entity_id`]): a filter that could not ask would hold every write back. A
-    /// refused filter answers why, with nothing held, asked or numbered.
+    /// refused filter answers why, with nothing held, asked or numbered. `ask` is lent: an engine
+    /// copies the rest of the key it names only where it keeps one of its own.
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         count_local: bool,
     ) -> Result<FilterId, Refusal>;
 
@@ -383,6 +400,28 @@ pub trait SessionEngine: Send + Sync + 'static {
         params: &PlainPutParams,
     ) -> FilteredPut;
 
+    /// State how a write of the entity holding write filter `filter` that brings nothing of its
+    /// own goes the plain way: the facts it is sent from and the declaration naming its whole key,
+    /// or `None` for the general way. Stated once, when the entity is declared; the filter's row
+    /// keeps it, so no caller keeps a plain form of its own. Every engine states what it does
+    /// with it, so none sends a bare write the general way by omission.
+    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>);
+
+    /// Publish what an entity holding write filter `filter` writes: the one entry a declared
+    /// entity's put and delete go through. Nothing is sent when the filter holds the write back
+    /// (`Suppressed`, answered as a success as zenoh-pico answers it). A write with `opts` goes
+    /// the general way ([`Self::publish_on_wire_all`]). One with none brings nothing of its own:
+    /// it goes the plain way its filter's row keeps ([`Self::keep_write_filter_plain`]), or is
+    /// answered `NotPlain`, nothing sent, for the caller to send it the general way.
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut;
+
     /// Whether the session has a transport to carry a batch window: a face, or a listener that
     /// takes one. This is zenoh-pico's `_z_transport_get_common` being non-NULL, which its three
     /// `zp_batch_*` answer `_Z_ERR_TRANSPORT_NOT_AVAILABLE` for when it is not (a client whose
@@ -392,15 +431,10 @@ pub trait SessionEngine: Send + Sync + 'static {
         true
     }
 
-    /// Open a batch window on the session's links (zenoh-pico `zp_batch_start`): how many opened.
-    fn batch_start_all(&self) -> usize;
-
-    /// Flush the open batch windows (zenoh-pico `zp_batch_flush`): how many flushed.
-    fn batch_flush_all(&self) -> usize;
-
-    /// Close the batch windows, sending what they hold (zenoh-pico `zp_batch_stop`): how many
-    /// closed.
-    fn batch_stop_all(&self) -> usize;
+    /// Take `step` on the batch window of each of the session's links (zenoh-pico's
+    /// `zp_batch_start`, `zp_batch_flush` and `zp_batch_stop`): how many windows took it. One
+    /// walk of the links for the three steps.
+    fn batch_all(&self, step: BatchStep) -> usize;
 
     /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
     /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`

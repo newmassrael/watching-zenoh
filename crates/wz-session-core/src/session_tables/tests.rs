@@ -336,6 +336,22 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
 }
 
+/// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
+/// that names no row takes none.
+#[test]
+fn a_retained_key_expression_is_retracted_by_its_last_holder() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert!(tables.retain_keyexpr(declared.handle));
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "a retracted one takes none"
+    );
+    assert!(tables.keyexprs().is_empty());
+}
+
 #[test]
 fn a_key_expression_id_skips_one_still_declared() {
     let mut tables = Tables::new();

@@ -35,7 +35,7 @@ const STILL: Duration = Duration::from_millis(300);
 /// `wait_before_drop`, where the pico profile's waits as long as a blocking one.
 const DROP_WAIT_US: u64 = 1_000;
 
-fn publish(congestion: CongestionControl) -> PublishOptions {
+fn publish(congestion: CongestionControl) -> PublishOptions<'static> {
     PublishOptions::put()
         .with_locality(Locality::Remote)
         .with_congestion_control(congestion)

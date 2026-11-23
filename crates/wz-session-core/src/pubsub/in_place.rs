@@ -589,18 +589,26 @@ mod tests {
         (lent_seen, owned_seen, lent.in_place_fallbacks())
     }
 
-    fn meta() -> crate::metadata::PushMetadata {
-        crate::metadata::PushMetadata {
-            timestamp: Some(TimestampHint {
+    /// The timestamp and the encoding `meta` lends.
+    fn hints() -> (TimestampHint, EncodingHint) {
+        (
+            TimestampHint {
                 time: 0x0102_0304_0506_0708,
                 zid: alloc::vec![0xa1, 0xa2, 0xa3],
-            }),
-            encoding: Some(EncodingHint {
+            },
+            EncodingHint {
                 packed_id: 0x0b,
                 schema: Some(b"schema/x".to_vec()),
-            }),
+            },
+        )
+    }
+
+    fn meta((stamp, encoded): &(TimestampHint, EncodingHint)) -> crate::metadata::PushMetadata<'_> {
+        crate::metadata::PushMetadata {
+            timestamp: Some(stamp),
+            encoding: Some(encoded),
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
-            attachment: Some(alloc::vec![1, 2, 3, 4, 5]),
+            attachment: Some(&[1, 2, 3, 4, 5]),
             qos: Some(QosLevel::from_raw(0x05)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
@@ -609,8 +617,9 @@ mod tests {
 
     #[test]
     fn a_literal_put_with_every_field_is_delivered_lent_as_the_owned_path_delivers_it() {
-        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta())
-            .expect("build");
+        let built =
+            crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints()))
+                .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
@@ -633,9 +642,10 @@ mod tests {
 
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, alloc::vec![9, 8, 7], false);
+        let hints = hints();
         let instrumented = crate::metadata::PushMetadata {
             ts_stack: Some(stack.clone()),
-            ..meta()
+            ..meta(&hints)
         };
         let built =
             crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &instrumented)
@@ -654,8 +664,9 @@ mod tests {
         assert_eq!(fallbacks.instrumented, 1);
 
         // One that carries none is delivered lent, and nothing falls back.
-        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta())
-            .expect("build");
+        let built =
+            crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints()))
+                .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let (lent, _, fallbacks) = both_ways(&push, "demo/*", |_| {});
@@ -666,8 +677,9 @@ mod tests {
     /// A literal Put on `key`, decoded from the wire bytes a peer would send, as both paths read it.
     #[cfg(feature = "key-set-closed")]
     fn put_on<T>(key: &str, then: impl FnOnce(&Push<'_>) -> T) -> T {
-        let built = crate::push_build::build_push_literal_with_meta(key, b"payload", &meta())
-            .expect("build");
+        let built =
+            crate::push_build::build_push_literal_with_meta(key, b"payload", &meta(&hints()))
+                .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         then(&push)
@@ -731,8 +743,8 @@ mod tests {
     #[cfg(feature = "pubsub-delete")]
     #[test]
     fn a_del_is_delivered_lent_as_the_owned_path_delivers_it() {
-        let built =
-            crate::push_build::build_push_del_literal_with_meta("demo/a", &meta()).expect("build");
+        let built = crate::push_build::build_push_del_literal_with_meta("demo/a", &meta(&hints()))
+            .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let (lent, owned, _) = both_ways(&push, "demo/a", |_| {});
@@ -924,8 +936,9 @@ mod tests {
     #[cfg(feature = "pubsub-source-info")]
     #[test]
     fn a_self_echo_is_suppressed_on_both_paths() {
-        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"p", &meta())
-            .expect("build");
+        let built =
+            crate::push_build::build_push_literal_with_meta("demo/a", b"p", &meta(&hints()))
+                .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
         let own = |r: &mut SubscriberRegistry| {

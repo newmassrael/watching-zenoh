@@ -246,7 +246,7 @@ mod stalled_link {
     /// The most blocking publishes the link is given to fill.
     const FILL_AT_MOST: usize = 4_096;
 
-    fn publish(congestion: CongestionControl) -> PublishOptions {
+    fn publish(congestion: CongestionControl) -> PublishOptions<'static> {
         PublishOptions::put()
             .with_locality(Locality::Remote)
             .with_congestion_control(congestion)

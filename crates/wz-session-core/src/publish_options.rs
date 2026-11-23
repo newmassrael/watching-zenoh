@@ -24,7 +24,7 @@
 //! are features of this crate; the runtime's features of the same names forward to them, so the
 //! answer in a tokio build is the answer it always was.
 
-use alloc::vec::Vec;
+use alloc::borrow::Cow;
 
 use crate::admission_retry::AdmissionRetry;
 use crate::link_restriction::LinkRestriction;
@@ -53,7 +53,7 @@ use crate::send_wire_error::SendWireError;
 /// contract holds.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct PublishOptions {
+pub struct PublishOptions<'a> {
     /// Publisher-side locality predicate (zenoh-pico `allowed_destination` parameter to
     /// `_z_write`). `Any` routes to both wire and loopback branches; `Remote` to wire only;
     /// `SessionLocal` to loopback only. Default: `Any`.
@@ -93,8 +93,10 @@ pub struct PublishOptions {
     /// Del-kind ignores this field (zenoh-pico `_z_msg_del_t` has no encoding slot). Wire-side
     /// propagation is built (R233, `gated_encoding_field` on the Put body, gated
     /// `pubsub-encoding`) and foreign-proven — R311y207 (`wz_encoding_to_pico_zsub`,
-    /// `text/plain` decoded by pico); loopback honours it from R232.
-    pub encoding: Option<EncodingHint>,
+    /// `text/plain` decoded by pico); loopback honours it from R232. Lent by a holder that keeps
+    /// it for the publish (a publisher's declared encoding, [`Self::with_encoding_lent`]), or
+    /// owned ([`Self::with_encoding`]).
+    pub encoding: Option<Cow<'a, EncodingHint>>,
     /// R232 — body-level source identification propagated to `Sample.source_info`. Cooperates
     /// with the R231 self-echo dedup: when the dispatcher fires on a wire-arrived Push whose
     /// `source_info.zid` matches the session's own zid, the dedup suppresses the duplicate fire so
@@ -115,8 +117,10 @@ pub struct PublishOptions {
     /// one, which is R2370's repair; this field feeds BOTH, so the single id this comment used to
     /// name was wrong for one of them and foreign-proven — R311y209
     /// (`wz_attachment_to_pico_zsub`, ze_serializer kv-pairs decoded by pico); loopback honours
-    /// it from R232.
-    pub attachment: Option<Vec<u8>>,
+    /// it from R232. Borrowed for the publish, as its payload is: the bytes are written into the
+    /// slot the link lends, and a holder that keeps the options past the call keeps the bytes
+    /// itself ([`Self::into_owned_parts`]).
+    pub attachment: Option<&'a [u8]>,
     /// R232 — outer-level QoS metadata propagated to `Sample.qos`. zenoh-pico mirror: the Push
     /// outer `_Z_MSG_EXT_ENC_ZINT | 0x01` extension carrying priority + congestion-control +
     /// express packed into one byte. Wire-side propagation is built (R233,
@@ -141,7 +145,52 @@ pub struct PublishOptions {
     stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
 }
 
-impl PublishOptions {
+impl<'a> PublishOptions<'a> {
+    /// These options without their attachment, and the attachment they borrowed: what a holder
+    /// that keeps the options past the call they were made for keeps, the bytes copied by it. An
+    /// encoding they were lent is copied into what is kept.
+    pub fn into_owned_parts(self) -> (PublishOptions<'static>, Option<&'a [u8]>) {
+        let Self {
+            allowed_destination,
+            links,
+            admission_retry,
+            atomic_tx,
+            reliability,
+            kind,
+            timestamp,
+            encoding,
+            source_info,
+            attachment,
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
+            #[cfg(feature = "pubsub-ts-stack")]
+            wire_ts_stack,
+            stamp_timestamp,
+        } = self;
+        (
+            PublishOptions {
+                allowed_destination,
+                links,
+                admission_retry,
+                atomic_tx,
+                reliability,
+                kind,
+                timestamp,
+                encoding: encoding.map(|encoding| Cow::Owned(encoding.into_owned())),
+                source_info,
+                attachment: None,
+                qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
+                #[cfg(feature = "pubsub-ts-stack")]
+                wire_ts_stack,
+                stamp_timestamp,
+            },
+            attachment,
+        )
+    }
+
     /// Whether a publisher declared with these options takes a time per message and stamps it (the
     /// publisher's `put_at` and `delete_at`). The publisher supplies its own node's identity beside
     /// the caller's time, so a caller cannot sign a message as another node. When it does not stamp,
@@ -243,7 +292,15 @@ impl PublishOptions {
     /// stays (struct stability); only the populator gates.
     #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
-        self.encoding = Some(encoding);
+        self.encoding = Some(Cow::Owned(encoding));
+        self
+    }
+
+    /// [`Self::with_encoding`] with an encoding its holder keeps for as long as the publish runs:
+    /// a publisher's declared encoding is lent to each put that names none, and copied nowhere.
+    #[cfg(feature = "pubsub-encoding")]
+    pub fn with_encoding_lent(mut self, encoding: &'a EncodingHint) -> Self {
+        self.encoding = Some(Cow::Borrowed(encoding));
         self
     }
 
@@ -267,7 +324,7 @@ impl PublishOptions {
     /// setter would silently drop the blob. The `attachment` field itself stays (struct
     /// stability); only the populator gates.
     #[cfg(feature = "pubsub-attachment")]
-    pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
+    pub fn with_attachment(mut self, attachment: &'a [u8]) -> Self {
         self.attachment = Some(attachment);
         self
     }
@@ -416,9 +473,9 @@ impl PublishOptions {
 
     /// R233 — extract the wire-encoder-facing metadata bundle so an engine can hand it to the
     /// Push builder without the lower module learning about [`Locality`] / [`Reliability`] /
-    /// [`SampleKind`] (those stay on the dispatch-time surface). Clones each owned slot — the
-    /// expected publish path performs one extraction per publish call so the allocation cost is
-    /// amortised against the wire frame's existing copies.
+    /// [`SampleKind`] (those stay on the dispatch-time surface). The timestamp, the encoding and the
+    /// attachment are lent from these options; only a timestamp stack, in a build that has one, is
+    /// copied.
     ///
     /// R311y309 — every field is threaded through its OWN gate. The wire ENCODER already drops
     /// an un-composed field at its SSOT gate-point, so gating here is redundant for the bytes —
@@ -435,12 +492,12 @@ impl PublishOptions {
     /// `priority_band` deliberately still reads `self.qos` ungated — that is the independent
     /// `transport-qos` conduit axis (R311y307), whose real gate is the runtime-negotiated
     /// `is_qos()`, not a compile feature.
-    pub fn push_metadata(&self) -> PushMetadata {
+    pub fn push_metadata(&self) -> PushMetadata<'_> {
         PushMetadata {
-            timestamp: gated_timestamp(self.timestamp.clone()),
-            encoding: gated_encoding(self.encoding.clone()),
+            timestamp: gated_timestamp(self.timestamp.as_ref()),
+            encoding: gated_encoding(self.encoding.as_deref()),
             source_info: gated_source_info(self.source_info.clone()),
-            attachment: gated_attachment(self.attachment.clone()),
+            attachment: gated_attachment(self.attachment),
             qos: gated_qos(self.qos),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: self.wire_ts_stack.clone().or_else(|| self.ts_stack.clone()),
@@ -467,11 +524,11 @@ impl PublishOptions {
         sample = sample.with_reliability(self.reliability);
         let meta = self.push_metadata();
         if let Some(timestamp) = meta.timestamp {
-            sample = sample.with_timestamp(timestamp);
+            sample = sample.with_timestamp(timestamp.clone());
         }
         if self.kind == SampleKind::Put {
             if let Some(encoding) = meta.encoding {
-                sample = sample.with_encoding(encoding);
+                sample = sample.with_encoding(encoding.clone());
             }
         }
         if let Some(source_info) = meta.source_info {
@@ -748,15 +805,34 @@ macro_rules! metadata_gated {
     };
 }
 
-metadata_gated!(gated_timestamp, "pubsub-timestamp", TimestampHint);
-metadata_gated!(gated_encoding, "pubsub-encoding", EncodingHint);
+metadata_gated!(gated_timestamp, "pubsub-timestamp", &TimestampHint);
+metadata_gated!(gated_encoding, "pubsub-encoding", &EncodingHint);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
-metadata_gated!(gated_attachment, "pubsub-attachment", Vec<u8>);
+metadata_gated!(gated_attachment, "pubsub-attachment", &[u8]);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
 
 #[cfg(test)]
 mod plain_put_tests {
     use super::*;
+
+    /// A lent encoding is what the publish carries, read where its holder keeps it, and options
+    /// kept past the call keep a copy of it: the holder's own is left as it was.
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn a_lent_encoding_is_carried_and_copied_only_into_options_that_are_kept() {
+        let declared = EncodingHint {
+            packed_id: 4,
+            schema: Some(alloc::vec![b's']),
+        };
+        let lent = PublishOptions::put().with_encoding_lent(&declared);
+        assert!(matches!(lent.encoding, Some(Cow::Borrowed(_))));
+        assert_eq!(lent.push_metadata().encoding, Some(&declared));
+        let (kept, _) = lent.into_owned_parts();
+        assert!(matches!(kept.encoding, Some(Cow::Owned(_))));
+        assert_eq!(kept.encoding.as_deref(), Some(&declared));
+        let owned = PublishOptions::put().with_encoding(declared.clone());
+        assert!(matches!(owned.encoding, Some(Cow::Owned(_))));
+    }
 
     /// The constant the engine's tests read the build from is the answer of the function it
     /// stands for, and a Put that is not plain is no plain Put in any build.

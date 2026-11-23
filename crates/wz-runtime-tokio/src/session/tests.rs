@@ -979,7 +979,8 @@ fn publish_shm_aliased_puts_the_descriptor_on_the_wire_under_the_declared_id() {
     let mut payload = crate::shm_provider::ShmBackedPayload::alloc(11).expect("alloc");
     payload.write(b"zero-copy!!");
     let opts = || PublishOptions::put().with_locality(Locality::Remote);
-    let meta = opts().push_metadata();
+    let meta_opts = opts();
+    let meta = meta_opts.push_metadata();
 
     session
         .publish_shm_aliased(7, Some("/kitchen"), "home/temp/kitchen", &payload, opts())
@@ -1307,7 +1308,7 @@ fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared
     let meta = opts.push_metadata();
 
     session
-        .publish_shm_aliased(7, None, "home/temp", &payload, opts)
+        .publish_shm_aliased(7, None, "home/temp", &payload, opts.clone())
         .expect("publish");
 
     let frame = driver.frame_bytes(0);
@@ -2009,7 +2010,7 @@ fn publish_options_with_metadata_setters_chain() {
             schema: Some("application/json".into()),
         })
         .with_source_info(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42))
-        .with_attachment(b"meta".to_vec())
+        .with_attachment(b"meta")
         .with_qos(QosLevel::from_raw(0b0001_1010));
     let ts = opts.timestamp.as_ref().unwrap();
     assert_eq!(ts.time, 0x1122_3344_5566_7788);
@@ -2021,7 +2022,7 @@ fn publish_options_with_metadata_setters_chain() {
     assert_eq!(si.zid_len, 4);
     assert_eq!(si.eid, 7);
     assert_eq!(si.sn, 42);
-    assert_eq!(opts.attachment.as_deref(), Some(&b"meta"[..]));
+    assert_eq!(opts.attachment, Some(&b"meta"[..]));
     assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
 }
 
@@ -2080,10 +2081,10 @@ fn loopback_drops_timestamp_when_feature_off() {
 #[test]
 fn loopback_drops_encoding_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.encoding = Some(crate::sample::EncodingHint {
+    opts.encoding = Some(std::borrow::Cow::Owned(crate::sample::EncodingHint {
         packed_id: 13,
         schema: Some("application/json".into()),
-    });
+    }));
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.encoding.is_none(),
@@ -2111,7 +2112,7 @@ fn loopback_drops_source_info_when_feature_off() {
 #[test]
 fn loopback_drops_attachment_when_feature_off() {
     let mut opts = PublishOptions::put();
-    opts.attachment = Some(b"meta".to_vec());
+    opts.attachment = Some(b"meta");
     let s = super::publish_common::build_loopback_sample("k", b"v", &opts);
     assert!(
         s.attachment.is_none(),
@@ -2464,7 +2465,7 @@ fn publish_loopback_propagates_attachment_to_sample() {
 
     let opts = PublishOptions::put()
         .with_locality(Locality::SessionLocal)
-        .with_attachment(b"attach-payload".to_vec());
+        .with_attachment(b"attach-payload");
     session.publish("home/temp", b"22.5", opts).unwrap();
 
     let s = captured.lock().unwrap();
@@ -2673,7 +2674,7 @@ fn publish_loopback_propagates_all_metadata_in_one_chain() {
             schema: None,
         })
         .with_source_info(SourceInfo::new(&[0xAA, 0xBB], 1, 2))
-        .with_attachment(vec![0xCC, 0xDD])
+        .with_attachment(&[0xCC, 0xDD])
         .with_qos(QosLevel::from_raw(0x10));
     session.publish("home/temp", b"payload", opts).unwrap();
 
@@ -2877,7 +2878,7 @@ fn auto_stamp_reaches_both_legs_as_one_value() {
     // LOOPBACK leg reported. If the two legs minted separately, these bytes
     // are not in the frame.
     let meta = wz_session_core::metadata::PushMetadata {
-        timestamp: Some(ts),
+        timestamp: Some(&ts),
         ..Default::default()
     };
     let expected =
@@ -3117,7 +3118,7 @@ fn publish_aliased_loopback_propagates_metadata_to_sample() {
             time: 0xAABB_CCDD,
             zid: vec![0x42],
         })
-        .with_attachment(b"aliased-meta".to_vec());
+        .with_attachment(b"aliased-meta");
     let fired = session
         .publish_aliased(7, None, "home/temp", b"x", opts)
         .unwrap();
@@ -18339,17 +18340,19 @@ fn a_subscription_takes_the_overload_answer_of_the_session_unless_it_says_its_ow
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
     use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+    let stamp = TimestampHint {
+        time: 0x1234_5678_9abc_def0,
+        zid: vec![1, 2, 3, 4],
+    };
+    let encoded = EncodingHint {
+        packed_id: 0x2d,
+        schema: Some(b"text/plain".to_vec()),
+    };
     let meta = wz_session_core::metadata::PushMetadata {
-        timestamp: Some(TimestampHint {
-            time: 0x1234_5678_9abc_def0,
-            zid: vec![1, 2, 3, 4],
-        }),
-        encoding: Some(EncodingHint {
-            packed_id: 0x2d,
-            schema: Some(b"text/plain".to_vec()),
-        }),
+        timestamp: Some(&stamp),
+        encoding: Some(&encoded),
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
-        attachment: Some(b"attached".to_vec()),
+        attachment: Some(b"attached"),
         qos: Some(QosLevel::from_raw(0x05)),
         #[cfg(feature = "pubsub-ts-stack")]
         ts_stack: None,

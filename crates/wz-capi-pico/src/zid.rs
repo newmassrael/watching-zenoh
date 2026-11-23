@@ -294,26 +294,26 @@ unsafe fn enumerate_peers(
             };
             let engine = crate::session::engine_ref(state);
             // Each identity is copied out of the session before the callback runs, so no C
-            // callback runs under the session's lock and the list is never held whole.
-            wz_capi_port::each_peer(engine, |peer| {
-                if (peer.whatami == WHATAMI_WIRE_ROUTER) != routers {
-                    return;
-                }
-                let id = z_id_t::from_wire(&peer.zid);
+            // callback runs under the session's lock and the list is never held whole. The
+            // established peers come first, then the members of the groups the session joined.
+            wz_capi_port::each_known_node(engine, |node| {
+                let zid = match node {
+                    wz_capi_port::KnownNode::Peer(peer)
+                        if (peer.whatami == WHATAMI_WIRE_ROUTER) == routers =>
+                    {
+                        peer.zid
+                    }
+                    // Open-debt item 913 — a session on a multicast group is a peer, and pico
+                    // lists every member of its group as a peer whatever role the member
+                    // announced (`vendor/zenoh-pico/src/api/api.c` @
+                    // `_zp_multicast_fetch_zid(`), and none as a router, its routers being a
+                    // client's alone. An engine that joins no group has no member.
+                    wz_capi_port::KnownNode::GroupMember(zid) if !routers => zid,
+                    _ => return,
+                };
+                let id = z_id_t::from_wire(&zid);
                 call(&id, taken.context);
             });
-            // Open-debt item 913 — a session on a multicast group is a peer, and pico lists
-            // every member of its group as a peer whatever role the member announced
-            // (`vendor/zenoh-pico/src/api/api.c` @ `_zp_multicast_fetch_zid(`), and none as a
-            // router, its routers being a client's alone.
-            #[cfg(feature = "multicast-transport")]
-            if !routers {
-                // Either engine's groups, through the port.
-                wz_capi_port::each_group_member(engine, |zid| {
-                    let id = z_id_t::from_wire(&zid);
-                    call(&id, taken.context);
-                });
-            }
             Z_OK
         })();
         if let Some(dropfn) = taken.drop {
@@ -347,12 +347,14 @@ pub unsafe extern "C" fn z_id_to_string(id: *const z_id_t, out: *mut z_owned_str
 /// (`vendor/zenoh-pico/src/api/admin_space.c` @ `_Z_RETURN_IF_ERR(z_id_to_string(zid, &zid_str));`).
 pub(crate) fn zid_hex(id: &[u8; Z_ID_SIZE]) -> [u8; Z_ID_SIZE * 2] {
     let mut buf = [0u8; Z_ID_SIZE * 2];
-    let mut pos = buf.len();
-    for byte in id.iter() {
-        pos -= 1;
-        buf[pos] = HEX[(byte & 0x0F) as usize];
-        pos -= 1;
-        buf[pos] = HEX[((byte & 0xF0) >> 4) as usize];
+    // The first byte fills the last pair of characters, and each pair is the byte's high digit
+    // then its low one. Every index below is in range by its type, so the rendering has no
+    // refusal path.
+    for (pair, byte) in buf.chunks_exact_mut(2).rev().zip(id) {
+        if let [high, low] = pair {
+            *high = HEX[usize::from(byte >> 4)];
+            *low = HEX[usize::from(byte & 0x0F)];
+        }
     }
     buf
 }
@@ -442,6 +444,22 @@ mod tests {
             id.id[15] = 7;
             assert_eq!(_z_id_len(id), 16);
         }
+    }
+
+    /// A zid renders as 32 lowercase hex characters, its bytes in reverse order and each byte's
+    /// high digit first, as pico's `z_id_to_string` renders it.
+    #[test]
+    fn a_zid_renders_its_bytes_reversed_high_digit_first() {
+        let mut id = [0u8; Z_ID_SIZE];
+        for (at, byte) in id.iter_mut().enumerate() {
+            *byte = at as u8 + 1;
+        }
+        id[0] = 0xAB;
+        assert_eq!(
+            zid_hex(&id).as_slice(),
+            b"100f0e0d0c0b0a0908070605040302ab".as_slice()
+        );
+        assert_eq!(zid_hex(&[0; Z_ID_SIZE]), [b'0'; Z_ID_SIZE * 2]);
     }
 
     /// A short wire zid is zero-padded to 16, LEFT-aligned — zenoh strips

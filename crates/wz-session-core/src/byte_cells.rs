@@ -187,6 +187,27 @@ impl LentByteCells {
     pub fn in_use(&self) -> usize {
         (0..self.count).filter(|&at| self.flag(at).get()).count()
     }
+
+    /// Take back the buffer that starts at `base`, whose claim its holder kept past the claim's
+    /// own life (`core::mem::forget`) and now lets go, as dropping the claim would have: `false`,
+    /// changing nothing, when no cell of the table starts at `base` or that cell is not lent.
+    ///
+    /// # Safety
+    /// Nothing uses the buffer's bytes from here: its holder gave them up with this call.
+    pub unsafe fn release_at(&self, base: NonNull<u8>) -> bool {
+        let Some(offset) = (base.as_ptr() as usize).checked_sub(self.bytes.as_ptr() as usize)
+        else {
+            return false;
+        };
+        let Some(at) = offset.checked_div(self.size) else {
+            return false;
+        };
+        if at >= self.count || at.checked_mul(self.size) != Some(offset) || !self.flag(at).get() {
+            return false;
+        }
+        self.flag(at).set(false);
+        true
+    }
 }
 
 /// A buffer lent by a [`ByteCells`] table or a [`LentByteCells`] one, until it is dropped. Not
@@ -291,6 +312,40 @@ mod tests {
         assert_eq!(table.in_use(), 2, "the copy names the same table");
         drop(again);
         drop(a);
+        assert_eq!(table.in_use(), 0);
+    }
+
+    /// A claim kept past its own life is taken back by the address it starts at, once, and an
+    /// address no cell starts at, or a cell not lent, is refused and changes nothing. Turned red
+    /// by a release that frees the cell an address merely falls inside.
+    #[test]
+    fn a_kept_claim_is_taken_back_by_where_it_starts() {
+        let flags = [Cell::new(false), Cell::new(false)];
+        let mut bytes = [0u8; 8];
+        // SAFETY: as in the test above.
+        let table = unsafe {
+            LentByteCells::over(
+                NonNull::from(&flags).cast::<Cell<bool>>(),
+                NonNull::from(&mut bytes).cast::<u8>(),
+                4,
+                2,
+            )
+        };
+        let first = table.claim().expect("first");
+        let second = table.claim().expect("second");
+        let (base, _) = second.raw();
+        core::mem::forget(second);
+        let base = NonNull::new(base).expect("a cell's address");
+        // SAFETY: the kept claim is given up here and nothing uses its bytes after.
+        unsafe {
+            let inside = NonNull::new(base.as_ptr().add(1)).expect("an address");
+            assert!(!table.release_at(inside), "no cell starts there");
+            assert_eq!(table.in_use(), 2);
+            assert!(table.release_at(base));
+            assert_eq!(table.in_use(), 1);
+            assert!(!table.release_at(base), "a cell not lent is refused");
+        }
+        drop(first);
         assert_eq!(table.in_use(), 0);
     }
 

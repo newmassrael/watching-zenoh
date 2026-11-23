@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+    BatchStep, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -520,7 +521,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 
     const PUTS: usize = 32;
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
@@ -534,7 +535,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
         .expect("a put the window holds");
     }
     assert_eq!(
-        peer.batch_stop_all(),
+        peer.batch_all(BatchStep::Stop),
         1,
         "the window is written as it closes"
     );
@@ -601,18 +602,26 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
         .expect("a put the window holds");
     };
     assert_eq!(
-        peer.batch_start_all(),
+        peer.batch_all(BatchStep::Start),
         1,
         "the client's link opens a window"
     );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_flush_all(), 1, "the first batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Flush),
+        1,
+        "the first batch is written"
+    );
     for _ in 0..PUTS {
         put();
     }
-    assert_eq!(peer.batch_stop_all(), 1, "the second batch is written");
+    assert_eq!(
+        peer.batch_all(BatchStep::Stop),
+        1,
+        "the second batch is written"
+    );
     std::thread::sleep(Duration::from_millis(100));
     let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
     let before = takes(&engine);

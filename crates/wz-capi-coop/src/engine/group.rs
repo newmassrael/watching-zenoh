@@ -1098,7 +1098,7 @@ pub(super) struct GroupPut<'a> {
     pub(super) wire: &'a WireKey,
     pub(super) payload: &'a [u8],
     pub(super) kind: SampleKind,
-    pub(super) meta: &'a PushMetadata,
+    pub(super) meta: &'a PushMetadata<'a>,
     pub(super) reliable: bool,
     pub(super) priority: Priority,
 }

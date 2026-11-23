@@ -106,7 +106,7 @@ where
     fn declare_publisher(
         &self,
         keyexpr: &str,
-        options: PublishOptions,
+        options: PublishOptions<'static>,
     ) -> Result<DeclaredPublisher<Publisher<R, T>>, AdvancedPublisherError> {
         // Allocate the publisher entity id from the session's dedicated
         // entity-id SSOT (the `SourceInfo.eid` id-space). zenoh-pico draws

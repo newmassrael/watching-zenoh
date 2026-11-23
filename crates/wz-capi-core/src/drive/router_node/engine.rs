@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink,
-    PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
     StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -306,6 +306,10 @@ impl SessionEngine for RouterState {
 
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
 
+    /// The node holds no declaration: `acquire_keyexpr` refuses every key, so no hold reaches
+    /// here and there is nothing to count.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
     fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         Vec::new()
     }
@@ -368,7 +372,7 @@ impl SessionEngine for RouterState {
         _plane: FilterPlane,
         _keyexpr: &str,
         _wire: &WireKey,
-        _ask: Option<InterestForm>,
+        _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
@@ -398,15 +402,31 @@ impl SessionEngine for RouterState {
         FilteredPut::NotPlain
     }
 
-    fn batch_start_all(&self) -> usize {
-        0
+    // The node keeps no plain form: every write goes its general publish.
+    fn keep_write_filter_plain(
+        &self,
+        _filter: FilterId,
+        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
     }
 
-    fn batch_flush_all(&self) -> usize {
-        0
+    fn publish_filtered(
+        &self,
+        _filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        // The node's filters hold nothing back; a bare write is answered for the caller to send
+        // the general way.
+        match opts {
+            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
+            None => FilteredPut::NotPlain,
+        }
     }
 
-    fn batch_stop_all(&self) -> usize {
+    fn batch_all(&self, _step: BatchStep) -> usize {
         0
     }
 

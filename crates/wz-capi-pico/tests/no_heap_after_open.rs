@@ -22,6 +22,12 @@
 //! row grades; a row locked at 0 grades the most, since it claims no window allocates at all.
 //!
 //! With `WZ_NO_HEAP_READING` set, the lines are written to the file it names as well.
+//!
+//! With `WZ_NO_HEAP_SITES` set, each family is counted in one window of a few rounds and every
+//! allocation of its counted rounds records its stack: one `no-heap-site:` line is printed per
+//! round and site, the site being the innermost frame of a wz crate and the door the calling
+//! thread entered, with the allocations a round made there. The family lines are not printed
+//! then, since the records' own allocations fall in the windows; the gate reads no site line.
 //! `scripts/lib/no_heap_ratchet_gate.py --check` holds those lines to `deploy/no_heap_ratchet.json`:
 //! the allocations of a round may only fall, and a family that reached 0 stays there. Layer C1nh
 //! builds and runs this file; its one test is `#[ignore]`d, so a default sweep does not count a
@@ -47,8 +53,13 @@
 
 #![cfg(not(feature = "engine-tokio"))]
 
+use std::alloc::{GlobalAlloc, Layout};
+use std::backtrace::Backtrace;
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ffi::CStr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use wz_capi_pico::abi::z_owned_keyexpr_t;
@@ -67,7 +78,143 @@ use pipe_pair::{
 };
 
 #[global_allocator]
-static ALLOCATOR: Injecting = Injecting;
+static ALLOCATOR: Sited = Sited;
+
+// ---------------------------------------------------------------------------------------------
+// Where the allocations are made, recorded when `WZ_NO_HEAP_SITES` is set.
+
+/// The variable that asks where each counted allocation is made, as well as how many there are.
+const SITES_VARIABLE: &str = "WZ_NO_HEAP_SITES";
+/// The prefix of a line that says where a round's allocations are made; the gate reads none.
+const SITE_PREFIX: &str = "no-heap-site:";
+/// The rounds a family is counted in, in one window, when its sites are recorded: a record
+/// captures the stack of every allocation, which takes far longer than the allocation.
+const SITE_ROUNDS: usize = 3;
+/// No round's counted rounds are running.
+const NO_ROUND: usize = usize::MAX;
+
+/// Whether the sites are recorded.
+static SITES_ON: AtomicBool = AtomicBool::new(false);
+/// The round whose counted rounds are running, as its place in `Round::ALL`, or `NO_ROUND`.
+static SITE_ROUND: AtomicUsize = AtomicUsize::new(NO_ROUND);
+/// The stack of each recorded allocation and the place of its round, read only once every round
+/// has run: reading a stack's symbols takes far longer than capturing it, and a round that took
+/// that long would not see its traffic cross within the wait.
+static SITES: Mutex<Vec<(usize, Backtrace)>> = Mutex::new(Vec::new());
+
+thread_local! {
+    /// Whether this thread is recording a site, whose own allocations are not recorded. A `const`
+    /// initialisation of a type with no destructor, so reading it inside the allocator does not
+    /// itself allocate.
+    static RECORDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The pair's counting allocator, which also records where each allocation of a counted round
+/// is made when the sites are asked for.
+struct Sited;
+
+// SAFETY: every call is forwarded to the pair's allocator unchanged; a record only reads the
+// stack and writes this file's own table.
+unsafe impl GlobalAlloc for Sited {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { Injecting.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record_site();
+        unsafe { Injecting.realloc(ptr, layout, new_size) }
+    }
+}
+
+/// Record where the allocation being made is, when the sites are asked for and a round's counted
+/// rounds are running. The record's own allocations are not recorded.
+fn record_site() {
+    if !SITES_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    let round = SITE_ROUND.load(Ordering::Relaxed);
+    if round == NO_ROUND || RECORDING.with(Cell::get) {
+        return;
+    }
+    RECORDING.with(|recording| recording.set(true));
+    let stack = Backtrace::force_capture();
+    SITES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push((round, stack));
+    RECORDING.with(|recording| recording.set(false));
+}
+
+/// A frame's symbol with the `<` of a trait implementation's path taken off.
+fn bare(symbol: &str) -> &str {
+    symbol.trim_start_matches('<')
+}
+
+/// Where an allocation was made, read off its stack: the innermost frame of a wz crate, with its
+/// place in the source where the stack has one, and the outermost frame of the library, which on
+/// the calling thread is the door the program called.
+fn site_of(stack: &str) -> String {
+    let mut frames: Vec<(&str, Option<&str>)> = Vec::new();
+    for line in stack.lines().map(str::trim) {
+        if let Some(at) = line.strip_prefix("at ") {
+            if let Some(last) = frames.last_mut() {
+                last.1.get_or_insert(at);
+            }
+        } else if let Some((index, symbol)) = line.split_once(": ") {
+            if !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()) {
+                frames.push((symbol, None));
+            }
+        }
+    }
+    let inner = frames
+        .iter()
+        .find(|(symbol, _)| bare(symbol).starts_with("wz_"));
+    let door = frames
+        .iter()
+        .rev()
+        .find(|(symbol, _)| bare(symbol).starts_with("wz_capi_pico::"));
+    let place = |at: &Option<&str>| {
+        at.map(|at| {
+            at.rsplit_once("crates/")
+                .map_or(at, |(_, rest)| rest)
+                .to_owned()
+        })
+        .unwrap_or_default()
+    };
+    match (inner, door) {
+        (Some((symbol, at)), Some((door, _))) => format!("{symbol} [{}] <- {door}", place(at)),
+        (Some((symbol, at)), None) => format!("{symbol} [{}]", place(at)),
+        (None, _) => String::from("(no wz frame)"),
+    }
+}
+
+/// The rounds of a window: fewer when the sites are recorded.
+fn rounds() -> usize {
+    if SITES_ON.load(Ordering::Relaxed) {
+        SITE_ROUNDS
+    } else {
+        ROUNDS
+    }
+}
+
+/// The windows of a family: one when the sites are recorded.
+fn windows() -> usize {
+    if SITES_ON.load(Ordering::Relaxed) {
+        1
+    } else {
+        WINDOWS
+    }
+}
 
 /// Rounds of each family run before the count, so that what the library makes on the first
 /// exchanges (a route, a buffer grown to its size) is made, and rounds counted.
@@ -108,11 +255,20 @@ enum Round {
     E2e,
     Replay,
     ConfigDocument,
+    SubscriberDeclare,
+    QueryableDeclare,
+    MatchingListener,
+    LivelinessSubscriber,
+    QuerierDeclare,
+    QuerierGet,
+    ConfigClone,
+    PublisherPut,
+    Delete,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 11] = [
+    const ALL: [Round; 20] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -124,6 +280,15 @@ impl Round {
         Round::E2e,
         Round::Replay,
         Round::ConfigDocument,
+        Round::SubscriberDeclare,
+        Round::QueryableDeclare,
+        Round::MatchingListener,
+        Round::LivelinessSubscriber,
+        Round::QuerierDeclare,
+        Round::QuerierGet,
+        Round::ConfigClone,
+        Round::PublisherPut,
+        Round::Delete,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -134,12 +299,20 @@ impl Round {
             Round::E2e => cfg!(all(feature = "e2e-sender", feature = "e2e-receiver")),
             Round::Replay => cfg!(feature = "replay-cache"),
             Round::ConfigDocument => cfg!(feature = "config-document"),
+            Round::QueryableDeclare => cfg!(feature = "queryable"),
+            Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
+            Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
             | Round::PutBatch
             | Round::Get
-            | Round::KeyexprDeclare => true,
+            | Round::KeyexprDeclare
+            | Round::SubscriberDeclare
+            | Round::MatchingListener
+            | Round::ConfigClone
+            | Round::PublisherPut
+            | Round::Delete => true,
         }
     }
 }
@@ -156,7 +329,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 14] = [
+const FAMILIES: [(&str, Round, Part); 23] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -171,6 +344,19 @@ const FAMILIES: [(&str, Round, Part); 14] = [
     ("e2e", Round::E2e, Part::All),
     ("replay", Round::Replay, Part::All),
     ("config-document", Round::ConfigDocument, Part::All),
+    ("subscriber-declare", Round::SubscriberDeclare, Part::All),
+    ("queryable-declare", Round::QueryableDeclare, Part::All),
+    ("matching-listener", Round::MatchingListener, Part::All),
+    (
+        "liveliness-subscriber",
+        Round::LivelinessSubscriber,
+        Part::All,
+    ),
+    ("querier-declare", Round::QuerierDeclare, Part::All),
+    ("querier-get", Round::QuerierGet, Part::Calling),
+    ("config-clone", Round::ConfigClone, Part::All),
+    ("publisher-put", Round::PublisherPut, Part::Calling),
+    ("delete", Round::Delete, Part::Calling),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -435,6 +621,12 @@ struct Bench {
     pair: Pair,
     /// The payload of a put near the batch limit.
     batch: Vec<u8>,
+    /// The dialling session's publisher on the key the listener hears, which a publisher's put
+    /// goes through and a matching listener is declared on.
+    publisher: z_owned_publisher_t,
+    /// The dialling session's querier on the key the listener's queryable answers.
+    #[cfg(feature = "query")]
+    querier: wz_capi_pico::z_owned_querier_t,
     /// The listening session's token, which a liveliness get finds.
     #[cfg(feature = "liveliness-get")]
     alive: wz_capi_pico::liveliness::z_owned_liveliness_token_t,
@@ -473,9 +665,40 @@ impl Bench {
         let e2e = E2e::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
+        let ke = view(DATA_KEY);
+        let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(pair.dialler()),
+                &mut publisher,
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "the publisher a publisher's put goes through is declared"
+        );
+        #[cfg(feature = "query")]
+        let querier = {
+            let ke = view(pipe_pair::ASK_KEY);
+            let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_pico::z_declare_querier(
+                    z_session_loan(pair.dialler()),
+                    &mut querier,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK,
+                "the querier a querier's get goes through is declared"
+            );
+            querier
+        };
         Self {
             pair,
             batch: vec![0x5A; batch_len],
+            publisher,
+            #[cfg(feature = "query")]
+            querier,
             #[cfg(feature = "liveliness-get")]
             alive,
             #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
@@ -524,15 +747,227 @@ impl Bench {
                 #[cfg(feature = "config-document")]
                 config_document();
             }
+            Round::SubscriberDeclare => self.subscriber_declare(),
+            Round::QueryableDeclare => {
+                #[cfg(feature = "queryable")]
+                self.queryable_declare();
+            }
+            Round::MatchingListener => self.matching_listener(),
+            Round::LivelinessSubscriber => {
+                #[cfg(feature = "liveliness")]
+                self.liveliness_subscriber();
+            }
+            Round::QuerierDeclare => {
+                #[cfg(feature = "query")]
+                self.querier_declare();
+            }
+            Round::QuerierGet => {
+                #[cfg(feature = "query")]
+                self.querier_get();
+            }
+            Round::ConfigClone => config_clone(),
+            Round::PublisherPut => self.publisher_put(),
+            Round::Delete => self.delete(),
         }
     }
 
+    unsafe fn subscriber_declare(&self) {
+        let mut closure = pipe_pair::sample_closure(&self.pair.counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_subscriber(
+                self.pair.dialler(),
+                DECLARED,
+                &mut closure,
+                &mut subscriber
+            ),
+            Z_OK,
+            "a subscriber is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber)),
+            Z_OK,
+            "a subscriber is undeclared"
+        );
+    }
+
+    #[cfg(feature = "queryable")]
+    unsafe fn queryable_declare(&self) {
+        let mut closure = pipe_pair::query_closure(&self.pair.counts);
+        let mut queryable: wz_capi_pico::z_owned_queryable_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_queryable(
+                self.pair.dialler(),
+                DECLARED,
+                &mut closure,
+                &mut queryable
+            ),
+            Z_OK,
+            "a queryable is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(&mut queryable)),
+            Z_OK,
+            "a queryable is undeclared"
+        );
+    }
+
+    /// Declare a matching listener on the bench's publisher and retract it.
+    unsafe fn matching_listener(&self) {
+        use wz_capi_pico::matching::{
+            z_closure_matching_status, z_closure_matching_status_move, z_matching_listener_move,
+            z_owned_closure_matching_status_t, z_owned_matching_listener_t,
+            z_publisher_declare_matching_listener, z_undeclare_matching_listener,
+        };
+        let mut closure: z_owned_closure_matching_status_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_matching_status(
+                &mut closure,
+                None,
+                Some(counted_drop),
+                pipe_pair::context(&self.pair.counts),
+            ),
+            Z_OK
+        );
+        let mut listener: z_owned_matching_listener_t = std::mem::zeroed();
+        assert_eq!(
+            z_publisher_declare_matching_listener(
+                wz_capi_pico::z_publisher_loan(&self.publisher),
+                &mut listener,
+                z_closure_matching_status_move(&mut closure),
+            ),
+            Z_OK,
+            "a matching listener is declared"
+        );
+        assert_eq!(
+            z_undeclare_matching_listener(z_matching_listener_move(&mut listener)),
+            Z_OK,
+            "a matching listener is undeclared"
+        );
+    }
+
+    #[cfg(feature = "liveliness")]
+    unsafe fn liveliness_subscriber(&self) {
+        use wz_capi_pico::liveliness::z_liveliness_declare_subscriber;
+        let ke = view(DECLARED);
+        let mut closure = pipe_pair::sample_closure(&self.pair.counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_liveliness_declare_subscriber(
+                z_session_loan(self.pair.dialler()),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a liveliness subscriber is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber)),
+            Z_OK,
+            "a liveliness subscriber is undeclared"
+        );
+    }
+
+    #[cfg(feature = "query")]
+    unsafe fn querier_declare(&self) {
+        let ke = view(DECLARED);
+        let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_pico::z_declare_querier(
+                z_session_loan(self.pair.dialler()),
+                &mut querier,
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a querier is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(&mut querier)),
+            Z_OK,
+            "a querier is undeclared"
+        );
+    }
+
+    /// Ask the listener's queryable through the bench's querier and wait for the get's end.
+    #[cfg(feature = "query")]
+    unsafe fn querier_get(&self) {
+        let counts = &self.pair.counts;
+        let replies = counts.replies.load(Ordering::SeqCst);
+        let over = counts.gets_over.load(Ordering::SeqCst);
+        let mut closure = reply_closure(counts);
+        assert_eq!(
+            wz_capi_pico::z_querier_get(
+                wz_capi_pico::z_querier_loan(&self.querier),
+                std::ptr::null(),
+                wz_capi_pico::z_closure_reply_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a querier's get is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.gets_over.load(Ordering::SeqCst)
+                > over),
+            "a querier's get did not end within {WAIT_BOUND:?}"
+        );
+        assert!(
+            counts.replies.load(Ordering::SeqCst) > replies,
+            "a querier's get between open sessions is answered"
+        );
+    }
+
+    /// Put through the bench's publisher and wait for the listener to hear it.
+    unsafe fn publisher_put(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            wz_capi_pico::z_publisher_put(
+                wz_capi_pico::z_publisher_loan(&self.publisher),
+                wz_capi_pico::z_bytes_move(&mut bytes),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a publisher's put is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a publisher's put did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Delete on the key the listener hears and wait for it to hear the delete.
+    unsafe fn delete(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let ke = view(DATA_KEY);
+        assert_eq!(
+            wz_capi_pico::z_delete(
+                z_session_loan(self.pair.dialler()),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a delete is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a delete did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Declare a publisher and undeclare it, on the listening session: the dialler holds the
+    /// publishers the other families go through, as many as a session of the pico preset holds
+    /// (`MAX_PUBLISHERS`), and the one this family declares would be past them.
     unsafe fn publisher_declare(&self) {
         let ke = view(DATA_KEY);
         let mut publisher: z_owned_publisher_t = std::mem::zeroed();
         assert_eq!(
             z_declare_publisher(
-                z_session_loan(self.pair.dialler()),
+                z_session_loan(self.pair.listener()),
                 &mut publisher,
                 z_view_keyexpr_loan(&ke),
                 std::ptr::null(),
@@ -667,8 +1102,47 @@ impl Bench {
         self.e2e.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
+        #[cfg(feature = "query")]
+        {
+            let mut querier = self.querier;
+            assert_eq!(
+                wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(&mut querier)),
+                Z_OK
+            );
+        }
+        let mut publisher = self.publisher;
+        assert_eq!(
+            z_undeclare_publisher(z_publisher_move(&mut publisher)),
+            Z_OK
+        );
         self.pair.close()
     }
+}
+
+/// The drop of a closure whose context is a [`pipe_pair::context`]: counted, as the pair's own
+/// closures count theirs, so the close sees every closure the library was handed dropped.
+unsafe extern "C" fn counted_drop(context: *mut std::ffi::c_void) {
+    let counts = std::sync::Arc::from_raw(context as *const pipe_pair::Counts);
+    counts.dropped.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Make a config and a copy of it, and drop both, as a program does before it opens another
+/// session.
+unsafe fn config_clone() {
+    use wz_capi_pico::{
+        z_config_clone, z_config_default, z_config_drop, z_config_loan, z_config_move,
+        z_owned_config_t,
+    };
+    let mut config: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(z_config_default(&mut config), Z_OK);
+    let mut copy: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(
+        z_config_clone(&mut copy, z_config_loan(&config)),
+        Z_OK,
+        "the config is copied"
+    );
+    z_config_drop(z_config_move(&mut copy));
+    z_config_drop(z_config_move(&mut config));
 }
 
 /// A document the zenoh-c ABI reads too, of which this ABI reads the `wz` member. Synthetic.
@@ -698,11 +1172,17 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
         bench.run(round);
     }
     std::thread::sleep(SETTLE);
+    let place = Round::ALL
+        .iter()
+        .position(|of| *of == round)
+        .unwrap_or(NO_ROUND);
     open_window(0);
-    for _ in 0..ROUNDS {
+    SITE_ROUND.store(place, Ordering::SeqCst);
+    for _ in 0..rounds() {
         bench.run(round);
     }
     std::thread::sleep(SETTLE);
+    SITE_ROUND.store(NO_ROUND, Ordering::SeqCst);
     let seen = close_window();
     assert!(
         !seen.fired,
@@ -713,11 +1193,11 @@ unsafe fn window(bench: &mut Bench, round: Round) -> Seen {
 
 /// Every window of `round`.
 unsafe fn measure(bench: &mut Bench, round: Round) -> Vec<Seen> {
-    let mut windows = Vec::with_capacity(WINDOWS);
-    for _ in 0..WINDOWS {
-        windows.push(window(bench, round));
+    let mut seen = Vec::with_capacity(windows());
+    for _ in 0..windows() {
+        seen.push(window(bench, round));
     }
-    windows
+    seen
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -741,6 +1221,7 @@ fn allocations_after_open_are_counted_per_operation_family() {
         );
     }
 
+    SITES_ON.store(std::env::var_os(SITES_VARIABLE).is_some(), Ordering::SeqCst);
     count_panics();
     mark_calling_thread();
     let (seen, balanced, dropped) = unsafe {
@@ -756,6 +1237,31 @@ fn allocations_after_open_are_counted_per_operation_family() {
     assert!(balanced, "every closure the library was handed is dropped");
     assert!(dropped, "both transports are let go");
     assert_eq!(PANICS.load(Ordering::SeqCst), 0, "a thread panicked");
+
+    // With the sites recorded, a window's count holds the records' own allocations too, so the
+    // reading is not printed: what is printed is each round's allocations a round, at each site.
+    if SITES_ON.load(Ordering::SeqCst) {
+        let stacks = std::mem::take(&mut *SITES.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut sites: BTreeMap<(usize, String), u64> = BTreeMap::new();
+        for (round, stack) in stacks {
+            *sites
+                .entry((round, site_of(&stack.to_string())))
+                .or_insert(0) += 1;
+        }
+        let mut lines: Vec<(usize, u64, String)> = sites
+            .into_iter()
+            .map(|((round, site), count)| (round, count, site))
+            .collect();
+        lines.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        for (round, count, site) in lines {
+            let name = Round::ALL
+                .get(round)
+                .map_or_else(|| String::from("?"), |round| format!("{round:?}"));
+            let per_round = count as f64 / SITE_ROUNDS as f64;
+            println!("{SITE_PREFIX} {name} per_round={per_round:.2} {site}");
+        }
+        return;
+    }
 
     let mut reading = String::new();
     for (name, round, part) in FAMILIES {

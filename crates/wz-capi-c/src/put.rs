@@ -133,7 +133,7 @@ pub(crate) fn locality_from_c(value: zc_locality_t) -> Locality {
 /// thread. The field means what the caller said, and the callback runs where
 /// zenoh-c's does ([`wz_runtime_tokio::session::LocalDeliveryDrain::Caller`],
 /// chosen by [`crate::session::z_open`]).
-fn put_options() -> PublishOptions {
+fn put_options() -> PublishOptions<'static> {
     PublishOptions::put()
         .with_locality(Locality::Any)
         .with_priority(priority_from_c(Z_PRIORITY_DATA))
@@ -143,19 +143,22 @@ fn put_options() -> PublishOptions {
 
 /// The Del-kind counterpart, with the same locality default and for the same
 /// reason.
-fn delete_options() -> PublishOptions {
+fn delete_options() -> PublishOptions<'static> {
     put_options().with_kind(SampleKind::Del)
 }
 
-/// Fold a `z_put_options_t` into the wz publish bundle.
+/// Fold a `z_put_options_t` into the wz publish bundle, and the attachment it moved in, which
+/// the caller keeps while the publish borrows it ([`attached`]).
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct whose `encoding` /
 /// `attachment` fields are null or valid moved values.
-unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
+unsafe fn resolve_put_options(
+    options: *mut z_put_options_t,
+) -> (PublishOptions<'static>, Option<Vec<u8>>) {
     let base = put_options();
     if options.is_null() {
-        return base;
+        return (base, None);
     }
     // SAFETY: the caller's contract.
     let opts = unsafe { &mut *options };
@@ -208,9 +211,14 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
     };
     // SAFETY: as above. TAKEN — upstream documents every owned options field as
     // consumed on return.
-    match unsafe { take_payload(opts.attachment) } {
-        Some(blob) => with_source_info.with_attachment(blob),
-        None => with_source_info,
+    (with_source_info, unsafe { take_payload(opts.attachment) })
+}
+
+/// `publish` carrying `attachment`, which the caller keeps for as long as the publish runs.
+fn attached<'a>(publish: PublishOptions<'a>, attachment: Option<&'a [u8]>) -> PublishOptions<'a> {
+    match attachment {
+        Some(blob) => publish.with_attachment(blob),
+        None => publish,
     }
 }
 
@@ -218,7 +226,7 @@ unsafe fn resolve_put_options(options: *mut z_put_options_t) -> PublishOptions {
 ///
 /// # Safety
 /// `options` must be null or a valid delete-options struct.
-unsafe fn resolve_delete_options(options: *const z_delete_options_t) -> PublishOptions {
+unsafe fn resolve_delete_options(options: *const z_delete_options_t) -> PublishOptions<'static> {
     let base = delete_options();
     if options.is_null() {
         return base;
@@ -345,7 +353,8 @@ pub(crate) unsafe fn put_stated(
         // SAFETY: the caller's contract.
         let payload = unsafe { take_outbound(payload) };
         // SAFETY: the caller's contract for the options struct.
-        let publish = unsafe { resolve_put_options(options) };
+        let (publish, attachment) = unsafe { resolve_put_options(options) };
+        let publish = attached(publish, attachment.as_deref());
         let statement = match statement {
             Ok(statement) => statement,
             Err(refusal) => return refusal,
@@ -675,7 +684,7 @@ mod tests {
         ] {
             let mut o = put_options_struct(c_value);
             // SAFETY: a live local whose owned fields are all null.
-            let resolved = unsafe { resolve_put_options(&mut o) };
+            let (resolved, _) = unsafe { resolve_put_options(&mut o) };
             assert_eq!(
                 resolved.allowed_destination, expected,
                 "z_put_options_t.allowed_destination = {c_value} must resolve to {expected:?}",
@@ -742,7 +751,7 @@ mod tests {
         let mut o = put_options_struct(crate::publisher::ZC_LOCALITY_ANY);
         o.reliability = Z_RELIABILITY_BEST_EFFORT;
         // SAFETY: a live local whose owned fields are all null.
-        let resolved = unsafe { resolve_put_options(&mut o) };
+        let (resolved, _) = unsafe { resolve_put_options(&mut o) };
         assert_eq!(
             resolved.reliability,
             wz_runtime_tokio::Reliability::BestEffort

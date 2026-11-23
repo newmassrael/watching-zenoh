@@ -202,43 +202,58 @@ impl ConfigEntries {
     /// `Z_ERR_CONFIG_FAILED_INSERT` when a new key finds no row or the value no room, the table
     /// then as it was.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
-        let need = value.len() + 1;
-        let found = self.rows[..self.held].iter().position(|row| row.key == key);
-        if found.is_none() && self.held == self.rows.len() {
+        // Every refusal is taken before anything is written, so a refused insert leaves the table
+        // as it was; each index is read checked, so no refusal of the config's is a panic.
+        let Some(need) = value.len().checked_add(1) else {
+            return Z_ERR_CONFIG_FAILED_INSERT;
+        };
+        let found = self
+            .rows
+            .get(..self.held)
+            .and_then(|held| held.iter().position(|row| row.key == key));
+        let old = found.and_then(|at| self.rows.get(at).copied());
+        if found.is_none() && self.held >= self.rows.len() {
             return Z_ERR_CONFIG_FAILED_INSERT;
         }
-        let old = found.map(|at| self.rows[at]);
+        let fits = |start: usize| {
+            start
+                .checked_add(need)
+                .is_some_and(|end| end <= self.text.len())
+        };
         let start = match old {
             Some(row) if need <= row.room as usize => row.start as usize,
             // The last place grows into the free text after it rather than leaving itself unused.
-            Some(row)
-                if row.place_end() == self.end && row.start as usize + need <= self.text.len() =>
-            {
+            Some(row) if row.place_end() == self.end && fits(row.start as usize) => {
                 row.start as usize
             }
-            _ if need <= self.text.len() - self.end => self.end,
+            _ if fits(self.end) => self.end,
             _ => return Z_ERR_CONFIG_FAILED_INSERT,
         };
-        self.text[start..start + value.len()].copy_from_slice(value.as_bytes());
-        self.text[start + value.len()] = 0;
         let room = match old {
             Some(row) if row.start as usize == start => need.max(row.room as usize),
             _ => need,
         };
-        self.end = self.end.max(start + room);
         let row = Row {
             key,
             start: start as u32,
             len: need as u32,
             room: room as u32,
         };
-        match found {
-            Some(at) => self.rows[at] = row,
-            None => {
-                self.rows[self.held] = row;
-                self.held += 1;
-            }
+        let (Some(place), Some(slot)) = (
+            self.text.get_mut(start..start + need),
+            self.rows.get_mut(found.unwrap_or(self.held)),
+        ) else {
+            return Z_ERR_CONFIG_FAILED_INSERT;
+        };
+        if let Some((terminator, body)) = place.split_last_mut() {
+            body.copy_from_slice(value.as_bytes());
+            *terminator = 0;
         }
+        *slot = row;
+        if found.is_none() {
+            self.held += 1;
+        }
+        self.end = self.end.max(start + room);
         Z_OK
     }
 }

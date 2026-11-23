@@ -87,6 +87,46 @@ unsafe fn publisher(session: &z_owned_session_t, key: &CStr) -> (z_owned_publish
     (publisher, code)
 }
 
+/// A key expression `key` declared on `session`, and the code its declaration answered.
+unsafe fn declared_keyexpr(
+    session: &z_owned_session_t,
+    key: &CStr,
+) -> (wz_capi_pico::abi::z_owned_keyexpr_t, i8) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut declared: wz_capi_pico::abi::z_owned_keyexpr_t = std::mem::zeroed();
+    let code = wz_capi_pico::z_declare_keyexpr(
+        z_session_loan(session),
+        &mut declared,
+        z_view_keyexpr_loan(&ke),
+    );
+    (declared, code)
+}
+
+/// A querier declared on `key`, and the code its declaration answered.
+#[cfg(feature = "query")]
+unsafe fn declared_querier(
+    session: &z_owned_session_t,
+    key: &CStr,
+) -> (wz_capi_pico::z_owned_querier_t, i8) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+    let code = wz_capi_pico::z_declare_querier(
+        z_session_loan(session),
+        &mut querier,
+        z_view_keyexpr_loan(&ke),
+        std::ptr::null_mut(),
+    );
+    (querier, code)
+}
+
+/// How many of an entity a session opened under the pico preset holds: the preset's bound, which
+/// the build's own value of the limit holds.
+fn limited(value: wz_session_core::limit_binding::Quota) -> usize {
+    value.most().expect("the pico preset bounds the entity")
+}
+
 #[test]
 fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_when_empty() {
     // SAFETY: every owned value below is made and dropped through the library's own doors, once.
@@ -133,9 +173,11 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             ..Default::default()
         };
         let mut needed = 0usize;
-        let limits = wz_session_core::limits::SessionLimits::defaults();
+        // The pools read a count left at zero against the limits every session of the ABI opens
+        // under, zenoh-pico's preset, and not the build's defaults.
+        let limits = wz_session_core::limits::SessionLimits::PICO_PRESET;
         if limits.max_subscriptions().most().is_none() {
-            // A heap build states no bound, so a subscriber count left at zero has none.
+            // A limit with no bound leaves a subscriber count left at zero with none.
             assert_eq!(
                 wz_ext_object_pool_bytes(&unstated, &mut needed),
                 Z_ERR_CONFIG_INVALID_VALUE
@@ -159,6 +201,8 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             bytes: 2,
             configs: 1,
             payload_bytes: 128,
+            queriers: 1,
+            keyexprs: 1,
             ..Default::default()
         };
         let mut bytes = 0usize;
@@ -192,14 +236,18 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             Z_EINVAL,
             "reserved once"
         );
-        let held_by_plane = usize::from(cfg!(feature = "queryable"))
-            + 2 * usize::from(cfg!(feature = "liveliness"));
-        let reported = 1 + 1 + 1 + held_by_plane + 2 + configs_reported;
+        // An entity lies in a pool only on the tokio engine: on the cooperative engine it lies in
+        // its session's own arena, as many as the session's limit admits, and no pool holds it.
+        let pooled = usize::from(cfg!(feature = "engine-tokio"));
+        let held_by_plane = pooled
+            * (usize::from(cfg!(feature = "queryable"))
+                + 2 * usize::from(cfg!(feature = "liveliness"))
+                + usize::from(cfg!(feature = "query")));
+        // The session, the publisher and the subscriber where they are pooled, the planes', the
+        // two payloads, the declared key expression and the config.
+        let reported = 1 + 2 * pooled + held_by_plane + 2 + 1 + configs_reported;
         assert_eq!(slots(), reported);
-        let laid: usize = classes()
-            .iter()
-            .map(|class| class.slots * class.slot_bytes)
-            .sum();
+        let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
             laid + (1 - configs_reported) * config_slot + area,
             bytes,
@@ -261,21 +309,90 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert!(!z_internal_session_check(&second_session));
         assert_eq!(in_use(), 3);
 
-        // ARM 8: the one publisher's place is taken; a second declaration is refused, and the
-        // place of an undeclared one is taken again.
-        let (mut declared, code) = publisher(&session, c"wz/pool/a");
-        assert_eq!(code, Z_OK);
+        // ARM 8: each publisher's place is taken, the pool's one on the tokio engine and on the
+        // cooperative engine those of the session's own arena, as many as its limit admits, which
+        // no pool holds or counts; one more declaration is refused, and the place of an
+        // undeclared one is taken again.
+        let publishers = if pooled == 1 {
+            1
+        } else {
+            limited(wz_session_core::limits::SessionLimits::PICO_PRESET.max_publishers())
+        };
+        let mut declared: Vec<z_owned_publisher_t> = (0..publishers)
+            .map(|_| {
+                let (declared, code) = publisher(&session, c"wz/pool/a");
+                assert_eq!(code, Z_OK);
+                declared
+            })
+            .collect();
         let (refused_publisher, code) = publisher(&session, c"wz/pool/b");
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert!(!z_internal_publisher_check(&refused_publisher));
-        z_publisher_drop(z_publisher_move(&mut declared));
-        let (mut redeclared, code) = publisher(&session, c"wz/pool/b");
+        let mut undeclared = declared.pop().expect("a declared publisher");
+        z_publisher_drop(z_publisher_move(&mut undeclared));
+        let (redeclared, code) = publisher(&session, c"wz/pool/b");
         assert_eq!(code, Z_OK);
-        assert_eq!(in_use(), 4);
+        declared.push(redeclared);
+        assert_eq!(in_use(), 3 + pooled);
+
+        // ARM 8b: the one declared key expression's place is taken; a second declaration is
+        // refused, left null, and the place of an undeclared one goes back.
+        let (mut key, code) = declared_keyexpr(&session, c"wz/pool/key/a");
+        assert_eq!(code, Z_OK);
+        assert_eq!(in_use(), 4 + pooled);
+        let (refused_key, code) = declared_keyexpr(&session, c"wz/pool/key/b");
+        assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(!wz_capi_pico::z_internal_keyexpr_check(&refused_key));
+        assert_eq!(
+            wz_capi_pico::z_undeclare_keyexpr(
+                z_session_loan(&session),
+                wz_capi_pico::z_keyexpr_move(&mut key)
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            in_use(),
+            3 + pooled,
+            "an undeclared key gives its place back"
+        );
+
+        // ARM 8c: the queriers' places likewise.
+        #[cfg(feature = "query")]
+        {
+            let queriers = if pooled == 1 {
+                1
+            } else {
+                limited(wz_session_core::limits::SessionLimits::PICO_PRESET.max_queriers())
+            };
+            let mut held: Vec<wz_capi_pico::z_owned_querier_t> = (0..queriers)
+                .map(|_| {
+                    let (querier, code) = declared_querier(&session, c"wz/pool/ask/a");
+                    assert_eq!(code, Z_OK);
+                    querier
+                })
+                .collect();
+            assert_eq!(in_use(), 3 + 2 * pooled);
+            let (refused_querier, code) = declared_querier(&session, c"wz/pool/ask/b");
+            assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+            assert!(!wz_capi_pico::z_internal_querier_check(&refused_querier));
+            for querier in &mut held {
+                assert_eq!(
+                    wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(querier)),
+                    Z_OK
+                );
+            }
+            assert_eq!(
+                in_use(),
+                3 + pooled,
+                "an undeclared querier gives its place back"
+            );
+        }
 
         // ARM 9: everything let go, the pools are given up, and the next object reserves the
         // build's pools again: three payloads fit where the program's pools held two.
-        z_publisher_drop(z_publisher_move(&mut redeclared));
+        for publisher in &mut declared {
+            z_publisher_drop(z_publisher_move(publisher));
+        }
         z_session_drop(z_session_move(&mut session));
         z_bytes_drop(z_bytes_move(&mut first));
         z_bytes_drop(z_bytes_move(&mut again));

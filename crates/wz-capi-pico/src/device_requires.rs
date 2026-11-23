@@ -104,9 +104,7 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
     // with `is_group_endpoint`; a build with neither the tokio engine nor `peer` refused every
     // listener above.
     #[cfg(any(feature = "engine-tokio", feature = "peer"))]
-    let joins_a_group = listen
-        .as_deref()
-        .is_some_and(crate::session::is_group_endpoint);
+    let joins_a_group = listen.is_some_and(crate::session::is_group_endpoint);
     #[cfg(not(any(feature = "engine-tokio", feature = "peer")))]
     let joins_a_group = false;
     #[cfg(not(feature = "multicast-transport"))]
@@ -125,11 +123,11 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
             )),
             _ => Scouting::Off,
         };
-    let (connect, listen, groups): (Vec<String>, Vec<String>, Vec<String>) = match listen {
+    let (connect, listen, groups): (Vec<String>, Vec<String>, Vec<&str>) = match listen {
         Some(group) if joins_a_group => (Vec::new(), Vec::new(), vec![group]),
         listen => (
-            connect.into_iter().collect(),
-            listen.into_iter().collect(),
+            connect.into_iter().map(String::from).collect(),
+            listen.into_iter().map(String::from).collect(),
             Vec::new(),
         ),
     };
@@ -137,7 +135,7 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
         connect: &connect,
         dial_must_succeed: true,
         listen: &listen,
-        groups: groups.iter().map(String::as_str).collect(),
+        groups,
         bind_must_succeed: true,
         scouting,
         reads_files: !files.is_empty(),
@@ -187,8 +185,13 @@ mod tests {
     #[cfg(feature = "config-policy")]
     #[test]
     fn a_config_whose_policies_the_open_refuses_is_refused() {
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(refused) = crate::config_policy::PolicyStatements::refused_by_the_resolution()
+        else {
+            return;
+        };
         let mut cfg = config(&[(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447")]);
-        cfg.policies = crate::config_policy::PolicyStatements::unchecked("no-such-policy", "on");
+        cfg.policies = refused;
         let (code, reason) = requirement_of(&cfg).unwrap_err();
         assert_eq!(code, crate::result::Z_ERR_CONFIG_INVALID_VALUE);
         assert!(reason.contains("policy"), "{reason}");

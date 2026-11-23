@@ -173,24 +173,22 @@ impl Config {
     /// have, a value the build leaves out of the policy's domain, a policy only the build decides.
     /// A refused statement changes nothing.
     pub fn state_policy(&mut self, policy: &str, value: &str) -> ZResult<()> {
-        let statement = [wz_session_core::policy_document::Statement::new(
-            policy, value,
-        )];
-        judge_alone(wz_session_core::policy_document::Overrides {
-            profile: None,
-            statements: &statement,
-            limits: &[],
+        use wz_session_core::policy_document::{
+            Origin, Overrides, Refusal, Stated as LayerStated, Statement,
+        };
+
+        let statement = Statement::new(policy, value);
+        judge_alone(Overrides {
+            statements: LayerStated::Read(&[statement]),
+            ..Overrides::default()
         })?;
-        match self
-            .1
-            .policies
-            .iter_mut()
-            .find(|(stated, _)| stated == policy)
-        {
-            Some((_, held)) => *held = value.to_owned(),
-            None => self.1.policies.push((policy.to_owned(), value.to_owned())),
-        }
-        Ok(())
+        self.1.policies.state(statement).map_err(|reason| {
+            let refusal = Refusal {
+                layer: Origin::Api,
+                reason,
+            };
+            zerror!("{refusal}").into()
+        })
     }
 
     /// Name the profile the open starts from, in place of the one the document's `wz` member
@@ -201,8 +199,7 @@ impl Config {
     pub fn state_profile(&mut self, profile: &str) -> ZResult<()> {
         judge_alone(wz_session_core::policy_document::Overrides {
             profile: Some(profile),
-            statements: &[],
-            limits: &[],
+            ..wz_session_core::policy_document::Overrides::default()
         })?;
         self.1.profile = Some(profile.to_owned());
         Ok(())
@@ -277,8 +274,9 @@ pub(crate) struct WzStatements {
     member: Vec<Stated>,
     /// The profile the open's caller names.
     profile: Option<String>,
-    /// The policies the open's caller states, each once, in the order first stated.
-    policies: Vec<(String, String)>,
+    /// The policies the open's caller states, by the build's table.
+    #[cfg(feature = "engine-tokio")]
+    policies: wz_session_core::policy_document::PolicySet,
 }
 
 impl WzStatements {
@@ -364,19 +362,14 @@ impl WzStatements {
     fn resolve(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         use wz_session_core::{
             policy::SessionPolicy,
-            policy_document::{resolve_document_under, Overrides, Statement},
+            policy_document::{resolve_document_under, Overrides, Stated as LayerStated},
         };
 
         let tree = self.tree();
-        let statements: Vec<Statement<'_>> = self
-            .policies
-            .iter()
-            .map(|(policy, value)| Statement::new(policy.as_str(), value.as_str()))
-            .collect();
         let overrides = Overrides {
             profile: self.profile.as_deref(),
-            statements: &statements,
-            limits: &[],
+            statements: LayerStated::Set(&self.policies),
+            ..Overrides::default()
         };
         resolve_document_under(SessionPolicy::defaults(), &tree, overrides)
             .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())
@@ -1212,7 +1205,8 @@ mod tests {
             .id();
         config.state_policy("key-set", held).unwrap();
         config.state_policy("key-set", held).unwrap();
-        assert_eq!(config.1.policies, [("key-set".to_owned(), held.to_owned())]);
+        assert_eq!(config.1.policies.value_of("key-set"), Some(held));
+        assert_eq!(config.1.policies.len(), 1);
     }
 
     #[test]
