@@ -1649,8 +1649,12 @@ impl SampleSink for SubscriberRow {
 }
 
 /// `wire` as the link of `actions` names the key `keyexpr`: the link's key-wire form decides,
-/// and the declared form keeps `wire` as the ABI made it (`shared-key-ids`).
-#[cfg(feature = "shared-key-ids")]
+/// and the declared form keeps `wire` as the ABI made it (`shared-key-ids`). Only a get names
+/// its key by the ABI's form still.
+#[cfg(all(
+    feature = "shared-key-ids",
+    any(feature = "query", feature = "liveliness-get")
+))]
 fn on_link<'w, C: ClockSource + 'static>(
     actions: &McuActions<C>,
     keyexpr: &str,
@@ -1683,7 +1687,10 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 }
 
 /// A build without the shared key ids names every key on every link as the ABI made it.
-#[cfg(not(feature = "shared-key-ids"))]
+#[cfg(all(
+    not(feature = "shared-key-ids"),
+    any(feature = "query", feature = "liveliness-get")
+))]
 #[inline(always)]
 fn on_link<'w, C: ClockSource + 'static>(
     _actions: &McuActions<C>,

@@ -3632,14 +3632,14 @@ mod tests {
     #[test]
     fn a_link_names_a_key_by_the_declaration_it_holds() {
         let (actions, _driver) = crate::test_fixtures::recording_actions();
-        actions.send_declare_keyexpr(7, "home/").expect("declared");
+        actions.send_declare_keyexpr(7, "home").expect("declared");
         let named = actions.named_by("home/temp", 7).expect("a key");
         assert_eq!(named.text(), "home/temp");
         assert_eq!(
             (named.wire().id(), named.wire().suffix()),
-            (7, Some("temp"))
+            (7, Some("/temp"))
         );
-        let whole = actions.named_by("home/", 7).expect("a key");
+        let whole = actions.named_by("home", 7).expect("a key");
         assert_eq!((whole.wire().id(), whole.wire().suffix()), (7, None));
         for (key, id) in [("away/temp", 7), ("home/temp", 99), ("home/temp", 0)] {
             let named = actions.named_by(key, id).expect("a key");
