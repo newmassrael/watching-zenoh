@@ -196,10 +196,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             + 2 * usize::from(cfg!(feature = "liveliness"));
         let reported = 1 + 1 + 1 + held_by_plane + 2 + configs_reported;
         assert_eq!(slots(), reported);
-        let laid: usize = classes()
-            .iter()
-            .map(|class| class.slots * class.slot_bytes)
-            .sum();
+        let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
             laid + (1 - configs_reported) * config_slot + area,
             bytes,

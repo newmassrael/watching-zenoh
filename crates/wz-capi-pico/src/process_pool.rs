@@ -49,9 +49,9 @@
 //!
 //! Each kind of object has a pool of its own, of as many slots as its count: the pool of one kind
 //! never lends a slot to another, so each holds what was stated for it and no more, whatever
-//! another kind of the same size has free. A slot is the smallest of the slot sizes the pools are
-//! reported by that holds its object, or for an object larger than the largest of them (a config
-//! of the build's text) the object's own size. A pool with no free slot refuses the object: the
+//! another kind of the same size has free. A slot is its object's own size, rounded up to the
+//! alignment of a slot: the size classes group the pools for the reports and size no slot. A pool
+//! with no free slot refuses the object: the
 //! call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having made, declared or opened nothing, and the
 //! refusal is counted. Nothing falls back to the heap: when the build's pools cannot be reserved
 //! either, the object is refused the same way. An object let go frees its slot for the next one,
@@ -121,17 +121,20 @@ pub(crate) const fn class_of(size: usize, align: usize) -> Option<usize> {
     None
 }
 
-/// The bytes of each slot of the pool of a `T`: the smallest size class that holds it, or past
-/// the largest class its own size rounded up to the alignment of a slot. Evaluated when the build
-/// is compiled, so an object aligned past a slot fails the build rather than a reservation.
+/// The bytes of each slot of the pool of a `T`: its own size rounded up to the alignment of a
+/// slot, and one alignment for an object of no bytes, as a free slot holds the link to the next. A
+/// kind's pool lends its slots to no other kind, so a slot larger than its object would hold
+/// nothing more. Evaluated when the build is compiled, so an object aligned past a slot fails the
+/// build rather than a reservation.
 const fn slot_size<T>() -> usize {
     let size = core::mem::size_of::<T>();
     if core::mem::align_of::<T>() > SLOT_ALIGN {
         panic!("an object of the ABI is aligned past a slot of the process pools");
     }
-    match class_of(size, 1) {
-        Some(class) => slot_bytes(class),
-        None => size.next_multiple_of(SLOT_ALIGN),
+    if size == 0 {
+        SLOT_ALIGN
+    } else {
+        size.next_multiple_of(SLOT_ALIGN)
     }
 }
 
@@ -422,12 +425,14 @@ struct ClassCount {
     refused: usize,
 }
 
-/// The pools of one slot size together, as the doors report them.
+/// The pools of one size class together, as the doors report them: the class's largest slot, and
+/// the slots of the pools whose slots it holds and their bytes.
 #[cfg(any(test, feature = "object-pool"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClassReport {
     pub(crate) slot_bytes: usize,
     pub(crate) slots: usize,
+    pub(crate) bytes: usize,
     pub(crate) in_use: usize,
     pub(crate) high_water: usize,
     pub(crate) refused: usize,
@@ -762,14 +767,15 @@ impl Pools {
     #[cfg(any(test, feature = "object-pool"))]
     fn report(&self, class: usize) -> ClassReport {
         let count = &self.counts[class];
+        let pools = || {
+            self.pools
+                .iter()
+                .filter(move |pool| count_of(pool.size) == class)
+        };
         ClassReport {
             slot_bytes: slot_bytes(class),
-            slots: self
-                .pools
-                .iter()
-                .filter(|pool| count_of(pool.size) == class)
-                .map(|pool| pool.slots)
-                .sum(),
+            slots: pools().map(|pool| pool.slots).sum(),
+            bytes: pools().map(|pool| pool.slots * pool.size).sum(),
             in_use: count.in_use,
             high_water: count.high_water,
             refused: count.refused,
@@ -1104,12 +1110,15 @@ mod tests {
         assert_eq!(class_of(16, 32), None);
     }
 
-    /// An object larger than the largest class has a slot of its own size, rounded up to the
-    /// alignment of a slot, and is counted after the last class; one a class holds takes the
-    /// class's slot.
+    /// An object takes a slot of its own size, rounded up to the alignment of a slot, whichever
+    /// class reports it; one larger than the largest class is counted after the last class; one of
+    /// no bytes takes the alignment, where a free slot keeps its link.
     #[test]
-    fn an_object_past_the_largest_class_takes_a_slot_of_its_own_size() {
-        assert_eq!(slot_size::<[u8; 100]>(), 128);
+    fn an_object_takes_a_slot_of_its_own_size() {
+        assert_eq!(slot_size::<[u8; 100]>(), 112);
+        assert_eq!(slot_size::<[u8; 112]>(), 112);
+        assert_eq!(slot_size::<()>(), SLOT_ALIGN);
+        assert_eq!(count_of(112), 3, "reported by the class of 128");
         assert_eq!(slot_size::<[u8; 16 * 1024]>(), 16 * 1024);
         assert_eq!(slot_size::<[u8; 16 * 1024 + 1]>(), 16 * 1024 + 16);
         assert_eq!(count_of(16 * 1024), CLASSES - 1);
@@ -1335,6 +1344,27 @@ mod tests {
         assert!(pools.give_back(second));
         assert_eq!(pools.held(), 0);
         assert_eq!(pools.report(2).high_water, 3);
+        assert_eq!(pools.report(0).bytes, 2 * 16);
+        assert_eq!(pools.report(2).bytes, 3 * 64);
+    }
+
+    /// A class reports every pool whose slots it holds, slots of different sizes among them: its
+    /// largest slot, their slots and the bytes they take, which a reader adds up to what the
+    /// reservation took.
+    #[test]
+    fn a_class_reports_the_bytes_of_slots_smaller_than_its_own() {
+        let mut memory = Memory([0; 512]);
+        let plan = plan_of(&[(Kind::Bytes, 2, 48), (Kind::Publisher, 1, 64)]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        let report = pools.report(count_of(48));
+        assert_eq!(count_of(48), count_of(64), "one class holds both");
+        assert_eq!(
+            (report.slot_bytes, report.slots, report.bytes),
+            (64, 3, 2 * 48 + 64)
+        );
+        assert_eq!(plan.slot_bytes(), Ok(report.bytes));
     }
 
     /// Laying the pools writes nothing into their slots; a pool hands out its untouched slots lowest

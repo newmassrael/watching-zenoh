@@ -1913,13 +1913,13 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * object-pool-region.
  *
  * THE POOLS. One per kind of object, of as many slots as its count, each
- * slot the smallest of WZ_EXT_OBJECT_POOL_CLASSES sizes that holds the
- * object (16 bytes, then each twice the one before), or for an object larger
- * than the largest (a config of the build's text) the object's own size. The
- * pool of one kind never lends a slot to another, so each kind holds what was
- * stated for it and no more. wz_ext_object_pool_class reports the pools by
- * slot size, the kinds of one size together; a pool of slots larger than the
- * largest size is reported by none.
+ * slot the object's own size rounded up to 16 bytes. The pool of one kind
+ * never lends a slot to another, so each kind holds what was stated for it
+ * and no more. wz_ext_object_pool_class reports the pools by size class, of
+ * WZ_EXT_OBJECT_POOL_CLASSES classes whose largest slots are 16 bytes, then
+ * each twice the one before: the kinds whose slots a class holds together,
+ * with the bytes their slots take. A pool of slots larger than the largest
+ * class is reported by none.
  *
  * THE PAYLOADS' AREA. The bytes the owned payloads, strings and slices carry
  * lie beside the pools, in one area of payload_bytes bytes: blocks of
@@ -1982,6 +1982,7 @@ typedef struct wz_ext_object_pool_class_t {
   size_t in_use;
   size_t high_water;
   size_t refused;
+  size_t bytes;
 } wz_ext_object_pool_class_t;
 
 /* The bytes the pools of counts take, in out_bytes (0 on every error): the
@@ -2009,10 +2010,13 @@ z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts)
 z_result_t wz_ext_object_pool_place(void *base, size_t len,
                                     const wz_ext_object_pool_counts_t *counts);
 
-/* The pools of slot size class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1)
- * together, in out: the slot size, and while pools are reserved their slots,
- * those in use, the most in use at once and the objects they refused. Z_OK; _Z_ERR_NULL for a NULL out;
- * Z_EINVAL for a class past the last. */
+/* The pools of size class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1) together, in
+ * out: the class's largest slot (slot_bytes; each slot of an object is the
+ * object's own size, rounded up to 16 bytes, so the slots of one class
+ * differ), and while pools are reserved their slots, the bytes those take
+ * (bytes), those in use, the most in use at once and the objects they
+ * refused. Z_OK; _Z_ERR_NULL for a NULL out; Z_EINVAL for a class past the
+ * last. */
 z_result_t wz_ext_object_pool_class(size_t class_index,
                                     wz_ext_object_pool_class_t *out);
 
