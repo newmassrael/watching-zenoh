@@ -131,12 +131,8 @@ where
 {
     // A session that lent its links cells places each in one: past them the link is refused, as
     // one past the session's buffers is, and none is placed on the heap.
-    let driver = match cells {
-        Some(cells) => {
-            crate::link_cells::CellRc::place(cells, driver).map_err(|_| LinkOpenError::Exhausted)?
-        }
-        None => crate::link_cells::CellRc::boxed(driver),
-    };
+    let driver =
+        crate::link_cells::CellRc::in_cells(cells, driver).map_err(|_| LinkOpenError::Exhausted)?;
     Ok(OpenedLink {
         sink: driver.clone().into_sink(),
         pump: driver.into_link(),

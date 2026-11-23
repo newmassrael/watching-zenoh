@@ -2490,12 +2490,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         // The link's actions go in its cell of the session's table, as its gates do below.
         let actions = McuActions::<C>::build(sink, params, self.session_time.clone());
-        let actions: SessionHandle<C> = match &self.actions_cells {
-            Some(cells) => {
-                CellRc::place(cells, actions).map_err(|_| self.cells_exhausted(endpoint))?
-            }
-            None => CellRc::boxed(actions),
-        };
+        let actions: SessionHandle<C> = CellRc::in_cells(self.actions_cells.as_ref(), actions)
+            .map_err(|_| self.cells_exhausted(endpoint))?;
         // The link has its place in the session's admission before the handshake runs, which asks
         // it once the remote's zid is known: a second link to a node the session holds is refused
         // there, with nothing declared over it by either end, and not closed after it came up.
@@ -2575,13 +2571,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let gate: LinkGate<C> = unsafe { RoundGate::new(pump, self.lane.clone(), room) };
         // The gates go in the link's cell of the session's table, as the link's driver goes in
         // one of the stack's: a link past the cells is refused as one past the buffers is.
-        let link = match &self.gate_cells {
-            Some(cells) => {
-                CellRc::place(cells, gate).map_err(|_| self.cells_exhausted(endpoint))?
-            }
-            None => CellRc::boxed(gate),
-        }
-        .into_link();
+        let link = CellRc::in_cells(self.gate_cells.as_ref(), gate)
+            .map_err(|_| self.cells_exhausted(endpoint))?
+            .into_link();
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -2725,7 +2717,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
-    /// stack's buffers is.
+    /// stack's buffers is. Out of line: each part of a link a cell holds is refused by it.
+    #[cold]
+    #[inline(never)]
     fn cells_exhausted(&self, endpoint: Option<&DialEndpoint>) -> OpenError {
         OpenError::Unreachable(EndpointRefusal::new(
             self.endpoint_text(endpoint),
