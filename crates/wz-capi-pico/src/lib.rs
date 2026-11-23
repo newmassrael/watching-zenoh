@@ -464,8 +464,6 @@ pub mod abi;
 #[cfg(not(wz_additional_apart))]
 pub mod additional;
 #[cfg(feature = "admin-space")]
-// Totality debt TD-193 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod admin_space;
 #[cfg(feature = "advanced")]
 pub mod advanced;
