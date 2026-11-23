@@ -2632,8 +2632,6 @@ pub mod supervision {
 // one is healthy. Gated as the machine is. Documented in its own `//!`; see the note at
 // `event_ring`.
 #[cfg(feature = "supervision")]
-// Totality debt TD-125 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod supervisor;
 
 /// SCE-generated stream activation statechart (reception supervision per stream: when a receiver

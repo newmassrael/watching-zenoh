@@ -327,7 +327,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
 | TD-123 | `wz-session-core` | `session_slot` | `arithmetic_side_effects` | 2 | open |
 | TD-124 | `wz-session-core` | `sink` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
-| TD-125 | `wz-session-core` | `supervisor` | `indexing_slicing` | 2 | open |
 | TD-129 | `wz-session-core` | `wire_bincode` | `indexing_slicing`, `arithmetic_side_effects` | 2 | open |
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-135 | `wz-session-core` | `driver_loop` | `indexing_slicing` | 1 | open |
