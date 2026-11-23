@@ -535,14 +535,98 @@ where
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[derive(Clone, Copy)]
 pub struct MulticastTxEncoded<'a> {
-    /// The message's own `ext_qos`: its band, its congestion control, whether it is express.
-    pub qos: crate::sample::QosLevel,
-    /// The channel: the reliable ring, or the best-effort one.
-    pub reliable: bool,
+    /// How the message is framed: its band, channel, congestion control and express flag.
+    pub framing: MulticastTxFraming,
     /// The most the body encodes to.
     pub size: usize,
     /// The encoder of the network message the frame carries.
     pub body: &'a crate::frame_encode::BodyEncoder<'a>,
+}
+
+/// How a message lent for the call is framed onto a group, read as its owned form is
+/// ([`frame_meta`]): the three ways a group's messages take their band.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MulticastTxFraming {
+    /// A message whose own `ext_qos` names its band: a query, a reply.
+    OwnBand {
+        /// The message's `ext_qos`.
+        qos: crate::sample::QosLevel,
+        /// The channel: the reliable ring, or the best-effort one.
+        reliable: bool,
+    },
+    /// A publication: the band its publisher chose, and its congestion control and express flag
+    /// those of its own `ext_qos`.
+    Publication {
+        /// The publication's `ext_qos`.
+        qos: crate::sample::QosLevel,
+        /// The channel.
+        reliable: bool,
+        /// The band its publisher chose.
+        priority: Priority,
+    },
+    /// A declaration or an interest: the DEFAULT band and no frame `ext_qos`, reliable, and
+    /// droppable as its own `ext_qos` says.
+    Control {
+        /// The message's `ext_qos`.
+        qos: crate::sample::QosLevel,
+    },
+}
+
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+impl MulticastTxFraming {
+    fn meta(self, params: &crate::multicast_params::MulticastParams) -> FrameMeta {
+        match self {
+            Self::OwnBand { qos, reliable } => qos_frame_meta(qos, reliable, params),
+            Self::Publication {
+                qos,
+                reliable,
+                priority,
+            } => publication_frame_meta(qos, reliable, priority, params),
+            Self::Control { qos } => control_frame_meta(qos),
+        }
+    }
+}
+
+/// How a publication is framed: the band its publisher chose, clamped as every message's is, and
+/// its congestion control and express flag those of its own `ext_qos`.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+fn publication_frame_meta(
+    qos: crate::sample::QosLevel,
+    reliable: bool,
+    priority: Priority,
+    params: &crate::multicast_params::MulticastParams,
+) -> FrameMeta {
+    // R311y227 — clamp the app / routing band to DEFAULT unless the group negotiated `is_qos`
+    // (else a non-qos / pico receiver bails "Unknown priority"). Under `transport-qos` on a qos
+    // group the clamped band selects the per-priority TX conduit AND rides the frame `ext_qos`.
+    let eff = effective_mcast_priority(priority, params.is_qos);
+    FrameMeta {
+        priority: eff,
+        ext_qos: frame_ext_qos(eff),
+        reliable,
+        droppable: is_droppable(reliable, qos.congestion()),
+        express: qos.is_express(),
+    }
+}
+
+/// How a declaration or an interest is framed: DEFAULT-band, no frame `ext_qos`, reliable, and
+/// droppable as its own `ext_qos` says.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-push",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    )
+))]
+fn control_frame_meta(qos: crate::sample::QosLevel) -> FrameMeta {
+    FrameMeta {
+        priority: Priority::DEFAULT,
+        ext_qos: None,
+        reliable: true,
+        droppable: is_droppable(true, qos.congestion()),
+        express: false,
+    }
 }
 
 /// What a push of a message with `qos` on the channel `reliable` onto a group of `params` must
@@ -572,7 +656,7 @@ pub fn multicast_tx_encoded_conduit(
     message: &MulticastTxEncoded<'_>,
     params: &crate::multicast_params::MulticastParams,
 ) -> Priority {
-    qos_frame_meta(message.qos, message.reliable, params).priority
+    message.framing.meta(params).priority
 }
 
 /// [`multicast_tx_push`] (or [`multicast_tx_push_batched`] inside a window) of a message lent for
@@ -592,7 +676,7 @@ where
     Q: MulticastTxQueue + ?Sized,
 {
     push_frame(
-        qos_frame_meta(message.qos, message.reliable, params),
+        message.framing.meta(params),
         message.size,
         message.body,
         tx_sn,
@@ -613,6 +697,14 @@ pub struct MulticastTxMeta(FrameMeta);
 
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 impl MulticastTxMeta {
+    /// How the lent `message` is framed onto a group of `params`.
+    pub fn of_encoded(
+        message: &MulticastTxEncoded<'_>,
+        params: &crate::multicast_params::MulticastParams,
+    ) -> Self {
+        Self(message.framing.meta(params))
+    }
+
     /// How `item` is framed onto a group of `params`.
     pub fn of_item(
         item: &MulticastTxItem,
@@ -819,6 +911,208 @@ where
     )
 }
 
+/// The bytes `body` encodes to, or `None` when its encoder refuses the message.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+fn encoded_size(body: &crate::frame_encode::BodyEncoder<'_>) -> Option<usize> {
+    #[cfg(feature = "transport-tx-lend")]
+    let size = crate::tx_buf::encoded_len(body);
+    // A build whose encoders write a vector counts by writing one.
+    #[cfg(not(feature = "transport-tx-lend"))]
+    let size = {
+        let mut bytes = Vec::new();
+        match body(&mut crate::tx_buf::TxSink::new(&mut bytes)) {
+            Ok(()) => bytes.len(),
+            Err(_) => 0,
+        }
+    };
+    (size > 0).then_some(size)
+}
+
+/// `f` handed `declaration`, a declaration written from its parts
+/// ([`crate::lent_control`]), as a message lent for the call: framed as the owned `Declare` is.
+/// `None` when its encoder refuses it, with `f` not called.
+#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
+pub fn multicast_tx_declaration<S, R>(
+    declaration: &S,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R>
+where
+    S: wz_codecs::declare::DeclareSource,
+{
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
+        wz_codecs::declare::DeclareWire::encode_source(declaration, sink)
+    };
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::Control {
+            qos: crate::declare_ext_qos::QOS_DECLARE,
+        },
+        size,
+        body: &body,
+    }))
+}
+
+/// `f` handed `interest`, an interest written from its parts ([`crate::lent_control`]), as a
+/// message lent for the call: framed as the owned `Interest` is. `None` when its encoder refuses
+/// it, with `f` not called.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_interest<R>(
+    interest: &wz_codecs::lent::Interest<'_>,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        // An interest written from its parts carries no `ext_qos` (`lent_control::interest_exact`).
+        framing: MulticastTxFraming::Control {
+            qos: crate::sample::QosLevel::DEFAULT,
+        },
+        size,
+        body: &body,
+    }))
+}
+
+/// [`crate::declare_build::build_group_announcement`] written from its parts and handed to `f` as a
+/// message lent for the call ([`multicast_tx_declaration`]); the builder's errors, and
+/// `FeatureDisabled` for a kind this build has no declaration plane of.
+#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
+pub fn multicast_tx_group_announcement<R>(
+    what: crate::declare_form::GroupDeclaration,
+    id: u64,
+    key: crate::declare_form::GroupKey<'_>,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Result<R, crate::send_wire_error::SendWireError> {
+    use crate::declare_form::GroupDeclaration;
+    use crate::send_wire_error::SendWireError;
+    let crate::declare_form::GroupKey { mapping_id, suffix } = key;
+    let refused = SendWireError::Codec(sce_forge_runtime::codec::CodecError::LengthOutOfRange);
+    match what {
+        #[cfg(feature = "declare-subscriber")]
+        GroupDeclaration::Subscriber => {
+            let declaration = crate::lent_control::subscriber_declaration(id, mapping_id, suffix)
+                .map_err(SendWireError::Codec)?;
+            multicast_tx_declaration(&declaration, f).ok_or(refused)
+        }
+        #[cfg(feature = "declare-queryable")]
+        GroupDeclaration::Queryable { complete } => {
+            let declaration = crate::lent_control::queryable_declaration(
+                id,
+                mapping_id,
+                suffix,
+                crate::queryable_info::QueryableInfo::local(complete),
+            )
+            .map_err(SendWireError::Codec)?;
+            multicast_tx_declaration(&declaration, f).ok_or(refused)
+        }
+        #[cfg(feature = "liveliness-token")]
+        GroupDeclaration::Token => {
+            let declaration = crate::lent_control::token_declaration(id, mapping_id, suffix)
+                .map_err(SendWireError::Codec)?;
+            multicast_tx_declaration(&declaration, f).ok_or(refused)
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = (id, mapping_id, suffix, f, refused);
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+}
+
+/// The most bytes the `ext_keyexpr` body of a retraction takes: its inner header, a ten-byte id
+/// and a key of the build's longest.
+#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
+const RETRACTION_KEY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
+
+/// [`crate::declare_build::build_group_retraction`] written from its parts, its key's
+/// `ext_keyexpr` body on the stack, and handed to `f` as a message lent for the call; refused
+/// with `LengthOutOfRange` for a key past the build's longest, and `FeatureDisabled` for a kind
+/// this build has no declaration plane of.
+#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
+pub fn multicast_tx_group_retraction<R>(
+    what: crate::declare_form::GroupDeclaration,
+    id: u64,
+    key: crate::declare_form::GroupKey<'_>,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Result<R, crate::send_wire_error::SendWireError> {
+    use crate::declare_form::GroupDeclaration;
+    use crate::send_wire_error::SendWireError;
+    let refused = SendWireError::Codec(sce_forge_runtime::codec::CodecError::LengthOutOfRange);
+    let mut buf = [0u8; RETRACTION_KEY_BYTES];
+    let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(
+        key.mapping_id,
+        key.suffix.unwrap_or(""),
+        &mut buf,
+    )
+    .ok_or(refused)?;
+    let named = buf.get(..len).ok_or(refused)?;
+    match what {
+        #[cfg(feature = "declare-subscriber")]
+        GroupDeclaration::Subscriber => multicast_tx_declaration(
+            &crate::lent_control::undeclare_subscriber_declaration(id, Some(named)),
+            f,
+        )
+        .ok_or(refused),
+        #[cfg(feature = "declare-queryable")]
+        GroupDeclaration::Queryable { .. } => multicast_tx_declaration(
+            &crate::lent_control::undeclare_queryable_declaration(id, Some(named)),
+            f,
+        )
+        .ok_or(refused),
+        #[cfg(feature = "liveliness-token")]
+        GroupDeclaration::Token => multicast_tx_declaration(
+            &crate::lent_control::undeclare_token_declaration(id, Some(named)),
+            f,
+        )
+        .ok_or(refused),
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = (id, named, f);
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+}
+
+/// A Put or a Del a group session publishes, written from its parts
+/// ([`crate::lent_push::write_publication`]) and handed to `f` as a message lent for the call:
+/// framed as the owned Push of the same publication is, on `priority` and the channel
+/// `reliable`. `None` when the writer declines the publication (a timestamp stack, which it does
+/// not carry) or refuses it, with `f` not called: the caller sends the owned Push.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+// The key, the kind and value, the metadata, the channel and band, and what is done with it.
+#[allow(clippy::too_many_arguments)]
+pub fn multicast_tx_publication<R>(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    kind: crate::sample::SampleKind,
+    value: &[u8],
+    meta: &crate::metadata::PushMetadata,
+    reliable: bool,
+    priority: Priority,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    #[cfg(feature = "pubsub-ts-stack")]
+    if meta.ts_stack.is_some() {
+        return None;
+    }
+    #[cfg(feature = "pubsub-qos")]
+    let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
+    #[cfg(not(feature = "pubsub-qos"))]
+    let qos = crate::sample::QosLevel::DEFAULT;
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
+        crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
+    };
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::Publication {
+            qos,
+            reliable,
+            priority,
+        },
+        size,
+        body: &body,
+    }))
+}
+
 /// [`multicast_tx_push`] with or without a batch window ([`multicast_tx_push_batched`]).
 #[cfg(all(
     feature = "alloc",
@@ -1002,25 +1296,17 @@ fn frame_meta(
             reliable,
             priority,
         } => {
-            // R311y227 — clamp the app / routing band to DEFAULT unless the group
-            // negotiated `is_qos` (else a non-qos / pico receiver bails "Unknown
-            // priority"). Under `transport-qos` on a qos group the clamped `eff`
-            // selects the per-priority TX conduit AND rides the frame `ext_qos`;
-            // the fragment re-frame re-emits that SAME `ext_qos` and mints its
-            // follow-ons on the SAME conduit. `None` / DEFAULT is byte-identical
-            // to the pre-qos wire.
-            let eff = effective_mcast_priority(*priority, params.is_qos);
             // R2928 — the congestion control comes off the Push's own ext_qos,
             // as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
-            let qos = crate::declare_ext_qos::read_push_qos(push);
-            FrameMeta {
-                priority: eff,
-                ext_qos: frame_ext_qos(eff),
-                reliable: *reliable,
-                droppable: is_droppable(*reliable, qos.congestion()),
-                express: qos.is_express(),
-            }
+            // The fragment re-frame re-emits the same frame `ext_qos` and mints its follow-ons
+            // on the same conduit; `None` / DEFAULT is byte-identical to the pre-qos wire.
+            publication_frame_meta(
+                crate::declare_ext_qos::read_push_qos(push),
+                *reliable,
+                *priority,
+                params,
+            )
         }
         // A query's band comes off its own `ext_qos`, clamped as a Response's is; it rides the
         // reliable ring, as the unicast query does.
@@ -1069,16 +1355,9 @@ fn frame_meta(
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => declare_frame_meta(declare),
         #[cfg(feature = "codec-push")]
-        MulticastTxItem::Interest { interest } => FrameMeta {
-            priority: Priority::DEFAULT,
-            ext_qos: None,
-            reliable: true,
-            droppable: is_droppable(
-                true,
-                crate::declare_ext_qos::read_interest_qos(interest).congestion(),
-            ),
-            express: false,
-        },
+        MulticastTxItem::Interest { interest } => {
+            control_frame_meta(crate::declare_ext_qos::read_interest_qos(interest))
+        }
     }
 }
 
@@ -1093,16 +1372,7 @@ fn frame_meta(
     )
 ))]
 fn declare_frame_meta(declare: &crate::transport_profile::owned::DeclareOwned) -> FrameMeta {
-    FrameMeta {
-        priority: Priority::DEFAULT,
-        ext_qos: None,
-        reliable: true,
-        droppable: is_droppable(
-            true,
-            crate::declare_ext_qos::read_declare_qos(declare).congestion(),
-        ),
-        express: false,
-    }
+    control_frame_meta(crate::declare_ext_qos::read_declare_qos(declare))
 }
 
 /// R2937 — the conduit a push of `item` onto a group of `params` mints on:
@@ -2457,8 +2727,10 @@ mod push_tests {
         let push = crate::push_build::build_push_literal("k", b"lent").unwrap();
         let body = crate::frame_encode::push_body(&push);
         let lent = MulticastTxEncoded {
-            qos: crate::declare_ext_qos::read_push_qos(&push),
-            reliable: true,
+            framing: MulticastTxFraming::OwnBand {
+                qos: crate::declare_ext_qos::read_push_qos(&push),
+                reliable: true,
+            },
             size: multicast_tx_bytes(&owned),
             body: &body,
         };

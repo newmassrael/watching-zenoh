@@ -65,15 +65,6 @@ use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::tx_deadline::PushOutcome;
 
-/// Why [`GroupTxStage::push_encoded`] took nothing of a message lent for the call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LentPushRefused {
-    /// Another push holds the conduits: the message was pushed from inside that push's wait for
-    /// room, and a message lent for the call cannot be kept for their release as an owned one
-    /// is. The caller sends it again once that push returns, or gives it up.
-    Reentrant,
-}
-
 /// What a producer that may wait for room does while the lane its message takes is full: the
 /// host runs its tasks, the group's pump among them, which writes what the group's socket takes;
 /// the socket is waited on; and the wait is spent on the host's clock.
@@ -617,19 +608,19 @@ impl GroupTxStage {
     }
 
     /// Push `message`, a message of the session lent for the call (its body written by its encoder
-    /// where the frame is built), as [`Self::push`] pushes an owned one. A message lent for the
-    /// call cannot be kept for the release of the conduits another push holds, as an owned one is:
-    /// pushed while they are held (from inside that push's wait for room), it is refused
-    /// ([`LentPushRefused::Reentrant`]) with nothing minted, queued or counted, and the caller
-    /// decides what becomes of it.
+    /// where the frame is built), as [`Self::push`] pushes an owned one. Pushed while another push
+    /// holds the conduits (from inside that push's wait for room), its body is kept encoded and it
+    /// is framed when they are let go, as an owned one is; one the kept storage has no room for is
+    /// a congestion drop of its lane, counted.
     pub fn push_encoded(
         &self,
         message: &MulticastTxEncoded<'_>,
         pace: &dyn GroupTxPace,
-    ) -> Result<PushOutcome, LentPushRefused> {
+    ) -> PushOutcome {
         let inner = &*self.inner;
         let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            return Err(LentPushRefused::Reentrant);
+            let meta = MulticastTxMeta::of_encoded(message, &inner.params);
+            return self.stage(meta, message.size, message.body, false);
         };
         let conduit = multicast_tx_encoded_conduit(message, &inner.params);
         let params = &inner.params;
@@ -644,7 +635,7 @@ impl GroupTxStage {
         );
         drop(conduits);
         self.push_deferred();
-        Ok(outcome)
+        outcome
     }
 
     /// Put `item`, a reply, on the stage without waiting, whatever its lane holds, counted on the
@@ -1335,7 +1326,7 @@ mod tests {
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
         multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxDatagram,
-        MulticastTxEncoded, MulticastTxItem,
+        MulticastTxEncoded, MulticastTxFraming, MulticastTxItem,
     };
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::qos::Priority;
@@ -1344,7 +1335,7 @@ mod tests {
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
-    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, Lanes, LentPushRefused, Record};
+    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, Lanes, Record};
     use crate::group_drive::MulticastPump;
     use wz_session_core::limits::MaxMulticastRepliesHeld;
 
@@ -1564,8 +1555,10 @@ mod tests {
         let push = wz_session_core::lent_push::literal_put("demo/stage", b"first").expect("a put");
         let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| push.encode(sink);
         let message = |congestion: CongestionControl| MulticastTxEncoded {
-            qos: wz_session_core::sample::QosLevel::DEFAULT.with_congestion(congestion),
-            reliable: true,
+            framing: MulticastTxFraming::OwnBand {
+                qos: wz_session_core::sample::QosLevel::DEFAULT.with_congestion(congestion),
+                reliable: true,
+            },
             size: 64,
             body: &body,
         };
@@ -1578,7 +1571,7 @@ mod tests {
         freeing.writable = true;
         assert_eq!(
             stage.push_encoded(&message(CongestionControl::Block), &freeing),
-            Ok(PushOutcome::Pushed)
+            PushOutcome::Pushed
         );
         assert!(freeing.passes.get() > 0, "it waited for the writer");
 
@@ -1588,7 +1581,7 @@ mod tests {
         let host = FullHost::new(&nothing);
         assert_eq!(
             stage.push_encoded(&message(CongestionControl::Block), &host),
-            Ok(PushOutcome::Congested)
+            PushOutcome::Congested
         );
         assert_eq!(host.now_us.get(), params.tx_queue.wait_before_close_us);
         assert_eq!(stage.drops(Priority::DEFAULT), 1);
@@ -1598,7 +1591,7 @@ mod tests {
         let host = FullHost::new(&nothing);
         assert_eq!(
             stage.push_encoded(&message(CongestionControl::Drop), &host),
-            Ok(PushOutcome::Congested)
+            PushOutcome::Congested
         );
         assert_eq!(host.now_us.get(), params.tx_queue.wait_before_drop_us);
         assert_eq!(stage.drops(Priority::DEFAULT), 1);
@@ -1677,10 +1670,10 @@ mod tests {
     }
 
     /// A message lent for the call is put on its lane as an owned one is; one pushed while another
-    /// push holds the conduits, which cannot be kept for their release, is refused to its caller,
-    /// is counted as no drop, and leaves nothing on the lanes.
+    /// push holds the conduits is kept encoded and framed behind it once they are let go, with no
+    /// drop counted.
     #[test]
-    fn a_lent_message_is_queued_and_one_pushed_inside_another_push_is_refused() {
+    fn a_lent_message_is_queued_and_one_pushed_inside_another_push_is_kept() {
         let params = params();
         let stage = GroupTxStage::new(&params);
         let nothing = || {};
@@ -1688,35 +1681,26 @@ mod tests {
         let push = wz_session_core::lent_push::literal_put("demo/stage", b"first").expect("a put");
         let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| push.encode(sink);
         let lent = MulticastTxEncoded {
-            qos: wz_session_core::sample::QosLevel::DEFAULT,
-            reliable: true,
+            framing: MulticastTxFraming::OwnBand {
+                qos: wz_session_core::sample::QosLevel::DEFAULT,
+                reliable: true,
+            },
             size: 64,
             body: &body,
         };
-        assert_eq!(stage.push_encoded(&lent, &host), Ok(PushOutcome::Pushed));
-        let held = stage.inner.conduits.borrow_mut();
-        assert_eq!(
-            stage.push_encoded(&lent, &host),
-            Err(LentPushRefused::Reentrant)
-        );
-        drop(held);
-        assert_eq!(
-            stage.drops(multicast_tx_encoded_conduit(&lent, &params)),
-            0,
-            "a refusal is the caller's to answer, and no drop"
-        );
-        let datagram = stage.take().expect("the lent message is on its lane");
-        assert!(datagram.bytes.ends_with(b"first"));
-        assert!(
-            stage.take().is_none(),
-            "the one pushed inside another push left nothing"
-        );
+        assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Pushed);
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Pushed);
+        }
+        stage.push_deferred();
+        assert_eq!(stage.drops(multicast_tx_encoded_conduit(&lent, &params)), 0);
+        let first = stage.take().expect("the lent message is on its lane");
+        let kept = stage.take().expect("the kept one is framed behind it");
+        assert!(first.bytes.ends_with(b"first") && kept.bytes.ends_with(b"first"));
+        assert_eq!((first.sn, kept.sn), (0, 1));
     }
 
-    /// A JOIN advertises the sequence numbers the socket took, not the ones minted: three puts
-    /// are minted before the first step, the socket takes one of them, and the beacon of the next
-    /// step, sent once a second one is written, advertises the third as the next to come although
-    /// all three were minted.
     #[test]
     fn the_join_advertises_what_the_socket_took_and_not_what_was_minted() {
         let wire = Rc::new(RefCell::new(Wire {
