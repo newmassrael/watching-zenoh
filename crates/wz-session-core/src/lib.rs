@@ -2058,8 +2058,6 @@ pub mod reply_stage;
 /// The per-session half of what the observer used to hold process-wide; the
 /// session slot owns one under `session-slot`.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-100 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod peer_tables;
 
 // The storage plane is the server layer's, in the wz-storage crate (server-layer split,
