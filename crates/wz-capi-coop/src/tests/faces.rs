@@ -44,6 +44,19 @@ fn a_session_reports_the_face_it_stands_on() {
     assert!(link.group.is_none(), "a unicast link");
 }
 
+/// A watch asked of a closed session is refused as closed and its sink let go of: no face comes up
+/// on it to tell.
+#[test]
+fn a_closed_session_refuses_a_face_watch() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    wz_capi_port::SessionDrive::close(&*engine);
+    let sink: wz_session_core::face::FaceEventSink = Arc::new(|_kind, _face| {});
+    let held = Arc::downgrade(&sink);
+    assert_eq!(engine.watch_faces(sink), Err(wz_capi_port::Refusal::Closed));
+    assert!(held.upgrade().is_none(), "the refused sink is let go of");
+}
+
 /// A watcher is told when the face goes and when the link dialled again brings one up, in that
 /// order and with what the face was. The face the open brought up is no event to a watcher that
 /// came after it. The sink runs with the session free: it lists the faces from inside the event.
@@ -60,14 +73,16 @@ fn a_watcher_is_told_of_the_face_lost_and_the_one_dialled_again() {
     let told: Told = Arc::default();
     let into = told.clone();
     let reach = engine.clone();
-    let id = engine.watch_faces(Arc::new(move |kind, face| {
-        into.lock().unwrap().push((
-            kind,
-            face.zid[0],
-            face.links.len(),
-            reach.face_snapshots().len(),
-        ));
-    }));
+    let id = engine
+        .watch_faces(Arc::new(move |kind, face| {
+            into.lock().unwrap().push((
+                kind,
+                face.zid[0],
+                face.links.len(),
+                reach.face_snapshots().len(),
+            ));
+        }))
+        .expect("an open session watches its faces");
     assert!(
         told.lock().unwrap().is_empty(),
         "CONTROL: the face the open brought up is no event to a later watcher"

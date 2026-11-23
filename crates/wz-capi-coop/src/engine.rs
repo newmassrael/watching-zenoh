@@ -5514,20 +5514,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     /// Each group's session sends its JOIN at its next step, which this call takes, as the tokio
     /// engine's group sends one at once.
     #[cfg(feature = "group")]
-    fn send_join_on_groups(&self) -> usize {
-        let Some(mut guard) = self.live() else {
-            return 0;
-        };
+    fn send_join_on_groups(&self) -> Result<usize, Declined> {
+        let mut guard = self.live().ok_or(Declined::Closed)?;
         let core = &mut guard.0;
         let asked = core.groups.iter().filter(|group| group.ask_join()).count();
         if asked == 0 {
-            return 0;
+            return Ok(0);
         }
         core.local.run_until_idle();
         drop(guard);
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
-        asked
+        Ok(asked)
     }
 
     #[cfg(feature = "connectivity")]
@@ -5537,8 +5535,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     #[cfg(feature = "connectivity")]
-    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
-        self.faces.watch(sink)
+    fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
+        if SessionEngine::is_closed(self) {
+            return Err(Declined::Closed);
+        }
+        Ok(self.faces.watch(sink))
     }
 
     #[cfg(feature = "connectivity")]

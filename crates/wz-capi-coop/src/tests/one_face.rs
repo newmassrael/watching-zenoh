@@ -61,13 +61,15 @@ fn puts_and_is_heard(
 fn counting_faces(session: &Stepped) -> Arc<Mutex<(usize, usize)>> {
     let counts = Arc::new(Mutex::new((0usize, 0usize)));
     let into = counts.clone();
-    session.watch_faces(Arc::new(move |kind, _| {
-        let mut counts = into.lock().unwrap();
-        match kind {
-            FaceEventKind::Up => counts.0 += 1,
-            FaceEventKind::Down => counts.1 += 1,
-        }
-    }));
+    session
+        .watch_faces(Arc::new(move |kind, _| {
+            let mut counts = into.lock().unwrap();
+            match kind {
+                FaceEventKind::Up => counts.0 += 1,
+                FaceEventKind::Down => counts.1 += 1,
+            }
+        }))
+        .expect("an open session watches its faces");
     counts
 }
 

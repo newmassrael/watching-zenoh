@@ -202,8 +202,11 @@ impl SessionEngine for SharedSession {
     }
 
     #[cfg(feature = "multicast-transport")]
-    fn send_join_on_groups(&self) -> usize {
-        SharedSession::send_join_on_groups(self)
+    fn send_join_on_groups(&self) -> Result<usize, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(SharedSession::send_join_on_groups(self))
     }
 
     fn listen_locators(&self) -> Vec<String> {
@@ -238,8 +241,11 @@ impl SessionEngine for SharedSession {
         all
     }
 
-    fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> u64 {
-        SharedSession::watch_faces(self, sink)
+    fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> Result<u64, Refusal> {
+        if SharedSession::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(SharedSession::watch_faces(self, sink))
     }
 
     fn unwatch_faces(&self, id: u64) -> bool {

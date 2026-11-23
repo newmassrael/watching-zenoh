@@ -7455,6 +7455,16 @@ mod matching_aggregate_tests {
             SessionEngine::acquire_keyexpr(&shared, "wz/decl/key"),
             Err(Refusal::Closed)
         );
+        assert_eq!(
+            SessionEngine::watch_faces(&shared, Arc::new(|_kind, _face| {})),
+            Err(Refusal::Closed),
+            "a closed session refuses to watch its faces"
+        );
+        #[cfg(feature = "multicast-transport")]
+        assert_eq!(
+            SessionEngine::send_join_on_groups(&shared),
+            Err(Refusal::Closed)
+        );
     }
 
     /// Through the engine port a get asked of a closed session is refused as closed and mints no

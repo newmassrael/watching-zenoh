@@ -199,8 +199,11 @@ impl SessionEngine for RouterState {
         self.forwarder.face_snapshots()
     }
 
-    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
-        self.forwarder.watch_faces(sink)
+    fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
+        if RouterState::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(self.forwarder.watch_faces(sink))
     }
 
     fn unwatch_faces(&self, id: u64) -> bool {

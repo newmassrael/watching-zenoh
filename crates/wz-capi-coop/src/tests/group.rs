@@ -293,7 +293,11 @@ fn a_join_asked_between_two_beacons_is_sent_at_once() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(network.beacons_of(1), 1, "no beacon is due within a minute");
 
-    assert_eq!(member.send_join_on_groups(), 1, "the one group is asked");
+    assert_eq!(
+        member.send_join_on_groups(),
+        Ok(1),
+        "the one group is asked"
+    );
     eventually("the JOIN asked for", || network.beacons_of(1) == 2);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(network.beacons_of(1), 2, "and the cadence runs from it");
@@ -301,8 +305,8 @@ fn a_join_asked_between_two_beacons_is_sent_at_once() {
     SessionDrive::close(&*member);
     assert_eq!(
         member.send_join_on_groups(),
-        0,
-        "a closed session asks no group"
+        Err(wz_capi_port::Refusal::Closed),
+        "a closed session asks no group, and says why"
     );
 }
 
@@ -683,10 +687,11 @@ mod watched {
         let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
         let told: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> = Arc::default();
         let into = Arc::clone(&told);
-        let _watcher =
-            first.watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
+        first
+            .watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
                 into.lock().unwrap().push((kind, face.clone()));
-            }));
+            }))
+            .expect("an open session watches its faces");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
@@ -1433,7 +1438,7 @@ mod cut {
         // A JOIN asked while the socket is full waits for it, behind what the writer holds, and
         // leaves at the group's next step once the socket takes datagrams again: the put after it
         // waits for it, since the put writes what is staged itself.
-        assert_eq!(first.engine.send_join_on_groups(), 1);
+        assert_eq!(first.engine.send_join_on_groups(), Ok(1));
         let joins_in_the_cut = joins_on(&first.wire);
         first.writable();
         SessionDrive::start_read_task(&*first.engine).expect("the first's read task starts");

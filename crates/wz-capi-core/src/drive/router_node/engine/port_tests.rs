@@ -674,9 +674,11 @@ fn a_face_watch_through_the_port_is_told_of_a_link_coming_and_going() {
     type Told = Vec<(FaceEventKind, [u8; 16], u8)>;
     let events: Arc<Mutex<Told>> = Arc::default();
     let sink = Arc::clone(&events);
-    let watch = engine.watch_faces(Arc::new(move |kind, face| {
-        sink.lock().unwrap().push((kind, face.zid, face.whatami));
-    }));
+    let watch = engine
+        .watch_faces(Arc::new(move |kind, face| {
+            sink.lock().unwrap().push((kind, face.zid, face.whatami));
+        }))
+        .expect("an open node watches its faces");
 
     let locator = router.listen_locators()[0].clone();
     let peer = Client::open(vec![locator]);

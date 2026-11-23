@@ -232,6 +232,13 @@ pub(crate) enum Door {
     Keyexpr,
     /// A subscriber, a liveliness subscriber or a queryable, declared once its key is.
     Entity,
+    /// What a session is asked of itself apart from any entity: the watch of its faces its open
+    /// makes for the connectivity plane, and `zp_send_join`.
+    #[cfg(any(
+        feature = "connectivity",
+        all(feature = "multicast-transport", not(feature = "multi-thread"))
+    ))]
+    Session,
     /// A liveliness token, declared once its key is, which a build without liveliness has none of.
     #[cfg(feature = "liveliness")]
     Token,
@@ -284,6 +291,18 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
         },
         #[cfg(feature = "liveliness")]
         Door::Token => refusal_code(refusal, Door::Keyexpr),
+        // pico answers a call on a session that is not open with `_Z_ERR_SESSION_CLOSED`
+        // (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `return _z_session_is_closed(zn) ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK;`), and has no other
+        // refusal of these.
+        #[cfg(any(
+            feature = "connectivity",
+            all(feature = "multicast-transport", not(feature = "multi-thread"))
+        ))]
+        Door::Session => match refusal {
+            Refusal::Closed => Z_ERR_SESSION_CLOSED,
+            _ => Z_ERR_GENERIC,
+        },
         Door::Entity => match refusal {
             Refusal::ExceedsCapacity => Z_ERR_TRANSPORT_TX_FAILED,
             _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
@@ -373,6 +392,27 @@ mod tests {
         assert_eq!(
             refusal_code(Refusal::Closed, Door::Entity),
             Z_ERR_SYSTEM_OUT_OF_MEMORY
+        );
+    }
+
+    /// A session closed under a call on itself answers pico's code for a closed session.
+    #[cfg(any(
+        feature = "connectivity",
+        all(feature = "multicast-transport", not(feature = "multi-thread"))
+    ))]
+    #[test]
+    fn a_refusal_of_the_session_itself_answers_picos_code() {
+        assert_eq!(
+            refusal_code(Refusal::Closed, Door::Session),
+            Z_ERR_SESSION_CLOSED
+        );
+        assert_eq!(
+            refusal_code(Refusal::TableFull, Door::Session),
+            Z_ERR_GENERIC
+        );
+        assert_eq!(
+            refusal_code(Refusal::NotBuilt, Door::Session),
+            WZ_EXT_ERR_UNSUPPORTED
         );
     }
 

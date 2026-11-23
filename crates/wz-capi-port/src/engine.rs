@@ -108,9 +108,10 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Ask every multicast group the session joined to send its JOIN now, between two beacons,
     /// which then keeps its cadence from it (zenoh-pico's `zp_send_join`): how many groups were
-    /// asked. An engine that joins no group asks none, the provided answer.
-    fn send_join_on_groups(&self) -> usize {
-        0
+    /// asked, `0` for a session that joined none. A closed session asks nothing and is refused
+    /// ([`Refusal::Closed`]). An engine that joins no group asks none, the provided answer.
+    fn send_join_on_groups(&self) -> Result<usize, Refusal> {
+        Ok(0)
     }
 
     /// A snapshot of every established face: the peer's identity and the negotiated booleans of
@@ -124,12 +125,13 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Tell `sink` each time a face comes up or goes down, from now on, and answer the id that
     /// stops it ([`Self::unwatch_faces`]). The sink runs where the session hands out its
-    /// callbacks and never under the session's lock, so it may reach back into the session. An
-    /// engine built without the connectivity plane tells nobody of anything, which is the
+    /// callbacks and never under the session's lock, so it may reach back into the session.
+    /// Refused, with `sink` let go of, on a closed session, which no face comes up on, and with
+    /// [`Refusal::NotBuilt`] by an engine built without the connectivity plane, which is the
     /// provided answer.
-    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+    fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
         let _ = sink;
-        0
+        Err(Refusal::NotBuilt)
     }
 
     /// Stop the face watch `id`: `true` when one was registered under it.

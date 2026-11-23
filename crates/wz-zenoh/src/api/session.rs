@@ -1100,16 +1100,17 @@ impl Engine {
     /// Tell `sink` each time a face comes up or goes down, from now on, until
     /// [`Engine::unwatch_faces`] is called with the id returned.
     #[cfg(feature = "unstable")]
-    fn watch_faces(&self, sink: FaceSink) -> u64 {
+    fn watch_faces(&self, sink: FaceSink) -> ZResult<u64> {
         match self {
-            Engine::Router(router) => router
+            Engine::Router(router) => Ok(router
                 .node
                 .forwarder()
-                .watch_faces(tokio_engine::face_sink(sink)),
+                .watch_faces(tokio_engine::face_sink(sink))),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
-                .watch_faces(tokio_engine::face_sink(sink)),
+                .watch_faces(tokio_engine::face_sink(sink))
+                .map_err(|refused| zerror!("the engine refused a face watch: {refused}").into()),
         }
     }
 
@@ -1844,7 +1845,7 @@ impl Engine {
     }
 
     #[cfg(feature = "unstable")]
-    fn watch_faces(&self, _sink: FaceSink) -> u64 {
+    fn watch_faces(&self, _sink: FaceSink) -> ZResult<u64> {
         match *self {}
     }
 
@@ -4632,7 +4633,7 @@ impl SessionInner {
         if self.is_closed() {
             return Err(SessionClosedError.into());
         }
-        let watch = self.engine.watch_faces(sink);
+        let watch = self.engine.watch_faces(sink)?;
         let Ok(id) = Id::try_from(watch) else {
             self.engine.unwatch_faces(watch);
             return Err(zerror!(
