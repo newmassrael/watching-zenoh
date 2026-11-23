@@ -937,28 +937,6 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         }
     }
 
-    /// Deliver a message that was read in place, whose key may lie in the peer's own table so that
-    /// this table is borrowed apart from it ([`SubscriberPeer`]): the gate, then the selection of a
-    /// key of a closed set or the match of every subscription (through the match cache where the
-    /// table is fixed in size and `MATCH_MEMO_FIXED_SLOTS` asks for it; a heap table matches
-    /// afresh, so that this path allocates nothing for a key it has not seen). The delivery of
-    /// the in-place receive path, which a closed image of the fixed profile takes.
-    #[cfg(all(
-        feature = "storage-profile",
-        any(feature = "pubsub-put", feature = "pubsub-delete")
-    ))]
-    pub(super) fn fire_lent(&mut self, view: &dyn SampleView, class: Option<ClassId>) -> usize {
-        self.deliver_from_peer(
-            view.keyexpr(),
-            class,
-            PeerDelivery {
-                no_allocation: true,
-                ..PeerDelivery::default()
-            },
-            |sink| sink.deliver(view),
-        )
-    }
-
     /// The declaration id the next subscription or aggregate reply takes, or
     /// `None` once every `u32` id has been handed out. Upstream's counter wraps
     /// (`zenoh/src/net/runtime/mod.rs` @ `self.next_id.fetch_add(1, Ordering::SeqCst)`)
@@ -1223,7 +1201,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 ..
             }) => {
                 if crate::driver_loop::OWNED_RECORDS {
-                    self.dispatch_plain_puts(peer, *reliable, payload, puts);
+                    peer.dispatch_plain_puts(self, *reliable, payload, puts);
                 }
             }
             // A Push lent where its frame lies, and the control records lent beside
@@ -1236,7 +1214,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             ))]
             IterationEvent::InPlace(record) => {
                 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-                self.dispatch_in_place(peer, &record);
+                peer.dispatch_in_place(self, &record);
                 #[cfg(feature = "rx-lent-control")]
                 self.dispatch_in_place_control(peer, &record);
             }
@@ -1720,28 +1698,6 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             let _ = (key, text, deliver);
             None
         }
-    }
-
-    /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
-    /// ([`crate::sink::PlainSample`]): the same matcher and memory, and each matching sink
-    /// is handed the sample through [`SampleSink::deliver_plain`], which a sink that can
-    /// keep a range of the frame instead of a copy of the sample answers more cheaply than
-    /// [`SampleSink::deliver`].
-    #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
-    fn fire_plain_to_subscribers(
-        &mut self,
-        sample: &crate::sink::PlainSample<'_>,
-        class: Option<ClassId>,
-    ) -> usize {
-        self.deliver_from_peer(
-            sample.keyexpr(),
-            class,
-            PeerDelivery {
-                repeats_previous: sample.repeats_previous_key(),
-                ..PeerDelivery::default()
-            },
-            |sink| sink.deliver_plain(sample),
-        )
     }
 }
 
