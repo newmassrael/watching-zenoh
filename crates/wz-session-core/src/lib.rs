@@ -2826,8 +2826,6 @@ pub mod multicast_join;
     feature = "codec-close",
     feature = "storage-profile"
 ))]
-// Totality debt TD-071 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod multicast_rx;
 
 /// R2848 — the recording seam of a multicast transport's counts: what the
