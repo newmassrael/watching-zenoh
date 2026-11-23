@@ -2277,12 +2277,6 @@ pub mod unicast_rx;
 /// refusals, the open key and the capability document. Unconditional, so a node of the
 /// fixed-memory profile answers an open in the words the heap profile does;
 /// `lifecycle_query` re-exports it.
-// Totality debt TD-038 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::arithmetic_side_effects
-)]
 pub mod lifecycle_wire;
 
 // The lifecycle contract for every verb (decision D7): the request a transport reads
