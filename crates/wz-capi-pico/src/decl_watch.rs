@@ -231,7 +231,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
         let released = closure.release_latch();
         let sink: DeclWatchSink =
             Arc::new(move |event: DeclWatchEvent<'_>| tell(&closure, entity, &event));
-        match wz_capi_port::SessionEngine::declare_decl_watch(&*engine, plane, sink) {
+        match wz_capi_port::SessionEngine::declare_decl_watch(Arc::as_ref(&engine), plane, sink) {
             Ok(id) => {
                 let state = Box::new(WatchState {
                     engine,
@@ -266,7 +266,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_wa
         // SAFETY: a non-null `_val` is the box `wz_ext_decl_watch_declare` wrote, taken once: the
         // slot is null from the line above.
         let state = Box::from_raw(val.cast::<WatchState>());
-        wz_capi_port::SessionEngine::undeclare_decl_watch(&*state.engine, state.id);
+        wz_capi_port::SessionEngine::undeclare_decl_watch(Arc::as_ref(&state.engine), state.id);
         let released = Arc::clone(&state.released);
         core::mem::drop(state);
         released.wait();

@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn a_places_layout_holds_its_value() {
         let layout = HeldPlace::<[u64; 3]>::LAYOUT;
-        assert!(layout.size() >= core::mem::size_of::<[u64; 3]>() + 1);
+        assert!(layout.size() > core::mem::size_of::<[u64; 3]>());
         assert!(layout.align() >= core::mem::align_of::<[u64; 3]>());
     }
 }

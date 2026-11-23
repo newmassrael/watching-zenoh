@@ -6706,47 +6706,47 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C
 
     /// The session's own zid, zero-padded to 16 bytes ([`SessionEngine::zid`]).
     pub fn zid(&self) -> [u8; 16] {
-        SessionEngine::zid(&*self.engine)
+        SessionEngine::zid(self.engine_ref())
     }
 
     /// [`SessionDrive::close`].
     pub fn close(&self) {
-        SessionDrive::close(&*self.engine)
+        SessionDrive::close(self.engine_ref())
     }
 
     /// [`SessionDrive::is_closed`].
     pub fn is_closed(&self) -> bool {
-        SessionDrive::is_closed(&*self.engine)
+        SessionDrive::is_closed(self.engine_ref())
     }
 
     /// [`SessionDrive::start_read_task`].
     pub fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
-        SessionDrive::start_read_task(&*self.engine)
+        SessionDrive::start_read_task(self.engine_ref())
     }
 
     /// [`SessionDrive::stop_read_task`].
     pub fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
-        SessionDrive::stop_read_task(&*self.engine)
+        SessionDrive::stop_read_task(self.engine_ref())
     }
 
     /// [`SessionDrive::read_task_is_running`].
     pub fn read_task_is_running(&self) -> bool {
-        SessionDrive::read_task_is_running(&*self.engine)
+        SessionDrive::read_task_is_running(self.engine_ref())
     }
 
     /// [`SessionDrive::read`].
     pub fn read(&self, single: bool) -> Result<(), SessionClosed> {
-        SessionDrive::read(&*self.engine, single)
+        SessionDrive::read(self.engine_ref(), single)
     }
 
     /// [`SessionDrive::send_keep_alive`].
     pub fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        SessionDrive::send_keep_alive(&*self.engine)
+        SessionDrive::send_keep_alive(self.engine_ref())
     }
 
     /// [`SessionDrive::spin_once`].
     pub fn spin_once(&self) -> bool {
-        SessionDrive::spin_once(&*self.engine)
+        SessionDrive::spin_once(self.engine_ref())
     }
 }
 
@@ -6755,7 +6755,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopD
     /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
     /// session that outlives it finds it closed.
     fn drop(&mut self) {
-        SessionDrive::close(&*self.engine);
+        SessionDrive::close(self.engine_ref());
     }
 }
 

@@ -132,7 +132,7 @@ impl PicoSessionExt {
         let watch_id = {
             let sink = Arc::clone(&connectivity);
             SessionEngine::watch_faces(
-                &**engine,
+                Arc::as_ref(engine),
                 Arc::new(move |kind, snapshot| {
                     sink.on_face_event(kind, snapshot);
                 }),
@@ -216,7 +216,7 @@ impl Drop for PicoSessionExt {
     /// session's listener maps.
     fn drop(&mut self) {
         let (engine, id) = &self.watch;
-        SessionEngine::unwatch_faces(&**engine, *id);
+        SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
         self.connectivity.shutdown();
     }
 }
