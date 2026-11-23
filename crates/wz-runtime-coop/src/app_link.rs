@@ -49,7 +49,6 @@
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -401,12 +400,6 @@ fn open_link(
     }
 }
 
-/// The most bytes of a link's remainder a flush offers the program in one call: the window it is
-/// copied into, on the stack, under the transport's lock and out of it again before the program is
-/// called. A remainder longer than it is offered over several calls, as a program that takes part
-/// of an offer is.
-const FLUSH_WINDOW: usize = 512;
-
 /// One link of the program's transport as this engine's seams hold it: released when it drops.
 struct Held {
     transport: Arc<AppTransport>,
@@ -456,25 +449,21 @@ impl Held {
         }
     }
 
-    /// Offer the program what is held for it, until it would block or has taken all of it. The
-    /// program is called with no lock of the transport held, so what is held is offered a window
-    /// at a time, copied out of the table into storage on the stack: nothing is allocated.
+    /// Offer the program what is held for it, until it would block or has taken all of it: each
+    /// run lent in place by the transport ([`AppTransport::offer_remainder`]) and offered with no
+    /// lock held, nothing copied. Another writer offering the link's remainder now offers it for
+    /// this one.
     fn flush(&self) -> Result<(), AppLinkError> {
-        let mut window = [0u8; FLUSH_WINDOW];
         loop {
-            let held = self
-                .transport
-                .with(|table| table.copy_remainder(self.handle, &mut window));
-            let offered = window.get(..held).unwrap_or_default();
-            if offered.is_empty() {
+            let mut sent = Ok(0);
+            let Some((taken, offered)) = self.transport.offer_remainder(self.handle, |bytes| {
+                sent = self.send_once(bytes);
+                sent.as_ref().map_or(0, |taken| *taken)
+            }) else {
                 return Ok(());
-            }
-            let taken = self.send_once(offered)?;
-            let effects = self
-                .transport
-                .with(|table| table.drop_remainder(self.handle, taken));
-            self.transport.perform(effects);
-            if taken < held {
+            };
+            sent?;
+            if taken < offered {
                 return Ok(());
             }
         }
@@ -487,7 +476,7 @@ impl Held {
         for part in parts {
             let held = self
                 .transport
-                .with(|table| !table.remainder(self.handle).is_empty());
+                .with(|table| table.holds_remainder(self.handle));
             let taken = if held { 0 } else { self.send_once(part)? };
             if taken < part.len() {
                 self.transport
@@ -607,7 +596,7 @@ impl LinkInput {
         self.transport.with(|table| {
             table.poll_readable(self.handle, waker)
                 || (table.state(self.handle) == Some(wz_session_core::app_link::AppLinkState::Open)
-                    && !table.remainder(self.handle).is_empty())
+                    && table.holds_remainder(self.handle))
         })
     }
 }
@@ -1425,6 +1414,18 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use alloc::vec::Vec;
+
+    /// What `link` holds for the program, read through the offer a writer makes, with nothing
+    /// taken: the front run, which is all of it while it has not wrapped.
+    fn held(transport: &AppTransport, link: LinkHandle) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let _ = transport.offer_remainder(link, |bytes| {
+            seen = bytes.to_vec();
+            0
+        });
+        seen
+    }
     use alloc::string::String;
     use alloc::vec;
     use std::sync::Mutex;
@@ -1541,10 +1542,7 @@ mod tests {
             .send_parts(&[b"ab", b"cd", b"ef"])
             .expect("held, not failed");
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"ab");
-        assert_eq!(
-            transport.with(|table| table.remainder(stream.held.handle).to_vec()),
-            b"cdef"
-        );
+        assert_eq!(held(&transport, stream.held.handle), b"cdef");
         // A later send queues behind the remainder rather than overtaking it.
         stream.send_parts(&[b"gh"]).unwrap();
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"ab");
@@ -1555,7 +1553,7 @@ mod tests {
         let mut buf = [0u8; 4];
         assert_eq!(stream.try_read(&mut buf), Ok(None));
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"abcdefgh");
-        assert!(transport.with(|table| table.remainder(stream.held.handle).is_empty()));
+        assert!(!transport.with(|table| table.holds_remainder(stream.held.handle)));
     }
 
     #[test]
@@ -2315,10 +2313,7 @@ mod tests {
         // writable, and then ends, and the next offer leaves the rest.
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
         assert_eq!(stream.try_read(&mut buf), Ok(None));
-        assert_eq!(
-            transport.with(|table| table.remainder(handle).to_vec()),
-            b"cdef"
-        );
+        assert_eq!(held(&transport, handle), b"cdef");
         let started = Instant::now();
         ready.wait_readable(50);
         assert!(

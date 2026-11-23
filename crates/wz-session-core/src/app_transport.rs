@@ -51,6 +51,23 @@ pub trait AppPort: Send + Sync {
     }
 }
 
+/// A run of a link's remainder lent by [`AppTransport::offer_remainder`], given back when it is
+/// dropped, so a writer that unwinds out of its offer still gives it back.
+struct LentRemainder<'t> {
+    transport: &'t AppTransport,
+    link: LinkHandle,
+    taken: usize,
+}
+
+impl Drop for LentRemainder<'_> {
+    fn drop(&mut self) {
+        let effects = self
+            .transport
+            .with(|table| table.give_back_remainder(self.link, self.taken));
+        self.transport.perform(effects);
+    }
+}
+
 /// The lock a transport's table is held under, which the ABI that makes the transport gives it.
 pub trait TableLock: Send + Sync {
     /// Run `f` on the table with the lock held.
@@ -115,6 +132,31 @@ impl AppTransport {
     /// that brings it, outside the lock ([`Self::perform`]). A stale `link` answers `true` at once.
     pub fn wait_link(&self, link: LinkHandle, interest: LinkInterest, waker: &Waker) -> bool {
         self.with(|table| table.wait_link(link, interest, waker))
+    }
+
+    /// Offer `offer` the bytes `link` holds for the program, in place, with no lock held: the
+    /// front run of its remainder, lent until `offer` answers how many of them the program took
+    /// ([`AppLinkTable::lend_remainder`]), which then leave it. Nothing is copied. `None` when
+    /// nothing is held, or another writer is offering it now; otherwise what was taken and the
+    /// length of the run offered, which a writer that was given all of it asks again for the rest.
+    pub fn offer_remainder(
+        &self,
+        link: LinkHandle,
+        offer: impl FnOnce(&[u8]) -> usize,
+    ) -> Option<(usize, usize)> {
+        let (base, len) = self.with(|table| table.lend_remainder(link))?;
+        let mut lent = LentRemainder {
+            transport: self,
+            link,
+            taken: 0,
+        };
+        // SAFETY: `[base, base + len)` is the front run of the link's remainder, lent by the table
+        // until `give_back_remainder`, which the guard calls: until then the table writes no byte of
+        // it, frees neither its storage nor the row that holds it, and lends it to no one else
+        // (`AppLinkTable::lend_remainder`). The table outlives this call, which borrows `self`.
+        let bytes = unsafe { core::slice::from_raw_parts(base.as_ptr(), len) };
+        lent.taken = offer(bytes).min(len);
+        Some((lent.taken, len))
     }
 
     /// How many links the transport holds.
