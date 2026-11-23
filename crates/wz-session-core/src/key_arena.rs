@@ -494,6 +494,17 @@ impl KeyRef {
         // SAFETY: as `as_str`.
         unsafe { self.store.as_ref() }.word(self.at, SIZE) as usize
     }
+
+    /// Let go of the key now and leave the empty key, which holds no block, in its place: for a
+    /// row taken out of its table under the lock that guards the arena and dropped after that lock
+    /// is let go of, for what else it holds.
+    pub fn let_go(&mut self) {
+        *self = Self {
+            store: self.store,
+            at: NIL,
+            len: 0,
+        };
+    }
 }
 
 impl Clone for KeyRef {
@@ -842,6 +853,26 @@ mod tests {
         let unguarded = keys_of(128);
         drop(unguarded.key("demo/free").expect("room"));
         assert_eq!(keys.counts().used, 0);
+    }
+
+    /// A key let go of in place reads as the empty key and is one holder fewer of its block: the
+    /// block stays while another holder shares it, and goes back with the last, whose empty key
+    /// then gives nothing back when it is dropped.
+    #[test]
+    fn a_key_let_go_of_in_place_leaves_the_empty_key() {
+        let keys = keys_of(128);
+        let mut key = keys.key("demo/let/go").expect("room");
+        let mut shared = key.clone();
+        let block = block_bytes("demo/let/go".len()).expect("short");
+        key.let_go();
+        assert_eq!(key.as_str(), "");
+        assert_eq!(key.block_bytes(), 0);
+        assert_eq!(keys.counts().used, block, "the share keeps the block");
+        assert_eq!(shared.as_str(), "demo/let/go");
+        shared.let_go();
+        assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
+        drop((key, shared));
+        assert_eq!(keys.counts().used, 0, "an empty key gives nothing back");
     }
 
     /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered

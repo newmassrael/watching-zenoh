@@ -1904,15 +1904,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.keys.key(keyexpr).ok()
     }
 
-    /// Let go of a removed row's key here, under the session's lock: a row that leaves the lock to
-    /// be dropped after it (for what else it holds, whose drop may reach the session) keeps the
-    /// empty key, which holds no block, as the arena's counts are touched only under the lock.
-    fn let_go_of_key(&self, key: &mut RowKey) {
-        if let Ok(empty) = self.keys.key("") {
-            drop(core::mem::replace(key, empty));
-        }
-    }
-
     /// The block of a row of the session's own record that keeps `keyexpr` already, shared: a key
     /// the session's declarations and the program's objects name alike (a publisher's key, its write
     /// filter's and its Interest's) takes one block, whichever of them came first.
@@ -5497,7 +5488,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 actions.send_interest_final(u64::from(id));
             }
-            core.let_go_of_key(&mut entry.keyexpr);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         #[cfg(feature = "liveliness")]
@@ -5531,7 +5523,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
-            core.let_go_of_key(&mut entry.keyexpr);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
@@ -6468,7 +6461,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
             Self::reevaluate_queryable_matching(core);
-            core.let_go_of_key(&mut entry.keyexpr);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Queryable(id));
@@ -6542,7 +6536,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 entry.retract(&actions);
             }
-            core.let_go_of_key(&mut entry.keyexpr);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         // Its key may hold a declaration whose release reaches the session: after the lock.
