@@ -1022,18 +1022,28 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
-/// The id space of one link: the key expressions this session declared to it, read through the
-/// link's `actions` (which keep what they sent), lent to the tables of the face the link serves.
-/// A peer that was told an id names it instead of the literal when it sends something for the
-/// session (a router does for a subscriber it routes to), and the tables resolve it against this.
-struct LinkOwnSpace<C: ClockSource + 'static>(Rc<McuActions<C>>);
+/// The key expressions the session declared, one table for all its links (`Core::keyexprs`).
+type KeyexprRows = Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>;
 
-impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
+/// The session's own id space, read from its one table of declared key expressions: what a link
+/// sends names a key by the id the session gave it, and what a peer sends for the session may
+/// name one too (a router does for a subscriber it routes to). Every link is told the same
+/// declarations under the same ids, so each link and the tables of each face hold this handle
+/// and none keeps a copy: a declaration grows nothing on a link. The table is held weakly: the
+/// session owns it and drops it before the arena its keys lie in, and a handle left after that
+/// reads nothing.
+struct SessionKeyexprs(alloc::rc::Weak<RefCell<KeyexprRows>>);
+
+impl OwnMappingSpace for SessionKeyexprs {
     fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
-        OwnMappingSpace::resolve_own_mapping(&*self.0, id)
+        let table = self.0.upgrade()?;
+        let rows = table.borrow();
+        rows.iter()
+            .find(|row| row.id == id)
+            .map(|row| String::from(row.keyexpr.as_str()))
     }
 
-    // The literal goes from the link's table straight into the resolver's buffer: the provided
+    // The literal goes from the session's row straight into the resolver's buffer: the provided
     // form would make a `String` of it first, an allocation for every message that names an id
     // of this session's.
     fn append_own_mapping(
@@ -1041,17 +1051,22 @@ impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
         id: ExprId,
         out: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), wz_session_core::bounded::CapacityFull<()>>> {
-        OwnMappingSpace::append_own_mapping(&*self.0, id, out)
+        let table = self.0.upgrade()?;
+        let rows = table.borrow();
+        rows.iter()
+            .find(|row| row.id == id)
+            .map(|row| out.push_str(row.keyexpr.as_str()))
     }
 }
 
-// SAFETY: as `Confined`. A `LinkOwnSpace` is stored only in the tables of a face, which `Core`
-// owns inside the lock of `CoopEngine`, and it is read only by the dispatch of that face's
-// frames, which runs under the same lock; no clone of its `Rc` leaves the lock. The marker
-// traits are what the shared handle of a host build names (`SharedOwnMappingSpace` is an `Arc` of
-// a `Send + Sync` object where the target has atomic pointers).
-unsafe impl<C: ClockSource + 'static> Send for LinkOwnSpace<C> {}
-unsafe impl<C: ClockSource + 'static> Sync for LinkOwnSpace<C> {}
+// SAFETY: as `Confined`. A `SessionKeyexprs` is stored only in the tables of a face and in the
+// actions of a link, which `Core` owns inside the lock of `CoopEngine`, and it is read only by
+// the dispatch of a face's frames and by a link's sends, which run under the same lock; no clone
+// of its `Weak` leaves the lock. The marker traits are what the shared handle of a host build
+// names (`SharedOwnMappingSpace` is an `Arc` of a `Send + Sync` object where the target has
+// atomic pointers).
+unsafe impl Send for SessionKeyexprs {}
+unsafe impl Sync for SessionKeyexprs {}
 
 /// What a subscriber's sink mints: the callback a sample is handed to.
 type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
@@ -1328,7 +1343,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The key arena the rows of those tables keep their keys in, lent from `arena` with them.
     keys: KeySpace,
     subscribers: Rows<SubEntry, { caps::MAX_SUBSCRIPTIONS }>,
-    keyexprs: Rows<KexprEntry, { caps::MAX_DECLARED_KEYEXPRS }>,
+    /// The key expressions the session declared: shared only with the weak handles its links and
+    /// the tables of its faces read them through (`SessionKeyexprs`), so it is dropped here, before
+    /// the arena its keys lie in.
+    keyexprs: Rc<RefCell<KeyexprRows>>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
@@ -2149,13 +2167,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 return Err(OpenError::EntropyUnavailable);
             }
         }
-        // The id space of this link, for the tables of the face it serves: what the peer names by
-        // an id the session declared to it resolves against the link's own declarations. Each link
-        // has its own, so it is installed whenever one is made, a redialled face's included.
+        // The session's id space, read from its one table of declarations by the link (what it
+        // sends names a key by its id) and by the tables of the face it serves (what the peer
+        // sends may name one): installed whenever a link is made, a redialled face's included.
+        let keyexprs = SessionKeyexprs(Rc::downgrade(&self.keyexprs));
         #[cfg(target_has_atomic = "ptr")]
-        let own_space: SharedOwnMappingSpace = Arc::new(LinkOwnSpace(actions.clone()));
+        let own_space: SharedOwnMappingSpace = Arc::new(keyexprs);
         #[cfg(not(target_has_atomic = "ptr"))]
-        let own_space: SharedOwnMappingSpace = Rc::new(LinkOwnSpace(actions.clone()));
+        let own_space: SharedOwnMappingSpace = Rc::new(keyexprs);
+        #[cfg(target_has_atomic = "ptr")]
+        actions.install_session_keyexprs(Arc::clone(&own_space));
         self.registry
             .borrow_mut()
             .install_own_mapping_space(face, own_space);
@@ -3625,7 +3646,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             entities,
             keys,
             subscribers,
-            keyexprs,
+            keyexprs: Rc::new(RefCell::new(keyexprs)),
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
@@ -5607,13 +5628,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         let mut core = self.live()?;
         let core = &mut core.0;
-        if let Some(entry) = core.keyexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
+        if let Some(entry) = core
+            .keyexprs
+            .borrow_mut()
+            .iter_mut()
+            .find(|e| e.keyexpr == keyexpr)
+        {
             entry.holds += 1;
             return Some(entry.id);
         }
         // A key no declaration holds yet takes a row; a full table refuses it before an id is
         // taken or anything is sent, and so does a key longer than the row holds.
-        if core.keyexprs.free_slots() == 0 {
+        if core.keyexprs.borrow().free_slots() == 0 {
             return None;
         }
         let key = core.row_key(keyexpr)?;
@@ -5648,7 +5674,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         core.next_mapping = id.wrapping_add(1);
         keep(
-            &mut core.keyexprs,
+            &mut *core.keyexprs.borrow_mut(),
             KexprEntry {
                 id,
                 keyexpr: key,
@@ -5663,13 +5689,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         let core = &mut core.0;
-        let Some(at) = core.keyexprs.iter().position(|e| e.id == mapping_id) else {
-            return;
+        let (at, held) = {
+            let mut keyexprs = core.keyexprs.borrow_mut();
+            let Some(at) = keyexprs.iter().position(|e| e.id == mapping_id) else {
+                return;
+            };
+            keyexprs[at].holds -= 1;
+            (at, keyexprs[at].holds != 0)
         };
-        core.keyexprs[at].holds -= 1;
-        if core.keyexprs[at].holds == 0 {
+        if !held {
+            // The links are asked before the row goes, and the row goes before they are told: a
+            // send never finds the table borrowed.
             let links = core.retract(Kind::Keyexpr, at);
-            core.keyexprs.remove(at);
+            core.keyexprs.borrow_mut().remove(at);
             for actions in links {
                 actions.send_undeclare_kexpr(mapping_id);
             }
@@ -5687,8 +5719,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.live()
             .map(|core| {
-                core.0
-                    .keyexprs
+                let keyexprs = core.0.keyexprs.borrow();
+                keyexprs
                     .iter()
                     .map(|e| (e.id, String::from(e.keyexpr.as_str())))
                     .collect()

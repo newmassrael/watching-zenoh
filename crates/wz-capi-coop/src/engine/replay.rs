@@ -190,7 +190,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// How many declarations of `kind` the session holds.
     fn len_of(&self, kind: Kind) -> usize {
         match kind {
-            Kind::Keyexpr => self.keyexprs.len(),
+            Kind::Keyexpr => self.keyexprs.borrow().len(),
             Kind::Subscriber => self.subscribers.len(),
             Kind::Interest => self.interests.len(),
             #[cfg(feature = "queryable")]
@@ -227,7 +227,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             return match kind {
                 Kind::Keyexpr => {
-                    let entry = &self.keyexprs[left];
+                    let keyexprs = self.keyexprs.borrow();
+                    let entry = &keyexprs[left];
                     actions
                         .send_declare_keyexpr(entry.id, &entry.keyexpr)
                         .is_ok()
