@@ -202,12 +202,13 @@ where
     {
         let runtime = self.local.runtime();
         let driver = claim.driver_handle();
-        let actions = new_session_in_slot(claim, params, CoopTime::new(runtime));
+        let (actions, entropy) = new_session_in_slot(claim, params, CoopTime::new(runtime));
         let pump_link = self.stack.pump(driver, lane);
         let Ok(pump) = self.pumps.claim(
             runtime.with_driver(),
             pump_link,
             actions.clone(),
+            entropy,
             CoopTime::new(runtime),
             config,
         ) else {

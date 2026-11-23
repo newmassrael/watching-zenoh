@@ -50,6 +50,7 @@ use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::limits::SessionLimits;
@@ -69,7 +70,7 @@ use crate::connect_manager::{ConnectManager, SlotState};
 use crate::dial::{admin_session_of, EventSink, McuActions, UdpDialer};
 
 /// Builds the sink each dialled session reports to.
-type DialSink<C> = Box<dyn FnMut(&Rc<McuActions<C>>) -> EventSink>;
+type DialSink<C> = Box<dyn FnMut(&SessionHandle<C>) -> EventSink>;
 
 /// An MCU node a host can reach, and reconfigure, at runtime.
 pub struct AdminNode<'a, L, C, P, A>
@@ -77,7 +78,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> (SessionHandle<C>, SessionEntropy),
 {
     local: &'a CoopLocalSet<C>,
     links: Rc<L>,
@@ -87,7 +88,7 @@ where
     listen_port: u16,
     timeouts: SessionTimeouts,
     accept: A,
-    acceptor: Option<(CoopLocalJoinHandle<DriverOutcome>, Rc<McuActions<C>>)>,
+    acceptor: Option<(CoopLocalJoinHandle<DriverOutcome>, SessionHandle<C>)>,
     admin_key: String,
     config_key: String,
     /// The sessions the admin declarations have been sent on, by identity.
@@ -122,15 +123,16 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> (SessionHandle<C>, SessionEntropy),
 {
     /// A node that listens on `listen_port`, answers as `identity`, applies
     /// writes to `control` and reports through `status`, over the network `links`.
     ///
     /// `dial_params` gives each dialled session its parameters. `accept`
     /// builds the action bundle of each acceptor session over the sink it
-    /// is given; an acceptor mints cookies, so this is where a board installs
-    /// its entropy source (`wz_runtime_coop::session_runtime::new_session_actions`).
+    /// is given, with the entropy source the session draws its cookies from (a handle on
+    /// the board's one source). `entropy` is the node's source, which its dialled sessions
+    /// draw from.
     ///
     /// The node's observer is every session's, dialled and accepted, so it is held to one
     /// snapshot of the session limits: the `limits` of the parameters `dial_params` gives, which
@@ -155,6 +157,7 @@ where
         timeouts: SessionTimeouts,
         mut dial_params: P,
         accept: A,
+        entropy: SessionEntropy,
     ) -> Result<Self, RegisterError> {
         let admin_key = admin_queryable_key(&identity.zid_hex, identity.whatami);
         let mut config_key = String::new();
@@ -177,7 +180,14 @@ where
         let on_event: DialSink<C> = Box::new(move |actions| {
             Box::new(dispatch_to(dial_observer.clone(), actions.clone())) as EventSink
         });
-        let dialer = UdpDialer::new(local, links.clone(), timeouts, dial_params, on_event);
+        let dialer = UdpDialer::new(
+            local,
+            links.clone(),
+            timeouts,
+            dial_params,
+            on_event,
+            entropy,
+        );
         Ok(Self {
             local,
             links,
@@ -200,7 +210,7 @@ where
     }
 
     /// The session a host reached this node on, while there is one.
-    pub fn acceptor(&self) -> Option<&Rc<McuActions<C>>> {
+    pub fn acceptor(&self) -> Option<&SessionHandle<C>> {
         self.acceptor.as_ref().map(|(_, actions)| actions)
     }
 
@@ -264,16 +274,16 @@ where
     /// Send the admin declarations on every established session that has
     /// not had them, and forget the sessions that are gone.
     fn declare_on_new_sessions(&mut self) {
-        let live: Vec<&Rc<McuActions<C>>> = self
+        let live: Vec<&SessionHandle<C>> = self
             .acceptor
             .iter()
             .map(|(_, actions)| actions)
             .chain(self.manager.sessions().map(|(_, s)| s.actions()))
             .collect();
         self.declared
-            .retain(|done| live.iter().any(|a| Rc::as_ptr(a) == *done));
+            .retain(|done| live.iter().any(|a| CellRc::as_ptr(a) == *done));
         for actions in live {
-            let key = Rc::as_ptr(actions);
+            let key = CellRc::as_ptr(actions);
             if actions.is_established()
                 && !self.declared.contains(&key)
                 && declare_admin(actions, &self.admin_key, &self.config_key)
@@ -283,15 +293,16 @@ where
         }
     }
 
-    fn listen(&mut self) -> Option<(CoopLocalJoinHandle<DriverOutcome>, Rc<McuActions<C>>)> {
+    fn listen(&mut self) -> Option<(CoopLocalJoinHandle<DriverOutcome>, SessionHandle<C>)> {
         // The peer is whoever speaks first; the link learns it on receive.
         let OpenedLink { sink, pump } = self.links.open_acceptor(self.listen_port).ok()?;
-        let actions = (self.accept)(sink);
+        let (actions, entropy) = (self.accept)(sink);
         let on_event = dispatch_to(self.observer.clone(), actions.clone());
         let handle = spawn_session(
             self.local,
             pump,
             actions.clone(),
+            entropy,
             CoopTime::new(self.local.runtime()),
             SessionDriveConfig {
                 timeouts: self.timeouts,
@@ -309,6 +320,8 @@ mod tests {
     use super::*;
     use alloc::string::String;
     use alloc::vec;
+
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use wz_codecs::lent::{Push, PushVariant, Wireexpr, WireexprNonlocal, WireexprVariant};
     use wz_runtime_coop::session_runtime::new_session_actions;
@@ -336,6 +349,60 @@ mod tests {
             for b in buf {
                 self.0 = self.0.wrapping_add(1);
                 *b = self.0;
+            }
+            Ok(())
+        }
+    }
+
+    /// How many sessions a test's acceptor factory made, and how many of those are alive: a
+    /// session's handshake binding holds the only handle on the entropy source the factory gives
+    /// it, so a [`Witness`] lives exactly as long as the session's engine.
+    struct Lives {
+        made: AtomicUsize,
+        alive: AtomicUsize,
+    }
+
+    impl Lives {
+        const fn new() -> Self {
+            Self {
+                made: AtomicUsize::new(0),
+                alive: AtomicUsize::new(0),
+            }
+        }
+
+        fn made_and_alive(&self) -> (usize, usize) {
+            (
+                self.made.load(Ordering::Relaxed),
+                self.alive.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    /// An entropy source counted in `Lives` from its making to its drop.
+    struct Witness(&'static Lives, u8);
+
+    impl Witness {
+        fn new(lives: &'static Lives) -> Self {
+            lives.made.fetch_add(1, Ordering::Relaxed);
+            lives.alive.fetch_add(1, Ordering::Relaxed);
+            Self(lives, 0)
+        }
+    }
+
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            self.0.alive.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl wz_session_core::entropy::EntropySource for Witness {
+        fn try_fill_bytes(
+            &mut self,
+            buf: &mut [u8],
+        ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+            for b in buf {
+                self.1 = self.1.wrapping_add(1);
+                *b = self.1;
             }
             Ok(())
         }
@@ -421,8 +488,7 @@ mod tests {
             sink: far_sink,
             pump: far_pump,
         } = far_links.open_acceptor(7522).expect("bind far peer");
-        let far_actions =
-            new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime), Counting(9));
+        let far_actions = new_session_actions(far_sink, params(0xc3), CoopTime::new(&runtime));
         // R2838 — what the peer is told: every Declare the node sends it.
         let declares = Rc::new(core::cell::Cell::new(0usize));
         let seen = declares.clone();
@@ -430,6 +496,7 @@ mod tests {
             &local,
             far_pump,
             far_actions.clone(),
+            SessionEntropy::new(Counting(9)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -471,13 +538,12 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             move |sink| {
-                new_session_actions(
-                    sink,
-                    params(0xb1),
-                    CoopTime::new(&accept_runtime),
-                    Counting(1),
+                (
+                    new_session_actions(sink, params(0xb1), CoopTime::new(&accept_runtime)),
+                    SessionEntropy::new(Counting(1)),
                 )
             },
+            SessionEntropy::new(Counting(2)),
         )
         .expect("a fresh node takes its admin keys");
 
@@ -554,6 +620,7 @@ mod tests {
     fn the_node_listens_again_when_the_accepted_session_ends() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
         static STATUS: NodeStatus = NodeStatus::new(true);
+        static LIVES: Lives = Lives::new();
 
         let net = MemoryNetwork::new();
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
@@ -575,21 +642,17 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb2),
             move |sink| {
-                new_session_actions(
-                    sink,
-                    params(0xb2),
-                    CoopTime::new(&accept_runtime),
-                    Counting(1),
+                (
+                    new_session_actions(sink, params(0xb2), CoopTime::new(&accept_runtime)),
+                    SessionEntropy::new(Witness::new(&LIVES)),
                 )
             },
+            SessionEntropy::new(Counting(2)),
         )
         .expect("a fresh node takes its admin keys");
         let listen_at = core::net::SocketAddr::from(([10, 0, 0, 2], 7531));
         node.tick(0);
-        // Weak: it does not hold the session's link (and so its port), and it
-        // keeps the allocation, so the ended session's address cannot be handed
-        // to its successor and make "a new session" read as "the same one".
-        let first = Rc::downgrade(node.acceptor().expect("listening"));
+        std::assert!(node.acceptor().is_some(), "listening");
         std::assert!(
             net.bind(listen_at, None).is_err(),
             "the listener holds the port"
@@ -610,14 +673,11 @@ mod tests {
         // free, and the node listens again with a session of its own.
         local.run_until_idle();
         node.tick(2);
-        let second = node.acceptor().expect("listening again");
-        std::assert!(
-            first.upgrade().is_none(),
-            "the ended session is gone, neither the node nor the executor holds it"
-        );
-        std::assert!(
-            !core::ptr::eq(first.as_ptr(), Rc::as_ptr(second)),
-            "a new session, not the ended one"
+        std::assert!(node.acceptor().is_some(), "listening again");
+        std::assert_eq!(
+            LIVES.made_and_alive(),
+            (2, 1),
+            "a new session, and the ended one is gone: neither the node nor the executor holds it"
         );
         std::assert!(
             net.bind(listen_at, None).is_err(),
@@ -635,6 +695,7 @@ mod tests {
     fn the_node_listens_again_at_once_when_the_executor_has_already_dropped_the_session() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
         static STATUS: NodeStatus = NodeStatus::new(true);
+        static LIVES: Lives = Lives::new();
 
         let net = MemoryNetwork::new();
         let node_links = Rc::new(MemoryLinks::new(net.clone(), [10, 0, 0, 2]));
@@ -657,13 +718,12 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb3),
             move |sink| {
-                new_session_actions(
-                    sink,
-                    params(0xb3),
-                    CoopTime::new(&accept_runtime),
-                    Counting(1),
+                (
+                    new_session_actions(sink, params(0xb3), CoopTime::new(&accept_runtime)),
+                    SessionEntropy::new(Witness::new(&LIVES)),
                 )
             },
+            SessionEntropy::new(Counting(2)),
         )
         .expect("a fresh node takes its admin keys");
         node.tick(0);
@@ -680,6 +740,7 @@ mod tests {
             &local,
             pump,
             host_actions.clone(),
+            SessionEntropy::new(Counting(3)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -701,7 +762,7 @@ mod tests {
             1,
             "the admin interests went out on the accepted session"
         );
-        let first = Rc::downgrade(node.acceptor().expect("accepted"));
+        std::assert_eq!(LIVES.made_and_alive(), (1, 1), "one session accepted");
 
         // The session ends and the executor drops it before the node looks.
         node.acceptor.as_ref().expect("accepted").0.abort();
@@ -711,13 +772,10 @@ mod tests {
         let second = node
             .acceptor()
             .expect("listening again on the tick that found the session ended");
-        std::assert!(
-            first.upgrade().is_none(),
-            "the ended session is gone, neither the node nor the executor holds it"
-        );
-        std::assert!(
-            !core::ptr::eq(first.as_ptr(), Rc::as_ptr(second)),
-            "a new session, not the ended one"
+        std::assert_eq!(
+            LIVES.made_and_alive(),
+            (2, 1),
+            "a new session, and the ended one is gone: neither the node nor the executor holds it"
         );
         std::assert!(!second.is_established(), "and nobody has reached it yet");
         std::assert!(
@@ -767,13 +825,12 @@ mod tests {
                 ..params(0xb4)
             },
             move |sink| {
-                new_session_actions(
-                    sink,
-                    params(0xb4),
-                    CoopTime::new(&accept_runtime),
-                    Counting(1),
+                (
+                    new_session_actions(sink, params(0xb4), CoopTime::new(&accept_runtime)),
+                    SessionEntropy::new(Counting(1)),
                 )
             },
+            SessionEntropy::new(Counting(2)),
         )
         .expect("two places take the config subscriber");
         let mut observer = node.observer().borrow_mut();
@@ -803,13 +860,12 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb5),
             move |sink| {
-                new_session_actions(
-                    sink,
-                    params(0xb5),
-                    CoopTime::new(&control_runtime),
-                    Counting(1),
+                (
+                    new_session_actions(sink, params(0xb5), CoopTime::new(&control_runtime)),
+                    SessionEntropy::new(Counting(1)),
                 )
             },
+            SessionEntropy::new(Counting(2)),
         )
         .expect("a fresh node takes its admin keys");
         let mut observer = control.observer().borrow_mut();

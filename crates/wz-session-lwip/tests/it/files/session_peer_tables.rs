@@ -146,8 +146,8 @@ fn each_session_has_peer_tables_of_its_own_and_a_flood_stays_with_the_flooded() 
         .claim(driver_on(&link, 7742), Fill)
         .ok()
         .expect("slot");
-    let a = new_session_in_slot(claim_a, || params(0xa1), CoopTime::new(&runtime));
-    let b = new_session_in_slot(claim_b, || params(0xb1), CoopTime::new(&runtime));
+    let (a, _) = new_session_in_slot(claim_a, || params(0xa1), CoopTime::new(&runtime));
+    let (b, _) = new_session_in_slot(claim_b, || params(0xb1), CoopTime::new(&runtime));
     assert!(
         !core::ptr::eq(a.peers(), b.peers()),
         "two sessions, two sets of peer tables"
@@ -219,7 +219,7 @@ fn a_slot_comes_back_with_empty_peer_tables() {
         .claim(driver_on(&link, 7743), Fill)
         .ok()
         .expect("slot");
-    let first = new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
+    let (first, _) = new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
     {
         let mut peers = first.peers().borrow_mut();
         for id in 1..=4u64 {
@@ -236,7 +236,7 @@ fn a_slot_comes_back_with_empty_peer_tables() {
         .claim(driver_on(&link, 7744), Fill)
         .ok()
         .expect("slot");
-    let second = new_session_in_slot(claim, || params(0xc2), CoopTime::new(&runtime));
+    let (second, _) = new_session_in_slot(claim, || params(0xc2), CoopTime::new(&runtime));
     let peers = second.peers().borrow();
     assert_eq!(
         (
@@ -280,7 +280,7 @@ fn a_stated_quota_of_two_finals_refuses_the_third_in_a_slot_built_session() {
         .claim(driver_on(&link, 7745), Fill)
         .ok()
         .expect("slot");
-    let held = new_session_in_slot(
+    let (held, _) = new_session_in_slot(
         claim,
         || SessionInitParams {
             limits: stated,
@@ -313,7 +313,7 @@ fn a_stated_quota_of_two_finals_refuses_the_third_in_a_slot_built_session() {
         .claim(driver_on(&link, 7746), Fill)
         .ok()
         .expect("slot");
-    let built = new_session_in_slot(claim, || params(0xd2), CoopTime::new(&runtime));
+    let (built, _) = new_session_in_slot(claim, || params(0xd2), CoopTime::new(&runtime));
     let mut peers = built.peers().borrow_mut();
     for rid in 0..3 {
         assert!(peers.finals.has_room(), "under the build's limits");
@@ -380,7 +380,7 @@ fn a_stated_quota_of_two_pending_queries_refuses_the_third_on_a_slot_sessions_di
         .claim(driver_on(&link, 7747), Fill)
         .ok()
         .expect("slot");
-    let held = new_session_in_slot(
+    let (held, _) = new_session_in_slot(
         claim,
         || SessionInitParams {
             limits: stated,
@@ -399,7 +399,7 @@ fn a_stated_quota_of_two_pending_queries_refuses_the_third_on_a_slot_sessions_di
         .claim(driver_on(&link, 7748), Fill)
         .ok()
         .expect("slot");
-    let built = new_session_in_slot(claim, || params(0xe2), CoopTime::new(&runtime));
+    let (built, _) = new_session_in_slot(claim, || params(0xe2), CoopTime::new(&runtime));
     assert_eq!(
         three_pending_queries(observer, built),
         [Ok(()), Ok(()), Ok(())]

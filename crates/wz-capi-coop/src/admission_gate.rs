@@ -19,6 +19,7 @@ use alloc::rc::Rc;
 use core::cell::Cell;
 
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability, SessionDatagramLink};
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::link::{LostCause, RxFrame};
 use wz_session_mcu::dial::McuActions;
@@ -45,12 +46,12 @@ impl Admitted {
 /// `admitted` is granted.
 pub(crate) struct AdmissionGate<P, C: ClockSource + 'static> {
     pump: P,
-    actions: Rc<McuActions<C>>,
+    actions: SessionHandle<C>,
     admitted: Admitted,
 }
 
 impl<P, C: ClockSource + 'static> AdmissionGate<P, C> {
-    pub(crate) fn new(pump: P, actions: Rc<McuActions<C>>, admitted: Admitted) -> Self {
+    pub(crate) fn new(pump: P, actions: SessionHandle<C>, admitted: Admitted) -> Self {
         Self {
             pump,
             actions,
@@ -203,12 +204,8 @@ mod tests {
         let OpenedLink { sink, pump } = MemoryLinks::new(net.clone(), ACCEPTOR)
             .open_acceptor(7447)
             .expect("bind the acceptor's end");
-        let acceptor = new_session_actions(
-            sink,
-            params(WhatAmI::Peer, 0xa1),
-            CoopTime::new(&runtime),
-            PosixEntropy,
-        );
+        let acceptor =
+            new_session_actions(sink, params(WhatAmI::Peer, 0xa1), CoopTime::new(&runtime));
         let admitted = Admitted::default();
         let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
@@ -227,6 +224,7 @@ mod tests {
             &local,
             Rc::new(AdmissionGate::new(pump, acceptor.clone(), admitted.clone())),
             acceptor.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
             dispatch_to(observer, acceptor.clone()),
@@ -235,16 +233,13 @@ mod tests {
         let OpenedLink { sink, pump } = MemoryLinks::new(net, INITIATOR)
             .open_initiator(Locator::udp(std::net::SocketAddr::from((ACCEPTOR, 7447))))
             .expect("open the initiator's end");
-        let initiator = new_session_actions(
-            sink,
-            params(WhatAmI::Client, 0xc1),
-            CoopTime::new(&runtime),
-            PosixEntropy,
-        );
+        let initiator =
+            new_session_actions(sink, params(WhatAmI::Client, 0xc1), CoopTime::new(&runtime));
         let _initiator_task = spawn_session(
             &local,
             pump,
             initiator.clone(),
+            wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
             dispatch_to(

@@ -221,19 +221,22 @@ type Binding = SessionActionsBinding<CoopRuntime<Frozen>, CoopTime<Frozen>>;
 /// One end of a session: its actions bundle, the socket driver those send
 /// through, and the pump that reads what the other end sent.
 struct Side {
-    actions: Rc<Actions>,
+    actions: wz_runtime_coop::link_cells::CellRc<Actions>,
     /// The socket driver the actions send through, which the refusal tests take
     /// every slot from.
     #[cfg(feature = "tx-lend-only")]
     sink: wz_runtime_coop::link_cells::CellRc<dyn wz_session_core::link::BoxedLinkDriver>,
     pump: LwipSessionLink<Rc<LwipLink>>,
+    /// The session's entropy, which the handshake binding this end's machine is driven
+    /// through draws from.
+    entropy: wz_runtime_coop::session_runtime::SessionEntropy,
 }
 
 impl Side {
     /// The FSM's own action methods over this end's bundle, which is how a
     /// handshake message is sent.
     fn fsm(&self) -> Binding {
-        Binding::new(self.actions.clone())
+        Binding::new(self.actions.clone(), self.entropy.clone())
     }
 
     /// Every datagram that has reached this end, in order. Pumps lwIP's input
@@ -277,15 +280,11 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
 
     let opened = links.open_acceptor(port).expect("bind the acceptor");
     let acceptor = Side {
-        actions: new_session_actions(
-            opened.sink.clone(),
-            params(0xa1),
-            CoopTime::new(&runtime),
-            Counting(1),
-        ),
+        actions: new_session_actions(opened.sink.clone(), params(0xa1), CoopTime::new(&runtime)),
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
     };
 
     let opened = links
@@ -299,6 +298,7 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
         #[cfg(feature = "tx-lend-only")]
         sink: opened.sink,
         pump: opened.pump,
+        entropy: wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(2)),
     };
     (acceptor, initiator)
 }

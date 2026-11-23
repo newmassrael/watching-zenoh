@@ -86,7 +86,7 @@ use wz_link_lwip::rx_sockets::bind_session_rx;
 use wz_link_lwip::test_bind::session_rx as bind_session_rx;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
 use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionPump, SessionRole};
-use wz_runtime_coop::session_runtime::SessionHandle;
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
@@ -365,14 +365,14 @@ mod placing_in_slot {
         socket: SessionRxSocket,
         peer: Option<([u8; 4], u16)>,
         zid: u8,
-    ) -> (Handle, LwipSessionLink<Rc<LwipLink>>) {
+    ) -> (Handle, SessionEntropy, LwipSessionLink<Rc<LwipLink>>) {
         let driver = driver_over(socket, peer);
         let Ok(claim) = SESSIONS.claim(driver, Counting(zid)) else {
             panic!("a slot is free");
         };
         let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-        let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
-        (actions, pump_link)
+        let (actions, entropy) = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
+        (actions, entropy, pump_link)
     }
 
     /// Slots in use, for the check that they all come back.
@@ -406,12 +406,12 @@ mod placing_on_the_heap {
         socket: SessionRxSocket,
         peer: Option<([u8; 4], u16)>,
         zid: u8,
-    ) -> (Handle, LwipSessionLink<Rc<LwipLink>>) {
+    ) -> (Handle, SessionEntropy, LwipSessionLink<Rc<LwipLink>>) {
         let driver = wz_runtime_coop::link_cells::CellRc::boxed(driver_over(socket, peer));
         let sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver> =
             driver.clone().into_sink();
         let actions = if zid == 0xa1 {
-            new_session_actions(sink, params(zid), CoopTime::new(runtime), Counting(zid))
+            new_session_actions(sink, params(zid), CoopTime::new(runtime))
         } else {
             SessionLinkActions::<Rt, CoopTime<Frozen>>::new_generic(
                 sink,
@@ -419,7 +419,11 @@ mod placing_on_the_heap {
                 CoopTime::new(runtime),
             )
         };
-        (actions, LwipSessionLink::new(link.clone(), driver))
+        (
+            actions,
+            SessionEntropy::new(Counting(zid)),
+            LwipSessionLink::new(link.clone(), driver),
+        )
     }
 
     /// No slot table on this profile: nothing to come back.
@@ -557,19 +561,24 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
     let mut costs = Costs::default();
 
     // CREATION: both ends, from the bound socket to the session that can run.
-    let (((acceptor_actions, acceptor_link), (initiator_actions, initiator_link)), n) =
-        m.count("creation", || {
-            (
-                placing::create(&link, &runtime, acceptor_socket, None, 0xa1),
-                placing::create(
-                    &link,
-                    &runtime,
-                    initiator_socket,
-                    Some(([127, 0, 0, 1], port)),
-                    0xb1,
-                ),
-            )
-        });
+    let (
+        (
+            (acceptor_actions, acceptor_entropy, acceptor_link),
+            (initiator_actions, initiator_entropy, initiator_link),
+        ),
+        n,
+    ) = m.count("creation", || {
+        (
+            placing::create(&link, &runtime, acceptor_socket, None, 0xa1),
+            placing::create(
+                &link,
+                &runtime,
+                initiator_socket,
+                Some(([127, 0, 0, 1], port)),
+                0xb1,
+            ),
+        )
+    });
     costs.check("creation of the per-session state", n);
 
     let (on_acceptor, acceptor_seen) = application(&acceptor_actions);
@@ -579,6 +588,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
             runtime.clone(),
             acceptor_link,
             acceptor_actions.clone(),
+            acceptor_entropy,
             CoopTime::new(&runtime),
             config(SessionRole::Acceptor),
         ),
@@ -591,6 +601,7 @@ fn a_session_costs_the_heap_nothing_from_its_slot_to_its_close() {
             runtime.clone(),
             initiator_link,
             initiator_actions.clone(),
+            initiator_entropy,
             CoopTime::new(&runtime),
             config(SessionRole::Initiator),
         ),
@@ -821,7 +832,8 @@ mod table {
             .ok()
             .expect("a slot");
         let driver_handle = claim.driver_handle();
-        let actions = new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
+        let (actions, _entropy) =
+            new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
         let clone = actions.clone();
         let sink = actions.link.driver.clone();
         assert_eq!(TABLE.in_use(), 1);

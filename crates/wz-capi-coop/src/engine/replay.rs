@@ -30,9 +30,8 @@
 //! with no retry wait or after the no-progress bound, gives the replay up and the link with it
 //! ([`TurnEnd::EndsLink`]).
 
-use alloc::rc::Rc;
-
 use wz_runtime_coop::session_drive::SessionLinks;
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
@@ -448,7 +447,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
     /// over ([`Self::retract_at`]). Call it once, before the removal.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<Rc<McuActions<C>>> {
+    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<SessionHandle<C>> {
         let place = self.start_of(kind) + index;
         self.retract_at(place)
     }
@@ -456,7 +455,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The declaration at `place` in the replay's order is about to be removed: the links to
     /// retract it over, which are those of the faces that are up and whose peers were told of it.
     /// Call it once, before the removal.
-    pub(super) fn retract_at(&mut self, place: usize) -> Vec<Rc<McuActions<C>>> {
+    pub(super) fn retract_at(&mut self, place: usize) -> Vec<SessionHandle<C>> {
         let mut links = Vec::new();
         for face in self.links.faces_mut() {
             let Link::Up(wire) = &face.link else {

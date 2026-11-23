@@ -81,7 +81,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::SessionHandle;
+use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -984,6 +984,20 @@ pub trait SessionLinks {
         let _ = tables;
     }
 
+    /// The bytes of a cell that holds any link the stack opens (`crate::link_cells`): what a
+    /// session's arena lays the cells of its link table out with. The default, `0`, is a stack
+    /// that places each link on the heap.
+    fn link_cell_bytes(&self) -> usize {
+        0
+    }
+
+    /// The cells every link the stack opens from now on is placed in, for the session the links
+    /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
+    /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
+    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells) {
+        let _ = cells;
+    }
+
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the
     /// dial is asked again ([`PendingDial::poll`]) until its link is made or refused, so a dial that
     /// is slow to be answered or refused (a stream's connect) does not hold whoever holds the
@@ -1172,6 +1186,7 @@ pub fn run_session<C, L, F>(
     runtime: &CoopRuntime<C>,
     link: L,
     actions: &SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: &CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -1185,6 +1200,7 @@ where
         runtime.clone(),
         link,
         actions.clone(),
+        entropy,
         clock.clone(),
         config,
     );
@@ -1303,6 +1319,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
@@ -1318,6 +1335,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
             runtime,
             link,
             actions,
+            entropy,
             clock,
             config,
             #[cfg(feature = "reassembly")]
@@ -1336,12 +1354,13 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
     ) -> Self {
         let reasm = in_place_reassembly(arena, &actions.params.policy);
-        Self::build(runtime, link, actions, clock, config, reasm)
+        Self::build(runtime, link, actions, entropy, clock, config, reasm)
     }
 
     /// `rx-in-place` with `reassembly` — the session's reassembly Router, and
@@ -1370,11 +1389,12 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
     ) -> Self {
-        Self::build(runtime, link, actions, clock, config, reasm)
+        Self::build(runtime, link, actions, entropy, clock, config, reasm)
     }
 
     /// [`Self::with_router`] built in `place` and lent back, its Router made in its own field by
@@ -1393,6 +1413,7 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
@@ -1405,7 +1426,16 @@ impl<
         UnicastRx::init_in(rx, make_router)?;
         // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
         unsafe {
-            Self::build_in(place, runtime, link, actions, clock, config, |_| {});
+            Self::build_in(
+                place,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |_| {},
+            );
             Some(place.assume_init_mut())
         }
     }
@@ -1417,6 +1447,7 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
@@ -1426,9 +1457,18 @@ impl<
         // the place it wrote, so `init_in` takes it as written. Then `build_in` has written every
         // field of the pump into `place`.
         unsafe {
-            Self::build_in(&mut place, runtime, link, actions, clock, config, |rx| {
-                let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
-            });
+            Self::build_in(
+                &mut place,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                },
+            );
             place.assume_init()
         }
     }
@@ -1454,6 +1494,7 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
@@ -1474,6 +1515,7 @@ impl<
                 &mut *core::ptr::addr_of_mut!((*at).engine)
                     .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D>, CoopTime<C>>>>(),
                 &actions,
+                entropy,
             );
             // `new_session_engine_in` yields an un-initialized engine (the AP
             // convention — the caller runs the SCXML initial transition into the
@@ -1708,6 +1750,7 @@ pub async fn session_task<C, L, F>(
     runtime: CoopRuntime<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     mut on_event: F,
@@ -1717,7 +1760,7 @@ where
     L: SessionDatagramLink,
     F: FnMut(IterationEvent<'_, '_>),
 {
-    let mut pump = SessionPump::new(runtime, link, actions, clock, config);
+    let mut pump = SessionPump::new(runtime, link, actions, entropy, clock, config);
     loop {
         if let Some(outcome) = pump.step(&mut on_event) {
             return outcome;
@@ -1746,6 +1789,7 @@ pub fn spawn_session<C, L, F>(
     local: &CoopLocalSet<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     on_event: F,
@@ -1759,6 +1803,7 @@ where
         local.runtime().clone(),
         link,
         actions,
+        entropy,
         clock,
         config,
         on_event,
@@ -1809,6 +1854,7 @@ pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1827,6 +1873,7 @@ where
             runtime,
             link,
             actions,
+            entropy,
             clock,
             config,
             make_router,
@@ -1865,6 +1912,7 @@ struct PumpParts<C: ClockSource + 'static, L, M> {
     runtime: CoopRuntime<C>,
     link: L,
     actions: SessionHandle<C>,
+    entropy: SessionEntropy,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1893,13 +1941,21 @@ where
                 runtime,
                 link,
                 actions,
+                entropy,
                 clock,
                 config,
                 make_router,
             } = parts;
-            SessionPump::with_router_in(slot, runtime, link, actions, clock, config, |router| {
-                make_router.make_in(router)
-            })
+            SessionPump::with_router_in(
+                slot,
+                runtime,
+                link,
+                actions,
+                entropy,
+                clock,
+                config,
+                |router| make_router.make_in(router),
+            )
         });
         // A pump its maker did not build in its place is no session to drive: the task ends.
         let Some(pump) = built else {
@@ -2213,7 +2269,7 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 ///
 /// ```ignore
 /// static PUMPS: PumpSlots<BoardClock, LwipSessionLink<&'static LwipLink>, 3> = PumpSlots::new();
-/// let pump = PUMPS.claim(runtime.clone(), link, actions, clock, config)?;
+/// let pump = PUMPS.claim(runtime.clone(), link, actions, entropy, clock, config)?;
 /// spawn_pump(&local, pump, on_event)?;
 /// ```
 ///
@@ -2305,6 +2361,7 @@ impl<
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
+        entropy: SessionEntropy,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Result<PumpRef<C, L, D>, PumpsFull> {
@@ -2352,6 +2409,7 @@ impl<
                 runtime,
                 link,
                 actions,
+                entropy,
                 clock,
                 config,
                 // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
@@ -2539,7 +2597,7 @@ mod wake_budget_tests {
     #[cfg(feature = "session-unicast-accept")]
     use wz_session_core::driver_loop::DriverLoopOutcome;
 
-    use crate::session_runtime::new_session_actions;
+    use crate::session_runtime::{new_session_actions, SessionEntropy};
     use crate::time::{ClockSource, CoopTime};
     use crate::CoopRuntime;
 
@@ -2634,7 +2692,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         // The session's own clock, whose epoch is its runtime's and not the board's.
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
@@ -2644,7 +2703,7 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
@@ -2656,7 +2715,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
         let link = Rc::new(Recording::default());
@@ -2665,7 +2725,7 @@ mod wake_budget_tests {
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link, actions.clone(), clock, config);
+        let mut pump = SessionPump::new(runtime, link, actions.clone(), entropy, clock, config);
         let mut wakes = 0;
         let _ = pump.step(&mut |event: IterationEvent<'_, '_>| {
             if matches!(event, IterationEvent::AppWake) {
@@ -2685,14 +2745,22 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions.clone(), clock, config);
+        let mut pump = SessionPump::new(
+            runtime,
+            link.clone(),
+            actions.clone(),
+            entropy,
+            clock,
+            config,
+        );
         link.holding.set(true);
         actions.park_pending_batch(&[0xFF]);
         let _ = pump.step(&mut |_event: IterationEvent<'_, '_>| {});
@@ -2729,14 +2797,15 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
             role: SessionRole::Acceptor,
             max_iters: None,
         };
-        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, entropy, clock, config);
         let mut lost = Vec::new();
         let mut record = |event: IterationEvent<'_, '_>| {
             if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
@@ -2794,14 +2863,16 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let made = Rc::new(core::cell::Cell::new(0u32));
-        let before = Rc::strong_count(&actions);
+        let before = crate::link_cells::CellRc::handles(&actions);
         let task = spawn_session_with_router(
             &local,
             Rc::clone(&link),
             actions.clone(),
+            entropy,
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2826,13 +2897,13 @@ mod wake_budget_tests {
             !link.budgets.borrow().is_empty(),
             "the pump built in the task stepped its link"
         );
-        let running = Rc::strong_count(&actions);
+        let running = crate::link_cells::CellRc::handles(&actions);
         assert!(running > before, "the pump holds the handle to its session");
         task.abort();
         local.run_until_idle();
         assert_eq!(made.get(), 1, "a dropped task makes nothing more");
         assert!(
-            Rc::strong_count(&actions) < running,
+            crate::link_cells::CellRc::handles(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
     }
@@ -2850,7 +2921,8 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let link = Rc::new(Recording::default());
         let lend = RouterLend::<Router>::new();
         let mut router = crate::reassembly_rx::mcu_reassembly(
@@ -2860,6 +2932,7 @@ mod wake_budget_tests {
             &local,
             Rc::clone(&link),
             actions,
+            entropy,
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2909,12 +2982,14 @@ mod wake_budget_tests {
             let local = CoopLocalSet::new(&runtime);
             let clock = CoopTime::new(&runtime);
             let sink = crate::link_cells::heap_sink(Null);
-            let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+            let actions = new_session_actions(sink, params(), clock.clone());
+            let entropy = SessionEntropy::new(Counting(0));
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
                 &local,
                 Rc::new(Recording::default()),
                 actions,
+                entropy,
                 clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -2989,11 +3064,13 @@ mod wake_budget_tests {
         let local = CoopLocalSet::new(&runtime);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let task = spawn_session_with_router(
             &local,
             Rc::new(Recording::default()),
             actions,
+            entropy,
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -3046,7 +3123,8 @@ mod wake_budget_tests {
         let runtime = CoopRuntime::new(Stopped);
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null);
-        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
         let now_ms = clock.now_monotonic_ms();
         let config = SessionDriveConfig {
             timeouts: SessionTimeouts::from_build(),
@@ -3055,7 +3133,7 @@ mod wake_budget_tests {
         };
         let link = Rc::new(Recording::default());
         (
-            SessionPump::new(runtime, link, actions, clock, config),
+            SessionPump::new(runtime, link, actions, entropy, clock, config),
             now_ms,
         )
     }

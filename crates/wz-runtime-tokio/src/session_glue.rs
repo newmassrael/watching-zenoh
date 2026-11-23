@@ -426,13 +426,9 @@ pub use wz_session_core::peer_init_caps::PeerInitCaps;
 /// `drive_session_until_terminal` also receives, so the lease comparator's
 /// `now_ms` and the recorded `keepalive_ms` / `established_ms` share an epoch.
 ///
-/// R311y813 — this is also where the per-handshake COOKIE NONCE is drawn. The
-/// construction seam, not each accept entry point: `accept_and_open_session`
-/// has six siblings today (`_with_auth`, `_with_multilink`, `_with_lowlatency`,
-/// …) plus the router / capi accept paths, and the auth nonce — installed at
-/// each seam instead — is why "a caller cannot forget it" had to be re-argued
-/// at every one of them. Drawing it once at construction makes a new accept
-/// path bound by default and costs an initiator-role bundle 8 unread bytes.
+/// The per-handshake COOKIE NONCE is not this seam's: every engine's binding holds the AP's one
+/// source ([`OsEntropy`], [`new_session_engine`]) and draws it at each InitAck, so no accept
+/// path can forget it.
 pub fn new_session_actions<T: TimeSource>(
     driver: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
@@ -447,31 +443,6 @@ pub fn new_session_actions<T: TimeSource>(
     #[cfg(feature = "transport-batching")]
     let batching = params.tx_queue.batching;
     let actions = SessionLinkActions::<TokioRuntime, T>::new_generic(driver, params, clock);
-    // R311y813 — bind this bundle's acceptor cookie to one handshake. An
-    // entropy failure leaves the slot at its fail-closed `None`: the acceptor
-    // then mints no HMAC cookie and admits no OpenSyn, which is loud (no
-    // session establishes) rather than quietly replayable. Reported at `error`
-    // because a host without `/dev/urandom` is a deploy fault, not a runtime
-    // condition to absorb.
-    // R311y819 — drawn through the §2.5 port ([`OsEntropy`]) rather than by a
-    // direct `nonce_from_os_entropy()` call, so this seam and the MCU one
-    // (`wz_runtime_coop::session_runtime::new_session_actions`) differ in their
-    // SOURCE and in nothing else. The bytes are identical — `OsEntropy` is
-    // `getrandom` and the trait fixes the same little-endian decode
-    // `nonce_from_os_entropy` performs.
-    // R2763 — the source is INSTALLED, and the draw below goes through it. The
-    // bundle re-draws on every InitAck it mints, which is what makes the
-    // binding per-HANDSHAKE rather than per-bundle; this call is what gives it
-    // something to re-draw from. The construction-time draw is kept so an
-    // unusable source is reported HERE, at the seam that owns the deploy fault,
-    // instead of silently at the first handshake.
-    actions.install_cookie_entropy(Box::new(OsEntropy));
-    if !actions.draw_cookie_nonce() {
-        log::error!(
-            "wz-session: no OS entropy for the anti-amplification cookie nonce; \
-             this bundle will refuse every inbound OpenSyn"
-        );
-    }
     // Declare this profile's reassembly budget to the TX side, so an
     // oversize send is refused where the caller can see it instead of being
     // fragmented into a chain this host's own dispatcher would drop
@@ -518,7 +489,7 @@ pub fn new_session_actions<T: TimeSource>(
 pub fn new_session_engine<T: TimeSource>(
     actions: &Arc<SessionLinkActions<TokioRuntime, T>>,
 ) -> Engine<SessionFsmUnicastPolicy<SessionActionsBinding<TokioRuntime, T>>> {
-    wz_session_core::drive::new_session_engine(actions)
+    wz_session_core::drive::new_session_engine(actions, OsEntropy)
 }
 
 // ─────────────────────────── codec wiring ───────────────────────────
@@ -2273,18 +2244,13 @@ mod tests {
         );
     }
 
-    /// R311y813 — `new_session_actions` must install a cookie nonce, and two
-    /// bundles must not share one. This is the half the FSM discriminator
-    /// (`a_cookie_from_an_earlier_handshake_is_refused_by_the_next`)
-    /// deliberately does not test: that test INSTALLS its nonces so its
-    /// outcome is decided by the binding, which leaves "does anything draw a
-    /// fresh one in production" unasserted. Here.
-    ///
-    /// A regression that drops the draw fails on `Some`; one that hoists it to
-    /// a process-wide constant fails on distinctness — the same 2^64 argument
-    /// the signing-key test above makes at 2^256.
+    /// R311y813 — the AP's one source draws a fresh cookie nonce for each handshake of each
+    /// bundle. A bundle holds no source, so no nonce before its first InitAck; the binding's
+    /// source draws one there, and two draws, on one bundle or on two, are not one value. A
+    /// regression that hoists the draw to a process-wide constant fails on distinctness.
     #[test]
-    fn new_session_actions_draws_a_distinct_cookie_nonce_per_bundle() {
+    fn the_ap_source_draws_a_distinct_cookie_nonce_per_handshake() {
+        use crate::session_glue::OsEntropy;
         let mk = || {
             let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> =
                 Arc::new(wz_runtime_tokio_test_support::NoopOutboundDriver::default());
@@ -2295,15 +2261,24 @@ mod tests {
             )
         };
         let (a, b) = (mk(), mk());
-        let (na, nb) = (a.cookie_nonce(), b.cookie_nonce());
-        assert!(
-            na.is_some() && nb.is_some(),
-            "the AP construction seam must leave no bundle fail-closed"
+        assert_eq!(
+            a.cookie_nonce(),
+            None,
+            "a bundle keeps no source, so it holds no nonce before its first InitAck"
         );
+        assert!(a.draw_cookie_nonce(&mut OsEntropy) && b.draw_cookie_nonce(&mut OsEntropy));
+        let first = a.cookie_nonce();
         assert_ne!(
-            na, nb,
-            "each bundle must draw its OWN nonce -- a shared one makes every \
+            first,
+            b.cookie_nonce(),
+            "each bundle's handshake draws its OWN nonce -- a shared one makes every \
              acceptor on this node mint the same cookie for a given peer"
+        );
+        assert!(a.draw_cookie_nonce(&mut OsEntropy));
+        assert_ne!(
+            first,
+            a.cookie_nonce(),
+            "a second handshake on one bundle draws its own"
         );
     }
 
@@ -5705,7 +5680,10 @@ mod link_priority_tests {
         use crate::session_glue::SessionActionsBinding;
 
         let (actions, driver) = crate::test_fixtures::recording_actions();
-        let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(actions);
+        let mut binding = SessionActionsBinding::<TokioRuntime, TokioTime>::new(
+            actions,
+            crate::session_glue::OsEntropy,
+        );
         binding.send_init_syn();
         binding.send_open_syn();
         binding.send_init_ack_with_cookie();

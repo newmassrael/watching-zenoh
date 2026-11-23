@@ -338,7 +338,7 @@ fn run_router(
     let runtime = CoopRuntime::new(PosixClock);
     let local = CoopLocalSet::new(&runtime);
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
-    let actions = new_session_actions(sink, init, CoopTime::new(&runtime), PosixEntropy);
+    let actions = new_session_actions(sink, init, CoopTime::new(&runtime));
     let observer = std::rc::Rc::new(std::cell::RefCell::new(ApplicationLayerObserver::new()));
     if catch_all == CatchAll::Held {
         let samples = seen.clone();
@@ -403,6 +403,7 @@ fn run_router(
         &local,
         pump,
         actions.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(PosixEntropy),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -2396,6 +2397,8 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+#[cfg(all(feature = "app-transport", feature = "listen"))]
+mod app_listen;
 mod arena;
 mod closure_drops;
 mod congestion;

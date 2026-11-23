@@ -346,6 +346,7 @@ mod heap {
 
     use super::{dial_failed, parse_locator_for, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
+    use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
     use wz_session_core::locator_directory::DirectoryZid;
 
     /// What a dialled session reports its iterations to — typically
@@ -355,13 +356,13 @@ mod heap {
     /// A session this dialer started.
     pub struct UdpSession<C: ClockSource + 'static> {
         handle: CoopLocalJoinHandle<DriverOutcome>,
-        actions: Rc<McuActions<C>>,
+        actions: SessionHandle<C>,
         established: bool,
     }
 
     impl<C: ClockSource + 'static> UdpSession<C> {
         /// The session's action bundle, to publish or declare through.
-        pub fn actions(&self) -> &Rc<McuActions<C>> {
+        pub fn actions(&self) -> &SessionHandle<C> {
             &self.actions
         }
 
@@ -432,7 +433,7 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         local: &'a CoopLocalSet<C>,
         links: Rc<L>,
@@ -440,6 +441,9 @@ mod heap {
         max_iters: Option<usize>,
         params: P,
         on_event: E,
+        /// The node's one entropy source, which each session dialled draws its handshake's
+        /// secrets from through its binding.
+        entropy: SessionEntropy,
     }
 
     impl<'a, L, C, P, E> UdpDialer<'a, L, C, P, E>
@@ -447,16 +451,17 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         /// A dialer spawning onto `local`, over `links`, with the handshake
-        /// deadlines `timeouts`.
+        /// deadlines `timeouts`, its sessions drawing from the node's `entropy`.
         pub fn new(
             local: &'a CoopLocalSet<C>,
             links: Rc<L>,
             timeouts: SessionTimeouts,
             params: P,
             on_event: E,
+            entropy: SessionEntropy,
         ) -> Self {
             Self {
                 local,
@@ -465,6 +470,7 @@ mod heap {
                 max_iters: None,
                 params,
                 on_event,
+                entropy,
             }
         }
 
@@ -496,6 +502,7 @@ mod heap {
                 self.local,
                 pump,
                 actions.clone(),
+                self.entropy.clone(),
                 CoopTime::new(runtime),
                 SessionDriveConfig {
                     timeouts: self.timeouts,
@@ -517,7 +524,7 @@ mod heap {
         L: SessionLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+        E: FnMut(&SessionHandle<C>) -> EventSink,
     {
         type Session = UdpSession<C>;
 
@@ -955,6 +962,7 @@ mod tests {
     use wz_runtime_coop::session_drive::{
         spawn_session, LinkOpenError, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
     };
+    use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
     use wz_runtime_coop::{ClockSource, CoopLocalSet};
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::session_timeouts::SessionTimeouts;
@@ -1011,7 +1019,7 @@ mod tests {
         }
     }
 
-    fn quiet(_: &Rc<McuActions<FrozenClock>>) -> EventSink {
+    fn quiet(_: &SessionHandle<FrozenClock>) -> EventSink {
         Box::new(|_| {})
     }
 
@@ -1040,12 +1048,12 @@ mod tests {
             acceptor_sink,
             params(0xa1),
             CoopTime::new(&runtime),
-            Counting(1),
         );
         let _acceptor = spawn_session(
             &local,
             acceptor_pump,
             acceptor_actions.clone(),
+            SessionEntropy::new(Counting(1)),
             CoopTime::new(&runtime),
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -1061,6 +1069,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
+            SessionEntropy::new(Counting(2)),
         );
         let mut session = dialer.dial("udp/10.0.0.1:7494").expect("dialable");
         for _ in 0..64 {
@@ -1115,6 +1124,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xc1),
             quiet,
+            SessionEntropy::new(Counting(2)),
         )
         .with_max_iters(8);
         let mut lost = unanswered.dial("udp/10.0.0.1:7495").expect("dialable");
@@ -1159,12 +1169,12 @@ mod tests {
                 sink,
                 params(0xa1),
                 CoopTime::new(&runtime),
-                Counting(1),
             );
             let task = spawn_session(
                 &local,
                 pump,
                 actions.clone(),
+                SessionEntropy::new(Counting(1)),
                 CoopTime::new(&runtime),
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -1182,6 +1192,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xb1),
             quiet,
+            SessionEntropy::new(Counting(2)),
         );
         std::assert!(
             verifies_nodes(&dialer),
@@ -1256,6 +1267,7 @@ mod tests {
             SessionTimeouts::from_build(),
             || params(0xd1),
             quiet,
+            SessionEntropy::new(Counting(2)),
         );
         std::assert!(matches!(
             dialer.dial("udp/10.0.0.1:7494"),

@@ -2640,21 +2640,6 @@ mod tests {
             }
         }
 
-        struct Counting(u8);
-
-        impl wz_session_core::entropy::EntropySource for Counting {
-            fn try_fill_bytes(
-                &mut self,
-                buf: &mut [u8],
-            ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
-                for slot in buf.iter_mut() {
-                    *slot = self.0;
-                    self.0 = self.0.wrapping_add(1);
-                }
-                Ok(())
-            }
-        }
-
         type Heap = StreamDriver<Pipe, Vec<u8>, HeapTx>;
 
         /// A session whose frames each leave at once (no batch window), with the waits above.
@@ -2701,7 +2686,7 @@ mod tests {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
             link.socket.full.set(true);
             actions
                 .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
@@ -2740,7 +2725,7 @@ mod tests {
             let runtime = CoopRuntime::new(Stopped);
             let link = link();
             let sink = link.clone().into_sink();
-            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime), Counting(0));
+            let actions = new_session_actions(sink, params(), CoopTime::new(&runtime));
             link.socket.full.set(true);
             let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")
                 .expect("a literal Put encodes");

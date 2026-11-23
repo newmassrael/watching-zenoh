@@ -134,11 +134,12 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
     let pool = InstalledPool::install();
 
     let OpenedLink { sink, pump } = links.open_acceptor(7561).expect("bind acceptor");
-    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime), Counting(1));
+    let acceptor = new_session_actions(sink, params(0xa1), CoopTime::new(&runtime));
     let _acceptor_task = spawn_session(
         &local,
         pump,
         acceptor.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(1)),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
@@ -162,6 +163,7 @@ fn every_frame_of_an_established_session_leaves_from_a_pool_slot() {
         &local,
         pump,
         initiator.clone(),
+        wz_runtime_coop::session_runtime::SessionEntropy::new(Counting(0)),
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
