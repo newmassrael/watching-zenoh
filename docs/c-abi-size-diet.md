@@ -410,6 +410,10 @@ For round 5 (section 9): `--scope 'drop_glue::<.*(NetworkMessage|DeclareIn|PushI
 (R3-d), `--scope '_(take|drop)$|take_block|drop_block'` (R5-a), and `nm -C` for
 `decode_one_record::<alloc::vec::Vec` and `decide_unit_in` (next list item 1).
 
+For round 6 (section 10): `--scope 'core::net::parser|dial::(socket_addr|ipv4_address|ipv6_)'` (R6-a),
+`--scope 'BTreeMap|zp_config_insert|z_config_clone|ConfigState'` (R6-b) and
+`--scope '^z_put$|^z_publisher_put$|PutCarried|put_options'` (R6-c).
+
 ## 5. Round 2: where the no_std form's code goes, and what pico's build does not carry
 
 **Attribution (read and estimated).** The read of section 1, by crate: `wz_session_core` 167K,
@@ -797,7 +801,7 @@ How the call graph was read: the library calls its own functions through GOT slo
 slots to addends gives the callers of a function, and walking them up gives its root (the
 session task `CoopLocalSet::spawn_local`, an export, or a vtable entry).
 
-### The next list, with lighter forms
+### The next list, with lighter forms (read and carried out in round 6, section 10)
 
 | # | what | where (old reading) | lighter form | estimate |
 |---|------|---------------------|--------------|---------:|
@@ -816,3 +820,81 @@ Together -40K to -71K if item 1 is still linked, -20K to -36K if it is not. With
 (-3K to -13.5K) on 458,109 that is about 374K to 435K against 329,664 (1.13x to 1.32x): the 1.0x
 goal still needs the session core's send side and the engine's own size read from a build of
 this branch, in that order.
+
+
+## 10. Round 6: section 9's list read against a newer build, and three cuts
+
+Nothing of round 6 was built or measured when this was written. The starting figures are measured
+on the base of this round (rounds 1 to 5 merged; the same linker on both arms, both packed and
+without unwind tables): `pico-client-coop-nostd` 461,005 against zenoh-pico's 329,664 (1.40x), and
+`pico-client-coop` 935,270 against 401,760 (2.33x).
+
+**The reading.** The library section 9 read is older than the main branch it was written beside.
+This round read a no_std library of the main branch of the same day, built with the case's
+features (`os-posix,link-udp`, `.text` 407,861), by `nm -S` and section 9's walk of the GOT
+slots. That build has none of rounds 3 to 5, so its figures say what a path costs where those
+rounds did not change it; where they did, this branch's code is read instead, as each row says.
+
+| # | item of section 9 | read | done | estimate |
+|---|-------------------|------|------|---------:|
+| 1 | the owned decode of a batch | not linked: the main build names no `decode_one_record::<Vec<_>>`, no `decide_unit_in` and no `read_unit_in`. In this branch the in-place receive with `reassembly` reads a unit it does not take as a `Frame` through `dispatch_copied` (`refused_data_unit`, `dispatch_control_in_place`), stages a `Fragment` in place, and `report_outcome_in_place` reaches `report_outcome_reassembling`, the unicast path to `reassembled_chain_outcome`, only with `transport-compression` | nothing to cut | 0 |
+| 1b | the owned network-message drop glue | in the main build `NetworkMessage`'s drop (347) is reached only from `DriverLoopOutcome`'s (311), whose list R3-d makes of no size here; `DeclareIn`'s (1,029) only from the owned declaration sends and the answers to an interest, which R3-b writes from parts in `tx-lend-only` | nothing more to cut | (in R3-b, R3-d) |
+| 2 | the application fan | `dispatch_event_among` is 172 bytes in the main build: the preset holds the subscriber and remote-subscriber planes only, so there is nothing to route by kind | nothing to cut | 0 |
+| 3 | the address parser | `core::net`'s parser 2,963 (`read_ipv4_addr` 953, `read_number::<u16>` 669, `read_ipv6_addr` and its groups 842, `read_socket_addr_v6` 415), reached only from `dial::parse_endpoint` through `SocketAddrV6::from_str`; the IPv4 reader (1,193) was wz's already | R6-a below | -2K to -2.5K |
+| 4 | the registry's teardown | `Rc<RefCell<Registry>>::drop_slow` 1,566, the engine's drop 1,537, `Registry::new` 1,823 | not done: the registry and the arena are the faces work's files in this round | (-2K to -4K) |
+| 5 | the put doors | `z_put` 2,206, `z_publisher_put` 2,526 | R6-c below | -0.5K to -1.5K |
+| 6 | the config door | `zp_config_insert` 3,328 is a `BTreeMap<u8, String>` insert inlined, beside the map's `clone_subtree` 902 and its share of `Box<ConfigState>`'s drop 898: the cost is the map, not a match over keys | R6-b below, in that form | -3K to -4.5K |
+| 7 | the key expression matcher | 11,008, `keyexpr_canon` 3,995; the matcher is generated from `sources/algorithms/keyexpr_*.scxml`, so a shared chunk walk is a change of those documents and a regeneration | not done | (-1K to -3K) |
+| 8 | the handshake and OAM decode | a transport OAM's decode gives the length the unit's reader goes on from, and a network OAM's decode is how the walk steps over one; `parse_init` and `parse_open` read the syn and the ack by one document each | not done: without the decode a batch holding an OAM delivers nothing after it, and a reader of the acks alone is a second document | (-1K to -2.5K) |
+| 9 | the outbound key mappings | `RawTable<(u16, String)>::reserve_rehash` 1,424, `foldhash` 463 | not done: the key storage work's | (-1.5K to -2K) |
+| 10 | `core`'s formatters | `pad_integral` 1,265, `do_count_chars` 1,464, `Formatter::pad` 1,065; part of the rest hangs on four `str` slices (the next list, item 1), not on the panic handler | the owner's decision for the formatters themselves | (-5K to -7K) |
+
+### R6-a: an IPv6 endpoint read by wz's own reader (landed)
+
+`refactor(session-mcu): Read a bracketed IPv6 endpoint by wz's own reader`. `dial::socket_addr_v6`
+reads `[address%scope]:port` as `SocketAddrV6`'s `FromStr` does: the address by
+`ipv6_address` (up to eight groups, `::` and the rest when fewer, an embedded IPv4 address closing
+them), a scope of decimal digits up to `u32::MAX`, and the port as the IPv4 form's. The IPv4
+octets of both forms are one reader (`ipv4_address`), and `decimal` sums in 64 bits so a scope at
+`u32::MAX` cannot overflow it. Held by `dial::parse_tests::the_ipv6_reader_reads_what_core_reads`,
+which reads 11,776 texts both ways (each count of groups before and after `::`, `::` twice, a fifth
+digit, either case, an IPv4 address in each place and malformed, scopes and ports on either side of
+their rules, malformed brackets and non-ASCII digits) and asserts both answers are reached; the
+IPv4 reader is still held to `SocketAddrV4`'s by `the_ipv4_reader_reads_what_core_reads`. In the
+std form `core::net`'s parser stays where the host's standard library names it, so the estimate
+is the no_std form's.
+
+### R6-b: a config's keys in a list (landed)
+
+`refactor(capi-pico): Hold a config's keys in a list, not a map`. `ConfigState::entries` is a
+`Vec<(u8, String)>` read by one scan: `insert` replaces the value of a key set before and appends
+otherwise, `get` and `zp_config_get` find the key. Nothing read the keys in order. A value
+`zp_config_get` lent stays where it is while other keys are set, because each value is an
+allocation of its own that moving the list does not move. Held by `config::tests`: a key set
+twice holds the value set last, an absent key and an empty value, the lent pointer unchanged after
+64 other keys, a value that is not text or is null refused with the key left as it was, and a
+clone that holds its own values. Both forms.
+
+### R6-c: one fold for both put doors (landed)
+
+`refactor(capi-pico): Fold both put doors' options through one body`. `PutCarried::fold` (out of
+line) takes the moved encoding and attachment, the timestamp and the source info of either option
+struct and answers the options with whether they carried anything; `publisher_put_options` keeps
+its `None` for options that carry nothing, and `session_put_options` sets its QoS after the fold.
+Held by `pubsub::put_options_tests::both_put_doors_carry_a_moved_attachment_and_spend_it` (the
+attachment and the timestamp carried, the express flag kept, the caller's bytes spent) and the
+tests that were there. Both forms.
+
+### The next list
+
+| # | what | where (main build) | lighter form | estimate |
+|---|------|--------------------|--------------|---------:|
+| 1 | `str` slices whose failure names `core`'s formatter | `DeclaredKeyexpr::declare_up_to`, `declare_subscriber_on_wire`, `encoding_hint::hint_from_str_in`, `keyexpr_canon::canonize_keyexpr_in` call `str::slice_error_fail`, the one root of `slice_error_fail_rt` 882, `char`'s `Debug` and `escape_debug_ext` 575 and `is_printable` 692 | slice the bytes at the offsets the code already found (an ASCII byte's offset is a boundary), or take `get` and the refusal the caller already has | -1.5K to -2.2K if nothing else names it |
+| 2 | the engine's own code | `wz_capi_coop::engine` 75,280 (`poll_links` 5,975, two `SessionEngine` methods of 5,535 and 4,078, `assemble` 5,532, `dial_from` 4,237, `start_wire` 4,221) | read function by function from a build of this branch, as section 9 asked | (to be read) |
+| 3 | the delivery lane | `lane` 14,274 (`LaneHeld::offer_sample` 4,435, `SampleLane::over_in` 2,191) | kept by D8; read for a body per sample kind that one body with the kind as data would do | -1K to -3K |
+| 4 | the bound a client decides at each handshake | `region_partition::transient_region_of` 895 and the interface list `decide_local_remote_bound` collects | with `config-policy` off nothing states a south partition, so it is `Auto` and the answer `None`; compile the decision only where a partition can be stated | -0.8K to -1.2K |
+| 5 | items 4, 7, 8 and 9 of section 9 | as the table above says | as section 9 says | -5.5K to -11.5K |
+
+Round 6's three cuts are estimated at -5.5K to -8.5K in the no_std form, about 452K to 456K against
+329,664 (1.37x to 1.38x). The 1.0x goal needs about -125K more: the engine's own code (item 2) and the
+session core's send side are where the volume is, in that order.
