@@ -65,6 +65,7 @@ pub mod encoding_ids;
 // This engine as the port's `SessionEngine` (wz-capi-port): the face registry's own operations,
 // reached by an ABI that names no engine.
 mod engine_port;
+pub use engine_port::CoreDrive;
 pub mod faces;
 pub mod gossip;
 #[cfg(feature = "group")]

@@ -1053,20 +1053,9 @@ unsafe fn declare_subscriber_state(
     *owned = z_owned_closure_sample_t::null_value();
     let released = cclosure.release_latch();
 
-    let Some(handle) = session_handle(zs) else {
-        return Err(Z_ERR_NULL);
-    };
     // A closed session takes no declaration; the closure consumed above runs its drop.
-    if handle.is_closed() {
-        return Err(crate::result::Z_ERR_SESSION_CLOSED);
-    }
-    let ke = match keyexpr_str(keyexpr) {
-        Some(k) => k.to_owned(),
-        None => return Err(Z_ERR_INVALID),
-    };
-    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-        return Err(Z_ERR_INVALID);
-    }
+    let handle = crate::session::open_session_handle(zs)?;
+    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?.to_owned();
     let miss: MissSlot = Arc::new(ListenerSet::new());
     // pico builds this subscriber from plain entities, each declaring and
     // naming its key the way its own entry point does — see

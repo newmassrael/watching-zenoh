@@ -523,12 +523,13 @@ fn memory_basis(
 }
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
-/// session's drop glue stays in that engine's crate (`SessionState::into_drive`); the cooperative
+/// session's drop glue stays in that engine's crate, and hands out its engine beside it
+/// (`SessionState::into_drive`); the cooperative
 /// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it,
 /// and it is the engine's own type: the one engine of the build, or with `app-transport` either of
 /// the two the build opens ([`PicoDrive`]).
 #[cfg(feature = "engine-tokio")]
-pub(crate) type HeldDrive = Box<dyn wz_capi_port::SessionDrive>;
+pub(crate) type HeldDrive = wz_capi_core::CoreDrive;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 pub(crate) type HeldDrive = wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>;
 #[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
@@ -751,6 +752,23 @@ pub(crate) unsafe fn session_handle<'a>(
         return None;
     }
     held_at(val)
+}
+
+/// The handle of a session a declaration or a get is made on: `Z_ERR_NULL` when there is none,
+/// `_Z_ERR_SESSION_CLOSED` when it is closed, as pico's entry points answer both. One body every
+/// such door calls, so the reading and its codes are not copied into each.
+///
+/// # Safety
+/// As [`session_handle`].
+#[inline(never)]
+pub(crate) unsafe fn open_session_handle<'a>(
+    zs: *const z_loaned_session_t,
+) -> Result<&'a PicoSessionHandle, ZResult> {
+    let handle = session_handle(zs).ok_or(Z_ERR_NULL)?;
+    if handle.is_closed() {
+        return Err(Z_ERR_SESSION_CLOSED);
+    }
+    Ok(handle)
 }
 
 /// The place a cooperative session's handle lies in, a span of the session's arena.
@@ -3495,6 +3513,49 @@ mod session_place_tests {
             z_session_drop(z_session_move(&mut copy));
             assert!(copy._val.is_null(), "dropping the copy lets go of nothing");
             drop(engine);
+        }
+    }
+
+    /// The doors that declare or ask on a session read it through one body: an open session is
+    /// read, and once closed it is refused with pico's code for a closed session.
+    #[test]
+    fn a_door_reads_an_open_session_and_refuses_a_closed_one() {
+        // SAFETY: every pointer is to a live owned value of this frame.
+        unsafe {
+            let mut session = listening_on_loopback();
+            assert!(open_session_handle(z_session_loan(&session)).is_ok());
+            assert_eq!(
+                z_close(z_session_loan_mut(&mut session), core::ptr::null()),
+                Z_OK
+            );
+            assert_eq!(
+                open_session_handle(z_session_loan(&session)).err(),
+                Some(Z_ERR_SESSION_CLOSED)
+            );
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_session_handle_tests {
+    use super::*;
+
+    /// No session, and a session whose handle slot is empty, are `Z_ERR_NULL` to every door that
+    /// reads one, whatever engine the build has.
+    #[test]
+    fn no_session_is_refused_as_null() {
+        // SAFETY: a null pointer, and a loaned session of this frame whose slot is null.
+        unsafe {
+            assert_eq!(
+                open_session_handle(core::ptr::null()).err(),
+                Some(Z_ERR_NULL)
+            );
+            let empty = z_owned_session_t::null_value();
+            assert_eq!(
+                open_session_handle(z_session_loan(&empty)).err(),
+                Some(Z_ERR_NULL)
+            );
         }
     }
 }

@@ -6864,14 +6864,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys fo
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     for CoopEngine<L, C>
 {
-    fn engine(&self) -> Arc<dyn SessionEngine> {
-        self.this
-            .upgrade()
-            .expect("a live engine is held by an Arc")
-    }
-
-    fn engine_ref(&self) -> &dyn SessionEngine {
-        self
+    fn zid(&self) -> [u8; 16] {
+        SessionEngine::zid(self)
     }
 
     fn close(&self) {

@@ -53,12 +53,8 @@ impl SharedSession {
 /// for a live session: the one-directional divergence `docs/capi-pico-on-coop-engine.md`
 /// describes, which the cooperative engine removes.
 impl SessionDrive for SessionState {
-    fn engine(&self) -> Arc<dyn SessionEngine> {
-        self.shared.as_engine()
-    }
-
-    fn engine_ref(&self) -> &dyn SessionEngine {
-        self.shared.engine_ref()
+    fn zid(&self) -> [u8; 16] {
+        SessionEngine::zid(self.shared.engine_ref())
     }
 
     fn close(&self) {
@@ -103,15 +99,51 @@ impl SessionDrive for SessionState {
     }
 }
 
+/// The session a C handle holds on this engine: the session as the port's [`SessionDrive`], and
+/// the engine its entities keep. The engine is reached through trait objects, so it is this drive
+/// that hands the engine out, and not the port's trait, which a build of one engine reaches by the
+/// engine's own type.
+///
+/// It reads as the session's drive ([`Deref`](core::ops::Deref)): the handle closes, steps and
+/// asks the session through it.
+pub struct CoreDrive {
+    session: Box<dyn SessionDrive>,
+    engine: Arc<dyn SessionEngine>,
+}
+
+impl CoreDrive {
+    /// The engine the session's entities keep.
+    pub fn engine(&self) -> Arc<dyn SessionEngine> {
+        self.engine.clone()
+    }
+
+    /// The engine, borrowed for the length of one call.
+    pub fn engine_ref(&self) -> &dyn SessionEngine {
+        &*self.engine
+    }
+}
+
+impl core::ops::Deref for CoreDrive {
+    type Target = dyn SessionDrive;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.session
+    }
+}
+
 impl SessionState {
-    /// This session as the port's drive, made HERE (out of line) for the reason
+    /// This session as the drive a C handle holds, made HERE (out of line) for the reason
     /// [`SharedSession::as_engine`] is: a trait object made in an ABI crate brings the session's
     /// drop glue there a second time. The ABI then frees the session through the drive's vtable
     /// (pico `z_session_drop`), whose drop is this crate's; a `Box<SessionState>` dropped in the
     /// ABI crate measured 35 KB of duplicate text on the pico client build.
     #[inline(never)]
-    pub fn into_drive(self) -> Box<dyn SessionDrive> {
-        Box::new(self)
+    pub fn into_drive(self) -> CoreDrive {
+        let engine = self.shared.as_engine();
+        CoreDrive {
+            session: Box::new(self),
+            engine,
+        }
     }
 
     /// What a single-threaded entry point answers: done, for a live session.

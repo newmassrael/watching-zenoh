@@ -13,10 +13,7 @@
 //! calls as a live session does, and one the program steps does the work in them
 //! (`docs/capi-pico-on-coop-engine.md`, decisions D2 and D7).
 
-use alloc::sync::Arc;
 use core::any::Any;
-
-use crate::SessionEngine;
 
 /// A start or a stop of the read task was made from inside one of the session's own callbacks.
 /// zenoh-pico answers `_Z_ERR_INVALID` and does nothing, and so does an ABI given this.
@@ -51,18 +48,14 @@ pub struct SessionClosed;
 /// `Send + Sync` because a C program may hand its session to any thread in pico's multi-threaded
 /// arm. An engine whose own state is single-threaded keeps it behind the session's lock and runs
 /// no C callback while holding it (decision D8).
+///
+/// The engine a session's entities keep is not handed out here: each engine's own drive type
+/// hands it out as the engine's own type, so a build of one engine never turns it into a trait
+/// object, and an engine that is reached through a trait object hands the object out itself.
 pub trait SessionDrive: Send + Sync + 'static {
-    /// The engine the session's entities keep, handed out by the engine.
-    fn engine(&self) -> Arc<dyn SessionEngine>;
-
-    /// The engine, borrowed for the length of one call.
-    fn engine_ref(&self) -> &dyn SessionEngine;
-
     /// The session's own zid, zero-padded to 16 bytes: the id its handshakes carry, which is
     /// its engine's, so a drive and its engine cannot name two.
-    fn zid(&self) -> [u8; 16] {
-        self.engine_ref().zid()
-    }
+    fn zid(&self) -> [u8; 16];
 
     /// Close the session: a Close to each peer, the links shut, every callback finished.
     /// Idempotent.
