@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn a_members_keyexpr_interest_is_answered_with_the_keys_it_meets_and_its_final() {
         use crate::declare_build::{build_declare_final_reply, build_declare_kexpr_reply};
-        use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use crate::driver_loop::DriverLoopOutcome;
         use crate::interest_build::{build_interest_exact, InterestKinds};
         use crate::network_message::NetworkMessage;
         let ask = |id: u64, current: bool, key: Option<(crate::wire_id::ExprId, Option<&str>)>| {
@@ -475,7 +475,11 @@ mod tests {
         answers.declared(6, "other/y");
         answers.declared(7, "demo/b");
         answers.retracted(7);
-        assert!(answers.asked(&IterationEvent::Poll(&frame)));
+        // Noted record by record where the build lends them, so what is owed is the answer after
+        // the last event the frame raised.
+        let mut owed = false;
+        crate::driver_loop::deliver_frame(&frame, |event| owed = answers.asked(&event));
+        assert!(owed);
         let replies: Vec<_> = answers
             .take_answers()
             .into_iter()
