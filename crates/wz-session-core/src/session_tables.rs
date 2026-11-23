@@ -1666,7 +1666,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// [`Self::begin_subscriber`].
     pub fn begin_reply(&self, handle: PendingGetHandle) -> Option<<F::Reply as RowCallback>::Call> {
         const {
-            assert!(!<F::Reply as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Reply, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.pending_gets.get(handle)?.callback.begin()
     }
@@ -1799,13 +1799,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// with once they are let go, `None` when no live row is named. End it with [`RowCallback::end`];
     /// when that says it was the last call of a row undeclared meanwhile, let the row go with
     /// [`Self::release_subscriber`]. A callback whose call reads the row where it lies is held only by
-    /// a table whose rows never move (P3, P11).
+    /// a table of the lent policy, whose rows lie in the arena (`row_may_lie_in`).
     pub fn begin_subscriber(
         &self,
         handle: SubscriberHandle,
     ) -> Option<<F::Subscriber as RowCallback>::Call> {
         const {
-            assert!(!<F::Subscriber as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.subscribers.get(handle)?.callback.begin()
     }
@@ -1823,7 +1823,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: QueryableHandle,
     ) -> Option<<F::Queryable as RowCallback>::Call> {
         const {
-            assert!(!<F::Queryable as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Queryable, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.queryables.get(handle)?.callback.begin()
     }
@@ -1841,10 +1841,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: LivelinessSubscriberHandle,
     ) -> Option<<F::LivelinessSubscriber as RowCallback>::Call> {
         const {
-            assert!(
-                !<F::LivelinessSubscriber as RowCallback>::READS_ROW_IN_PLACE
-                    || P::ENFORCES_CAPACITY
-            );
+            assert!(row_may_lie_in::<F::LivelinessSubscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.liveliness_subscribers.get(handle)?.callback.begin()
     }
@@ -1865,7 +1862,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: MatchingListenerHandle,
     ) -> Option<<F::Matching as RowCallback>::Call> {
         const {
-            assert!(!<F::Matching as RowCallback>::READS_ROW_IN_PLACE || P::ENFORCES_CAPACITY);
+            assert!(row_may_lie_in::<F::Matching, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
         self.matching.get(handle)?.callback.begin()
     }
@@ -1995,6 +1992,14 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             .iter()
             .try_fold(0_usize, |sum, part| sum.checked_add((*part)?))
     }
+}
+
+/// Whether a row whose callback is `Cb` may lie in a table of policy `P`: a callback whose calls
+/// read its row where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read on another thread while
+/// the tables are held, so its row lies only where no `&mut` of the tables, nor of what holds them,
+/// reaches it: in the arena, behind the pointer a table of the lent policy keeps (P3, P11).
+const fn row_may_lie_in<Cb: RowCallback, P: Storage>() -> bool {
+    !Cb::READS_ROW_IN_PLACE || P::LENT_AT_OPEN
 }
 
 /// A row whose calls read it where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read by them
