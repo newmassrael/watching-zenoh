@@ -1794,8 +1794,6 @@ pub mod heap_account;
 // which the message lists and a capture's scouting lists keep. Undocumented on
 // this line for the reason the module above gives.
 #[cfg(feature = "alloc")]
-// Totality debt TD-072 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod oldest_instant;
 
 // Open-debt item 924 — the unit log a message list reads its datagrams' bytes

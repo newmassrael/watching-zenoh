@@ -285,7 +285,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-069 | `wz-session-core` | `deferred_fire` | `expect_used`, `arithmetic_side_effects` | 9 | open |
 | TD-070 | `wz-session-core` | `locator_directory` | `indexing_slicing`, `arithmetic_side_effects` | 9 | open |
 | TD-071 | `wz-session-core` | `multicast_rx` | `indexing_slicing`, `arithmetic_side_effects` | 9 | open |
-| TD-072 | `wz-session-core` | `oldest_instant` | `arithmetic_side_effects` | 9 | open |
 | TD-073 | `wz-session-core` | `signing_key` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 9 | open |
 | TD-074 | `wz-session-core` | `caps` | `indexing_slicing`, `arithmetic_side_effects` | 8 | open |
 | TD-075 | `wz-session-core` | `policy_binding` | `indexing_slicing`, `arithmetic_side_effects` | 8 | open |
