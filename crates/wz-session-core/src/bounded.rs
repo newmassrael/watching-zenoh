@@ -712,7 +712,7 @@ impl<T, const N: usize> BoundedVec<T, N, Lent> {
             &mut *seq
                 .base
                 .as_ptr()
-                .add(seq.len)
+                .add(seq.len())
                 .cast::<core::mem::MaybeUninit<T>>()
         };
         write(&mut *row);
@@ -968,13 +968,14 @@ impl<T, const N: usize, P: Storage> DerefMut for BoundedVec<T, N, P> {
 /// It owns its values and not its memory: dropped, it drops what it holds and gives no memory
 /// back, the memory being the arena's owner's to release whole.
 pub struct LentSeq<T> {
+    /// The first row, or for a table made by `Default`, which was lent none and is no table to
+    /// put a value in (`refuse_unlent`), `NonNull::dangling`: no arena lends there.
     base: NonNull<T>,
-    len: usize,
-    /// The rows the arena lent: the most the table holds.
-    room: usize,
-    /// Whether an arena lent the rows. A table made by `Default` was lent none and is no table
-    /// to put a value in (`refuse_unlent`).
-    lent: bool,
+    /// The rows that hold values, and the rows the arena lent, the most the table holds: each
+    /// under `u32::MAX`, which [`Arena::lend`] holds a table to, so a table is a pointer and two
+    /// words of 32 bits on every target.
+    len: u32,
+    room: u32,
     _owns: PhantomData<T>,
 }
 
@@ -991,14 +992,25 @@ impl<T> LentSeq<T> {
     /// # Safety
     /// `base` is aligned for `T`, and the `room` rows of `T` from it are valid for reads and
     /// writes, hold no value and are used by nothing else for as long as the table lives.
-    const unsafe fn lent(base: NonNull<T>, room: usize) -> Self {
+    const unsafe fn lent(base: NonNull<T>, room: u32) -> Self {
         Self {
             base,
             len: 0,
             room,
-            lent: true,
             _owns: PhantomData,
         }
+    }
+
+    /// The rows that hold values.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// The rows the arena lent.
+    #[inline(always)]
+    fn room(&self) -> usize {
+        self.room as usize
     }
 
     /// Stop a debug build at a value put in a table no arena lent rows to. Such a table refuses
@@ -1008,7 +1020,7 @@ impl<T> LentSeq<T> {
     #[inline(always)]
     fn refuse_unlent(&self) {
         debug_assert!(
-            self.lent,
+            self.base != NonNull::dangling(),
             "a value was put in a lent table no arena lent rows to: a table of this policy is \
              made by `Arena::lend`, and a working buffer takes the policy's `Storage::Scratch`"
         );
@@ -1017,11 +1029,12 @@ impl<T> LentSeq<T> {
     /// Drop the values from `len` on. The length is shortened first, so a value whose drop
     /// panics leaks the ones after it rather than letting them be dropped twice.
     fn drop_from(&mut self, len: usize) {
-        if len >= self.len {
+        if len >= self.len() {
             return;
         }
-        let tail = self.len - len;
-        self.len = len;
+        let tail = self.len() - len;
+        // Below the length, which is a `u32`.
+        self.len = len as u32;
         // SAFETY: the `tail` rows from `len` held values, which the length no longer covers, so
         // each is dropped here once.
         unsafe {
@@ -1046,7 +1059,6 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             base: NonNull::dangling(),
             len: 0,
             room: 0,
-            lent: false,
             _owns: PhantomData,
         }
     }
@@ -1054,16 +1066,16 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     fn as_slice(&self) -> &[T] {
         // SAFETY: the first `len` rows hold values, and `base` is aligned and non-null even for a
         // table lent nothing.
-        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len()) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: as `as_slice`, and `&mut self` makes this the only borrow of them.
-        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), self.len()) }
     }
 
     fn free_slots(&self) -> usize {
-        self.room - self.len
+        self.room() - self.len()
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1072,7 +1084,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return Err(CapacityFull(value));
         }
         // SAFETY: `len < room`, so the row at `len` is one this table was lent and holds no value.
-        unsafe { self.base.as_ptr().add(self.len).write(value) };
+        unsafe { self.base.as_ptr().add(self.len()).write(value) };
         self.len += 1;
         Ok(())
     }
@@ -1083,7 +1095,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
             return false;
         }
         // SAFETY: as `push`; `make` panicking leaves the row and the length as they were.
-        unsafe { self.base.as_ptr().add(self.len).write(make()) };
+        unsafe { self.base.as_ptr().add(self.len()).write(make()) };
         self.len += 1;
         true
     }
@@ -1095,12 +1107,12 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         self.len -= 1;
         // SAFETY: the row at the old last index held a value, which the length no longer covers,
         // so it is read out once.
-        Some(unsafe { self.base.as_ptr().add(self.len).read() })
+        Some(unsafe { self.base.as_ptr().add(self.len()).read() })
     }
 
     fn remove(&mut self, index: usize) -> T {
         assert!(
-            index < self.len,
+            index < self.len(),
             "removal index {index} is past a lent table of {} values",
             self.len
         );
@@ -1109,7 +1121,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         unsafe {
             let at = self.base.as_ptr().add(index);
             let value = at.read();
-            core::ptr::copy(at.add(1), at, self.len - index - 1);
+            core::ptr::copy(at.add(1), at, self.len() - index - 1);
             self.len -= 1;
             value
         }
@@ -1118,7 +1130,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
     fn retain<F: FnMut(&T) -> bool>(&mut self, mut keep: F) {
         // Each value is asked once, in order: one taken out moves the next to where it stood.
         let mut index = 0;
-        while index < self.len {
+        while index < self.len() {
             if keep(&self.as_slice()[index]) {
                 index += 1;
             } else {
@@ -1140,11 +1152,11 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         T: Clone,
     {
         self.refuse_unlent();
-        if len > self.room {
+        if len > self.room() {
             return Err(CapacityFull(()));
         }
         self.drop_from(len);
-        while self.len < len {
+        while self.len() < len {
             // Within the rows checked above, so every push is taken.
             if self.push(fill.clone()).is_err() {
                 break;
@@ -1158,7 +1170,7 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         T: Clone,
     {
         self.refuse_unlent();
-        if src.len() > self.room - self.len {
+        if src.len() > self.room() - self.len() {
             return Err(CapacityFull(()));
         }
         for value in src {
@@ -1181,7 +1193,7 @@ impl<T> IntoIterator for LentSeq<T> {
         LentIntoIter {
             base: seq.base,
             next: 0,
-            end: seq.len,
+            end: seq.len(),
             _owns: PhantomData,
         }
     }
@@ -1383,6 +1395,13 @@ impl Arena {
         if rows > N {
             return Err(LendRefused::OverCeiling { rows, ceiling: N });
         }
+        // A table counts its rows in 32 bits (`LentSeq`).
+        let Ok(room) = u32::try_from(rows) else {
+            return Err(LendRefused::OverCeiling {
+                rows,
+                ceiling: u32::MAX as usize,
+            });
+        };
         let left = self.bytes - self.lent;
         let span = match Self::table_bytes::<T>(rows) {
             Some(span) if span <= left => span,
@@ -1393,7 +1412,7 @@ impl Arena {
         // arena, and no table was lent it before, as `lent` only grows.
         let inner = unsafe {
             let at = NonNull::new_unchecked(self.base.as_ptr().add(self.lent)).cast::<T>();
-            LentSeq::lent(at, rows)
+            LentSeq::lent(at, room)
         };
         self.lent += span;
         Ok(BoundedVec { inner })
@@ -2161,6 +2180,37 @@ mod tests {
             .lend(0)
             .expect("no rows fit any arena");
         assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
+    }
+
+    /// A lent table is a pointer and two 32-bit counts, whatever its rows: a set of a session's
+    /// tables holds many. A table of more rows than a 32-bit count names is refused at the lend,
+    /// taking nothing, by that count; the CONTROL is the table of as many rows as it names.
+    #[test]
+    fn a_lent_table_is_a_pointer_and_two_32_bit_counts() {
+        assert_eq!(
+            core::mem::size_of::<BoundedVec<u64, 8, Lent>>(),
+            core::mem::size_of::<usize>() + 8
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let mut arena = arena_of(0);
+            let most = u32::MAX as usize;
+            let past: Result<BoundedVec<(), { usize::MAX }, Lent>, _> = arena.lend(most + 1);
+            assert_eq!(
+                past.err(),
+                Some(LendRefused::OverCeiling {
+                    rows: most + 1,
+                    ceiling: most
+                })
+            );
+            assert_eq!(arena.high_water(), 0, "nothing was taken");
+            let at_most: Result<BoundedVec<(), { usize::MAX }, Lent>, _> = arena.lend(most);
+            assert_eq!(
+                at_most.map(|table| table.free_slots()).ok(),
+                Some(most),
+                "CONTROL: as many rows as the count names"
+            );
+        }
     }
 
     /// A value pushed in place is built in the next row the table was lent and is held from then
