@@ -19,7 +19,7 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
@@ -1995,6 +1995,7 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn a_heap_tls_dial_is_begun_and_asked_never_waited_for() {
+        use alloc::rc::Rc;
         use core::cell::Cell;
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
 
