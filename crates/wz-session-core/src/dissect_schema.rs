@@ -297,7 +297,7 @@ pub fn matching<'t>(root: &'t Field, segments: &[&str]) -> Vec<&'t Field> {
     }
     let mut trail: Vec<&str> = Vec::new();
     walk(Child::Node(root), &mut trail, &mut |trail, field, _| {
-        if trail.len() >= segments.len() && trail[trail.len() - segments.len()..] == *segments {
+        if trail.ends_with(segments) {
             found.push(field);
         }
     });

@@ -1731,8 +1731,6 @@ pub mod dissect;
 /// The field tree as a selector's path sees it, and the declared shape of every
 /// tree [`dissect`] can produce.
 #[cfg(feature = "dissect")]
-// Totality debt TD-039 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod dissect_schema;
 
 /// A reproducible source of message-shaped bytes, for the property tests that
