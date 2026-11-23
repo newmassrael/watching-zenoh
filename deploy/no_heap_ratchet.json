@@ -72,6 +72,51 @@
       "allocs_per_round": 4,
       "locked": false,
       "debt": "debt-c-abi-heap-after-open"
+    },
+    "subscriber-declare": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "queryable-declare": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "matching-listener": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "liveliness-subscriber": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "querier-declare": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "querier-get": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "config-clone": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "publisher-put": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
+    },
+    "delete": {
+      "allocs_per_round": null,
+      "locked": false,
+      "debt": "debt-c-abi-heap-after-open"
     }
   }
 }

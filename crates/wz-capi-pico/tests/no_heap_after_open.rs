@@ -108,11 +108,20 @@ enum Round {
     E2e,
     Replay,
     ConfigDocument,
+    SubscriberDeclare,
+    QueryableDeclare,
+    MatchingListener,
+    LivelinessSubscriber,
+    QuerierDeclare,
+    QuerierGet,
+    ConfigClone,
+    PublisherPut,
+    Delete,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 11] = [
+    const ALL: [Round; 20] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -124,6 +133,15 @@ impl Round {
         Round::E2e,
         Round::Replay,
         Round::ConfigDocument,
+        Round::SubscriberDeclare,
+        Round::QueryableDeclare,
+        Round::MatchingListener,
+        Round::LivelinessSubscriber,
+        Round::QuerierDeclare,
+        Round::QuerierGet,
+        Round::ConfigClone,
+        Round::PublisherPut,
+        Round::Delete,
     ];
 
     /// Whether the build has the capability the round exercises.
@@ -134,12 +152,20 @@ impl Round {
             Round::E2e => cfg!(all(feature = "e2e-sender", feature = "e2e-receiver")),
             Round::Replay => cfg!(feature = "replay-cache"),
             Round::ConfigDocument => cfg!(feature = "config-document"),
+            Round::QueryableDeclare => cfg!(feature = "queryable"),
+            Round::LivelinessSubscriber => cfg!(feature = "liveliness"),
+            Round::QuerierDeclare | Round::QuerierGet => cfg!(feature = "query"),
             Round::Idle
             | Round::PublisherDeclare
             | Round::PutSmall
             | Round::PutBatch
             | Round::Get
-            | Round::KeyexprDeclare => true,
+            | Round::KeyexprDeclare
+            | Round::SubscriberDeclare
+            | Round::MatchingListener
+            | Round::ConfigClone
+            | Round::PublisherPut
+            | Round::Delete => true,
         }
     }
 }
@@ -156,7 +182,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 14] = [
+const FAMILIES: [(&str, Round, Part); 23] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -171,6 +197,19 @@ const FAMILIES: [(&str, Round, Part); 14] = [
     ("e2e", Round::E2e, Part::All),
     ("replay", Round::Replay, Part::All),
     ("config-document", Round::ConfigDocument, Part::All),
+    ("subscriber-declare", Round::SubscriberDeclare, Part::All),
+    ("queryable-declare", Round::QueryableDeclare, Part::All),
+    ("matching-listener", Round::MatchingListener, Part::All),
+    (
+        "liveliness-subscriber",
+        Round::LivelinessSubscriber,
+        Part::All,
+    ),
+    ("querier-declare", Round::QuerierDeclare, Part::All),
+    ("querier-get", Round::QuerierGet, Part::Calling),
+    ("config-clone", Round::ConfigClone, Part::All),
+    ("publisher-put", Round::PublisherPut, Part::Calling),
+    ("delete", Round::Delete, Part::Calling),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -435,6 +474,12 @@ struct Bench {
     pair: Pair,
     /// The payload of a put near the batch limit.
     batch: Vec<u8>,
+    /// The dialling session's publisher on the key the listener hears, which a publisher's put
+    /// goes through and a matching listener is declared on.
+    publisher: z_owned_publisher_t,
+    /// The dialling session's querier on the key the listener's queryable answers.
+    #[cfg(feature = "query")]
+    querier: wz_capi_pico::z_owned_querier_t,
     /// The listening session's token, which a liveliness get finds.
     #[cfg(feature = "liveliness-get")]
     alive: wz_capi_pico::liveliness::z_owned_liveliness_token_t,
@@ -473,9 +518,40 @@ impl Bench {
         let e2e = E2e::new();
         #[cfg(feature = "replay-cache")]
         let replay = Replay::new(&pair);
+        let ke = view(DATA_KEY);
+        let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_publisher(
+                z_session_loan(pair.dialler()),
+                &mut publisher,
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "the publisher a publisher's put goes through is declared"
+        );
+        #[cfg(feature = "query")]
+        let querier = {
+            let ke = view(pipe_pair::ASK_KEY);
+            let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+            assert_eq!(
+                wz_capi_pico::z_declare_querier(
+                    z_session_loan(pair.dialler()),
+                    &mut querier,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null_mut(),
+                ),
+                Z_OK,
+                "the querier a querier's get goes through is declared"
+            );
+            querier
+        };
         Self {
             pair,
             batch: vec![0x5A; batch_len],
+            publisher,
+            #[cfg(feature = "query")]
+            querier,
             #[cfg(feature = "liveliness-get")]
             alive,
             #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
@@ -524,7 +600,216 @@ impl Bench {
                 #[cfg(feature = "config-document")]
                 config_document();
             }
+            Round::SubscriberDeclare => self.subscriber_declare(),
+            Round::QueryableDeclare => {
+                #[cfg(feature = "queryable")]
+                self.queryable_declare();
+            }
+            Round::MatchingListener => self.matching_listener(),
+            Round::LivelinessSubscriber => {
+                #[cfg(feature = "liveliness")]
+                self.liveliness_subscriber();
+            }
+            Round::QuerierDeclare => {
+                #[cfg(feature = "query")]
+                self.querier_declare();
+            }
+            Round::QuerierGet => {
+                #[cfg(feature = "query")]
+                self.querier_get();
+            }
+            Round::ConfigClone => config_clone(),
+            Round::PublisherPut => self.publisher_put(),
+            Round::Delete => self.delete(),
         }
+    }
+
+    unsafe fn subscriber_declare(&self) {
+        let mut closure = pipe_pair::sample_closure(&self.pair.counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_subscriber(
+                self.pair.dialler(),
+                DECLARED,
+                &mut closure,
+                &mut subscriber
+            ),
+            Z_OK,
+            "a subscriber is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber)),
+            Z_OK,
+            "a subscriber is undeclared"
+        );
+    }
+
+    #[cfg(feature = "queryable")]
+    unsafe fn queryable_declare(&self) {
+        let mut closure = pipe_pair::query_closure(&self.pair.counts);
+        let mut queryable: wz_capi_pico::z_owned_queryable_t = std::mem::zeroed();
+        assert_eq!(
+            pipe_pair::declare_queryable(
+                self.pair.dialler(),
+                DECLARED,
+                &mut closure,
+                &mut queryable
+            ),
+            Z_OK,
+            "a queryable is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_queryable(wz_capi_pico::z_queryable_move(&mut queryable)),
+            Z_OK,
+            "a queryable is undeclared"
+        );
+    }
+
+    /// Declare a matching listener on the bench's publisher and retract it.
+    unsafe fn matching_listener(&self) {
+        use wz_capi_pico::matching::{
+            z_closure_matching_status, z_closure_matching_status_move, z_matching_listener_move,
+            z_owned_closure_matching_status_t, z_owned_matching_listener_t,
+            z_publisher_declare_matching_listener, z_undeclare_matching_listener,
+        };
+        let mut closure: z_owned_closure_matching_status_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_matching_status(
+                &mut closure,
+                None,
+                Some(counted_drop),
+                pipe_pair::context(&self.pair.counts),
+            ),
+            Z_OK
+        );
+        let mut listener: z_owned_matching_listener_t = std::mem::zeroed();
+        assert_eq!(
+            z_publisher_declare_matching_listener(
+                wz_capi_pico::z_publisher_loan(&self.publisher),
+                &mut listener,
+                z_closure_matching_status_move(&mut closure),
+            ),
+            Z_OK,
+            "a matching listener is declared"
+        );
+        assert_eq!(
+            z_undeclare_matching_listener(z_matching_listener_move(&mut listener)),
+            Z_OK,
+            "a matching listener is undeclared"
+        );
+    }
+
+    #[cfg(feature = "liveliness")]
+    unsafe fn liveliness_subscriber(&self) {
+        use wz_capi_pico::liveliness::z_liveliness_declare_subscriber;
+        let ke = view(DECLARED);
+        let mut closure = pipe_pair::sample_closure(&self.pair.counts);
+        let mut subscriber: wz_capi_pico::z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_liveliness_declare_subscriber(
+                z_session_loan(self.pair.dialler()),
+                &mut subscriber,
+                z_view_keyexpr_loan(&ke),
+                wz_capi_pico::z_closure_sample_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a liveliness subscriber is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber)),
+            Z_OK,
+            "a liveliness subscriber is undeclared"
+        );
+    }
+
+    #[cfg(feature = "query")]
+    unsafe fn querier_declare(&self) {
+        let ke = view(DECLARED);
+        let mut querier: wz_capi_pico::z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            wz_capi_pico::z_declare_querier(
+                z_session_loan(self.pair.dialler()),
+                &mut querier,
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a querier is declared"
+        );
+        assert_eq!(
+            wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(&mut querier)),
+            Z_OK,
+            "a querier is undeclared"
+        );
+    }
+
+    /// Ask the listener's queryable through the bench's querier and wait for the get's end.
+    #[cfg(feature = "query")]
+    unsafe fn querier_get(&self) {
+        let counts = &self.pair.counts;
+        let replies = counts.replies.load(Ordering::SeqCst);
+        let over = counts.gets_over.load(Ordering::SeqCst);
+        let mut closure = reply_closure(counts);
+        assert_eq!(
+            wz_capi_pico::z_querier_get(
+                wz_capi_pico::z_querier_loan(&self.querier),
+                std::ptr::null(),
+                wz_capi_pico::z_closure_reply_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK,
+            "a querier's get is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.gets_over.load(Ordering::SeqCst)
+                > over),
+            "a querier's get did not end within {WAIT_BOUND:?}"
+        );
+        assert!(
+            counts.replies.load(Ordering::SeqCst) > replies,
+            "a querier's get between open sessions is answered"
+        );
+    }
+
+    /// Put through the bench's publisher and wait for the listener to hear it.
+    unsafe fn publisher_put(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let mut bytes = payload();
+        assert_eq!(
+            wz_capi_pico::z_publisher_put(
+                wz_capi_pico::z_publisher_loan(&self.publisher),
+                wz_capi_pico::z_bytes_move(&mut bytes),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a publisher's put is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a publisher's put did not cross within {WAIT_BOUND:?}"
+        );
+    }
+
+    /// Delete on the key the listener hears and wait for it to hear the delete.
+    unsafe fn delete(&self) {
+        let counts = &self.pair.counts;
+        let heard = counts.heard.load(Ordering::SeqCst);
+        let ke = view(DATA_KEY);
+        assert_eq!(
+            wz_capi_pico::z_delete(
+                z_session_loan(self.pair.dialler()),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+            ),
+            Z_OK,
+            "a delete is taken"
+        );
+        assert!(
+            wait_for(WAIT_BOUND, || counts.heard.load(Ordering::SeqCst) > heard),
+            "a delete did not cross within {WAIT_BOUND:?}"
+        );
     }
 
     unsafe fn publisher_declare(&self) {
@@ -667,8 +952,47 @@ impl Bench {
         self.e2e.drop_both();
         #[cfg(feature = "replay-cache")]
         self.replay.drop_all();
+        #[cfg(feature = "query")]
+        {
+            let mut querier = self.querier;
+            assert_eq!(
+                wz_capi_pico::z_undeclare_querier(wz_capi_pico::z_querier_move(&mut querier)),
+                Z_OK
+            );
+        }
+        let mut publisher = self.publisher;
+        assert_eq!(
+            z_undeclare_publisher(z_publisher_move(&mut publisher)),
+            Z_OK
+        );
         self.pair.close()
     }
+}
+
+/// The drop of a closure whose context is a [`pipe_pair::context`]: counted, as the pair's own
+/// closures count theirs, so the close sees every closure the library was handed dropped.
+unsafe extern "C" fn counted_drop(context: *mut std::ffi::c_void) {
+    let counts = std::sync::Arc::from_raw(context as *const pipe_pair::Counts);
+    counts.dropped.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Make a config and a copy of it, and drop both, as a program does before it opens another
+/// session.
+unsafe fn config_clone() {
+    use wz_capi_pico::{
+        z_config_clone, z_config_default, z_config_drop, z_config_loan, z_config_move,
+        z_owned_config_t,
+    };
+    let mut config: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(z_config_default(&mut config), Z_OK);
+    let mut copy: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(
+        z_config_clone(&mut copy, z_config_loan(&config)),
+        Z_OK,
+        "the config is copied"
+    );
+    z_config_drop(z_config_move(&mut copy));
+    z_config_drop(z_config_move(&mut config));
 }
 
 /// A document the zenoh-c ABI reads too, of which this ABI reads the `wz` member. Synthetic.
