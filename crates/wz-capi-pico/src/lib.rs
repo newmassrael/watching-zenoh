@@ -441,8 +441,6 @@ compile_error!(
      and `scout-mcu` is the cooperative engine's window over one datagram socket"
 );
 
-// Totality debt TD-178 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod abi;
 // The doors of the additional features (end-to-end protection, stream supervision, instance keys, the
 // replay cache, the message catalog) are a layer over this core that names it only through its C
