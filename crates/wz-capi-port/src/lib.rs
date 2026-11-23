@@ -66,6 +66,7 @@ pub mod cancellation;
 pub mod decl_watch;
 mod drive;
 mod engine;
+pub mod entity_place;
 pub mod group;
 pub mod held_key;
 pub mod listeners;
@@ -92,6 +93,7 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
+pub use entity_place::{EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{
     each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,

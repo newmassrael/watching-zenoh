@@ -102,7 +102,7 @@ impl<T> Slot<T> {
         if needed.size() > laid.size() || needed.align() > laid.align() {
             return None;
         }
-        let place = engine.claim_place(entity)?;
+        let place = engine.place_lender()?.claim_place(entity)?;
         Some(Self {
             place: place.as_ptr().cast(),
             lender: Some(Lender {
@@ -174,7 +174,7 @@ impl<T> Drop for Slot<T> {
 /// lent it, and holding the session so its arena stands while the object lies in it.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) struct Lender {
-    place: wz_capi_coop::arena::EntityPlace,
+    place: wz_capi_port::EntityPlace,
     engine: Arc<crate::session::Engine>,
 }
 
@@ -198,9 +198,12 @@ impl Lender {
     /// Give the place back to the session that lent it, whatever it held let go of first.
     fn give_back(self) {
         let Self { place, engine } = self;
-        let given = engine.give_back_place(place);
+        // The engine that lent the place lends places, so it takes it back.
+        let given = engine
+            .place_lender()
+            .map(|lender| lender.give_back_place(place));
         debug_assert!(
-            given.is_ok(),
+            matches!(given, Some(Ok(()))),
             "a place goes back to the session that lent it"
         );
     }
@@ -236,8 +239,8 @@ impl<T> InSession<T> {
 /// place: the one table both the open's places ([`held_places`]) and each place taken
 /// ([`Slot::take_entity`]) read. `None` for a kind that is no entity.
 #[cfg(not(feature = "engine-tokio"))]
-fn entity_place(kind: Kind) -> Option<(wz_capi_coop::arena::EntityKind, core::alloc::Layout)> {
-    use wz_capi_coop::arena::EntityKind;
+fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::alloc::Layout)> {
+    use wz_capi_port::EntityKind;
     match kind {
         Kind::Publisher => Some((
             EntityKind::Publisher,
@@ -499,7 +502,7 @@ mod tests {
             engine_of, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
             z_session_move,
         };
-        use wz_capi_coop::arena::EntityKind;
+        use wz_capi_port::{EntityKind, PlaceLender};
 
         let open = || {
             let session = listening_on_loopback();
@@ -510,7 +513,10 @@ mod tests {
         };
         let (mut one, one_engine) = open();
         let (mut other, other_engine) = open();
-        let (lent, places) = one_engine.entity_places(EntityKind::Publisher);
+        let (lent, places) = one_engine
+            .place_lender()
+            .expect("the engine lends places")
+            .place_counts(EntityKind::Publisher);
         assert_eq!(lent, 0);
         assert!(places > 0, "the session's limit admits publishers");
 
@@ -530,7 +536,10 @@ mod tests {
             .expect("another session's places are its own")
             .fill(Counted(&drops));
         assert_eq!(
-            other_engine.entity_places(EntityKind::Publisher),
+            other_engine
+                .place_lender()
+                .expect("the engine lends places")
+                .place_counts(EntityKind::Publisher),
             (1, places)
         );
         for object in held {
@@ -540,17 +549,38 @@ mod tests {
         // SAFETY: as above.
         unsafe { release_entity(theirs) };
         assert_eq!(drops.get(), places + 1, "each object is dropped once");
-        assert_eq!(one_engine.entity_places(EntityKind::Publisher), (0, places));
         assert_eq!(
-            other_engine.entity_places(EntityKind::Publisher),
+            one_engine
+                .place_lender()
+                .expect("the engine lends places")
+                .place_counts(EntityKind::Publisher),
+            (0, places)
+        );
+        assert_eq!(
+            other_engine
+                .place_lender()
+                .expect("the engine lends places")
+                .place_counts(EntityKind::Publisher),
             (0, places)
         );
 
         let unfilled =
             Slot::<u64>::take_entity(&one_engine, Kind::Publisher).expect("a place given back");
-        assert_eq!(one_engine.entity_places(EntityKind::Publisher), (1, places));
+        assert_eq!(
+            one_engine
+                .place_lender()
+                .expect("the engine lends places")
+                .place_counts(EntityKind::Publisher),
+            (1, places)
+        );
         drop(unfilled);
-        assert_eq!(one_engine.entity_places(EntityKind::Publisher), (0, places));
+        assert_eq!(
+            one_engine
+                .place_lender()
+                .expect("the engine lends places")
+                .place_counts(EntityKind::Publisher),
+            (0, places)
+        );
         assert!(
             Slot::<u64>::take_entity(&one_engine, Kind::Sample).is_none(),
             "a kind that is no entity has no place"

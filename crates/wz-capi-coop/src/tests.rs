@@ -2006,6 +2006,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     use crate::arena::{AllocatorMemory, ArenaPlan, EntityKind, HeldPlaces};
     use crate::OpenKeyIds;
     use core::alloc::Layout;
+    use wz_capi_port::PlaceLender;
     use wz_session_core::bounded::ARENA_ALIGN;
     use wz_session_core::policy::SessionPolicy;
 
@@ -2031,9 +2032,9 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
         .entities()
         .of_kind(EntityKind::Subscriber);
     assert!(rows > 0, "the session keeps subscribers");
-    assert_eq!(one.entity_places(EntityKind::Subscriber), (0, rows));
+    assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
     assert_eq!(
-        one.entity_places(EntityKind::Publisher),
+        one.place_counts(EntityKind::Publisher),
         (0, 0),
         "a kind the open was asked for no place of has none"
     );
@@ -2057,11 +2058,11 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     let theirs = other
         .claim_place(EntityKind::Subscriber)
         .expect("the other session's places are its own");
-    assert_eq!(other.entity_places(EntityKind::Subscriber), (1, rows));
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (1, rows));
     let theirs = one
         .give_back_place(theirs)
         .expect_err("a session takes back no place another lent");
-    assert_eq!(other.entity_places(EntityKind::Subscriber), (1, rows));
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (1, rows));
 
     let first = lent.pop().expect("a lent place");
     let at = first.as_ptr();
@@ -2075,8 +2076,8 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
         assert_eq!(one.give_back_place(place), Ok(()));
     }
     assert_eq!(other.give_back_place(theirs), Ok(()));
-    assert_eq!(one.entity_places(EntityKind::Subscriber), (0, rows));
-    assert_eq!(other.entity_places(EntityKind::Subscriber), (0, rows));
+    assert_eq!(one.place_counts(EntityKind::Subscriber), (0, rows));
+    assert_eq!(other.place_counts(EntityKind::Subscriber), (0, rows));
 }
 
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is

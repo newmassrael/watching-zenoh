@@ -206,67 +206,34 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS;
 
-/// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
-pub const ENTITY_KINDS: usize = 6;
+pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
-/// A kind of the session's own entities whose rows an ABI may hold a place of its own beside
-/// ([`HeldPlaces`]): one place for each row the engine keeps of the kind ([`EntityRows`]), so the
-/// ABI's object for an entity lies in the session's arena, as many as the limit the session opened
-/// under admits, and goes with the session's memory, not with a pool of the process's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntityKind {
-    /// A publisher (`MAX_PUBLISHERS`).
-    Publisher,
-    /// A subscriber (`MAX_SUBSCRIPTIONS`).
-    Subscriber,
-    /// A queryable (`MAX_QUERYABLES`).
-    Queryable,
-    /// A liveliness token (`MAX_LOCAL_TOKENS`).
-    Token,
-    /// A liveliness subscriber (`MAX_LIVELINESS_SUBSCRIPTIONS`).
-    LivelinessSubscriber,
-    /// A querier (`MAX_QUERIERS`).
-    Querier,
-}
-
-impl EntityKind {
-    /// Every kind, in the order the plan lays their places out.
-    pub const ALL: [Self; ENTITY_KINDS] = [
-        Self::Publisher,
-        Self::Subscriber,
-        Self::Queryable,
-        Self::Token,
-        Self::LivelinessSubscriber,
-        Self::Querier,
-    ];
-
-    /// The two rows of the kind's places, the flags and the places, and the limit that counts
-    /// them, as the plan names them.
-    const fn rows(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Publisher => (
-                "publisher place flags",
-                "publisher places",
-                "MAX_PUBLISHERS",
-            ),
-            Self::Subscriber => (
-                "subscriber place flags",
-                "subscriber places",
-                "MAX_SUBSCRIPTIONS",
-            ),
-            Self::Queryable => (
-                "queryable place flags",
-                "queryable places",
-                "MAX_QUERYABLES",
-            ),
-            Self::Token => ("token place flags", "token places", "MAX_LOCAL_TOKENS"),
-            Self::LivelinessSubscriber => (
-                "liveliness subscriber place flags",
-                "liveliness subscriber places",
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
-            ),
-            Self::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
-        }
+/// The two rows of `kind`'s places, the flags and the places, and the limit that counts them, as
+/// the plan names them.
+const fn place_rows(kind: EntityKind) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        EntityKind::Publisher => (
+            "publisher place flags",
+            "publisher places",
+            "MAX_PUBLISHERS",
+        ),
+        EntityKind::Subscriber => (
+            "subscriber place flags",
+            "subscriber places",
+            "MAX_SUBSCRIPTIONS",
+        ),
+        EntityKind::Queryable => (
+            "queryable place flags",
+            "queryable places",
+            "MAX_QUERYABLES",
+        ),
+        EntityKind::Token => ("token place flags", "token places", "MAX_LOCAL_TOKENS"),
+        EntityKind::LivelinessSubscriber => (
+            "liveliness subscriber place flags",
+            "liveliness subscriber places",
+            "MAX_LIVELINESS_SUBSCRIPTIONS",
+        ),
+        EntityKind::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
     }
 }
 
@@ -925,7 +892,7 @@ impl ArenaPlan {
             if place.size() == 0 || count == 0 || laid != 0 {
                 continue;
             }
-            let (flags, places, basis) = kind.rows();
+            let (flags, places, basis) = place_rows(kind);
             self.put(flags, basis, count, LentByteCells::FLAG_BYTES)?;
             self.put(places, basis, count, place.size())?;
             if let Some(bytes) = self.entity_bytes.get_mut(kind as usize) {
@@ -1355,39 +1322,6 @@ impl HandlePlace {
     }
 }
 
-/// One place a session's arena lent the ABI for an entity of a kind ([`CoopEngine::claim_place`]),
-/// held by the ABI's object of the entity: its first byte, aligned to [`ARENA_ALIGN`] and holding
-/// the layout the open was given for the kind, and the kind. Neither copied nor cloned, so a place
-/// is given back once, and to the session and the kind that lent it, as giving it back consumes
-/// it ([`CoopEngine::give_back_place`]).
-///
-/// [`CoopEngine::claim_place`]: crate::CoopEngine::claim_place
-/// [`CoopEngine::give_back_place`]: crate::CoopEngine::give_back_place
-#[derive(Debug, PartialEq, Eq)]
-pub struct EntityPlace {
-    base: NonNull<u8>,
-    kind: EntityKind,
-}
-
-// SAFETY: a place is an address in a session's arena and its kind; the engine touches its bytes
-// never and its flag only under the session's lock, so handing the place to another thread shares
-// nothing.
-unsafe impl Send for EntityPlace {}
-// SAFETY: as for `Send`: a shared place is read only as an address.
-unsafe impl Sync for EntityPlace {}
-
-impl EntityPlace {
-    /// Where the place starts.
-    pub fn as_ptr(&self) -> NonNull<u8> {
-        self.base
-    }
-
-    /// The kind it was lent for.
-    pub fn kind(&self) -> EntityKind {
-        self.kind
-    }
-}
-
 /// The places a session's arena lent for the ABI's entities ([`HeldPlaces`]), a table of each kind
 /// it holds places of. A place is lent to the ABI by its address and given back by it, each under
 /// the session's lock, which every table of the arena is reached under.
@@ -1415,10 +1349,8 @@ impl EntityPlaces {
         // The claim is held by the place from here and ended by `give_back`, not by the buffer's
         // drop.
         core::mem::forget(buffer);
-        Some(EntityPlace {
-            base: NonNull::new(base)?,
-            kind,
-        })
+        // SAFETY: the cell at `base` was lent for `kind` just now, and this is its one token.
+        Some(unsafe { EntityPlace::lent(NonNull::new(base)?, kind) })
     }
 
     /// Give back `place`, or hand it back when it is no place these tables lent: one of another
@@ -1427,8 +1359,8 @@ impl EntityPlaces {
         // SAFETY: the place is consumed, so the claim it held ends here, once; what the ABI kept
         // at its address it let go of before it gave the place up.
         let taken = self
-            .of(place.kind)
-            .is_some_and(|cells| unsafe { cells.release_at(place.base) });
+            .of(place.kind())
+            .is_some_and(|cells| unsafe { cells.release_at(place.as_ptr()) });
         if taken {
             Ok(())
         } else {

@@ -33,6 +33,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
+use crate::entity_place::PlaceLender;
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
@@ -295,6 +296,14 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
     /// their own.
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        None
+    }
+
+    /// Where the C ABI's objects of the session's entities lie when the session's memory lays
+    /// places out for them at its open: one for each entity its limits admit, so one session's
+    /// entities spend no other's. `None`, the provided answer, from an engine whose sessions keep
+    /// no such places, whose ABI places its objects itself.
+    fn place_lender(&self) -> Option<&dyn PlaceLender> {
         None
     }
 

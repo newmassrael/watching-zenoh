@@ -208,13 +208,11 @@ use crate::sample::extract_source_info;
 use crate::sample::EncodingHint;
 #[cfg(feature = "alloc")]
 use crate::sample::Reliability;
-#[cfg(feature = "alloc")]
-use crate::sample::Sample;
 #[cfg(all(
     feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
-use crate::sample::{SampleKind, TimestampHint};
+use crate::sample::{Sample, SampleKind, TimestampHint};
 use crate::sink::{SampleDelivery, SampleSink, SampleView};
 #[cfg(all(feature = "alloc", feature = "declare-subscriber"))]
 use crate::transport_profile::owned::InterestOwned;

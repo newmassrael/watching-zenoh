@@ -61,8 +61,9 @@ use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
-    SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused,
+    SessionClosed, SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId,
+    SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -1564,7 +1565,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// epoch, whenever each link came up.
     session_time: CoopTime<C>,
     /// The places the ABI keeps its objects of the session's entities in, lent from the arena at
-    /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`CoopEngine::claim_place`]).
+    /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`PlaceLender::claim_place`]).
     places: EntityPlaces,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
@@ -3612,7 +3613,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The arena also holds the places `held` names, lent after every table
     /// ([`ArenaPlan::holding`]): a place for the ABI's own handle of the session
     /// ([`CoopDrive::handle_place`]) and places for its objects of the session's entities
-    /// ([`Self::claim_place`]). They are reserved with the session, and an open whose arena cannot
+    /// ([`PlaceLender::claim_place`]). They are reserved with the session, and an open whose arena cannot
     /// hold them opens nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
@@ -3925,28 +3926,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
-    }
-
-    /// A place of the ABI's own for one of the session's entities of `kind`, from those the open
-    /// laid out for the kind ([`HeldPlaces::with_entity`]), one for each row the session keeps of
-    /// it: `None` when every one is lent, when the open was asked for none of the kind, or when
-    /// the session is closed, which takes no entity. Lent under the session's lock, as every table
-    /// of its arena is, and the ABI's until it gives it back ([`Self::give_back_place`]).
-    pub fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
-        let core = self.live()?;
-        core.0.places.claim(kind)
-    }
-
-    /// Give back `place`, closed or not: the arena it lies in is the session's until the engine
-    /// is let go, which the ABI's object of the entity holds off. A place another session lent is
-    /// handed back untouched. What the ABI kept at the place it lets go of first.
-    pub fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
-        self.core.lock().0.places.give_back(place)
-    }
-
-    /// How many places of `kind` the ABI holds now, and how many the session's arena holds.
-    pub fn entity_places(&self, kind: EntityKind) -> (usize, usize) {
-        self.core.lock().0.places.counts(kind)
     }
 
     /// The bytes the session's open reserved for its arena: the sum of its plan's spans
@@ -6180,6 +6159,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(self)
     }
 
+    fn place_lender(&self) -> Option<&dyn PlaceLender> {
+        Some(self)
+    }
+
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
         self.live()
             .map(|core| {
@@ -7131,6 +7114,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         drop(guard);
         self.deliver();
         Ok(id)
+    }
+}
+
+/// The places the session's arena laid out at its open for the ABI's objects of its entities
+/// ([`HeldPlaces::with_entity`]), one for each row the session keeps of a kind, lent and given
+/// back under the session's lock, as every table of its arena is.
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for CoopEngine<L, C> {
+    fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
+        let core = self.live()?;
+        core.0.places.claim(kind)
+    }
+
+    /// Closed or not: the arena the place lies in is the session's until the engine is let go,
+    /// which the ABI's object of the entity holds off.
+    fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        self.core.lock().0.places.give_back(place)
+    }
+
+    fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.core.lock().0.places.counts(kind)
     }
 }
 
