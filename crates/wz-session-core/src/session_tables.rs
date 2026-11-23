@@ -58,7 +58,7 @@ use crate::pubsub::{
 use crate::query::any_local_queryable;
 #[cfg(feature = "alloc")]
 use crate::query::stage_queryable_interest;
-use crate::query::{fire_queryables, LocalQueryables, QueryableRef, QueryableRows};
+use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
@@ -1961,7 +1961,7 @@ impl<Key: KeyBacking, Cb, P: Storage> QueryableRows
     }
 }
 
-impl<F: RowCallbacks, P: Storage> LocalQueryables for SessionTables<F, P> {
+impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTables<F, P> {
     type Sink = F::Queryable;
 
     #[cfg(feature = "storage-profile")]
