@@ -416,13 +416,13 @@ impl ArenaPlan {
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
         // (`SessionArena::lend_endpoints`): one row of the plan, the two tables' spans.
-        let (dials, listens) = plan.endpoint_rows;
+        let (dial_rows, listen_rows) = plan.endpoint_rows;
         plan.put(
             "endpoint texts",
             "MAX_STATIC_CONNECT + MAX_ADMIN_LOCATORS",
             1,
-            Arena::table_bytes::<LocatorText>(dials)
-                .zip(Arena::table_bytes::<LocatorText>(listens))
+            Arena::table_bytes::<LocatorText>(dial_rows)
+                .zip(Arena::table_bytes::<LocatorText>(listen_rows))
                 .and_then(|(dial, listen)| dial.checked_add(listen))
                 .ok_or(ArenaRefused::TooLarge)?,
         )?;
