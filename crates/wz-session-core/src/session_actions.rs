@@ -16941,10 +16941,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// bytes the owned builder writes for the same description.
     ///
     /// The owned `Request` goes out instead where the session needs that message itself: a
-    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), a build
-    /// whose network counters classify a message by its owned form (`transport-stats`), and a
-    /// query that starts a timestamp stack. A build with no allocator has no owned message, and
-    /// refuses such a query as `FeatureDisabled`.
+    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), and a
+    /// build whose network counters classify a message by its owned form (`transport-stats`). A
+    /// build with no allocator has no owned message, and refuses such a query as `FeatureDisabled`.
     ///
     /// Reliable, as every query is: a Query lost on the way would leave the asker waiting for
     /// answers and a final that never come. Routed at the band its QoS names, and an express one
@@ -16954,12 +16953,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         parts: crate::query_parts::GetParts<'_>,
     ) -> Result<(), SendWireError> {
-        let writer = crate::lent_request::RequestWriter::new(parts).filter(|_| {
-            !crate::lent_request::COUNTED_FROM_OWNED && !self.rewrites_originated_keys()
-        });
-        let Some(writer) = writer else {
+        if crate::lent_request::COUNTED_FROM_OWNED || self.rewrites_originated_keys() {
             return self.send_owned_get(parts);
-        };
+        }
+        let writer = crate::lent_request::RequestWriter::new(parts);
         let qos = parts.query.qos;
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
         // Request has no size constant, and the link lends a slot of this size. A query the

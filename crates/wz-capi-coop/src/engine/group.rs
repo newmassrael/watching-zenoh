@@ -52,7 +52,7 @@ use wz_session_core::multicast_reply_sink::{
 };
 use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
-    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded, MulticastTxItem,
+    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
@@ -278,7 +278,7 @@ pub(super) struct GroupFace {
     /// The group's transport, which the task opens, reads and lets go of, and which the face
     /// writes the stage on ([`Self::write_staged`]).
     link: GroupLink<Watched>,
-    /// What a message of the session waits with on a full lane ([`Self::push`]).
+    /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The group socket's wait for room, asked from outside its task; `None` for a stack that
     /// gives none.
@@ -435,9 +435,11 @@ impl GroupFace {
         })
     }
 
-    /// Push `item`, a message of the session, onto the group's stage as the tokio engine's group
-    /// producer pushes it (`MulticastTxProducer::push`), through the same session core walk
-    /// (`multicast_tx_push`, [`GroupTxStage::push`]): its lane is asked for room before its
+    /// Push `message`, a message of the session written from its parts and lent for the call, onto
+    /// the group's stage as the tokio engine's group producer pushes one
+    /// (`MulticastTxProducer::push`), through the same session core walk
+    /// (`multicast_tx_push_encoded`, [`GroupTxStage::push_encoded`]): nothing of it is built on the
+    /// heap. Its lane is asked for room before its
     /// sequence number is minted and again before each further fragment, within the message's
     /// `wait_before_drop` when it may be dropped and its `wait_before_close` when it may not; while
     /// the lane is full, the session's tasks are run, in which the group's own writes what its
@@ -452,14 +454,6 @@ impl GroupFace {
     /// as zenoh-pico's put writes it (`vendor/zenoh-pico/src/transport/common/tx.c` @
     /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a batch window that holds the
     /// message puts nothing on a lane, and its flush writes it.
-    fn push(&self, item: MulticastTxItem) -> PushOutcome {
-        let outcome = self.tx.push(item, self);
-        self.write_staged();
-        outcome
-    }
-
-    /// [`Self::push`] of a message written from its parts, lent for the call: nothing of it is
-    /// built on the heap.
     fn push_lent(&self, message: &MulticastTxEncoded<'_>) -> PushOutcome {
         let outcome = self.tx.push_encoded(message, self);
         self.write_staged();
@@ -587,8 +581,7 @@ impl GroupFace {
     /// group was told when it is told the session's keyexprs, and in full otherwise
     /// (`GroupDeclarations::key`). Written straight into the group's stage by the writer a link's
     /// query is written by, and sent reliably on the group, as zenoh-pico sends one on its
-    /// multicast transport; a query that starts a timestamp stack, which that writer does not
-    /// carry, is built and queued owned. One asked from inside another push's wait is kept by the
+    /// multicast transport, its timestamp stack included. One asked from inside another push's wait is kept by the
     /// stage and framed after it. `false` when nothing was queued: the key names none, or the
     /// query cannot be written.
     #[cfg(feature = "query")]
@@ -604,18 +597,7 @@ impl GroupFace {
         else {
             return false;
         };
-        let parts = GetParts { rid, key, query };
-        let Some(writer) = RequestWriter::new(parts) else {
-            return match parts.owned_request() {
-                Ok(request) => {
-                    self.push(MulticastTxItem::Request {
-                        request: alloc::boxed::Box::new(request),
-                    });
-                    true
-                }
-                Err(_) => false,
-            };
-        };
+        let writer = RequestWriter::new(GetParts { rid, key, query });
         multicast_tx_request(&writer, query.qos, |message| self.push_lent(message)).is_some()
     }
 

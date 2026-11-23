@@ -13,8 +13,8 @@
 //!
 //! It writes the bytes itself rather than describe them to the codec, as `lent_push` does for a
 //! publication: the codec's form of a Query's value extension holds the encoding and the payload as
-//! one slice, which the caller does not have without a copy. A timestamp stack is not written; a
-//! query that starts one is declined ([`RequestWriter::new`]) and goes the owned way.
+//! one slice, which the caller does not have without a copy. The timestamp stack a query starts is the
+//! last envelope extension, written by its one writer (`ts_stack::TsStack::write`).
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
 
@@ -69,14 +69,9 @@ pub struct RequestWriter<'a> {
 }
 
 impl<'a> RequestWriter<'a> {
-    /// The writer for `parts`, or `None` for a query this writer does not carry: one that starts
-    /// a timestamp stack.
-    pub fn new(parts: GetParts<'a>) -> Option<Self> {
-        #[cfg(feature = "pubsub-ts-stack")]
-        if parts.query.ts_stack.is_some() {
-            return None;
-        }
-        Some(Self { parts })
+    /// The writer for `parts`: every query a description states, its timestamp stack included.
+    pub const fn new(parts: GetParts<'a>) -> Self {
+        Self { parts }
     }
 
     /// Encode the `Request` into `sink`. `LengthOutOfRange`, before a byte is written, for what
@@ -103,8 +98,12 @@ impl<'a> RequestWriter<'a> {
             measured(attachment)?,
         ];
         let envelope = envelope_extensions(&query);
+        #[cfg(feature = "pubsub-ts-stack")]
+        let stack = query.ts_stack;
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let stack: Option<core::convert::Infallible> = None;
 
-        let chained = envelope.iter().any(Option::is_some);
+        let chained = envelope.iter().any(Option::is_some) || stack.is_some();
         sink.write_u8(
             REQUEST_HEADER
                 | if suffix.is_some() { NAMED_FLAG } else { 0 }
@@ -118,8 +117,18 @@ impl<'a> RequestWriter<'a> {
         }
         let mut entries = envelope.iter().flatten().peekable();
         while let Some(&(header, value)) = entries.next() {
-            sink.write_u8(continued(header, entries.peek().is_some()))?;
+            sink.write_u8(continued(
+                header,
+                entries.peek().is_some() || stack.is_some(),
+            ))?;
             sink.write_vle_u64(value)?;
+        }
+        // The timestamp stack is the last envelope extension, as the owned builder places it.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if let Some(stack) = stack {
+            sink.write_u8(crate::ts_stack::TS_STACK_EXT_HEADER)?;
+            sink.write_vle_u64(widen(stack.encoded_len()))?;
+            stack.write(sink)?;
         }
 
         sink.write_u8(
@@ -353,7 +362,7 @@ mod tests {
 
     /// The bytes the writer writes for `parts`.
     fn lent_bytes(parts: GetParts<'_>) -> Result<Vec<u8>, CodecError> {
-        let writer = RequestWriter::new(parts).expect("the query is writable");
+        let writer = RequestWriter::new(parts);
         let mut buffer = alloc::vec![0u8; 4096];
         let mut sink = SliceSink::new(&mut buffer);
         writer.encode(&mut sink)?;
@@ -498,7 +507,7 @@ mod tests {
             key: WireKey::literal(&past_bound).expect("a literal"),
             query: QueryParts::PLAIN,
         };
-        let writer = RequestWriter::new(parts).expect("writable");
+        let writer = RequestWriter::new(parts);
         let mut buffer = [0u8; 16];
         let mut sink = SliceSink::new(&mut buffer);
         assert_eq!(
@@ -536,7 +545,7 @@ mod tests {
                 key: WireKey::literal("demo/a").expect("a literal"),
                 query,
             };
-            let writer = RequestWriter::new(parts).expect("writable");
+            let writer = RequestWriter::new(parts);
             let mut buffer = [0u8; 512];
             let mut sink = SliceSink::new(&mut buffer);
             let lent = writer.encode(&mut sink).err();
@@ -553,25 +562,36 @@ mod tests {
         }
     }
 
-    /// A query that starts a timestamp stack is declined: the writer does not carry it.
+    /// A query that starts a timestamp stack carries it as the last envelope extension, the owned
+    /// path's bytes, alone and behind the QoS and the timeout. Turned red by a stack written in
+    /// another place or form, or a chain whose continuation bits disagree with the owned one.
     #[cfg(feature = "pubsub-ts-stack")]
     #[test]
-    fn a_get_that_starts_a_timestamp_stack_is_declined() {
-        let stack = crate::ts_stack::TsStack::new(crate::ts_stack::point::SEND);
-        let parts = GetParts {
-            rid: 1,
-            key: WireKey::literal("demo/a").expect("a literal"),
-            query: QueryParts {
-                ts_stack: Some(&stack),
-                ..QueryParts::PLAIN
-            },
-        };
-        assert!(RequestWriter::new(parts).is_none());
-        assert!(RequestWriter::new(GetParts {
-            query: QueryParts::PLAIN,
-            ..parts
-        })
-        .is_some());
+    fn a_get_that_starts_a_timestamp_stack_is_written_as_the_owned_path_writes_it() {
+        let mut stack = crate::ts_stack::TsStack::new(crate::ts_stack::point::SEND);
+        assert!(stack.record(crate::ts_stack::point::SEND, alloc::vec![9, 8, 7], false));
+        let mut compared = 0usize;
+        for (qos, timeout_ms) in [(QosLevel::DEFAULT, 0), (QOS_DECLARE, 2_500)] {
+            for key in keys() {
+                let parts = GetParts {
+                    rid: 7,
+                    key,
+                    query: QueryParts {
+                        qos,
+                        timeout_ms,
+                        ts_stack: Some(&stack),
+                        ..QueryParts::PLAIN
+                    },
+                };
+                assert_eq!(
+                    lent_bytes(parts).expect("written"),
+                    owned_bytes(&parts).expect("built"),
+                    "{qos:?} {timeout_ms}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 2 * keys().len());
     }
 
     /// The length the writer states for a body is the number of bytes it writes, at every VLE
