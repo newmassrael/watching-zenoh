@@ -2600,6 +2600,10 @@ layer_c0_test_discipline() {
     # of an InitSyn's advertised size, and the verdict of a cell, over synthetic bytes. The runs are a build
     # host's, which builds zenoh-pico once per size.
     _runci_leg batch_control.selftest -- python3 scripts/host-bench/batch_control.py --selftest
+    # The fan-in lane (`scripts/pico-compare.sh fanin`): the reader of the probe's lines and the judgement of
+    # a round (every sample put under block arrives; none corrupt, behind or foreign), over synthetic lines.
+    # The rounds are a build host's, which builds both Rust arms of the probe.
+    _runci_leg fanin.selftest -- python3 scripts/host-bench/fanin.py --selftest
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.

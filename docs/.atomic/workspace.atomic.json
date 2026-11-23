@@ -7292,6 +7292,11 @@
       "source": "open-debt register",
       "reason": "The AP presets (router preset against zenohd, wz-zenoh against the upstream Rust API) are behind upstream zenoh on the D13 matrix (deploy/ap_superiority.json, first reading 2026-11-22): router fan-out to 16 subscribers 33x the cost, throughput 2-5x, multi-hop 3.9x, heap peak 3x, session open 1.5-3x; no cell WIN; RSS and latency TIE. The owner directed the AP presets to beat upstream in every aspect; each row is held by the ratchet and falls toward WIN (thread-per-core router after the one-engine migration, P7 of docs/c-abi-engine-and-memory.md)."
     },
+    "debt-ap-reassembly-cap-one-mebibyte": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, MEASURED: the AP (tokio) host can neither send nor rejoin a message above 1 MiB, where upstream's default transport/link/rx/max_message_size is 1 GiB. The bound is the build's reassembly pool slot (out/wz-runtime-tokio/reassembly_pool_ap.rs SLOT_SIZE 1048576, 32 slots, generated from sources/network/reassembly_pool_ap.scxml): crates/wz-runtime-tokio/src/reassembly.rs reads a configured max_message_size above it as the slot (RX_MAX_MESSAGE_SIZE_CEILING), and crates/wz-runtime-tokio/src/session_glue.rs hands the same value to the send side as its refusal bound (set_max_reassembly_bytes). Measured by scripts/pico-compare.sh fanin on pc2 (one publisher at 20 Hz for 3 s, TCP loopback, congestion control block): 4,000,000-byte samples arrived 0 of 60 whenever either end was wz (wz to wz, a wz publisher to an upstream subscriber, an upstream publisher to a wz subscriber), while upstream to upstream delivered every one and wz to wz delivered every 60,000- and 200,000-byte sample. A camera or lidar frame of a vehicle is above the bound. Closes when the AP host rejoins and sends a message up to the configured max_message_size, whose default is upstream's, and the fan-in lane delivers every 4 MB sample on the WW, PW and WP pairs. The atom transport-fragmentation still reads COMPLETE with \"no residual that matters vs upstream\", which this reading refutes; re-grading it PARTIAL moves the completeness ratchet c.partial-atoms from 2 to 3 (deploy/completeness_ratchet.json), and whether a ratchet moves up for a regrade is left to the owner."
+    },
     "debt-atomic-tx-multicast-group-unreserved": {
       "status": "active",
       "source": "open-debt register",
@@ -7760,6 +7765,11 @@
       "status": "deprecated",
       "source": "carry of Round 4385",
       "reason": "CLOSED (c7 integration round): the memory document counts the values door's ValuesMemory as its own member values (memory document revision 3); with fragment pieces the figure is a lower bound because the per-piece verdict B-tree is not modelled, as the document says."
+    },
+    "debt-oversize-publish-refusal-not-reported": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, MEASURED, CAUSE NOT READ: a publication the wz session refuses as larger than its reassembly bound is reported to the zenoh API caller as sent. In the fan-in lane's pair of a wz publisher and an upstream subscriber (4,000,000-byte samples, congestion control block), every one of the 60 puts returned Ok (put_errors 0) while the upstream subscriber, whose bound is 1 GiB, received none, which is what the refusal below would give and not what a sent chain would. The engine has a typed refusal for it (SendWireError::ExceedsReassemblyCap, mapped to PublishError::ExceedsCapacity in crates/wz-session-core/src/publish_options.rs and worded for the API by publish_error in crates/wz-zenoh/src/api/session.rs); where it is lost between the session's send path and Publisher::put is not read yet. Closes when such a put returns that error, with a test that holds it and the fan-in lane counting the refusals in put_errors. Measured beside debt-ap-reassembly-cap-one-mebibyte, which is what makes the refusal happen at 4 MB."
     },
     "debt-packet-edit-after-build": {
       "status": "deprecated",
