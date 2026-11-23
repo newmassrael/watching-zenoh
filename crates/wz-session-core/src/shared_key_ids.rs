@@ -226,18 +226,17 @@ pub(crate) fn dictionary_faults<'a>(
         .filter(|id| *id != 0)
         .collect();
     ids.sort_unstable();
-    for (index, pair) in ids.windows(2).enumerate() {
-        let repeated = pair[0] == pair[1];
-        if repeated && (index == 0 || ids[index - 1] != pair[0]) {
-            report(Fault::DuplicateId { id: pair[0] });
+    // Each run of one value is reported once, at its first.
+    for run in ids.chunk_by(|a, b| a == b) {
+        if let [id, _, ..] = run {
+            report(Fault::DuplicateId { id: *id });
         }
     }
     let mut keys: Vec<&'a str> = entries.iter().map(|&(_, _, key)| key).collect();
     keys.sort_unstable();
-    for (index, pair) in keys.windows(2).enumerate() {
-        let repeated = pair[0] == pair[1];
-        if repeated && (index == 0 || keys[index - 1] != pair[0]) {
-            report(Fault::DuplicateKey { key: pair[0] });
+    for run in keys.chunk_by(|a, b| a == b) {
+        if let [key, _, ..] = run {
+            report(Fault::DuplicateKey { key: *key });
         }
     }
 }
@@ -290,7 +289,8 @@ impl KeyIds {
             .collect();
         rows.sort_unstable_by_key(|entry| entry.id);
         let mut by_key: Vec<usize> = (0..rows.len()).collect();
-        by_key.sort_unstable_by(|a, b| rows[*a].key.as_bytes().cmp(rows[*b].key.as_bytes()));
+        let key_at = |at: &usize| rows.get(*at).map(|row| row.key.as_bytes());
+        by_key.sort_unstable_by(|a, b| key_at(a).cmp(&key_at(b)));
         Ok(Self {
             entries: rows,
             by_key,
@@ -332,16 +332,21 @@ impl KeyIds {
         self.entries
             .binary_search_by_key(&id, |entry| entry.id)
             .ok()
-            .map(|at| self.entries[at].key.as_str())
+            .and_then(|at| self.entries.get(at))
+            .map(|entry| entry.key.as_str())
     }
 
     /// The id of `key`, or `None` when the dictionary does not hold it. The key is compared as it
     /// is written: a key is in the dictionary when its text is.
     pub fn id_of(&self, key: &str) -> Option<ExprId> {
+        // `by_key` holds the places of `entries`, every one of them.
+        let key_at = |at: &usize| self.entries.get(*at).map(|entry| entry.key.as_bytes());
         self.by_key
-            .binary_search_by(|at| self.entries[*at].key.as_bytes().cmp(key.as_bytes()))
+            .binary_search_by(|at| key_at(at).cmp(&Some(key.as_bytes())))
             .ok()
-            .map(|place| self.entries[self.by_key[place]].id)
+            .and_then(|place| self.by_key.get(place))
+            .and_then(|at| self.entries.get(*at))
+            .map(|entry| entry.id)
     }
 
     /// Whether `id` is one of the dictionary's, and so not one this node may declare a key
@@ -374,10 +379,15 @@ impl KeyIds {
         }
         let bytes = key.as_bytes();
         let mut end = bytes.len();
-        while let Some(slash) = bytes[..end].iter().rposition(|byte| *byte == b'/') {
+        while let Some(slash) = bytes
+            .get(..end)
+            .and_then(|head| head.iter().rposition(|byte| *byte == b'/'))
+        {
             // `/` is one byte of UTF-8, so both halves are on a character boundary.
-            if let Some(id) = self.id_of(&key[..slash]) {
-                return Some((id, &key[slash..]));
+            if let (Some(head), Some(rest)) = (key.get(..slash), key.get(slash..)) {
+                if let Some(id) = self.id_of(head) {
+                    return Some((id, rest));
+                }
             }
             end = slash;
         }
@@ -528,7 +538,8 @@ impl LinkKeyForms {
         check_open(session, ids)?;
         for (at, (locator, form)) in links.iter().enumerate() {
             check_open(*form, ids)?;
-            if links[..at].iter().any(|(other, _)| other == locator) {
+            let before = links.get(..at).unwrap_or_default();
+            if before.iter().any(|(other, _)| other == locator) {
                 return Err(KeyIdsRefused::DuplicateLink {
                     locator: locator.clone(),
                 });
@@ -827,19 +838,23 @@ fn two_fields<'a>(
     let mut found: [Option<&'a Json5Value>; 2] = [None, None];
     let mut whole = true;
     for (field, value) in fields {
-        match names.iter().position(|name| *name == field.as_str()) {
-            Some(index) if found[index].is_some() => {
+        let named = names
+            .iter()
+            .zip(found.iter_mut())
+            .find(|(name, _)| **name == field.as_str());
+        match named {
+            Some((name, slot)) if slot.is_some() => {
                 refuse(
                     refusals,
                     KeyIdsReason::FieldStatedTwice {
                         member,
                         at,
-                        field: names[index],
+                        field: *name,
                     },
                 );
                 whole = false;
             }
-            Some(index) => found[index] = Some(value),
+            Some((_, slot)) => *slot = Some(value),
             None => {
                 refuse(
                     refusals,
@@ -902,10 +917,11 @@ pub fn read_member_in(
     while let Some(name) = next_member_in(lex)? {
         if name.eq_str("dictionary") {
             first_in(&mut dictionary)?;
-            read.ids = lexed_dictionary(lex, max_depth - 1)?;
+            // `open_in` refused a depth of 0 above.
+            read.ids = lexed_dictionary(lex, max_depth.saturating_sub(1))?;
         } else if name.eq_str("links") {
             first_in(&mut links)?;
-            read.links = lexed_links(lex, max_depth - 1, &in_domain)?;
+            read.links = lexed_links(lex, max_depth.saturating_sub(1), &in_domain)?;
         } else {
             return Err(MemberRefused);
         }
@@ -922,7 +938,8 @@ fn lexed_dictionary(
     open_in(lex, b'[', depth)?;
     let mut entries: Vec<(usize, ExprId, String)> = Vec::new();
     while next_element_in(lex)? {
-        open_in(lex, b'{', depth - 1)?;
+        // `open_in` refused a depth of 0 above.
+        open_in(lex, b'{', depth.saturating_sub(1))?;
         let (mut id, mut key) = (None, None);
         while let Some(field) = next_member_in(lex)? {
             if field.eq_str("id") && id.is_none() {
@@ -974,7 +991,8 @@ fn lexed_links(
     open_in(lex, b'[', depth)?;
     let mut links: Vec<(String, KeyWireForm)> = Vec::new();
     while next_element_in(lex)? {
-        open_in(lex, b'{', depth - 1)?;
+        // `open_in` refused a depth of 0 above.
+        open_in(lex, b'{', depth.saturating_sub(1))?;
         let (mut locator, mut form) = (None, None);
         while let Some(field) = next_member_in(lex)? {
             if field.eq_str("locator") && locator.is_none() {
@@ -1033,7 +1051,7 @@ fn next_member_in<'t>(lex: &mut Lexer<'t>) -> Result<Option<Json5Str<'t>>, Membe
     }
     let name = lex.member_name()?;
     lex.skip_trivia()?;
-    lex.expect(b':', ": after a member name")?;
+    lex.consume(b':', ": after a member name")?;
     lex.skip_trivia()?;
     Ok(Some(name))
 }
@@ -1199,7 +1217,7 @@ impl LinkKeys {
             return ReplyKey::Literal;
         };
         let rest = noted.suffix.as_deref().unwrap_or("");
-        let named = reply.len() == base.len() + rest.len()
+        let named = reply.len() == base.len().saturating_add(rest.len())
             && reply.starts_with(base)
             && reply.ends_with(rest);
         if !named {
@@ -1221,10 +1239,11 @@ impl LinkKeys {
 
 /// The bytes a VLE of `value` takes on the wire: seven bits of it per byte.
 const fn vle_len(value: u64) -> usize {
-    let mut len = 1;
+    // At most ten bytes for a 64-bit value.
+    let mut len = 1usize;
     let mut rest = value >> 7;
     while rest != 0 {
-        len += 1;
+        len = len.saturating_add(1);
         rest >>= 7;
     }
     len
@@ -1232,12 +1251,16 @@ const fn vle_len(value: u64) -> usize {
 
 /// The bytes of a wireexpr that names `key` as the literal: id 0, the length, the text.
 fn literal_cost(key: &str) -> usize {
-    vle_len(0) + vle_len(key.len() as u64) + key.len()
+    vle_len(0)
+        .saturating_add(vle_len(key.len() as u64))
+        .saturating_add(key.len())
 }
 
 /// The bytes of a wireexpr that names `id`, and `rest` after it when there is one.
 fn id_cost(id: ExprId, rest: Option<&str>) -> usize {
-    vle_len(u64::from(id)) + rest.map_or(0, |rest| vle_len(rest.len() as u64) + rest.len())
+    vle_len(u64::from(id)).saturating_add(rest.map_or(0, |rest| {
+        vle_len(rest.len() as u64).saturating_add(rest.len())
+    }))
 }
 
 #[cfg(test)]

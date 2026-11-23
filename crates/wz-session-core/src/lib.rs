@@ -326,12 +326,6 @@ pub mod key_gate;
 // The key ids every node of a deployment shares (`shared-key-ids`), documented from inside for the
 // reason the closed key set's modules are.
 #[cfg(feature = "shared-key-ids")]
-// Totality debt TD-018 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod shared_key_ids;
 
 // The pace of a paced declaration replay: `ReplayPacing`, the burst and the interval between
