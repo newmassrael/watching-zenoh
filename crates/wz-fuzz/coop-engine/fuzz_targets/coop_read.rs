@@ -29,7 +29,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
-use wz_capi_coop::{CoopConfig, CoopEngine, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES};
+use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
+use wz_capi_coop::{CoopConfig, CoopEngine};
 use wz_capi_port::{QueryCallback, QueryHolder, SessionDrive, SessionEngine, WireKey};
 use wz_fuzz_ingress_common::{
     advance_ms, handshake_replies, now_us, reset_clock, units, CountingAlloc, Window, BATCH,
@@ -147,8 +148,10 @@ fn config() -> CoopConfig {
         redial_ms: None,
         idle_wait_ms: 0,
         listen: Vec::new(),
-        accept_pending: DEFAULT_ACCEPT_PENDING,
-        max_faces: DEFAULT_MAX_FACES,
+        accept_pending: admitted_handshakes(&SessionLimits::defaults())
+            .expect("the build admits its own value"),
+        max_faces: admitted_faces(&SessionLimits::defaults())
+            .expect("the build admits its own value"),
         groups: Vec::new(),
         clock_moves: None,
         limits: SessionLimits::defaults(),
