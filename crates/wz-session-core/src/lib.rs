@@ -925,8 +925,6 @@ pub mod scouting_message;
 // has: the responder reads a Scout and writes a Hello, so a build with one
 // half has no responder to offer rather than a partial one.
 #[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
-// Totality debt TD-149 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used)]
 pub mod scout_responder;
 
 /// R2334 — the INITIATOR's counterpart to [`scout_responder`]: why a datagram

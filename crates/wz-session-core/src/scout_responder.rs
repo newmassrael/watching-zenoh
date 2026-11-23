@@ -272,6 +272,10 @@ pub enum ScoutIgnored {
     },
     /// Our own Scout, looped back by `IP_MULTICAST_LOOP`.
     SelfEcho,
+    /// This node's identity spells no Hello the codec writes: its zid is outside the field's
+    /// bounds. [`ResponderIdentity::try_new`] refuses such a zid, so no identity it built
+    /// reaches here.
+    NoHello,
 }
 
 /// The responder's verdict on one datagram.
@@ -321,7 +325,10 @@ pub fn answer_scout_from(
     if what & identity.whatami.to_api() == 0 {
         return ScoutDecision::Ignored(ScoutIgnored::WhatMismatch { what });
     }
-    ScoutDecision::Answer(hello_datagram_with(identity, identity.locators_for(asker)))
+    match hello_datagram_with(identity, identity.locators_for(asker)) {
+        Some(hello) => ScoutDecision::Answer(hello),
+        None => ScoutDecision::Ignored(ScoutIgnored::NoHello),
+    }
 }
 
 /// How many LEADING octets `asker` and `local` share, or `None` when the two are
@@ -408,13 +415,16 @@ pub fn best_reply_source(asker: IpAddr, candidates: &[IpAddr]) -> Option<usize> 
 /// flag `if !locators.is_empty()` and writes the list under the same condition
 /// (`zenoh-codec` `scouting/hello.rs:50-70`), so a Hello with the flag and no
 /// list is a decode failure at the other end rather than an empty list.
-pub fn hello_datagram(identity: &ResponderIdentity) -> Vec<u8> {
+///
+/// `None` for an identity whose zid the Hello's field does not hold, which
+/// [`ResponderIdentity::try_new`] refuses.
+pub fn hello_datagram(identity: &ResponderIdentity) -> Option<Vec<u8>> {
     hello_datagram_with(identity, &identity.locators)
 }
 
 /// [`hello_datagram`] carrying `advertised` in place of the identity's own list, for the asker the
 /// list was chosen for.
-fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> Vec<u8> {
+fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> Option<Vec<u8>> {
     let mut locators = Vec::with_capacity(advertised.len().min(HELLO_LOCATORS_HELD));
     for l in advertised {
         // A locator past the `u8` length the protocol reads one with has no
@@ -441,8 +451,7 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
         // `try_new` refuses an empty zid and one longer than the 4-bit field,
         // which is the whole reason it is a constructor rather than a struct
         // literal.
-        zid: sce_forge_runtime::codec::Bounded::new(identity.zid.as_slice())
-            .expect("`try_new` holds a zid of 1..=16 bytes, the codec's bounds"),
+        zid: sce_forge_runtime::codec::Bounded::new(identity.zid.as_slice())?,
         // A list only when there is a locator: the document sets `L` from it.
         locators: sce_forge_runtime::codec::Bounded::new(locators.as_slice())
             .filter(|_| !locators.is_empty()),
@@ -456,7 +465,7 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
     };
     let mut datagram = Vec::with_capacity(ScoutingHelloWire::measure(&message).len());
     let Ok(()) = ScoutingHelloWire::encode_source(&message, &mut VecSink::new(&mut datagram));
-    datagram
+    Some(datagram)
 }
 
 /// How many locators a Hello written here carries at most: what a wz node holds
@@ -703,7 +712,8 @@ mod tests {
             WhatAmI::Peer,
             &[0x11, 0x22, 0x33, 0x44],
             &[OUR_LOCATOR],
-        ));
+        ))
+        .expect("an identity spells a Hello");
         assert_eq!(
             answer_scout(&id, &someone_elses_hello),
             ScoutDecision::Ignored(ScoutIgnored::NotAScout),
@@ -735,14 +745,15 @@ mod tests {
     /// upstream reads as a decode failure, so the two must never disagree.
     #[test]
     fn the_locator_flag_tracks_the_list() {
-        let with = hello_datagram(&peer_identity());
+        let with = hello_datagram(&peer_identity()).expect("an identity spells a Hello");
         assert_eq!(
             with[0],
             wire_const::S_MID_HELLO | wire_const::FLAG_S_HELLO_L,
             "a Hello carrying a locator sets L in the header"
         );
 
-        let without = hello_datagram(&identity(WhatAmI::Peer, OUR_ZID, &[]));
+        let without = hello_datagram(&identity(WhatAmI::Peer, OUR_ZID, &[]))
+            .expect("an identity spells a Hello");
         assert_eq!(
             without[0],
             wire_const::S_MID_HELLO,
@@ -779,7 +790,7 @@ mod tests {
         // And it ENCODES: the boundary is asserted on the wire, not only on the
         // constructor, because `zid_len_m1` masks to 4 bits and would silently
         // wrap a value the constructor had let through.
-        let wire = hello_datagram(&longest);
+        let wire = hello_datagram(&longest).expect("an identity spells a Hello");
         assert_eq!(wire[2] >> 4, 15, "zid_len-1 = 15 for a 16-byte zid");
         assert_eq!(&wire[3..19], &[0xABu8; 16]);
     }
@@ -790,7 +801,7 @@ mod tests {
     /// header, version, `flags = whatami | (zid_len-1) << 4`, then the zid.
     #[test]
     fn the_hello_body_bytes_are_upstreams_layout() {
-        let wire = hello_datagram(&peer_identity());
+        let wire = hello_datagram(&peer_identity()).expect("an identity spells a Hello");
         assert_eq!(wire[1], 0x09, "version");
         assert_eq!(
             wire[2],
