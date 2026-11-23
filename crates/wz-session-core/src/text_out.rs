@@ -81,7 +81,8 @@ pub trait TextOut: fmt::Write {
                 let groups = v6.segments();
                 // The first longest run of zero groups: a later run of the same length keeps the
                 // first, as `Display` keeps it.
-                let (mut best_at, mut best_len, mut run_at, mut run_len) = (0, 0, 0, 0);
+                let (mut best_at, mut best_len, mut run_at, mut run_len) =
+                    (0usize, 0usize, 0usize, 0usize);
                 for (at, &group) in groups.iter().enumerate() {
                     if group == 0 {
                         if run_len == 0 {
