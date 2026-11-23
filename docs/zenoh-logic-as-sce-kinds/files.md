@@ -161,17 +161,19 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/deliveries.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/faces_added.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/queued.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/host_group.rs` | S7 | |
-| `crates/wz-capi-coop/src/lane.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
+| `crates/wz-capi-coop/src/round.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/scout_datagram.rs` | S7 | |
@@ -190,7 +192,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/held_keys.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/host_group.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/in_place.rs` | excluded: test | Test-only file by its name. |
-| `crates/wz-capi-coop/src/tests/lane.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/link_sets.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/listen.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/liveliness.rs` | S7 | |
@@ -202,6 +203,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/queryable.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/redial_wait.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/replay.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/round.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/runtime_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
