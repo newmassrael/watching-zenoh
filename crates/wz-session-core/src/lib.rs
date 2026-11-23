@@ -162,7 +162,7 @@ pub mod key_arena;
 /// The pools of rows the faces of a session share: a slab of rows of one kind lent from the
 /// session's arena once, each table that keeps its rows there a list of the rows it holds
 /// ([`row_pool::PooledRows`]). Unconditional, like [`bounded`], whose lent policy keeps a peer's
-/// tables in them.
+/// tables in them in a build with `peer-row-pools`; a build without it links none of it.
 pub mod row_pool;
 
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a

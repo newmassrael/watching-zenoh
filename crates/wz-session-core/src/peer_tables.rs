@@ -52,6 +52,7 @@ use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
+#[cfg(feature = "peer-row-pools")]
 use crate::row_pool::{Keyed, OwnSpans, RowLender, RowSource, RowSpace};
 use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
@@ -248,6 +249,7 @@ impl PeerTables<Lent> {
     /// its interests. Rows of a shared pool are handed to every face's tables; one face's own spans
     /// to the first tables that ask alone, so tables handed nothing keep what they had. What the
     /// tables held in other rows is forgotten first.
+    #[cfg(feature = "peer-row-pools")]
     pub fn keep_rows_in(&mut self, pools: &mut PeerPools) {
         if let Some(space) = pools.aliases.hand_out() {
             self.subscribers.keep_alias_rows_in(space);
@@ -272,6 +274,12 @@ impl PeerTables<Lent> {
         if let Some(space) = pools.tokens.hand_out() {
             self.tokens.keep_rows_in(space);
         }
+    }
+
+    /// Nothing to keep: a build without `peer-row-pools` keeps what the peer writes inline.
+    #[cfg(not(feature = "peer-row-pools"))]
+    pub fn keep_rows_in(&mut self, pools: &mut PeerPools) {
+        let _ = pools;
     }
 
     /// The bytes of an arena [`Self::lent`] takes for `rows`: each table's spans. `None` past the
@@ -304,6 +312,11 @@ impl PeerTables<Lent> {
     }
 }
 
+/// Whether this build's lent tables keep what a peer writes in pools a session's faces share
+/// (`peer-row-pools`): an engine that lends no pool where it is off reads this as a constant, so
+/// the code that sizes and lends them is not in its text.
+pub const SHARES_ROWS: bool = cfg!(feature = "peer-row-pools");
+
 /// How many rows each kind of what the peers of one session write by their own choice is lent
 /// ([`PeerPools::lent`]), and whether the session's faces share them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -323,54 +336,72 @@ pub struct PeerPoolRows {
 }
 
 /// The kind of row of a table keyed by a peer's ids whose value is a key's place.
+#[cfg(feature = "peer-row-pools")]
 type KeyKind = Keyed<crate::key_arena::KeyRef>;
 
 /// The kind of row of the peer's queryables.
+#[cfg(feature = "peer-row-pools")]
 type QueryableKind = Keyed<crate::id_map::DeclaredQueryable<Lent>>;
 
 /// The kind of row of the repeats of the peer's subscribers or queryables.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
 type RepeatKind = crate::row_pool::Seq<(u64, u64)>;
 
 impl PeerPoolRows {
-    /// The bytes the aliases' rows take in an arena. `None` past the most rows a pool or a span
-    /// names, or the address space.
+    /// The bytes the aliases' rows take in an arena: none without `peer-row-pools`, whose tables
+    /// keep their rows inline. `None` past the most rows a pool or a span names, or the address
+    /// space.
     pub const fn alias_bytes(&self) -> Option<usize> {
-        if self.shared {
-            RowSpace::<KeyKind>::pool_bytes(self.aliases)
-        } else {
-            span_of(RowSpace::<KeyKind>::own_bytes(self.aliases))
+        #[cfg(feature = "peer-row-pools")]
+        {
+            if self.shared {
+                RowSpace::<KeyKind>::pool_bytes(self.aliases)
+            } else {
+                span_of(RowSpace::<KeyKind>::own_bytes(self.aliases))
+            }
+        }
+        #[cfg(not(feature = "peer-row-pools"))]
+        {
+            Some(0)
         }
     }
 
     /// The bytes the declarations' rows take in an arena: the subscribers', the queryables', the
     /// tokens' and, with `alloc`, the repeats'. In a session of one face they are one span, each
     /// table's rows from where the one before ends, aligned for its rows (`decl_end`). `None`
-    /// past the most rows a pool or a span names, or the address space.
+    /// past the most rows a pool or a span names, or the address space. No bytes without
+    /// `peer-row-pools`.
     pub const fn decl_bytes(&self) -> Option<usize> {
-        let rows = self.remote_decls;
-        if !self.shared {
-            return span_of(decl_end(rows));
+        #[cfg(feature = "peer-row-pools")]
+        {
+            let rows = self.remote_decls;
+            if !self.shared {
+                return span_of(decl_end(rows));
+            }
+            #[cfg(feature = "alloc")]
+            let repeats = match RowSpace::<RepeatKind>::pool_bytes(rows) {
+                Some(each) => each.checked_mul(2),
+                None => None,
+            };
+            #[cfg(not(feature = "alloc"))]
+            let repeats = Some(0);
+            sum_spans(&[
+                RowSpace::<KeyKind>::pool_bytes(rows),
+                RowSpace::<QueryableKind>::pool_bytes(rows),
+                RowSpace::<KeyKind>::pool_bytes(rows),
+                repeats,
+            ])
         }
-        #[cfg(feature = "alloc")]
-        let repeats = match RowSpace::<RepeatKind>::pool_bytes(rows) {
-            Some(each) => each.checked_mul(2),
-            None => None,
-        };
-        #[cfg(not(feature = "alloc"))]
-        let repeats = Some(0);
-        sum_spans(&[
-            RowSpace::<KeyKind>::pool_bytes(rows),
-            RowSpace::<QueryableKind>::pool_bytes(rows),
-            RowSpace::<KeyKind>::pool_bytes(rows),
-            repeats,
-        ])
+        #[cfg(not(feature = "peer-row-pools"))]
+        {
+            Some(0)
+        }
     }
 
-    /// The bytes the interests' rows take in an arena: none without `declare-subscriber`. `None`
-    /// past the most rows a pool or a span names, or the address space.
+    /// The bytes the interests' rows take in an arena: none without `declare-subscriber` or
+    /// `peer-row-pools`. `None` past the most rows a pool or a span names, or the address space.
     pub const fn interest_bytes(&self) -> Option<usize> {
-        #[cfg(feature = "declare-subscriber")]
+        #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
         {
             if self.shared {
                 crate::pubsub::InterestRows::pool_bytes(self.interests)
@@ -378,7 +409,7 @@ impl PeerPoolRows {
                 span_of(crate::pubsub::InterestRows::own_bytes(self.interests))
             }
         }
-        #[cfg(not(feature = "declare-subscriber"))]
+        #[cfg(not(all(feature = "declare-subscriber", feature = "peer-row-pools")))]
         {
             Some(0)
         }
@@ -392,6 +423,7 @@ impl PeerPoolRows {
 }
 
 /// `bytes` rounded up to an arena's span.
+#[cfg(feature = "peer-row-pools")]
 const fn span_of(bytes: Option<usize>) -> Option<usize> {
     match bytes {
         Some(bytes) => Arena::span(bytes),
@@ -404,6 +436,7 @@ const fn span_of(bytes: Option<usize>) -> Option<usize> {
 /// tokens' and, with `alloc`, the subscribers' repeats' and the queryables' repeats', each from
 /// where the one before ends, aligned for its rows. `None` past the most rows a span names or
 /// the address space.
+#[cfg(feature = "peer-row-pools")]
 const fn decl_end(rows: usize) -> Option<usize> {
     let tokens = OwnSpans::after::<KeyKind>(
         OwnSpans::after::<QueryableKind>(OwnSpans::after::<KeyKind>(Some(0), rows), rows),
@@ -434,17 +467,24 @@ const fn decl_end(rows: usize) -> Option<usize> {
 /// inline tables lay their rows out, with no link and no pool state. Each span is handed to the
 /// first tables that ask and to no others, so no two tables lay rows over each other: this is not
 /// copied, and tables made after the first are handed nothing and refuse what their peer writes.
+///
+/// Without `peer-row-pools` (a build of one face) the tables keep those rows inline and there is
+/// nothing to lend: this holds nothing and hands nothing out.
 #[derive(Debug)]
 pub struct PeerPools {
+    #[cfg(feature = "peer-row-pools")]
     aliases: RowSource<KeyKind>,
+    #[cfg(feature = "peer-row-pools")]
     subscribers: RowSource<KeyKind>,
+    #[cfg(feature = "peer-row-pools")]
     queryables: RowSource<QueryableKind>,
+    #[cfg(feature = "peer-row-pools")]
     tokens: RowSource<KeyKind>,
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
     sub_repeats: RowSource<RepeatKind>,
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
     queryable_repeats: RowSource<RepeatKind>,
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
     interests: crate::pubsub::InterestRows,
 }
 
@@ -468,11 +508,20 @@ pub struct PeerPoolCounts {
 }
 
 impl PeerPools {
+    /// Nothing to lend: a build without `peer-row-pools` keeps what the peers write inline in each
+    /// face's tables.
+    #[cfg(not(feature = "peer-row-pools"))]
+    pub fn lent(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
+        let _ = (arena, rows);
+        Ok(Self {})
+    }
+
     /// The rows `rows` states, lent from `arena` in the order [`PeerPoolRows::arena_bytes`]
     /// counts them: the aliases', the declarations' and the interests'. For a session of one face
     /// each of those is one span, the declaration tables' carved in the order `decl_end` lays
     /// them out. Refused, what was lent so far going back with the arena, when the arena has not
     /// the room or a count is past what a pool or a span names.
+    #[cfg(feature = "peer-row-pools")]
     pub fn lent(arena: &mut Arena, rows: PeerPoolRows) -> Result<Self, LendRefused> {
         let decls = rows.remote_decls;
         let mut lend = RowLender::new(arena, rows.shared);
@@ -504,11 +553,25 @@ impl PeerPools {
     /// Whether the faces share these rows; one face's own spans are handed to that face's tables
     /// alone.
     pub fn is_shared(&self) -> bool {
-        self.aliases.is_shared()
+        #[cfg(feature = "peer-row-pools")]
+        {
+            self.aliases.is_shared()
+        }
+        #[cfg(not(feature = "peer-row-pools"))]
+        {
+            false
+        }
     }
 
     /// What each shared pool holds now; `None` for one face's own spans, whose tables say what they
     /// hold.
+    #[cfg(not(feature = "peer-row-pools"))]
+    pub fn counts(&self) -> Option<PeerPoolCounts> {
+        None
+    }
+
+    /// What each shared pool holds now; `None` for one face's own spans.
+    #[cfg(feature = "peer-row-pools")]
     pub fn counts(&self) -> Option<PeerPoolCounts> {
         Some(PeerPoolCounts {
             aliases: self.aliases.counts()?,
@@ -857,6 +920,7 @@ mod lent_tests {
     }
 
     /// One face's own spans of `each` rows of every kind, lent from an arena of their own.
+    #[cfg(feature = "peer-row-pools")]
     fn own_rows(each: usize) -> PeerPools {
         rows_of(each, false)
     }
@@ -1349,6 +1413,7 @@ mod lent_tests {
     /// alone: every source is spent once they took it, so tables made after them are handed nothing
     /// and no two tables lay rows over each other. A session's shared pools are handed to every
     /// table that asks.
+    #[cfg(feature = "peer-row-pools")]
     #[test]
     fn one_faces_own_spans_go_to_the_first_tables_alone() {
         let limits = SessionLimits::defaults();
@@ -1380,7 +1445,8 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "codec-declare",
-        feature = "declare-subscriber"
+        feature = "declare-subscriber",
+        feature = "peer-row-pools"
     ))]
     fn faces_sharing(
         count: usize,
@@ -1409,7 +1475,8 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "codec-declare",
-        feature = "declare-subscriber"
+        feature = "declare-subscriber",
+        feature = "peer-row-pools"
     ))]
     #[test]
     fn many_faces_declaring_a_few_fit_a_pool_far_smaller_than_their_bounds() {
@@ -1490,7 +1557,8 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "codec-declare",
-        feature = "declare-subscriber"
+        feature = "declare-subscriber",
+        feature = "peer-row-pools"
     ))]
     #[test]
     fn a_forgotten_peer_gives_back_exactly_its_rows() {
@@ -1562,7 +1630,8 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "codec-declare",
-        feature = "declare-subscriber"
+        feature = "declare-subscriber",
+        feature = "peer-row-pools"
     ))]
     #[test]
     fn a_faces_own_spans_hold_its_peers_rows_and_refuse_past_them() {
@@ -1642,6 +1711,7 @@ mod lent_tests {
     #[cfg(all(
         feature = "alloc",
         feature = "declare-subscriber",
+        feature = "peer-row-pools",
         not(feature = "pool-monitor")
     ))]
     #[test]

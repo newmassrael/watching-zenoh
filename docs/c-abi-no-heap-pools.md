@@ -219,7 +219,10 @@ the declarations owed it (`id_map.rs`, `declaration_sync.rs`, `peer_table.rs`,
   only as values (its bytes and alignment in either layout, where a pool's row keeps its link, how
   its item is dropped), compiled once for every kind and every bound and kept out of line; a row
   kind is a thin typed wrapper that writes, reads and lends its item, and every `unsafe` of the
-  pools lies in that one module.
+  pools lies in that one module. The pools are a build's choice (`wz-session-core`'s
+  `peer-row-pools`, named by the engine's `listen` and `group`): a build that holds one face
+  (pico's client) keeps those tables inline at one peer's bound in the face's tables, lends no
+  pool and no span, and links none of the pools' code.
 - Lifetime: the face's; a lost link takes them with it (the observer's link-loss flush), and a face
   that goes gives its rows back to the pools, one step each and no other face's.
 - Exhausted: the peer's declaration is refused and counted, whether its face's table is at the

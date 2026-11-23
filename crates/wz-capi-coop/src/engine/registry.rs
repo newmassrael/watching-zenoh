@@ -37,7 +37,7 @@ use wz_session_core::bounded::{Arena, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables};
+use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
@@ -344,8 +344,8 @@ impl Registry {
         let app = App::lent(arena, keys, rows, limits)?;
         let mut pools = PeerPools::lent(arena, peers.pools)?;
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
-        // lends one set.
-        debug_assert!(pools.is_shared() || peers.tables <= 1);
+        // lends one set; a build without pools keeps each set's rows inline.
+        debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));

@@ -537,7 +537,7 @@ struct InterestSide<P: Storage = Profile> {
     ///
     /// At most `MAX_INBOUND_SUB_INTERESTS` rows, in the policy's sequence of a peer's rows
     /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
-    /// shares ([`InterestRows`]), so a face holds the interests its peer asked and not the most it
+    /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
     /// could.
     #[cfg(feature = "declare-subscriber")]
     rows: <P as Storage>::Pooled<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }>,
@@ -3072,7 +3072,7 @@ impl SubscriberPeer<Lent> {
 
     /// Keep the aliases the peer declares from here on in rows of `space`, the session's: a pool the
     /// faces share, or a span of this table's own; the aliases held elsewhere are forgotten first.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
     pub fn keep_alias_rows_in(
         &mut self,
         space: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
@@ -3083,7 +3083,7 @@ impl SubscriberPeer<Lent> {
     /// Keep the interests the peer asks from here on in rows `rows` hands out, the session's: a
     /// pool the faces share, or a span of this side's own if no table took it before; the
     /// interests held elsewhere are forgotten first. Rows with nothing left to hand change nothing.
-    #[cfg(feature = "declare-subscriber")]
+    #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
     pub fn keep_interest_rows_in(&mut self, rows: &mut InterestRows) {
         if let Some(space) = rows.0.hand_out() {
             self.interests.rows.keep_rows_in(space);
@@ -3578,7 +3578,7 @@ impl InterestSide<Lent> {
 }
 
 /// The kind of row a peer's interests are kept in on the lent policy.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
 type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
 
 /// Where every face of a session keeps the interests its peer asks
@@ -3586,11 +3586,11 @@ type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
 /// from its arena once, so a face holds the interests its peer asked and the session holds what its
 /// faces together asked, up to the pool's rows; or, for a session of one face, a span of that
 /// face's own, handed to the first side that asks and to no other.
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
 #[derive(Debug)]
 pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
 
-#[cfg(feature = "declare-subscriber")]
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
 impl InterestRows {
     /// `rows` interests lent by `lend`: a pool the faces share, or a span of one face's own, a group
     /// of its own ([`Self::own_bytes`]). A refusal is `lend`'s to hand back.

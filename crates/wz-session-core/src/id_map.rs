@@ -520,7 +520,7 @@ impl<P: Storage> Default for DeclaredAliases<P> {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
 impl DeclaredAliases<crate::bounded::Lent> {
     /// Keep the aliases recorded from here on in rows of `space`, the session's; the ones held go
     /// first, as their rows belong to the space before.
@@ -649,9 +649,20 @@ mod tests {
             .expect("the arena is the span")
     }
 
+    /// Without `peer-row-pools` the aliases of a peer whose tables are lent are inline as the static
+    /// policy's: they take an alias with no arena having lent them a row.
+    #[cfg(all(feature = "alloc", not(feature = "peer-row-pools")))]
+    #[test]
+    fn lent_aliases_need_no_arena_without_pools() {
+        let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
+        aliases.insert(3, 1);
+        assert_eq!(aliases.told_as(3), Some(1));
+        assert_eq!(aliases.remove(3), Some(1));
+    }
+
     /// The aliases of a peer whose tables are lent keep their rows in the session's pool: one is
     /// recorded, read and forgotten there, and its row goes back with it.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", feature = "peer-row-pools"))]
     #[test]
     fn lent_aliases_keep_their_rows_in_the_sessions_pool() {
         let pool = pool_of::<crate::row_pool::Seq<(u64, u64)>>(2);

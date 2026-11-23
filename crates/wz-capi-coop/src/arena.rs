@@ -103,7 +103,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
-use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::row_pool::MAX_POOL_ROWS;
@@ -466,22 +466,24 @@ impl ArenaPlan {
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
         );
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
-        // tables' own (`pool_rows`).
-        let pools = plan.peers.pools;
-        for (part, kind, bytes) in [
-            ("peer alias pool", &POOL_LIMITS[0], pools.alias_bytes()),
-            (
-                "peer declaration pools",
-                &POOL_LIMITS[1],
-                pools.decl_bytes(),
-            ),
-            (
-                "peer interest pool",
-                &POOL_LIMITS[2],
-                pools.interest_bytes(),
-            ),
-        ] {
-            plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
+        if SHARES_ROWS {
+            let pools = plan.peers.pools;
+            for (part, kind, bytes) in [
+                ("peer alias pool", &POOL_LIMITS[0], pools.alias_bytes()),
+                (
+                    "peer declaration pools",
+                    &POOL_LIMITS[1],
+                    pools.decl_bytes(),
+                ),
+                (
+                    "peer interest pool",
+                    &POOL_LIMITS[2],
+                    pools.interest_bytes(),
+                ),
+            ] {
+                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+            }
         }
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
@@ -735,6 +737,10 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
 /// by the limit that set it: the session's limit for a pool, the face's for a span. Refused too
 /// when a limit is over the build's value.
 fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
+    if !SHARES_ROWS {
+        // A build whose faces keep what their peers write inline lends no pool and no span.
+        return Ok(PeerPoolRows::default());
+    }
     let mut rows = [0; POOL_LIMITS.len()];
     for (kind, held) in POOL_LIMITS.iter().zip(&mut rows) {
         let face = lent_under(kind.face, (kind.face_of)(limits), kind.face_ceiling)?;

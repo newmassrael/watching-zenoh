@@ -325,7 +325,7 @@ impl RemoteSubscriberPeer<Profile> {
     }
 }
 
-#[cfg(feature = "storage-profile")]
+#[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
 impl RemoteSubscriberPeer<crate::bounded::Lent> {
     /// Keep the subscribers the peer declares from here on in rows of `rows`, the session's: a pool
     /// the faces share, or a span of this table's own. What the table held elsewhere is forgotten

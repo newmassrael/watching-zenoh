@@ -434,13 +434,15 @@ impl Storage for Static {
 /// ([`KeyRef`](crate::key_arena::KeyRef)), which the table is handed with its rows
 /// ([`LentKeys`](crate::key_arena::LentKeys)), and not a buffer of the longest key: a key takes
 /// the bytes it has, and gives them back when its row goes (`docs/c-abi-no-heap-pools.md`,
-/// section 9.4). A table a peer writes, keyed by the peer's ids or not, keeps its rows where the
-/// session's open put them ([`RowSpace`](crate::row_pool::RowSpace)): in a pool every face of a
-/// session of many shares, the table a list of the rows it holds, at most its build capacity, so a
-/// face holds the rows its peer declared and not the most it could; or, for a session of one face,
-/// in a span of the table's own laid out as an inline table is (section 4.5). A sequence a row holds of its own is lent from the arena
-/// by the row's maker: one made by `Default` under this policy has no rows, no pool and no key
-/// arena, as a table the arena lent nothing has none.
+/// section 9.4). With `peer-row-pools`, a table a peer writes, keyed by the peer's ids or not, keeps
+/// its rows where the session's open put them ([`RowSpace`](crate::row_pool::RowSpace)): in a pool
+/// every face of a session of many shares, the table a list of the rows it holds, at most its build
+/// capacity, so a face holds the rows its peer declared and not the most it could; or, for a session
+/// of one face, in a span of the table's own laid out as an inline table is (section 4.5). Without
+/// it, a build of one face, those tables are inline at their build capacity, as the static
+/// policy's are. A sequence a row holds of its own is lent from the arena by the row's maker: one
+/// made by `Default` under this policy has no rows, no pool and no key arena, as a table the arena
+/// lent nothing has none.
 pub struct Lent;
 
 impl Storage for Lent {
@@ -454,8 +456,14 @@ impl Storage for Lent {
     type Keys = crate::key_arena::LentKeys;
     // A span of a lent table addresses rows of an arena a host session may size past 64 KiB.
     type Offset = u32;
+    #[cfg(feature = "peer-row-pools")]
     type Ids<V, const N: usize> = crate::id_map::PooledIdMap<V, N>;
+    #[cfg(not(feature = "peer-row-pools"))]
+    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    #[cfg(feature = "peer-row-pools")]
     type Pooled<T, const N: usize> = crate::row_pool::PooledRows<crate::row_pool::Seq<T>, N>;
+    #[cfg(not(feature = "peer-row-pools"))]
+    type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
 
     #[cfg(feature = "storage-profile")]
