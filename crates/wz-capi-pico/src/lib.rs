@@ -472,8 +472,6 @@ pub mod admin_space;
 #[cfg(feature = "advanced")]
 pub mod advanced;
 #[cfg(feature = "advanced")]
-// Totality debt TD-184 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
