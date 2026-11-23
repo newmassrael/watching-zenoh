@@ -1673,7 +1673,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // pico's config carries ONE listen locator, so the set is that one or none, unless it names
     // the group the session joins.
     #[cfg(feature = "multicast-transport")]
-    let (listen, connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen {
+    let (mut listen, mut connect, groups): (Vec<String>, Vec<String>, Vec<_>) = match request.listen
+    {
         Some(endpoint) if joins_a_group => (
             Vec::new(),
             Vec::new(),
@@ -1693,7 +1694,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         listen => (listen.into_iter().collect(), request.connect, Vec::new()),
     };
     #[cfg(not(feature = "multicast-transport"))]
-    let (listen, connect, groups): (
+    let (mut listen, mut connect, groups): (
         Vec<String>,
         Vec<String>,
         Vec<wz_capi_port::group::GroupJoin>,
@@ -1702,19 +1703,15 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         request.connect,
         Vec::new(),
     );
-    // The unicast endpoints as pico's links read them: the engine is handed what pico's link of
-    // the scheme reads, so a key that link does not know (`#iface=` on `tcp/`) is left out as pico
-    // leaves it, and what it reads stays for the engine to carry out or refuse.
-    let unicast = |endpoints: Vec<String>| -> Result<Vec<String>, ZResult> {
-        endpoints
-            .iter()
-            .map(|endpoint| crate::endpoint::engine_endpoint(endpoint.as_str()))
-            .collect()
-    };
-    let (listen, connect) = match (unicast(listen), unicast(connect)) {
-        (Ok(listen), Ok(connect)) => (listen, connect),
-        (Err(code), _) | (_, Err(code)) => return code,
-    };
+    // The unicast endpoints as pico's links read them, each read over its own text: the engine is
+    // handed what pico's link of the scheme reads, so a key that link does not know (`#iface=` on
+    // `tcp/`) is left out as pico leaves it, and what it reads stays for the engine to carry out
+    // or refuse.
+    for endpoint in listen.iter_mut().chain(connect.iter_mut()) {
+        if let Err(code) = crate::endpoint::engine_endpoint(endpoint) {
+            return code;
+        }
+    }
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
