@@ -93,10 +93,6 @@ pub fn parse_listen_locator(endpoint: &str) -> Result<Locator, DialRefused> {
 }
 
 /// An endpoint's text, read for a stack that opens IPv6 links when `IPV6` is true.
-///
-/// Out of line: each public reader above is called from several doors, and a body inlined into
-/// each would be one copy of the whole grammar per caller.
-#[inline(never)]
 fn parse_endpoint<const IPV6: bool>(
     endpoint: &str,
     any_port: bool,
