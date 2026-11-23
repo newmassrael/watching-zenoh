@@ -215,8 +215,6 @@ pub mod policy;
 // Where a policy's or a limit's value is decided: the build's domain of each policy, the value
 // selected inside it, and the declaration's words for scope, stage, mutability and what a peer
 // sees. Unconditional, no_std and no_alloc, like `policy`. Documented from inside.
-// Totality debt TD-075 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod policy_binding;
 
 // The value of a limit (a quota, or a parameter's integer), the values of it a build allows, and
