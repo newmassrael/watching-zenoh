@@ -453,8 +453,6 @@ pub mod reply_sink;
 // identical `(id, keyexpr)`; the matching undeclaration is a bare `u64`
 // scalar. First step of the declare model-B migration; the registry
 // generic-over-sink rewrites land in the apply sub-rounds.
-// Totality debt TD-090 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod decl_sink;
 
 // R311y442 — the zenoh SELECTOR-PARAMETER dialect (`;` list separator, `=`
