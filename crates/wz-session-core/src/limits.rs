@@ -1868,7 +1868,7 @@ mod enforcement {
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(
-            observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
+            observer.face_ref().queries.oversize_refusals(),
             u32::from(refused)
         );
         assert_eq!(
@@ -1899,10 +1899,7 @@ mod enforcement {
                     1,
                     "the longer query ran nowhere"
                 );
-                assert_eq!(
-                    observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
-                    1
-                );
+                assert_eq!(observer.face_ref().queries.oversize_refusals(), 1);
                 assert_eq!(
                     observer.pending_final_count(),
                     2,
@@ -1928,7 +1925,7 @@ mod enforcement {
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
         assert_eq!(
-            observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
+            observer.face_ref().queries.oversize_refusals(),
             u32::from(refused)
         );
         assert_eq!(
@@ -1959,10 +1956,7 @@ mod enforcement {
                     1,
                     "the longer query ran nowhere"
                 );
-                assert_eq!(
-                    observer.read_app(|app_half| app_half.queryables.oversize_refusals()),
-                    1
-                );
+                assert_eq!(observer.face_ref().queries.oversize_refusals(), 1);
                 assert_eq!(
                     observer.pending_final_count(),
                     2,

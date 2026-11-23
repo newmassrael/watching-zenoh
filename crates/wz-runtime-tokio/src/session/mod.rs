@@ -3143,7 +3143,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 .set_shm_resolver_shared(resolver.clone());
             // R3044 -- and the queryable registry, which reads the value of a
             // query that arrives as a list of slices.
-            observer.with_app(|app| app.queryables.set_shm_resolver_shared(resolver));
+            observer.face().queries.set_shm_resolver_shared(resolver);
         });
     }
 
@@ -3649,7 +3649,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         R::with_mutex_mut(&self.observer, |obs| {
             obs.face().subscribers.set_shm_negotiated(true);
             obs.face().replies.set_shm_negotiated(true);
-            obs.with_app(|app| app.queryables.set_shm_negotiated(true));
+            obs.face().queries.set_shm_negotiated(true);
         });
     }
 
@@ -4852,7 +4852,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 obs.face().replies.set_shm_negotiated(negotiated);
                 // R3044 -- and the queryable registry, which un-swaps a query's
                 // value behind the same gate.
-                obs.with_app(|app| app.queryables.set_shm_negotiated(negotiated));
+                obs.face().queries.set_shm_negotiated(negotiated);
             }
             // R3040 -- hand the registry the means of ACKNOWLEDGING the peer's
             // shared-memory slices, before the un-swap can run, as the negotiated
@@ -4872,7 +4872,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     .subscribers
                     .set_shm_handoff_shared(shared.clone());
                 obs.face().replies.set_shm_handoff_shared(shared.clone());
-                obs.with_app(|app| app.queryables.set_shm_handoff_shared(shared));
+                obs.face().queries.set_shm_handoff_shared(shared);
             }
             // The observer may serve more than this session, so the session states its own
             // `query-unanswerable-final` value, from the snapshot it was handed, before each
@@ -7111,7 +7111,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// callback table entry, then — iff `_z_locality_allows_remote(allowed_origin)`
     /// — emit the wire `DeclQueryable` so a router routes matching `Query`
     /// requests to this session. The callback fires synchronously inside
-    /// [`crate::query::QueryableRegistry::dispatch_request`] (wire arrival) and
+    /// [`wz_session_core::query::QueryPeer::dispatch_request`] (wire arrival) and
     /// [`crate::query::QueryableRegistry::local_query`] (loopback, R238+).
     ///
     /// Returns a [`Queryable`] handle whose `Drop` (RAII) unregisters the local

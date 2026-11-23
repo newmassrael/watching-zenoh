@@ -814,7 +814,7 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert_eq!(tables.epoch(), 0);
     assert_eq!(tables.next_subscription_id(), 1);
     let any = tables
-        .declare_subscriber("a/*", Locality::Any, KeyForm::default(), Counted::default())
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), Counted::default())
         .unwrap();
     let remote = tables
         .declare_subscriber(
@@ -835,11 +835,11 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     assert_eq!(
         seen,
         std::vec![
-            (u64::from(any.id), "a/*".into(), Locality::Any),
+            (u64::from(any.id), "a/b".into(), Locality::Any),
             (u64::from(remote.id), "a/b".into(), Locality::Remote),
         ]
     );
-    assert!(tables.has_local_matching("a/c"));
+    assert!(tables.has_local_matching("a/b"));
     assert!(!tables.has_local_matching("b"));
     let count = |sink: &mut Counted| sink.0 += 1;
     assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
@@ -854,7 +854,10 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     let _ = tables.undeclare_subscriber(any.handle);
     assert_eq!(tables.epoch(), 3);
-    assert!(!tables.has_local_matching("a/c"));
+    assert!(
+        !tables.has_local_matching("a/b"),
+        "the subscriber of peers only is no local match"
+    );
 }
 
 /// The table set is the session's own id space: a peer's `M=0` key that names a key expression
@@ -1224,4 +1227,45 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
         peer.sub_interest_reply(&tables, &SubInterestReply::Final { interest_id: 8 }),
         None
     );
+}
+
+/// The table set's queryables are matched by the functions the queryable registry's are: a remote
+/// query reaches the queryables that answer peers, in declaration order; an `AllComplete` query
+/// only the complete one; a session-local one only those that answer the session; and the
+/// session-local half of a querier's verdict reads the same rows.
+#[test]
+fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
+    use crate::query::LocalQueryables;
+    use crate::query_mode::QueryTarget;
+    let mut tables = Tables::new();
+    for (key, origin, complete, callback) in [
+        ("q/a", Locality::Any, false, 1),
+        ("q/a", Locality::Remote, true, 2),
+        ("q/a", Locality::SessionLocal, true, 3),
+        ("other", Locality::Any, true, 4),
+    ] {
+        tables
+            .declare_queryable(key, origin, complete, KeyForm::default(), callback)
+            .unwrap();
+    }
+    let fire = |tables: &mut Tables, remote: bool, target: Option<QueryTarget>| {
+        let mut asked = Vec::new();
+        let fired = tables.fire_matching_queryables(
+            "q/a",
+            KeyFacts::of("q/a"),
+            remote,
+            target,
+            |callback: &mut u32| asked.push(*callback),
+        );
+        assert_eq!(fired, asked.len());
+        asked
+    };
+    assert_eq!(fire(&mut tables, true, None), [1, 2]);
+    assert_eq!(fire(&mut tables, true, Some(QueryTarget::AllComplete)), [2]);
+    assert_eq!(fire(&mut tables, false, None), [1, 3]);
+    #[cfg(feature = "storage-profile")]
+    {
+        assert!(tables.has_local_queryable("q/a", false));
+        assert!(!tables.has_local_queryable("elsewhere", false));
+    }
 }

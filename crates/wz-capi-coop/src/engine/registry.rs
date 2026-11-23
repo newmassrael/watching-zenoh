@@ -625,6 +625,18 @@ impl Registry {
         }
     }
 
+    /// State the answer face `id`'s session gives a query of its peer whose key the face's tables
+    /// cannot resolve: the session's policy, held by the face from its link on.
+    pub(super) fn set_unanswerable_final(
+        &mut self,
+        id: FaceId,
+        value: wz_session_core::policy::QueryUnanswerableFinal,
+    ) {
+        if let Some(face) = self.held_mut(id) {
+            face.peer.queries.set_unanswerable_final(value);
+        }
+    }
+
     /// Let go of the id space the tables of face `id` hold, the link it was the space of being gone:
     /// until the next link of the face installs its own, the peer's ids of the session's
     /// declarations resolve to nothing, as before the first link.

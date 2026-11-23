@@ -32,7 +32,7 @@
 //! on the same `fire_to_subscribers` helper so the locality contract
 //! is enforced exactly once.
 //!
-//! `QueryableRegistry::dispatch_request` still only sees wire-arrived
+//! `QueryPeer::dispatch_request` still only sees wire-arrived
 //! records and treats them as remote — Queryable-side loopback is a
 //! follow-up that will mirror this round's Subscriber-side shape
 //! when the use case surfaces (`_z_session_deliver_query_locally` in

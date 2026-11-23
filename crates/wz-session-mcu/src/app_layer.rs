@@ -296,12 +296,14 @@ where
         {
             let mut peers = self.handle.peers().borrow_mut();
             let mut observer = self.observer.borrow_mut();
-            // The observer is the process's and this session is one link: the queries of this
-            // dispatch are asked by whom the link's key proved, or by nobody shown (decision D12).
-            observer.set_requester(self.handle.verified_peer_zid());
-            observer.set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
+            // The queries of this session's link are asked by whom its key proved, or by nobody
+            // shown (decision D12), and are answered by this session's policy: both are this
+            // face's, read where the link may have just been established.
+            peers.queries.set_requester(self.handle.verified_peer_zid());
+            peers
+                .queries
+                .set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
             observer.dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
-            observer.set_requester(None);
         }
         // A query whose deadline has passed ends with a timeout reply and its final, here, because
         // this is the one place that runs on every iteration of the session and holds the pending
@@ -730,7 +732,9 @@ mod tests {
             std::assert_eq!(
                 observer
                     .borrow()
-                    .read_app(|app| app.queryables.answers_unresolved_queries()),
+                    .face_ref()
+                    .queries
+                    .answers_unresolved_queries(),
                 value == QueryUnanswerableFinal::EmptyFinal,
                 "{}",
                 value.id()

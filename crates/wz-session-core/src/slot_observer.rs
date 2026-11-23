@@ -834,11 +834,6 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .limit_keys_to(limits.max_keyexpr_bytes_held());
-        #[cfg(feature = "query-queryable")]
-        self.queryables.limit_query_sizes_to(
-            limits.query_parameters_max_bytes_held(),
-            limits.query_attachment_max_bytes_held(),
-        );
         #[cfg(feature = "declare-subscriber")]
         self.remote_subscribers
             .limit_observers_to(limits.max_decl_observers_held());
@@ -856,27 +851,6 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .limit_to(limits.max_liveliness_subscriptions_held());
-    }
-
-    /// Say which zid the key of the link of the session about to be dispatched PROVED, or `None`
-    /// (decision D12): the queryables answer the queries of that dispatch with it as
-    /// [`crate::query_sink::QueryView::requester`]. The observer is the process's and a session
-    /// is one link, so the session says it before every dispatch.
-    pub fn set_requester(&mut self, requester: Option<[u8; 16]>) {
-        #[cfg(feature = "query-queryable")]
-        self.queryables.set_requester(requester);
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = requester;
-    }
-
-    /// State the `query-unanswerable-final` value of the session about to be dispatched, from
-    /// the snapshot that session holds: the observer is the process's, so the session says it
-    /// before every dispatch, as it says who its link proved.
-    pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        #[cfg(feature = "query-queryable")]
-        self.queryables.set_unanswerable_final(value);
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = value;
     }
 
     /// Fan an [`IterationEvent`] of one session into every registry, against that
@@ -941,7 +915,8 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
             .mapping_spaces_over(self.subscribers.own_space());
 
         #[cfg(feature = "query-queryable")]
-        self.queryables.dispatch_iteration_event(
+        peers.queries.dispatch_iteration_event(
+            &mut self.queryables,
             event,
             peer_table,
             &mut peers.replies,

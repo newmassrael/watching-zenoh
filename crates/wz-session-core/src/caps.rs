@@ -186,7 +186,7 @@ pub const DATAGRAM_FRAGMENT_GAP_US: usize = generated::DATAGRAM_FRAGMENT_GAP_US;
 
 /// The most bytes of selector parameters a query from a peer may carry for the node to run it;
 /// 0 sets no bound. A longer query reaches no queryable and is counted
-/// ([`crate::query::QueryableRegistry::oversize_refusals`]).
+/// ([`crate::query::QueryPeer::oversize_refusals`]).
 pub const QUERY_PARAMETERS_MAX_BYTES: usize = generated::QUERY_PARAMETERS_MAX_BYTES;
 
 /// The most bytes of attachment a query from a peer may carry for the node to run it; 0 sets no

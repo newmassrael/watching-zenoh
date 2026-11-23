@@ -51,6 +51,7 @@ use crate::declare::queryable::RemoteQueryablePeer;
 use crate::declare::subscriber::RemoteSubscriberPeer;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::pubsub::SubscriberPeer;
+use crate::query::QueryPeer;
 use crate::reply_stage::{FinalStage, ReplyStage};
 #[cfg(feature = "peer-row-pools")]
 use crate::row_pool::{Keyed, OwnSpans, RowLender, RowSource, RowSpace};
@@ -84,6 +85,9 @@ pub struct PeerTables<P: Storage = Profile> {
     pub replies: ReplyStage<P>,
     /// The `Final`s owed to the peer's queries.
     pub finals: FinalStage<P>,
+    /// What the peer's queries are judged by: who its link proved it to be, the session's answer
+    /// to a key it cannot resolve, the bounds of its queries and the shared memory of their values.
+    pub queries: QueryPeer,
     /// The answers to the peer's liveliness interests, staged until the next
     /// drain: [`caps::MAX_PENDING_DECLARES`] items, whole chains or none.
     #[cfg(feature = "liveliness-token")]
@@ -133,6 +137,7 @@ impl<P: Storage> PeerTables<P> {
             ptr::write(addr_of_mut!((*at).tokens), PeerTokens::default());
             ptr::write(addr_of_mut!((*at).replies), ReplyStage::default());
             ptr::write(addr_of_mut!((*at).finals), FinalStage::default());
+            ptr::write(addr_of_mut!((*at).queries), QueryPeer::new());
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).pending_declares), BoundedVec::default());
             #[cfg(feature = "liveliness-token")]
@@ -153,6 +158,7 @@ impl<P: Storage> PeerTables<P> {
             tokens: _,
             replies: _,
             finals: _,
+            queries: _,
             #[cfg(feature = "liveliness-token")]
                 pending_declares: _,
             #[cfg(feature = "liveliness-token")]
@@ -172,6 +178,7 @@ impl PeerTables<Static> {
             tokens: PeerTokens::new_static(),
             replies: ReplyStage::new_static(),
             finals: FinalStage::new_static(),
+            queries: QueryPeer::new(),
             #[cfg(feature = "liveliness-token")]
             pending_declares: BoundedVec::new_static(),
             #[cfg(feature = "liveliness-token")]
@@ -643,6 +650,10 @@ impl<P: Storage> PeerTables<P> {
         self.replies
             .limit_to(crate::reply_stage::ReplyBounds::of(limits));
         self.finals.limit_to(limits.max_pending_finals_held());
+        self.queries.limit_query_sizes_to(
+            limits.query_parameters_max_bytes_held(),
+            limits.query_attachment_max_bytes_held(),
+        );
         self.subscribers
             .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
         #[cfg(feature = "declare-subscriber")]
