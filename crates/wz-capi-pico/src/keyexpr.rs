@@ -502,9 +502,10 @@ fn non_wild_prefix(literal: &str) -> &str {
 /// would produce. The one judgement behind [`z_keyexpr_is_canon`], the two
 /// checked view constructors and the checked owned constructor.
 fn is_pico_canon(text: &str) -> bool {
-    matches!(
-        wz_session_core::keyexpr_canon::canonize_keyexpr(text),
-        Ok(canon) if canon.as_str() == text
+    // Judged without writing the canonical form, so a view of a key allocates nothing.
+    wz_session_core::keyexpr_canon::is_canonical(
+        text,
+        wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     )
 }
 

@@ -273,6 +273,32 @@ pub fn canon_verdict(input: &str, dialect: KeyexprDialect) -> Result<(), Keyexpr
     )
 }
 
+/// Whether `input` is its own canonical form in `dialect`: what [`canonize_keyexpr_in`] would
+/// write for it is `input` itself. The canonical form is compared with `input` piece by piece as
+/// it is walked, so nothing is written and nothing is allocated on any profile: a door that only
+/// judges whether a text it borrows is canon (a view of a key) holds no buffer for it.
+pub fn is_canonical(input: &str, dialect: KeyexprDialect) -> bool {
+    if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
+        return false;
+    }
+    let mut rest = input;
+    // A piece that is not the next text of `input` ends the walk; only whether the walk wrote
+    // all of `input` and nothing else is read, so the refusal it ends with is not.
+    let walked = walk_canonical(
+        input,
+        dialect,
+        <<Profile as Storage>::Scratch as Storage>::ENFORCES_CAPACITY,
+        &mut |piece: &str| match rest.strip_prefix(piece) {
+            Some(after) => {
+                rest = after;
+                Ok(())
+            }
+            None => Err(KeyexprCanonError::ExceedsCapacity),
+        },
+    );
+    walked.is_ok() && rest.is_empty()
+}
+
 /// Whether `P` refuses `input` for its length before any chunk is judged: the length of the
 /// text with every run of `$*` written once, which is the longest the canonical form can be,
 /// past `CAPACITY`, the bytes the output's type holds
@@ -1321,6 +1347,35 @@ mod tests {
             agree(&text);
         }
         walk_alphabet(agree);
+    }
+
+    /// A text is judged its own canonical form exactly when the canonizer writes it back as it is,
+    /// in both dialects, a refused text being no canonical form. Turned red by a comparison that
+    /// reads a prefix of the canonical form as the whole of it, or the other way round.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_text_is_canonical_exactly_when_the_canonizer_writes_it_back() {
+        let agree = |text: &str| {
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                assert_eq!(
+                    is_canonical(text, dialect),
+                    canonize_keyexpr_in(text, dialect).is_ok_and(|canon| canon.as_str() == text),
+                    "{text:?}, {dialect:?}"
+                );
+            }
+        };
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(agree);
+        for (text, canon) in [
+            ("a/b", true),
+            ("a/**/*", false),
+            ("a/*/**", true),
+            ("a//b", false),
+        ] {
+            assert_eq!(is_canonical(text, KeyexprDialect::Pico), canon, "{text}");
+        }
     }
 
     /// A wild key, which only the passes canonize, is taken whole into a key of the lent policy.
