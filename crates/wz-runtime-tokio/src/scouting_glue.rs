@@ -240,7 +240,7 @@ mod tests {
         engine: &mut Engine<ScoutingPolicy<ScoutActionsBinding>>,
         dgram: &[u8],
     ) {
-        if let Some(hello) = wz_session_core::scouting_host::decode_hello_row(dgram) {
+        if let Some(hello) = decode_scouted_hello(dgram) {
             *actions.pending_hello.lock().unwrap() = Some(hello);
         }
         engine.raise_hello_received(ScoutingHelloReceivedPayload {

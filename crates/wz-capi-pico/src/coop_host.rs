@@ -203,7 +203,7 @@ pub(crate) use zephyr_host::*;
 mod scouting {
     use core::net::{IpAddr, SocketAddr};
 
-    use wz_session_core::scouting_host::{HelloRow, ScoutedHello};
+    use wz_session_core::scouting_host::{HelloRow, HelloTable, ScoutedHello};
 
     use wz_session_core::session_zid::SessionZid;
 
@@ -222,6 +222,7 @@ mod scouting {
         zid: Option<SessionZid>,
         budget_ms: u64,
         rx_bytes: usize,
+        table: &mut HelloTable,
         on_hello: impl FnMut(&HelloRow),
     ) -> usize {
         wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
@@ -231,10 +232,12 @@ mod scouting {
             zid,
             budget_ms,
             rx_bytes,
+            table,
             on_hello,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn scout_first<C: wz_capi_coop::ClockSource + Clone>(
         clock: &C,
         group: IpAddr,
@@ -243,6 +246,7 @@ mod scouting {
         zid: Option<SessionZid>,
         budget_ms: u64,
         rx_bytes: usize,
+        table: &mut HelloTable,
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
             clock,
@@ -251,6 +255,7 @@ mod scouting {
             zid,
             budget_ms,
             rx_bytes,
+            table,
         )
     }
 }

@@ -109,16 +109,18 @@ fn a_row_keeps_locators_up_to_its_bounds_and_counts_the_rest() {
     assert_eq!(row.zid, scouted.zid);
 }
 
-/// A table records `MAX_SCOUT_HELLOS` Hellos and refuses one more, and its rows are delivered last
-/// responder first, lent, as a host's list is. Turned red by a table that grows past its rows.
+/// A table records `MAX_SCOUT_HELLOS` Hellos and refuses one more, which it counts, and its rows are
+/// delivered last responder first, lent, as a host's list is. Turned red by a table that grows
+/// past its rows.
 #[test]
 fn a_table_holds_its_rows_and_refuses_one_more() {
-    let mut table = HelloTable::default();
+    let mut table = alloc::boxed::Box::new(HelloTable::new());
     for zid in 1..=caps::MAX_SCOUT_HELLOS {
-        assert!(table.push(HelloRow::of(&hello(zid as u8))), "row {zid}");
+        assert!(table.push(&HelloRow::of(&hello(zid as u8))), "row {zid}");
     }
-    assert!(!table.push(HelloRow::of(&hello(0xEE))));
+    assert!(!table.push(&HelloRow::of(&hello(0xEE))));
     assert_eq!(table.len(), caps::MAX_SCOUT_HELLOS);
+    assert_eq!(table.refused(), 1);
     assert_eq!(table.first().map(|row| row.zid[0]), Some(1));
     let mut seen = Vec::new();
     let delivered = deliver_rows_in_upstream_order(&table, |row| seen.push(row.zid[0]));
@@ -130,8 +132,8 @@ fn a_table_holds_its_rows_and_refuses_one_more() {
     assert_eq!(seen, expected);
 }
 
-/// A Hello decoded into a row with no heap is the row of the Hello the host's decoder makes, and
-/// a Hello naming a zero zid is no row, as it is no scouted Hello.
+/// A Hello decoded into a row in place, with no heap, is the row of the Hello the host's decoder
+/// makes, and a Hello naming a zero zid is no row, as it is no scouted Hello.
 #[test]
 fn a_row_decoded_with_no_heap_is_the_scouted_hellos_row() {
     let hello_of = |zid: &[u8]| {
@@ -144,8 +146,17 @@ fn a_row_decoded_with_no_heap_is_the_scouted_hellos_row() {
         wire.extend_from_slice(&hello.encode_to_vec());
         wire
     };
-    assert!(decode_hello_row(&hello_of(&[0, 0])).is_none());
+    let mut row = HelloRow::EMPTY;
+    assert!(!row.decode_into(&hello_of(&[0, 0])));
     let wire = hello_of(&[0, 0x01]);
     let scouted = decode_scouted_hello(&wire).expect("a Hello naming a zid");
-    assert_eq!(decode_hello_row(&wire), Some(HelloRow::of(&scouted)));
+    assert!(row.decode_into(&wire));
+    assert_eq!(row, HelloRow::of(&scouted));
+    let mut table = alloc::boxed::Box::new(HelloTable::new());
+    assert!(table.push(&row));
+    table.clear();
+    assert!(
+        table.is_empty() && table.refused() == 0,
+        "a cleared table holds nothing"
+    );
 }

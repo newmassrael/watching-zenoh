@@ -115,6 +115,52 @@ mod window {
     use wz_session_core::session_zid::SessionZid;
 
     use crate::config::ConfigState;
+    use crate::result::ZResult;
+    #[cfg(not(feature = "engine-tokio"))]
+    use crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+
+    /// The process's one table of a cooperative window's Hellos: in the library's static memory,
+    /// reserved when it is built, never on a stack and never on the heap. A window claims it for
+    /// its run and its delivery; a window that finds it claimed, by another thread's scout or by
+    /// one asked from a scout's own callback, is refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as a
+    /// scout zenoh-pico's heap cannot hold its list for is.
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(in crate::scout) mod table {
+        use core::cell::UnsafeCell;
+
+        use wz_capi_port::sync::Lock;
+        use wz_session_core::scouting_host::HelloTable;
+
+        struct Region(UnsafeCell<HelloTable>);
+
+        // SAFETY: the table is reached only by the one holder of the claim, through it.
+        unsafe impl Sync for Region {}
+
+        static TABLE: Region = Region(UnsafeCell::new(HelloTable::new()));
+        static CLAIMED: Lock<bool> = Lock::new(false);
+
+        /// The table, held by one window at a time and given back when the claim is dropped.
+        pub(in crate::scout) struct Claim(());
+
+        impl Claim {
+            /// The table, or `None` while another window holds it.
+            pub(in crate::scout) fn take() -> Option<Self> {
+                CLAIMED.with(|claimed| (!core::mem::replace(claimed, true)).then_some(Self(())))
+            }
+
+            /// The table the claim holds.
+            pub(in crate::scout) fn table(&mut self) -> &mut HelloTable {
+                // SAFETY: one claim exists at a time, and it lends the table through `&mut self`.
+                unsafe { &mut *TABLE.0.get() }
+            }
+        }
+
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                CLAIMED.with(|claimed| *claimed = false);
+            }
+        }
+    }
 
     /// The clock a window is timed by: the system's, or the time base the scout's config names
     /// (`time-base`), which a window then runs on as a session opened from that config does.
@@ -156,7 +202,8 @@ mod window {
     }
 
     /// Scout `group:port` for `budget_ms` of `clock`, handing each peer that answered to
-    /// `on_hello` after the window, last responder first; the number delivered.
+    /// `on_hello` after the window, last responder first; the number delivered, or the code of a
+    /// window that could not be run.
     #[cfg(feature = "engine-tokio")]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run(
@@ -169,10 +216,10 @@ mod window {
         policy: &SessionPolicy,
         _limits: &SessionLimits,
         on_hello: impl FnMut(&ScoutedHello),
-    ) -> usize {
-        wz_capi_core::scouting::run_scout(
+    ) -> Result<usize, ZResult> {
+        Ok(wz_capi_core::scouting::run_scout(
             *clock, group, port, what, zid, budget_ms, policy, on_hello,
-        )
+        ))
     }
 
     /// Scout and answer the first node that replies, or `None` when none does in the window.
@@ -187,8 +234,10 @@ mod window {
         budget_ms: u64,
         policy: &SessionPolicy,
         _limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        wz_capi_core::scouting::scout_first(*clock, group, port, what, zid, budget_ms, policy)
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        Ok(wz_capi_core::scouting::scout_first(
+            *clock, group, port, what, zid, budget_ms, policy,
+        ))
     }
 
     // The cooperative engine on a host with `scout`: a socket for each interface.
@@ -204,10 +253,19 @@ mod window {
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
-    ) -> usize {
-        wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms, on_hello,
-        )
+    ) -> Result<usize, ZResult> {
+        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let delivered = wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            claim.table(),
+            on_hello,
+        );
+        Ok(delivered)
     }
 
     #[cfg(all(not(feature = "engine-tokio"), feature = "scout"))]
@@ -221,10 +279,18 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
-            clock, group, port, what, zid, budget_ms,
-        )
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let first = wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
+            clock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            claim.table(),
+        );
+        Ok(first)
     }
 
     // The cooperative engine with `scout-mcu` alone: one datagram socket of the stack its links
@@ -241,8 +307,9 @@ mod window {
         _policy: &SessionPolicy,
         limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
-    ) -> usize {
-        crate::coop_host::run_scout(
+    ) -> Result<usize, ZResult> {
+        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        Ok(crate::coop_host::run_scout(
             clock,
             group,
             port,
@@ -250,8 +317,9 @@ mod window {
             zid,
             budget_ms,
             limits.pico_multicast_batch_bytes(),
+            claim.table(),
             on_hello,
-        )
+        ))
     }
 
     #[cfg(all(not(feature = "engine-tokio"), not(feature = "scout")))]
@@ -265,8 +333,9 @@ mod window {
         budget_ms: u64,
         _policy: &SessionPolicy,
         limits: &SessionLimits,
-    ) -> Option<ScoutedHello> {
-        crate::coop_host::scout_first(
+    ) -> Result<Option<ScoutedHello>, ZResult> {
+        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        Ok(crate::coop_host::scout_first(
             clock,
             group,
             port,
@@ -274,7 +343,8 @@ mod window {
             zid,
             budget_ms,
             limits.pico_multicast_batch_bytes(),
-        )
+            claim.table(),
+        ))
     }
 }
 
@@ -834,7 +904,7 @@ pub(crate) fn locators_by_scout(
         read.budget_ms,
         policy,
         limits,
-    )
+    )?
     .map(|hello| hello.locators)
     .filter(|locators| !locators.is_empty())
     .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -917,7 +987,7 @@ pub unsafe extern "C" fn z_scout(
         return crate::result::Z_ERR_INVALID;
     };
 
-    let hellos = run_scout(
+    let scouted = run_scout(
         &clock,
         group,
         port,
@@ -940,7 +1010,6 @@ pub unsafe extern "C" fn z_scout(
             }
         },
     );
-    let _ = hellos;
     drop(cfg);
 
     // The closure's `drop` runs exactly once, AFTER the last callback — the
@@ -949,11 +1018,15 @@ pub unsafe extern "C" fn z_scout(
     if let Some(drop_fn) = user_drop {
         drop_fn(user_ctx);
     }
-    crate::result::Z_OK
+    match scouted {
+        Ok(_) => crate::result::Z_OK,
+        Err(code) => code,
+    }
 }
 
 /// Drive one scouting window for `budget_ms` and hand each peer that answered
-/// to `on_hello`. Returns the number delivered.
+/// to `on_hello`. Returns the number delivered, or the code of a window that
+/// could not be run (the cooperative engine's table held by another window).
 ///
 /// DELEGATES to the window of the engine the build runs (`window::run`), whose rules are the
 /// session's. This function used to carry its own copy of that loop, and the copy is what let
@@ -980,7 +1053,7 @@ fn run_scout(
     policy: &SessionPolicy,
     limits: &SessionLimits,
     mut on_hello: impl FnMut(&mut HelloState),
-) -> usize {
+) -> Result<usize, ZResult> {
     window::run(
         clock,
         group,
@@ -1332,5 +1405,24 @@ mod tests {
             seen += 1;
         });
         assert_eq!(seen, 1);
+    }
+
+    /// The cooperative engine's table of Hellos is one, in the library's static memory: a second
+    /// window while one holds it is refused, and the table is given back, cleared by the next
+    /// window, when the claim is dropped. Turned red by a table claimed twice at once, or never
+    /// given back.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn the_static_table_is_held_by_one_window_at_a_time() {
+        let held = window::table::Claim::take().expect("the table is free");
+        assert!(
+            window::table::Claim::take().is_none(),
+            "a second window is refused"
+        );
+        drop(held);
+        assert!(
+            window::table::Claim::take().is_some(),
+            "the table is given back"
+        );
     }
 }
