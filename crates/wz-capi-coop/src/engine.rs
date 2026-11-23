@@ -1412,6 +1412,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// its chains are keyed by their peers, and staged in the session's buffers for them, each
     /// claimed by a chain while it is open, lent from the arena (`ArenaPlan::reassembly`).
     router: SharedReassembly<SessionReassembly>,
+    /// The time the session measures on: each link's actions and task are given it, so what one
+    /// link sets a deadline by and another reads it by (the Router's chains among them) are on one
+    /// epoch, whenever each link came up.
+    session_time: CoopTime<C>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -2204,7 +2208,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             cookie_signing_key: SigningKey::from_entropy(&mut self.entropy)
                 .map_err(|_| OpenError::EntropyUnavailable)?,
         };
-        let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&self.runtime));
+        let actions = McuActions::<C>::new_generic(sink, params, self.session_time.clone());
         // The link has its place in the session's admission before the handshake runs, which asks
         // it once the remote's zid is known: a second link to a node the session holds is refused
         // there, with nothing declared over it by either end, and not closed after it came up.
@@ -2311,7 +2315,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             &self.local,
             link.clone(),
             actions.clone(),
-            CoopTime::new(&self.runtime),
+            self.session_time.clone(),
             SessionDriveConfig {
                 timeouts: self.config.timeouts,
                 role,
@@ -3528,6 +3532,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // takes memory after its open (`open_links` seals them).
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
         let local = CoopLocalSet::new(&runtime);
+        let session_time = CoopTime::new(&runtime);
         // The dial role's link, each port, each group and the clock's word: what a session waits on
         // from its open. A face accepted or attached later grows the buffer once.
         let wait_room = 2usize
@@ -3598,6 +3603,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             lane: samples.clone(),
             router,
+            session_time,
             arena,
         };
         #[cfg(feature = "queryable")]
@@ -3866,11 +3872,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.clock_reads.get()
     }
 
-    /// A handle on the session's one reassembly Router: what a test of the chains the session's
-    /// step ends stages its chain in. Taken under the lock, uncounted as a take.
+    /// A handle on the session's one reassembly Router, and the time now on the epoch its chains
+    /// are staged on: what a test of the chains the session's step ends stages its chain in. Taken
+    /// under the lock, uncounted as a take and as a reading of the session's clock.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn chain_router(&self) -> SharedReassembly<SessionReassembly> {
-        self.core.lock().0.router.clone()
+    pub(crate) fn chain_router(&self) -> (SharedReassembly<SessionReassembly>, u64) {
+        let core = self.core.lock();
+        let now_ms = core.0.session_time.ms_at(core.0.clock.now_us());
+        (core.0.router.clone(), now_ms)
     }
 
     /// How many subscribers the session core's table holds, each one row: what a test of a
@@ -4856,8 +4865,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let now_us = core.now_us();
         // A link's handle on the one reassembly Router sweeps nothing, so the session ends the
         // chains past their deadline here, once a step and by its reading, whichever link's task
-        // ran.
-        core.router.with(|router| router.sweep(now_us / 1000));
+        // ran; on the epoch its links staged them on, which is not the clock's own.
+        let chain_ms = core.session_time.ms_at(now_us);
+        core.router.with(|router| router.sweep(chain_ms));
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
         // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]

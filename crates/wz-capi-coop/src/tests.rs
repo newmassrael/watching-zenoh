@@ -953,18 +953,18 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
 }
 
 /// The session's step ends a chain of its one reassembly Router once the chain is past its
-/// deadline, though no link's receive sweeps it; the CONTROL is the chain, still open when it is
-/// begun.
+/// deadline, though no link's receive sweeps it, and not before: a step at once leaves a chain
+/// staged now on the Router's epoch open, as one measured on another epoch would not be. The
+/// CONTROL is the chain, open when it is begun.
 #[test]
 fn the_sessions_step_ends_a_chain_past_its_deadline() {
-    use wz_runtime_coop::ClockSource;
     use wz_session_core::extfragment::FragmentMarkers;
     use wz_session_core::qos::Priority;
     use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome};
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let chains = engine.chain_router();
+    let (chains, now_ms) = engine.chain_router();
     let begun = chains.with(|reassembly| {
         reassembly.ingest(
             Fragment {
@@ -977,7 +977,7 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
                 markers: FragmentMarkers::NONE,
             },
             wz_session_core::sn::mask_from_res(0x02),
-            PosixClock.now_us() / 1000,
+            now_ms,
             |_| {},
         )
     });
@@ -986,6 +986,12 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
         chains.with(|reassembly| reassembly.active_chains()),
         Some(1),
         "CONTROL: the chain is open"
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        chains.with(|reassembly| reassembly.active_chains()),
+        Some(1),
+        "a step before the deadline leaves the chain open"
     );
     until(&engine, "the step to end the chain", || {
         chains.with(|reassembly| reassembly.active_chains()) == Some(0)
