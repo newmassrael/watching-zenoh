@@ -3034,8 +3034,10 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// The heap profile's: the hand-off is a boxed closure and the job it runs owns
     /// the encoded message. A session in a slot has no second thread to hand to, and
     /// sends a block-first message as a blocking one, which is what a session with
-    /// no hand-off installed does.
-    #[cfg(feature = "alloc")]
+    /// no hand-off installed does. So does a lend-only session (`tx-lend-only`): the
+    /// job's encoded copy of the message is a frame built on the heap, which that
+    /// profile never builds, and its runtimes have no second thread to hand to.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
 }
 
@@ -3051,8 +3053,8 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
 /// [`SessionLinkActions::run_block_first_job`].
 ///
 /// A build with no dispatch arm sends no network message, so nothing there
-/// builds or reads one.
-#[cfg(feature = "alloc")]
+/// builds or reads one, and a lend-only build (`tx-lend-only`) schedules none.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 #[cfg_attr(
     not(any(
         feature = "codec-push",
@@ -3103,7 +3105,7 @@ enum DispatchStage {
     Fresh,
     /// A block-first message's background push: already observed, already
     /// holding its slot, so it is pushed as it stands.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     Scheduled,
     /// A send that may not wait for room: every ask is made with a wait of zero, and a message
     /// that finds none is neither dropped nor the reason for a close, it is reported as
@@ -3598,7 +3600,7 @@ where
 /// R2952 — the runtime's hand-off: run a [`BlockFirstJob`] off the sending
 /// thread (tokio: `spawn_blocking`, upstream's own seam). `Send + Sync` because
 /// the session it lives in is shared across the runtime's threads.
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
@@ -4386,7 +4388,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link: Self::hold_link(link),
             core: Self::hold_core(core),
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
         }
     }
@@ -4411,7 +4413,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Self::init_link(core::ptr::addr_of_mut!((*at).link), driver, &seed);
             Self::init_core(core::ptr::addr_of_mut!((*at).core), params, clock, seed);
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             core::ptr::addr_of_mut!((*at).block_first_handoff).write(R::new_mutex(None));
         }
     }
@@ -4732,7 +4734,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::wrap_actions(Self {
             core,
             link,
-            #[cfg(feature = "alloc")]
+            #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
         })
     }
@@ -5804,6 +5806,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5878,6 +5881,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Called by the runtime's hand-off, off the thread that sent it.
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5927,6 +5931,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// is ever scheduled and there is nothing to run.
     #[cfg(all(
         feature = "alloc",
+        not(feature = "tx-lend-only"),
         not(any(
             feature = "codec-push",
             feature = "codec-request",
@@ -5948,7 +5953,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// function that runs [`Self::run_block_first_job`] off the calling
     /// thread. Installed by a runtime that has one (tokio, from its
     /// `wrap_actions`); a session without one sends block-first as blocking.
-    #[cfg(feature = "alloc")]
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn install_block_first_handoff(&self, handoff: BlockFirstHandoff) {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
     }
@@ -10969,8 +10974,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Every sender names its [`DispatchStage`]: a send of its own is `Fresh`
     /// (only a `Probe` can end in [`Dispatched::NoRoom`]), and a block-first
     /// message's background push re-enters here as `Scheduled`
-    /// ([`Self::run_block_first_job`]), which is neither observed again nor
-    /// scheduled again.
+    /// (`Self::run_block_first_job`), which is neither observed again nor
+    /// scheduled again; a lend-only build schedules none.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-request",
@@ -11032,8 +11037,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // R2952 — also the band a scheduled block-first push dispatches at.
         let message_priority = priority;
         // Read only by the stats counters and by the block-first schedule (which owns a
-        // copy of the message, so needs the heap): neither exists in this build.
-        #[cfg(not(any(feature = "alloc", feature = "transport-stats")))]
+        // copy of the message, so needs the heap and is not the lend-only profile's):
+        // neither exists in this build.
+        #[cfg(not(any(
+            all(feature = "alloc", not(feature = "tx-lend-only")),
+            feature = "transport-stats"
+        )))]
         let _ = (stage, message_priority);
         // A send under room its sender already holds: only a Push is sent that way, and only a
         // build with a heap has a permit to hold.
@@ -11193,8 +11202,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // after link selection, and its lowlatency transport, returned above,
         // has no block-first at all): see [`Self::schedule_block_first`].
         // Scheduled or dropped, it is a sent message to the caller, as
-        // upstream's `schedule` reports it.
-        #[cfg(feature = "alloc")]
+        // upstream's `schedule` reports it. A lend-only session sends it as a blocking one.
+        #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
         if stage == DispatchStage::Fresh
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
