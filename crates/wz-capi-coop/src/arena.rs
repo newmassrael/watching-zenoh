@@ -734,45 +734,31 @@ impl ArenaPlan {
             plan.reassembly_chains,
             plan.reassembly_bytes,
         );
+        // The rows of the session's own declarations, read once: the registries' rows below and
+        // the declaration tables after them count the same limits.
+        plan.entities = plan.kept(entity_rows(limits));
         #[cfg(feature = "queryable")]
-        {
-            let queryables = plan.lent(
-                "MAX_QUERYABLES",
-                limits.max_queryables(),
-                caps::MAX_QUERYABLES,
-            );
-            plan.put(
-                "queryables",
-                "MAX_QUERYABLES",
-                queryables,
-                wz_session_core::query::QueryableRegistry::<
-                    wz_session_core::query_sink::BoxedQuerySink,
-                    Lent,
-                >::ROW_BYTES,
-            );
-        }
+        plan.put(
+            "queryables",
+            "MAX_QUERYABLES",
+            plan.entities.queryables,
+            wz_session_core::query::QueryableRegistry::<
+                wz_session_core::query_sink::BoxedQuerySink,
+                Lent,
+            >::ROW_BYTES,
+        );
         #[cfg(feature = "liveliness")]
         {
-            let tokens = plan.lent(
-                "MAX_LOCAL_TOKENS",
-                limits.max_local_tokens(),
-                caps::MAX_LOCAL_TOKENS,
-            );
             plan.put(
                 "liveliness tokens",
                 "MAX_LOCAL_TOKENS",
-                tokens,
+                plan.entities.tokens,
                 wz_session_core::declare::local_token::LocalTokenRegistry::<Lent>::ROW_BYTES,
-            );
-            let subscribers = plan.lent(
-                "MAX_LIVELINESS_SUBSCRIPTIONS",
-                limits.max_liveliness_subscriptions(),
-                caps::MAX_LIVELINESS_SUBSCRIPTIONS,
             );
             plan.put(
                 "liveliness subscribers",
                 "MAX_LIVELINESS_SUBSCRIPTIONS",
-                subscribers,
+                plan.entities.liveliness_subscribers,
                 wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberTable::<
                     wz_session_core::declare::liveliness_sample::BoxedLivelinessSampleSink,
                     Lent,
@@ -905,7 +891,6 @@ impl ArenaPlan {
         } else {
             0
         };
-        plan.entities = plan.kept(entity_rows(limits));
         plan.put_entities();
         plan.settled()
     }
