@@ -419,6 +419,11 @@ pub(crate) struct RawAddr {
 
 impl RawAddr {
     /// `at` in the kernel's form, for a call that reads an address (`bind`, `connect`, `sendto`).
+    ///
+    /// Out of line, as [`Self::to_socket_addr`] and [`name_of`] are: each opener and each send
+    /// would otherwise carry its own copy of both families' conversion, where the one system call
+    /// beside it costs far more than the call.
+    #[inline(never)]
     pub(crate) fn of(at: SocketAddr) -> Self {
         // SAFETY: an all-zero `sockaddr_storage` is a valid value of it, an unspecified family.
         let mut storage: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
@@ -501,6 +506,7 @@ impl RawAddr {
     /// The address the kernel wrote, or `None` for a family other than the two (no socket here
     /// has one). The flow label is left out: it is a field of a packet and not of an end, and a
     /// link compares its peer by address, port and scope.
+    #[inline(never)]
     pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
         match c_int::from(self.storage.ss_family) {
             libc::AF_INET if self.len as usize >= size_of::<libc::sockaddr_in>() => {
@@ -530,6 +536,7 @@ impl RawAddr {
 
 /// The address a `getsockname` or `getpeername` of `fd` reports: the `errno` when the call fails,
 /// `EAFNOSUPPORT` when it names a family other than the two.
+#[inline(never)]
 pub(crate) fn name_of(
     fd: c_int,
     call: unsafe extern "C" fn(c_int, *mut libc::sockaddr, *mut libc::socklen_t) -> c_int,
