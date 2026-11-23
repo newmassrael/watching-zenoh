@@ -78,3 +78,55 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
         .expect("a link's cell takes a small task");
     assert_eq!(local.block_on_local(small).expect("ran"), 3);
 }
+
+/// The parts of the cell a link's session task takes, by size, for the cell to be made smaller
+/// where it is largest: the pump (the session's machine, its handle, its timers, its receive with
+/// the reassembly Router and the record buffer) built in the task's own memory, what the task holds
+/// to build it, and what it hands each event to. Read with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints the parts of a link task's cell"]
+fn print_the_parts_of_a_link_tasks_cell() {
+    use alloc::rc::Rc;
+    use core::mem::size_of;
+    use wz_runtime_coop::reassembly_rx::{LentReassembly, LentReassemblyMaker};
+    use wz_runtime_coop::session_drive::{SessionDatagramLink, SessionDriveConfig, SessionPump};
+    use wz_runtime_coop::session_runtime::SessionHandle;
+    use wz_runtime_coop::{CoopRuntime, CoopTime};
+    use wz_session_core::drive::SessionEngine;
+    use wz_session_core::link::BoxedLinkDriver;
+    use wz_session_core::network_message::RecordBuf;
+    use wz_session_core::transport_timers::TransportTimers;
+    use wz_session_core::unicast_rx::UnicastRx;
+
+    use crate::engine::FaceDispatch;
+
+    type C = PosixClock;
+    type Link = Rc<dyn SessionDatagramLink>;
+    let cell = link_task_bytes::<C>();
+    let pump = size_of::<SessionPump<C, Link, dyn BoxedLinkDriver, LentReassembly>>();
+    let parts: [(&str, usize); 12] = [
+        ("pump", pump),
+        (
+            "  engine (the session machine)",
+            size_of::<SessionEngine<CoopRuntime<C>, CoopTime<C>>>(),
+        ),
+        ("  rx (receive)", size_of::<UnicastRx<LentReassembly>>()),
+        ("    router (reassembly)", size_of::<LentReassembly>()),
+        ("    record buffer", size_of::<RecordBuf>()),
+        ("  timers", size_of::<TransportTimers>()),
+        ("  actions handle", size_of::<SessionHandle<C>>()),
+        ("  runtime", size_of::<CoopRuntime<C>>()),
+        ("  clock", size_of::<CoopTime<C>>()),
+        ("  link", size_of::<Link>()),
+        (
+            "parts to build it: maker + config",
+            size_of::<LentReassemblyMaker>() + size_of::<SessionDriveConfig>(),
+        ),
+        ("event sink (FaceDispatch)", size_of::<FaceDispatch<C>>()),
+    ];
+    std::println!("link task cell: {cell} B");
+    for (name, bytes) in parts {
+        std::println!("{name:<40} {bytes:>7} B");
+    }
+    assert!(pump <= cell, "the pump is built in the cell");
+}
