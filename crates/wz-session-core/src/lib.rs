@@ -1185,8 +1185,6 @@ pub mod wz_root;
 /// consumed across the crate boundary by the AP-only pubkey auth method (the
 /// VLE u64 helpers stay `pub(crate)`); the rest is crate-internal.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-128 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod vle;
 
 /// R311y68 — `ext-pubsub-serde-codec` (§5.25): the Zenoh Serialization
