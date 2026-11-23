@@ -490,8 +490,6 @@ pub mod selector_params;
 // The grammar of the `_time` selector parameter, its resolution against "now" and its
 // membership test: the one reading wz-zenoh-util's upstream-shaped `TimeRange` and
 // wz-ext-pubsub's cache filter both go through. No clock here; the caller names its instant type.
-// Totality debt TD-006 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod time_range;
 
 /// R311y833 — the requester-side reply-keyexpr contract
