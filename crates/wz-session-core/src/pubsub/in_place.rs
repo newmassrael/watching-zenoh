@@ -665,7 +665,7 @@ mod tests {
 
         // One that carries none is delivered lent, and nothing falls back.
         let built =
-            crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints()))
+            crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta(&hints))
                 .expect("build");
         let wire = wire_of(&built);
         let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");

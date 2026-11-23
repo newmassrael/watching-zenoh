@@ -1190,6 +1190,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     );
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
         Reliability::Reliable,
     );
@@ -1200,6 +1201,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     );
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id + 1))),
         Reliability::Reliable,
     );
@@ -1225,6 +1227,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     peer.set_own_mapping_space(installed);
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
         Reliability::Reliable,
     );

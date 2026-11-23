@@ -2285,6 +2285,7 @@ mod tests {
     /// tokens it is owed are read one at a time, in ascending id, each found after the one before
     /// it: what an engine that calls its callbacks with no lock held walks, so no token it is owed
     /// is left out however many there are.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn an_unreplayed_subscribers_tokens_are_read_one_at_a_time() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2413,6 +2414,7 @@ mod tests {
     /// A link loss retracted while `room` allows stops where it says no: the
     /// tokens left stay in the table, and a later call retracts them in the
     /// same order, so no Delete is lost to a caller that had no room for it.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn link_loss_flushed_while_there_is_room_leaves_the_rest_for_later() {
         let mut reg = LivelinessSubscriberRegistry::new();

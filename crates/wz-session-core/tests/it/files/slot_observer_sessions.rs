@@ -87,7 +87,7 @@ fn dispatch(
     messages: Vec<NetworkMessage>,
 ) {
     let outcome = frame(messages);
-    observer.dispatch_event(peers, requesters, IterationEvent::Poll(&outcome));
+    observer.dispatch_event(&mut (), peers, requesters, IterationEvent::Poll(&outcome));
 }
 
 #[test]
