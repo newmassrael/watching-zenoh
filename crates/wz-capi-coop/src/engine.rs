@@ -1372,8 +1372,8 @@ type InterestRows = Rows<
 >;
 
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
+    /// The session's tasks, and the runtime their cells and timers lie in, which the set holds.
     local: CoopLocalSet<C>,
-    runtime: CoopRuntime<C>,
     clock: C,
     /// What the application holds and what the peer declared. It is the session's, so it
     /// outlives each link: a new link is dispatched to the same registry.
@@ -3614,7 +3614,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let limits = resolve_limits(&config);
         let core = Core {
             local,
-            runtime,
             clock,
             registry: Rc::new(RefCell::new(registry)),
             #[cfg(feature = "listen")]
@@ -3772,7 +3771,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // What the open spawned has its cells: from here a spawn finds a free cell or is refused.
         #[cfg(feature = "group")]
-        core.runtime.seal();
+        core.local.runtime().seal();
         Ok(())
     }
 
