@@ -236,7 +236,7 @@ pub(crate) fn dictionary_faults<'a>(
     keys.sort_unstable();
     for run in keys.chunk_by(|a, b| a == b) {
         if let [key, _, ..] = run {
-            report(Fault::DuplicateKey { key: *key });
+            report(Fault::DuplicateKey { key });
         }
     }
 }
@@ -849,7 +849,7 @@ fn two_fields<'a>(
                     KeyIdsReason::FieldStatedTwice {
                         member,
                         at,
-                        field: *name,
+                        field: name,
                     },
                 );
                 whole = false;
