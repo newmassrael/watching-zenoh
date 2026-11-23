@@ -371,8 +371,9 @@ wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support", "tx-pool"
 # stage buffer can be witnessed as ONE slot of the transmit pool lent through
 # this crate's driver (`session_drive`'s window test). No MCU image turns the
 # window on today; the feature only compiles it, and a session that never calls
-# `batch_start` sends exactly as before, so no other test here moves.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive", "transport-batching"] }
+# `batch_start` sends exactly as before, so no other test here moves. The
+# tests read the session machine's action counters too (`action-trace`).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive", "transport-batching", "action-trace"] }
 # Decision D4 — the InitAck a far end answers a dial with (`session_dial_for_a_node`),
 # from the one source of synthetic session frames.
 wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
