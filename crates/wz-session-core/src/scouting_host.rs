@@ -50,7 +50,6 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::fmt;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
@@ -250,22 +249,6 @@ pub struct HelloRow {
     text: [u8; HELLO_LOCATOR_TEXT],
 }
 
-/// A writer into a locator's room of a row, which refuses what does not fit.
-struct LocatorRoom<'r> {
-    room: &'r mut [u8],
-    len: usize,
-}
-
-impl fmt::Write for LocatorRoom<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self.len.checked_add(s.len()).ok_or(fmt::Error)?;
-        let place = self.room.get_mut(self.len..end).ok_or(fmt::Error)?;
-        place.copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
 impl PartialEq for HelloRow {
     /// The same Hello: its version, role, zid and the locators it kept and skipped. The bytes of
     /// the text past the kept locators are no part of it.
@@ -317,7 +300,7 @@ impl HelloRow {
         self.reset(hello.version, WhatAmI::from_wire(hello.cbyte), zid);
         if let Some(locators) = hello.locators.as_ref() {
             for entry in locators.inner().iter() {
-                self.keep(&entry.locator);
+                self.keep(entry.locator.inner());
             }
         }
         true
@@ -335,21 +318,15 @@ impl HelloRow {
 
     /// `locator` kept after the others, or skipped and counted when the row has no row for it
     /// or it is longer than `MAX_LOCATOR_LEN` bytes.
-    fn keep(&mut self, locator: impl fmt::Display) {
-        if self.kept == caps::SCOUT_HELLO_LOCATORS {
+    fn keep(&mut self, locator: &str) {
+        if self.kept == caps::SCOUT_HELLO_LOCATORS || locator.len() > caps::MAX_LOCATOR_LEN {
             self.skipped += 1;
             return;
         }
         let start = self.start_of(self.kept);
-        let mut room = LocatorRoom {
-            room: &mut self.text[start..start + caps::MAX_LOCATOR_LEN],
-            len: 0,
-        };
-        if fmt::write(&mut room, format_args!("{locator}")).is_err() {
-            self.skipped += 1;
-            return;
-        }
-        self.ends[self.kept] = start + room.len;
+        let end = start + locator.len();
+        self.text[start..end].copy_from_slice(locator.as_bytes());
+        self.ends[self.kept] = end;
         self.kept += 1;
     }
 
