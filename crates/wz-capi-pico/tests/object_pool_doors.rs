@@ -105,7 +105,7 @@ unsafe fn declared_keyexpr(
 
 /// A querier declared on `key`, and the code its declaration answered.
 #[cfg(feature = "query")]
-unsafe fn querier(
+unsafe fn declared_querier(
     session: &z_owned_session_t,
     key: &CStr,
 ) -> (wz_capi_pico::z_owned_querier_t, i8) {
@@ -329,10 +329,10 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         // ARM 8c: the one querier's place likewise.
         #[cfg(feature = "query")]
         {
-            let (mut querier, code) = querier(&session, c"wz/pool/ask/a");
+            let (mut querier, code) = declared_querier(&session, c"wz/pool/ask/a");
             assert_eq!(code, Z_OK);
             assert_eq!(in_use(), 5);
-            let (refused_querier, code) = querier(&session, c"wz/pool/ask/b");
+            let (refused_querier, code) = declared_querier(&session, c"wz/pool/ask/b");
             assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
             assert!(!wz_capi_pico::z_internal_querier_check(&refused_querier));
             assert_eq!(
