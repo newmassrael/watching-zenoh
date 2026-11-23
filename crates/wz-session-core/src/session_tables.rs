@@ -1794,29 +1794,29 @@ impl<Key: KeyBacking, Cb: crate::sink::SampleSink, P: Storage> SubscriberRows
 {
     type Sink = Cb;
 
-    fn end(&self) -> usize {
-        self.slot_end()
-    }
-
-    fn row(&self, position: usize) -> Option<RowRef<'_>> {
-        let row = self.live_at(position)?;
-        Some(RowRef {
-            pattern: text(&row.key.key),
-            facts: row.facts,
-            origin: row.origin,
-        })
-    }
-
-    fn row_mut(&mut self, position: usize) -> Option<(RowRef<'_>, &mut Cb)> {
-        let row = self.live_at_mut(position)?;
-        Some((
-            RowRef {
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut Cb)>(&mut self, mut f: F) {
+        for (place, row) in self.live_places_mut() {
+            let found = RowRef {
                 pattern: text(&row.key.key),
                 facts: row.facts,
                 origin: row.origin,
-            },
-            &mut row.callback,
-        ))
+            };
+            f(place, found, &mut row.callback);
+        }
+    }
+
+    fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, mut f: F) -> bool {
+        self.iter().any(|(_, row)| {
+            f(RowRef {
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+            })
+        })
+    }
+
+    fn sink_at(&mut self, position: usize) -> Option<&mut Cb> {
+        self.live_at_mut(position).map(|row| &mut row.callback)
     }
 }
 

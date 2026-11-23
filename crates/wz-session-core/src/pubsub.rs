@@ -2378,14 +2378,27 @@ pub(crate) trait SubscriberRows {
     /// The sink a matched row is handed a sample through.
     type Sink: SampleSink;
 
-    /// One past the last position a row may be at. A position under it may hold no row.
-    fn end(&self) -> usize;
+    /// Hand `f` each row with its position and its sink, in the table's order: one pass over
+    /// the rows, with no lookup of a position.
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut Self::Sink)>(&mut self, f: F);
 
-    /// The row at `position`, `None` where none is.
-    fn row(&self, position: usize) -> Option<RowRef<'_>>;
+    /// Whether `f` holds for any row, asked in the table's order until it does.
+    fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, f: F) -> bool;
 
-    /// The row at `position` and its sink, `None` where none is.
-    fn row_mut(&mut self, position: usize) -> Option<(RowRef<'_>, &mut Self::Sink)>;
+    /// The sink of the row at `position`, `None` where no row is: what a remembered match,
+    /// which keeps positions, is delivered through.
+    fn sink_at(&mut self, position: usize) -> Option<&mut Self::Sink>;
+}
+
+impl<C: SampleSink, P: Storage> Subscriber<C, P> {
+    /// The row as the matcher reads it.
+    fn row_ref(&self) -> RowRef<'_> {
+        RowRef {
+            pattern: &*self.pattern,
+            facts: self.pattern_facts,
+            origin: self.allowed_origin,
+        }
+    }
 }
 
 impl<C: SampleSink, P: Storage> SubscriberRows
@@ -2393,29 +2406,24 @@ impl<C: SampleSink, P: Storage> SubscriberRows
 {
     type Sink = C;
 
-    fn end(&self) -> usize {
-        self.len()
-    }
-
-    fn row(&self, position: usize) -> Option<RowRef<'_>> {
-        let subscriber = self.get(position)?;
-        Some(RowRef {
-            pattern: &*subscriber.pattern,
-            facts: subscriber.pattern_facts,
-            origin: subscriber.allowed_origin,
-        })
-    }
-
-    fn row_mut(&mut self, position: usize) -> Option<(RowRef<'_>, &mut C)> {
-        let subscriber = self.get_mut(position)?;
-        Some((
-            RowRef {
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut C)>(&mut self, mut f: F) {
+        for (position, subscriber) in self.iter_mut().enumerate() {
+            let row = RowRef {
                 pattern: &*subscriber.pattern,
                 facts: subscriber.pattern_facts,
                 origin: subscriber.allowed_origin,
-            },
-            &mut subscriber.sink,
-        ))
+            };
+            f(position, row, &mut subscriber.sink);
+        }
+    }
+
+    fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, mut f: F) -> bool {
+        self.iter().any(|subscriber| f(subscriber.row_ref()))
+    }
+
+    fn sink_at(&mut self, position: usize) -> Option<&mut C> {
+        self.get_mut(position)
+            .map(|subscriber| &mut subscriber.sink)
     }
 }
 
@@ -2425,21 +2433,15 @@ impl<C: SampleSink, P: Storage> SubscriberRows
 /// this once per message, is answered without taking the key apart.
 pub(crate) fn any_local_match<R: SubscriberRows>(rows: &R, key: &str) -> bool {
     let mut key_facts = None;
-    for position in 0..rows.end() {
-        let Some(row) = rows.row(position) else {
-            continue;
-        };
+    rows.any_row(|row| {
         if !row.origin.allows_local() {
-            continue;
+            return false;
         }
         let facts = *key_facts.get_or_insert_with(|| KeyFacts::of(key));
         // On the fixed backing a keyexpr or a pattern deeper than the chunk bound matches
         // nothing; the facts say so and the matcher applies the bound.
-        if keyexpr_intersects_text_with(row.pattern, row.facts, key, facts) {
-            return true;
-        }
-    }
-    false
+        keyexpr_intersects_text_with(row.pattern, row.facts, key, facts)
+    })
 }
 
 /// Deliver a key to the subscribers it matches, over a table's rows alone so that a caller
@@ -2475,7 +2477,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
                 if let Some(slot) = &memo.slots[at] {
                     if slot.epoch == epoch && slot.remote == is_remote {
                         for position in slot.hits.iter() {
-                            if let Some((_, sink)) = rows.row_mut(usize::from(*position)) {
+                            if let Some(sink) = rows.sink_at(usize::from(*position)) {
                                 deliver(sink);
                             }
                         }
@@ -2491,7 +2493,7 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
             for position in slot.hits.iter() {
-                if let Some((_, sink)) = rows.row_mut(usize::from(*position)) {
+                if let Some(sink) = rows.sink_at(usize::from(*position)) {
                     deliver(sink);
                 }
             }
@@ -2585,22 +2587,16 @@ fn scan_subscribers<R: SubscriberRows>(
     {
         return None;
     }
-    for position in 0..rows.end() {
-        let Some((row, sink)) = rows.row_mut(position) else {
-            continue;
-        };
+    rows.each_row_mut(|position, row, sink| {
         let pass = if is_remote {
             row.origin.allows_remote()
         } else {
             row.origin.allows_local()
         };
-        if !pass {
-            continue;
-        }
         // R2662 — the subscriber's pattern is the CANDIDATE; the matcher
         // applies the fixed backing's depth bound to it, the same defensive
         // over-depth skip every scan inherits from the one seam.
-        if keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts) {
+        if pass && keyexpr_intersects_text_with(row.pattern, row.facts, keyexpr, facts) {
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU the sink is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
@@ -2608,7 +2604,7 @@ fn scan_subscribers<R: SubscriberRows>(
             hit(position);
             fired = fired.saturating_add(1);
         }
-    }
+    });
     Some(fired)
 }
 

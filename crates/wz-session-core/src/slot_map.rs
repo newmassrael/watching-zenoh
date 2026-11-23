@@ -519,27 +519,26 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         None
     }
 
-    /// One past the last slot there is: every row is at a place under it.
-    pub(crate) fn slot_end(&self) -> usize {
-        self.meta.len()
-    }
-
-    /// The live row at `place`, whatever its generation: what a reader that keeps places rather
-    /// than handles reads, one that is valid only while the table does not change (a match cache
-    /// kept against a count that moves with every insert and removal).
-    pub(crate) fn live_at(&self, place: usize) -> Option<&T> {
-        if self.meta.get(place)?.state != State::Live {
-            return None;
-        }
-        self.rows.get(place)?.as_ref()
-    }
-
-    /// [`Self::live_at`], to change.
+    /// The live row at `place`, whatever its generation, to change: what a reader that keeps
+    /// places rather than handles reads, one that is valid only while the table does not change
+    /// (a match cache kept against a count that moves with every insert and removal).
     pub(crate) fn live_at_mut(&mut self, place: usize) -> Option<&mut T> {
         if self.meta.get(place)?.state != State::Live {
             return None;
         }
         self.rows.get_mut(place)?.as_mut()
+    }
+
+    /// Every live row with its place, in slot order, to change: [`Self::live_at_mut`]'s places.
+    pub(crate) fn live_places_mut(&mut self) -> impl Iterator<Item = (usize, &mut T)> + '_ {
+        self.meta
+            .iter()
+            .zip(self.rows.iter_mut())
+            .enumerate()
+            .filter_map(|(at, (slot, row))| match (slot.state, row) {
+                (State::Live, Some(row)) => Some((at, row)),
+                _ => None,
+            })
     }
 
     /// Every live row, in slot order.
