@@ -971,19 +971,20 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         };
         // The canon CHECK, not the canon transform: equality with the canonical
         // form is exactly `_z_keyexpr_is_canon` returning OK.
-        if !is_pico_canon(&text) {
+        if !is_pico_canon(text) {
             return Z_ERR_INVALID;
         }
-        if !fits(&text) {
+        if !fits(text) {
             return Z_EINVAL;
         }
-        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(&text));
+        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
         Z_OK
     })
 }
 
 /// Build an owned keyexpr from a NUL-terminated string, CANONIZING it first
-/// (pico `z_keyexpr_from_str_autocanonize`).
+/// (pico `z_keyexpr_from_str_autocanonize`): the substring form over the string's
+/// length, as pico's is.
 ///
 /// # Safety
 /// As [`z_keyexpr_from_str`].
@@ -992,24 +993,12 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    guarded(|| {
-        let len = if name.is_null() {
-            0
-        } else {
-            CStr::from_ptr(name).to_bytes().len()
-        };
-        let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
-            return Z_ERR_NULL;
-        };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
-    })
+    let mut len = if name.is_null() {
+        0
+    } else {
+        CStr::from_ptr(name).to_bytes().len()
+    };
+    z_keyexpr_from_substr_autocanonize(keyexpr, name, &mut len)
 }
 
 /// Build an owned keyexpr from a substring, canonizing it and writing the
@@ -1036,7 +1025,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
             return Z_ERR_NULL;
         };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 *len = canon.as_str().len();
@@ -1048,16 +1037,21 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
     })
 }
 
-/// Null `keyexpr` and read `name[..len]` as UTF-8, or `None` on any bad input.
+/// Null `keyexpr` and read `name[..len]` as UTF-8 where it lies, or `None` on any bad
+/// input. The owned key is made from it once, where it is stored, so nothing is copied to read it.
 ///
-/// Shared by the four owned constructors so the "null the destination FIRST"
+/// Shared by the owned constructors so the "null the destination FIRST"
 /// discipline cannot drift between them: a constructor that failed without
 /// nulling would leave the caller's stack value looking live.
-unsafe fn owned_keyexpr_input(
+///
+/// # Safety
+/// `keyexpr` must be null or valid and writable; `name` must be null or point at `len`
+/// readable bytes, which outlive the answer.
+unsafe fn owned_keyexpr_input<'a>(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
     len: usize,
-) -> Option<String> {
+) -> Option<&'a str> {
     if keyexpr.is_null() {
         return None;
     }
@@ -1066,7 +1060,7 @@ unsafe fn owned_keyexpr_input(
         return None;
     }
     let bytes = core::slice::from_raw_parts(name as *const u8, len);
-    core::str::from_utf8(bytes).ok().map(str::to_owned)
+    core::str::from_utf8(bytes).ok()
 }
 
 /// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
@@ -1166,16 +1160,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        let joined = [head, tail].concat();
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
-            // Canonizing only shortens a key, so one still past the bound is past it.
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
+        store_joined(key, left, &[head, tail])
     })
 }
 
@@ -1189,6 +1174,43 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
     match declared_of(left) {
         Some(declared) => declared.extended(literal),
         None => DeclaredKeyexpr::literal_only(literal),
+    }
+}
+
+/// The body `z_keyexpr_concat` and `z_keyexpr_join` share, out of line so neither export holds a
+/// copy of it: `parts` written one after the other into a buffer of the longest key a row of the
+/// session's tables holds, canonized, and stored in `key` keeping `left`'s declaration
+/// ([`extended_from`]). A text longer than the buffer is refused with `Z_EINVAL` before it is
+/// canonized, as one longer after canonizing is: the buffer is the bound every key of this build
+/// is held to, and the join takes no allocation of its own.
+///
+/// # Safety
+/// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
+#[inline(never)]
+unsafe fn store_joined(
+    key: *mut z_owned_keyexpr_t,
+    left: *const z_loaned_keyexpr_t,
+    parts: &[&str],
+) -> ZResult {
+    let mut buf = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
+    let mut used = 0usize;
+    for part in parts {
+        let Some(room) = buf.get_mut(used..used + part.len()) else {
+            return Z_EINVAL;
+        };
+        room.copy_from_slice(part.as_bytes());
+        used += part.len();
+    }
+    // SAFETY: `buf[..used]` is whole `str` values written one after the other, which is UTF-8.
+    let joined = core::str::from_utf8_unchecked(&buf[..used]);
+    match wz_session_core::keyexpr_canon::canonize_keyexpr(joined) {
+        // Canonizing only shortens a key, so one still past the bound is past it.
+        Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
+        Ok(canon) => {
+            store_owned_keyexpr(key, extended_from(left, canon.as_str()));
+            Z_OK
+        }
+        Err(_) => Z_ERR_INVALID,
     }
 }
 
@@ -1211,15 +1233,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        let joined = [l, "/", r].concat();
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
-            Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
-            Ok(canon) => {
-                store_owned_keyexpr(key, extended_from(left, canon.as_str()));
-                Z_OK
-            }
-            Err(_) => Z_ERR_INVALID,
-        }
+        store_joined(key, left, &[l, "/", r])
     })
 }
 
@@ -1675,6 +1689,84 @@ mod bound_tests {
             for key in [&mut left, &mut right, &mut wider, &mut full] {
                 z_keyexpr_drop(z_keyexpr_move(key));
             }
+        }
+    }
+
+    /// A concatenation is written into a buffer of the bound before it is canonized: a text past
+    /// the bound is refused even where canonizing would have shortened it under the bound,
+    /// leaving the destination null, and one under it is canonized and kept.
+    #[test]
+    fn a_concatenation_past_the_bound_is_refused_before_it_is_canonized() {
+        unsafe {
+            let (rc, mut left) = owned(&key_of(MAX_KEYEXPR_BYTES - 10));
+            assert_eq!(rc, Z_OK);
+            let past = "/$*$*$*$*$*$*";
+            let mut concat = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&left),
+                    past.as_ptr() as *const c_char,
+                    past.len(),
+                ),
+                Z_EINVAL
+            );
+            assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
+            let under = "/$*";
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&left),
+                    under.as_ptr() as *const c_char,
+                    under.len(),
+                ),
+                Z_OK
+            );
+            let made = keyexpr_str(z_keyexpr_loan(&concat)).expect("a key");
+            assert_eq!(made.len(), MAX_KEYEXPR_BYTES - 10 + 2);
+            assert!(made.ends_with("/*"), "the lone `$*` chunk is canonized");
+            z_keyexpr_drop(z_keyexpr_move(&mut concat));
+            z_keyexpr_drop(z_keyexpr_move(&mut left));
+        }
+    }
+
+    /// The string form of the canonizing constructor is the substring form over the string's
+    /// length: both canonize alike, the substring form writes the canonical length back, and a
+    /// null string is refused with the destination left null.
+    #[test]
+    fn both_canonizing_constructors_canonize_alike() {
+        unsafe {
+            let mut by_str = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_str_autocanonize(&mut by_str, c"demo/$*/x".as_ptr()),
+                Z_OK
+            );
+            let text = "demo/$*/x";
+            let mut len = text.len();
+            let mut by_substr = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(
+                    &mut by_substr,
+                    text.as_ptr() as *const c_char,
+                    &mut len,
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                len,
+                "demo/*/x".len(),
+                "the canonical length is written back"
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&by_str)), Some("demo/*/x"));
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&by_substr)), Some("demo/*/x"));
+            let mut none = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_from_str_autocanonize(&mut none, core::ptr::null()),
+                Z_ERR_NULL
+            );
+            assert!(!z_internal_keyexpr_check(&none));
+            z_keyexpr_drop(z_keyexpr_move(&mut by_str));
+            z_keyexpr_drop(z_keyexpr_move(&mut by_substr));
         }
     }
 }
