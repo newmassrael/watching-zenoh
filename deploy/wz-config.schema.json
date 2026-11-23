@@ -600,7 +600,7 @@
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",
-              "x-wz-binding-fixed": "build",
+              "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
             "MAX_LIVELINESS_SUBSCRIPTIONS": {
