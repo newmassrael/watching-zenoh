@@ -1285,8 +1285,8 @@ mod tests {
     };
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
-        multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxDatagram,
-        MulticastTxEncoded, MulticastTxFraming, MulticastTxItem,
+        multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxEncoded,
+        MulticastTxFraming, MulticastTxItem,
     };
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::qos::Priority;

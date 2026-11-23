@@ -3940,7 +3940,8 @@ mod group_publications_written_from_parts {
         let mut metas = alloc::vec![
             PushMetadata::default(),
             PushMetadata {
-                attachment: Some(alloc::vec![1, 2, 3]),
+                // Owned or borrowed, as the build's metadata holds an attachment.
+                attachment: Some((&[1u8, 2, 3][..]).into()),
                 ..PushMetadata::default()
             },
         ];
