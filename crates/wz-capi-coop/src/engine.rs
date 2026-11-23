@@ -1032,6 +1032,17 @@ impl<C: ClockSource + 'static> OwnMappingSpace for LinkOwnSpace<C> {
     fn resolve_own_mapping(&self, id: ExprId) -> Option<String> {
         OwnMappingSpace::resolve_own_mapping(&*self.0, id)
     }
+
+    // The literal goes from the link's table straight into the resolver's buffer: the provided
+    // form would make a `String` of it first, an allocation for every message that names an id
+    // of this session's.
+    fn append_own_mapping(
+        &self,
+        id: ExprId,
+        out: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<Result<(), wz_session_core::bounded::CapacityFull<()>>> {
+        OwnMappingSpace::append_own_mapping(&*self.0, id, out)
+    }
 }
 
 // SAFETY: as `Confined`. A `LinkOwnSpace` is stored only in the tables of a face, which `Core`
