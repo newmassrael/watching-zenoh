@@ -37,24 +37,19 @@ const PROMPT: Duration = Duration::from_millis(1_000);
 /// What the host's links pump.
 type Pump = <PosixLinks as SessionLinks>::Pump;
 
-/// A dial of [`SlowDials`]: the host's own, or one whose connection is never made nor refused.
-enum SlowDial {
-    Host(<PosixLinks as SessionLinks>::Dial),
-    Unanswered,
-}
+/// A dial of [`SlowDials`]: the host's own, or, with none, one whose connection is never made nor
+/// refused.
+struct SlowDial(Option<<PosixLinks as SessionLinks>::Dial>);
 
 impl PendingDial<Pump> for SlowDial {
     fn poll(&mut self) -> Option<Result<OpenedLink<Pump>, LinkOpenError>> {
-        match self {
-            SlowDial::Host(dial) => dial.poll(),
-            SlowDial::Unanswered => None,
-        }
+        self.0.as_mut()?.poll()
     }
 }
 
 impl From<OpenedLink<Pump>> for SlowDial {
     fn from(opened: OpenedLink<Pump>) -> Self {
-        SlowDial::Host(opened.into())
+        SlowDial(Some(opened.into()))
     }
 }
 
@@ -91,10 +86,13 @@ impl SessionLinks for SlowDials {
 
     fn begin_initiator(&self, to: Locator) -> Result<SlowDial, LinkOpenError> {
         if !self.slow.load(Ordering::SeqCst) {
-            return self.inner.begin_initiator(to).map(SlowDial::Host);
+            return self
+                .inner
+                .begin_initiator(to)
+                .map(|dial| SlowDial(Some(dial)));
         }
         self.dials.fetch_add(1, Ordering::SeqCst);
-        Ok(SlowDial::Unanswered)
+        Ok(SlowDial(None))
     }
 }
 
