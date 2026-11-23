@@ -514,7 +514,7 @@ fn memory_basis(
     crate::session_memory::MemoryBasis {
         limits: *limits,
         links: crate::session_memory::links_of(listen, limits),
-        queue_batches: tx_queue.sizes.iter().sum(),
+        queue_batches: crate::session_memory::link_tx_batches(tx_queue),
         batch_bytes: usize::from(pico_unicast_batch(limits)),
         rx_bytes: rx.buffer_size,
         // `pico_link_rx` hands the engine `usize::MAX` where the snapshot states no bound.
@@ -3067,8 +3067,8 @@ mod build_numbers {
     }
 
     /// `PICO_UNICAST_BATCH_BYTES` stated: the report of a session's memory counts each link's
-    /// queued batches at the stated size, as many as the queue the open builds from the same
-    /// snapshot, and its tables for that snapshot.
+    /// transmit batches at the stated size, as many as its engine holds for a link opened from
+    /// the same snapshot, and its tables for that snapshot.
     #[cfg(feature = "session-memory")]
     #[test]
     fn session_memory_counts_the_stated_unicast_batch() {
@@ -3081,7 +3081,10 @@ mod build_numbers {
                 assert_eq!(basis.limits, limits);
                 let queue = memory_row(&basis.report(), c"link transmit queues");
                 assert_eq!(queue.entry_bytes, value);
-                assert_eq!(queue.count, Some(tx_queue.sizes.iter().sum()));
+                assert_eq!(
+                    queue.count,
+                    Some(crate::session_memory::link_tx_batches(&tx_queue))
+                );
             },
         );
     }
