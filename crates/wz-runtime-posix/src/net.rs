@@ -760,6 +760,8 @@ impl PosixUdpSocket {
     /// leave) or was interrupted by a signal, any other failure as an error. A datagram whose
     /// source the kernel names in a family other than the socket's two is an error too: there
     /// is no end to judge it by.
+    // Out of line: both receives call it, and a copy inlined in each is larger than the call.
+    #[inline(never)]
     fn receive(&self, buf: &mut [u8], flags: c_int) -> Result<Option<Received>, PosixNetError> {
         let mut src = RawAddr::empty();
         // SAFETY: `buf` and `src` are live and writable for the lengths given.
