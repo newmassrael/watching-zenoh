@@ -983,6 +983,8 @@ pub struct DocumentSinks;
 
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
+    type SubscriberId = wz_session_core::pubsub::SubscriptionId;
+    type Delivery = ();
     type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;

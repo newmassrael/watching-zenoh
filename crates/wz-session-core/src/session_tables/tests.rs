@@ -1022,7 +1022,7 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     assert!(tables.has_local_matching("a/b"));
     assert!(!tables.has_local_matching("b"));
-    let count = |sink: &mut Counted| sink.0 += 1;
+    let count = |_, sink: &mut Counted| sink.0 += 1;
     assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
     assert_eq!(heard(&tables, any.handle), 1);
     assert_eq!(heard(&tables, remote.handle), 1);
@@ -1055,7 +1055,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
     use crate::bounded::Heap;
     use crate::pubsub::{LocalSubscribers, MATCH_SCANS};
     let scans = || MATCH_SCANS.with(|count| count.get());
-    let count = |sink: &mut Counted| sink.0 += 1;
+    let count = |_, sink: &mut Counted| sink.0 += 1;
     let mut tables = SessionTables::<Sinks, Heap>::new();
     tables.limit_memo_to(4);
     assert_eq!(tables.memo_slot_count(), 4);
@@ -1111,7 +1111,7 @@ fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_
 #[test]
 fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
     use crate::pubsub::LocalSubscribers;
-    let count = |sink: &mut Counted| sink.0 += 1;
+    let count = |_, sink: &mut Counted| sink.0 += 1;
     let mut tables = SessionTables::<Sinks, Static>::new();
     let sub = tables
         .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
@@ -1141,7 +1141,7 @@ fn a_peers_message_is_matched_afresh_where_it_may_not_allocate() {
     use crate::bounded::Heap;
     use crate::pubsub::{LocalSubscribers, PeerDelivery, MATCH_SCANS};
     let scans = || MATCH_SCANS.with(|count| count.get());
-    let count = |sink: &mut Counted| sink.0 += 1;
+    let count = |_, sink: &mut Counted| sink.0 += 1;
     let mut tables = SessionTables::<Sinks, Heap>::new();
     tables.limit_memo_to(4);
     let peers = tables
@@ -1232,7 +1232,7 @@ fn every_subscriber_is_told_a_plain_frame_ended() {
             FrameEnds::default(),
         )
         .unwrap();
-    tables.end_plain_frame();
+    tables.end_plain_frame(&mut ());
     assert_eq!(
         tables.subscribers().get(any.handle).unwrap().callback().0,
         1
@@ -1240,6 +1240,70 @@ fn every_subscriber_is_told_a_plain_frame_ended() {
     assert_eq!(
         tables.subscribers().get(own.handle).unwrap().callback().0,
         1
+    );
+}
+
+/// A delivery context that keeps nothing in the rows: it counts each delivery into the row and
+/// records the handle the row was named by.
+#[derive(Default)]
+struct Handed(Vec<SubscriberHandle>);
+
+impl crate::sink::SampleDelivery<Counted, SubscriberHandle> for Handed {
+    fn deliver(
+        &mut self,
+        id: SubscriberHandle,
+        row: &mut Counted,
+        _sample: &dyn crate::sink::SampleView,
+    ) {
+        row.0 += 1;
+        self.0.push(id);
+    }
+}
+
+/// A sample published by the session reaches, through the context it is handed, every row that
+/// hears the session, each named by the handle the tables gave it; a row that hears only peers
+/// is not handed it.
+#[test]
+fn a_delivery_names_each_row_it_reaches_by_its_handle() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = SessionTables::<Sinks>::new();
+    let any = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let remote = tables
+        .declare_subscriber(
+            "a/b",
+            Locality::Remote,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let own = tables
+        .declare_subscriber(
+            "a/*",
+            Locality::SessionLocal,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let sample = crate::sink::BorrowedSample {
+        keyexpr: "a/b",
+        payload: b"x",
+        kind: crate::sample_kind::SampleKind::Put,
+        reliability: crate::reliability::Reliability::Reliable,
+    };
+    let mut handed = Handed::default();
+    assert_eq!(tables.local_publish(&mut handed, &sample), 2);
+    assert_eq!(handed.0, std::vec![any.handle, own.handle]);
+    assert_eq!(heard(&tables, any.handle), 1);
+    assert_eq!(heard(&tables, own.handle), 1);
+    assert_eq!(heard(&tables, remote.handle), 0);
+    // The same key again is answered from the match cache, which keeps places: the rows are
+    // still named by their handles.
+    assert_eq!(tables.local_publish(&mut handed, &sample), 2);
+    assert_eq!(
+        handed.0,
+        std::vec![any.handle, own.handle, any.handle, own.handle]
     );
 }
 

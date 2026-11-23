@@ -650,7 +650,7 @@ impl ApplicationLayerObserver {
     /// `event` is `Copy`; the same reference fans into each table at zero cost.
     pub fn dispatch_event(&mut self, event: IterationEvent<'_, '_>) {
         self.app
-            .dispatch_event(&mut self.peers, &mut self.requesters, event);
+            .dispatch_event(&mut (), &mut self.peers, &mut self.requesters, event);
         // A peer's QUERYABLE Interest is answered from the queryables this
         // session holds (see `QueryableRegistry::respond_to_queryable_interest`).
         // Staged here and drained with the other interest-response chains, so no

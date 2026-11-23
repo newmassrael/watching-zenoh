@@ -102,6 +102,10 @@ impl<W: Word> Counter<W> {
     fn drained(&self) -> bool {
         self.0.load() == RETIRED
     }
+
+    fn retired(&self) -> bool {
+        self.0.load() & RETIRED != 0
+    }
 }
 
 /// The word of this target.
@@ -153,6 +157,13 @@ impl CallLatch {
     /// Whether the row is retired and no call of it runs.
     pub fn drained(&self) -> bool {
         self.0.drained()
+    }
+
+    /// Whether the row is retired, calls of it still running or not: a call begun before the
+    /// retirement that has not reached its row yet reads it here, so the latch stays the one
+    /// record of whether the row is live.
+    pub fn retired(&self) -> bool {
+        self.0.retired()
     }
 }
 
@@ -360,13 +371,16 @@ mod tests {
     /// and the held one.
     fn the_last_to_leave_a_retired_row_lets_it_go<W: Word + Default>() {
         let idle = Counter::<W>::default();
+        assert!(!idle.retired(), "a new row is live");
         assert!(idle.retire(), "no call runs: the retirer lets it go");
+        assert!(idle.retired());
         assert!(idle.drained());
         assert!(!idle.begin(), "a retired row begins no call");
 
         let busy = Counter::<W>::default();
         assert!(busy.begin() && busy.begin());
         assert!(!busy.retire(), "two calls run: not the retirer's");
+        assert!(busy.retired(), "retired while its calls still run");
         assert!(!busy.drained());
         assert!(!busy.end(), "one call still runs");
         assert!(busy.end(), "the last call of a retired row lets it go");
@@ -374,6 +388,7 @@ mod tests {
 
         let live = Counter::<W>::default();
         assert!(live.begin());
+        assert!(!live.retired(), "a call running does not retire the row");
         assert!(!live.end(), "a live row is let go of by nobody");
     }
 

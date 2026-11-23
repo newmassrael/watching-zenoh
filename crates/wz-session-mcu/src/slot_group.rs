@@ -314,7 +314,7 @@ where
         }
         let mut peers = state.peers.borrow_mut();
         let mut observer = observer.borrow_mut();
-        observer.dispatch_event(&mut peers, &mut requesters, event);
+        observer.dispatch_event(&mut (), &mut peers, &mut requesters, event);
     };
     let mut publisher = GroupPublisher::<P>::new();
     let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
