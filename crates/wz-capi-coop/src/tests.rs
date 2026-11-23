@@ -86,6 +86,9 @@ enum Command {
     DeclareQueryable(wz_session_core::wire_id::EntityId, &'static str, bool),
     UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
+    /// Push `.1` samples on the key in one batch window, so that one frame carries them all; the
+    /// payload of each is its index.
+    PushBatch(&'static str, u8),
     /// [`Command::Push`] stamped with a time by the router.
     PushStamped(&'static str, &'static [u8]),
     /// Push `.1` naming id `.0` in the RECEIVER's space, as a zenoh router does for a subscriber it
@@ -558,6 +561,13 @@ fn run_router(
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
+            }
+            Ok(Command::PushBatch(key, count)) => {
+                let _ = actions.batch_start();
+                for index in 0..count {
+                    let _ = actions.send_push_literal(key, &[index], true);
+                }
+                let _ = actions.batch_stop();
             }
             Ok(Command::PushStamped(key, value)) => {
                 let meta = wz_session_core::metadata::PushMetadata {
