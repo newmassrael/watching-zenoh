@@ -473,10 +473,12 @@ suites (C1co, Layer Z) unchanged.
    `engine/query.rs`, `engine/get.rs`, `wz-session-core` `query.rs`, `reply.rs`,
    `owed_replies.rs`. Families: `z_get`, query answered. Tests: a get past its table refused
    having sent nothing; a query with no held-query row answered with its Final at once. Its
-   remainder done: a query is answered into a stage of the query plane, one for each held query
-   (`MAX_PENDING_FINALS`), each lent at the open with the rows and the bytes of a face's stage of
-   replies (`AnswerStages` in `engine/query.rs`, the plan's row `answer stages`); an answer that
-   finds every stage held stages no reply, is counted, and its Final is sent all the same.
+   remainder done: a query's replies are staged nowhere. Each is written, as its queryable makes
+   it, into the transmit slot of the link the query came in on under the session's lock
+   (`Onward` in `engine/query.rs`, the link's `ResponseSink::send_reply_parts`), as zenoh-pico's
+   `z_query_reply` sends at the call; a held query keeps its row of held Finals and no buffer of
+   replies. The payload bound (`MAX_REPLY_PAYLOAD_BYTES`) still refuses a longer reply to its
+   queryable; the count of replies to one query is bounded by nothing, as zenoh-pico's is not.
 10. **U9. Handle objects and payloads from the process pools.** `wz-capi-pico` `object_slot.rs`
     (no heap fallback), `object_pool.rs` (reserved at the first call, decision Q1),
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
@@ -555,7 +557,7 @@ heap's own header of each block, not a measurement.
 
 | site | when | bytes | unit |
 |------|------|------:|------|
-| the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states; the stages held queries are answered into (U8) add one stage for each of `MAX_PENDING_FINALS`, `MAX_PENDING_REPLIES` rows with their keys and payloads each, about 86 KB at the build's defaults, about 5.4 KB at the pico preset and about 200 bytes under `arm_w.conf` (estimates) | U1; the size is the image's limits |
+| the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
@@ -565,7 +567,7 @@ heap's own header of each block, not a measurement.
 | the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
 | a publisher: its handle's `Box`, its key's `Arc<WireDeclaration>` and the `k_mutex` of its write filter's listeners (its key's literal and its filter's key are one block of the key arena, which the record's rows of the key share); and, dropped within the call, the key handed to `acquire_keyexpr` and to `declare_write_filter`, and the Interest form's rest of the key | each declaration | about 200 kept (estimate), three keys dropped | U9, U6's remainder, U10, U11 |
 | a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's declaration, the wire key's anchor (an `Arc` of two shares of the keys, whose text is the key arena's), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key as `String` | each declaration | about 300 kept (estimate) | U7, U6's remainder, U10, U5 |
-| a query a queryable answers: the stage its replies are staged in, one of the query plane's lent at the open (`AnswerStages`) | each query answered | none, read from the source; the open's arena holds one stage for each of `MAX_PENDING_FINALS` | done (U8) |
+| a query a queryable answers: each reply written into the link's transmit slot as it is made (`Onward`), with no stage | each query answered | none in this ABI's half, read from the source (the session's own get still builds its owned reply) | done (U8) |
 | `z_bytes_clone`: the payload's place (`box_bytes`) | each put of the put cell | 24, freed by the put | U9 |
 | `z_bytes_copy_from_buf`: the place, the `Arc<Backing>` and the copied bytes | each round trip of the rtt cell | 56 and the payload, freed by the put | U9 |
 | `z_publisher_put` on a publisher declared with no options of its own beyond the congestion control: `publish_plain`, `put_plain_filtered`, `send_plain_put_qos` into a slot the arena lent | each put | none, read from the source | done (U2) |

@@ -172,61 +172,57 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
     );
 }
 
-/// Held to one Final, a session answers query after query, each staging a reply into the one stage
-/// its open lent, and after the last answer the stage is free and no answer found none: answering
-/// lends nothing past the stages and keeps none. A kept query answered later takes and gives back
-/// the stage too. The CONTROL is each reply reaching the router.
+/// A query's replies go out as its callback makes them, more of them than the build's
+/// `MAX_PENDING_REPLIES`, as nothing stages them; one whose payload is past the session's
+/// `MAX_REPLY_PAYLOAD_BYTES` is refused to the callback and not sent, and the Final follows the
+/// last reply sent. A kept query's late reply goes out the same way. The CONTROL is the replies
+/// under the bound, each reaching the router.
 #[test]
-fn queries_answered_past_the_stages_leave_every_stage_free() {
-    let limits = super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)));
+fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
+    use wz_session_core::query_sink::ReplyError;
+
+    let limits =
+        super::entity_tables::lowered(|l| l.select_max_reply_payload_bytes(Quota::at_most(16)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
-    assert_eq!(engine.answer_stages(), (1, 0), "the open lent one stage");
+    let many = wz_session_core::caps::MAX_PENDING_REPLIES + 2;
+    let refused: Arc<Mutex<Option<Result<(), ReplyError>>>> = Arc::default();
     let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::default();
-    let slot = kept.clone();
-    declare(&engine, "demo/s/**", move |holder, query, out| {
-        out.reply_keyed(query.keyexpr(), b"staged")
-            .expect("a reply on the query's own key");
-        if query.keyexpr() == "demo/s/kept" {
-            *slot.lock().unwrap() = Some(holder.hold_query(query));
+    let (refusal, slot) = (refused.clone(), kept.clone());
+    declare(&engine, "demo/r/**", move |holder, query, out| {
+        for _ in 0..many {
+            out.reply_keyed(query.keyexpr(), b"small")
+                .expect("a reply under the bound");
         }
+        *refusal.lock().unwrap() = Some(out.reply_keyed(query.keyexpr(), &[0u8; 17]));
+        *slot.lock().unwrap() = Some(holder.hold_query(query));
     });
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) >= 1
     });
-    for (rid, key) in [
-        (1, "demo/s/a"),
-        (2, "demo/s/b"),
-        (3, "demo/s/c"),
-        (4, "demo/s/d"),
-    ] {
-        let answered = router.seen(|s| s.answers.len());
-        router.send(Command::Query(rid, key));
-        until(&engine, "the reply and the final", || {
-            router.seen(|s| s.answers.len()) >= answered + 2
-        });
-    }
-    assert_eq!(
-        engine.answer_stages(),
-        (1, 0),
-        "every answer gave the stage back, and none found it held"
-    );
-    router.send(Command::Query(5, "demo/s/kept"));
-    until(&engine, "the callback to keep the query", || {
-        kept.lock().unwrap().is_some()
+    router.send(Command::Query(1, "demo/r/a"));
+    until(&engine, "every reply under the bound", || {
+        router.seen(|s| s.answers.len()) >= many
     });
+    assert_eq!(
+        *refused.lock().unwrap(),
+        Some(Err(ReplyError::PayloadTooLarge)),
+        "a payload past the bound is refused to the callback"
+    );
     let held = kept.lock().unwrap().take().expect("the kept query");
     held.reply(&mut |out| {
-        out.reply_keyed("demo/s/kept", b"later")
+        out.reply_keyed("demo/r/a", b"later")
             .expect("a reply on the query's own key");
     });
-    assert_eq!(
-        engine.answer_stages(),
-        (1, 0),
-        "the kept query's answer gave the stage back"
-    );
     drop(held);
-    until(&engine, "the kept query's final", || {
-        router.seen(|s| s.answers.len()) >= 4 * 2 + 3
+    until(&engine, "the late reply and the final", || {
+        router.seen(|s| s.answers.len()) >= many + 2
     });
+    let mut expected = vec!["reply"; many + 1];
+    expected.push("final");
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        expected,
+        "every reply under the bound, none past it, then the final"
+    );
 }

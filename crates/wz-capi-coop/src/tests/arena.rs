@@ -625,33 +625,6 @@ fn the_plan_holds_the_queries_its_limit_resolves() {
     assert_eq!(at_one.held_queries(), 1);
 }
 
-/// The stages the held queries are answered into are a row of the plan: one for each query the
-/// open holds, each the rows and the bytes of a face's stage of replies, so the open's lending of
-/// them is what the reservation counts.
-#[cfg(feature = "queryable")]
-#[test]
-fn the_plan_holds_a_stage_for_each_held_query() {
-    let built =
-        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    let (count, replies, bytes) = built.answer_stages();
-    assert_eq!(count, built.held_queries());
-    assert_eq!(replies, built.peers().rows.replies);
-    assert_eq!(bytes, built.peers().rows.reply_bytes);
-    let stage = wz_session_core::reply_stage::ReplyStage::<Lent>::arena_bytes(replies, bytes)
-        .expect("within the address space");
-    assert_eq!(built.answer_stage_bytes(), Some(stage));
-    assert_eq!(row(&built, "answer stages").count, count);
-    assert_eq!(row(&built, "answer stages").entry_bytes, stage);
-    let lowered = lowered(|l| l.select_max_pending_finals(Quota::at_most(1)));
-    let at_one = ArenaPlan::of(&client_config(), &lowered).expect("lays an arena out");
-    assert_eq!(row(&at_one, "answer stages").count, 1);
-    assert_eq!(
-        row(&at_one, "answer stages").span(),
-        Some(stage),
-        "one held query, one stage"
-    );
-}
-
 /// An arena past the address space is refused before any memory is asked.
 #[test]
 fn an_arena_past_the_address_space_is_refused() {

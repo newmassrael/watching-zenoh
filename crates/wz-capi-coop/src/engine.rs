@@ -119,13 +119,17 @@ use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
-    query::{AnswerStages, CoopHolder, QueryPlane},
+    query::{CoopHolder, Onward, QueryPlane},
     wz_capi_port::{QblId, QueryCallback, QueryableSink},
     wz_session_core::query::QueryableId,
+    wz_session_core::query_sink::ReplyError,
     wz_session_core::query_sink::{BoxedQuerySink, QueryView},
-    wz_session_core::reply_stage::{ReplyBounds, ReplyStage},
+    wz_session_core::reply_stage::ReplyParts,
     wz_session_core::response_sink::ResponseSink,
 };
+
+#[cfg(feature = "local-queryable")]
+use wz_session_core::reply_stage::ReplyStage;
 
 #[cfg(feature = "queryable")]
 mod query;
@@ -640,11 +644,6 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
-    /// The bounds the replies of the session's queryables are staged under, taken from the
-    /// limits its open resolved: a callback answers outside the session's lock, into a stage of
-    /// its own held as the session's tables are.
-    #[cfg(feature = "queryable")]
-    reply_bounds: ReplyBounds,
     /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
     /// ([`SendingOn`]): the face pico's profile drops a droppable publish on, as against the
     /// session's other faces, which it is still sent to, and a session held by a read step, a
@@ -3484,13 +3483,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plan.peers(),
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
-        // The stages its queries are answered into, one for each it holds for its callbacks.
-        #[cfg(feature = "queryable")]
-        let answers = {
-            let (count, replies, bytes) = plan.answer_stages();
-            AnswerStages::lent(arena.arena_mut(), count, replies, bytes)
-                .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?
-        };
         // The ends of the session's legs wait in rows the plan counts for them.
         #[cfg(feature = "query")]
         let ended = EndedLegs::over(
@@ -3561,7 +3553,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "queryable")]
             queryables,
             #[cfg(feature = "queryable")]
-            plane: Arc::new(QueryPlane::holding(plan.held_queries(), answers)),
+            plane: Arc::new(QueryPlane::holding(plan.held_queries())),
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
@@ -3591,16 +3583,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
         let handed_at_most = core.config.tx_queue.sizes;
-        #[cfg(feature = "queryable")]
-        let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
         let arena_bytes = core.arena.bytes();
         Ok(Arc::new_cyclic(|this| Self {
             core: CoreLock::new(core),
             rooms,
             wait_before_drop_us,
             held_drop,
-            #[cfg(feature = "queryable")]
-            reply_bounds,
             sending_on: AtomicU64::new(NOT_SENDING),
             handed: Mutex::new(VecDeque::new()),
             owed: AtomicBool::new(false),
@@ -4266,7 +4254,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
                 _ => None,
             });
-        let mut replies = self.plane.answer_stage(self.reply_bounds);
+        let mut onward = Onward::to(self, generation);
         if let Some(callback) = callback {
             let _answering =
                 query::Answering::enter(self as *const Self as usize, generation, query.rid());
@@ -4279,11 +4267,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.keyexpr(),
                 query.parameters(),
                 query.qos(),
-                &mut replies,
+                &mut onward,
             );
             (lock(&callback))(query, &mut responder);
         }
-        self.answer(generation, query.rid(), &replies, true);
+        self.answer(generation, query.rid(), true);
     }
 
     /// A build with no queryable is handed no query.
@@ -4695,48 +4683,68 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         ));
     }
 
-    /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
-    /// of one hold on its Final, sending the Final when it was owed and this was the last hold.
-    /// Nothing is sent on a link that is no longer the session's. On a group, what was sent is
-    /// written by this call, on the calling thread.
+    /// One reply to the query that came in under `generation`, as its queryable makes it: onto
+    /// the query's link, written into the link's transmit slot under the session's lock, or to the
+    /// session's own get. Refused, sending nothing, when its payload or its attachment is longer
+    /// than the session's `MAX_REPLY_PAYLOAD_BYTES`; dropped, as a lost link drops it, when the
+    /// session is closed or the query's link is no longer the session's.
     #[cfg(feature = "queryable")]
-    fn answer(
-        &self,
-        generation: u64,
-        rid: wz_session_core::wire_id::RequestId,
-        replies: &ReplyStage<Lent>,
-        release: bool,
-    ) {
+    fn send_reply(&self, generation: u64, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
+        let Some(core) = self.live() else {
+            return Ok(());
+        };
+        let (payload, attachment) = parts.bounded_lengths();
+        let most = core.0.config.limits.max_reply_payload_bytes();
+        if !most.admits(payload) || !most.admits(attachment) {
+            return Err(ReplyError::PayloadTooLarge);
+        }
+        // The session's own get is answered to its pending entry, which is the registry's, and
+        // handed out when the answer ends (`Self::answer`).
+        #[cfg(feature = "local-queryable")]
+        if generation == query::LOCAL_QUERY {
+            let reply = wz_session_core::query::QueryReply::from_parts(&parts);
+            core.0
+                .registry
+                .borrow_mut()
+                .local
+                .replies
+                .deliver_local_reply(&reply.into());
+            return Ok(());
+        }
+        if let Some(route) = core.0.answer_route(generation) {
+            route.send_reply_parts(parts);
+        }
+        Ok(())
+    }
+
+    /// The answer to the query `rid` on the link of `generation` is over for now, its replies
+    /// sent as they were made ([`Self::send_reply`]): with `release`, let go of one hold on its
+    /// Final, sending the Final when it was owed and this was the last hold. Nothing is sent on a
+    /// link that is no longer the session's. On a group, what the replies staged there is written by
+    /// this call, on the calling thread.
+    #[cfg(feature = "queryable")]
+    fn answer(&self, generation: u64, rid: wz_session_core::wire_id::RequestId, release: bool) {
         let Some(core) = self.live() else {
             return;
         };
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let mut registry = core.0.registry.borrow_mut();
-            let gets = &mut registry.local;
-            for reply in replies.iter() {
-                gets.replies.deliver_local_reply(&reply.into());
-            }
             if release && lock(&self.plane.holds).release(generation, rid).is_some() {
-                gets.replies.deliver_local_final(rid);
+                core.0
+                    .registry
+                    .borrow_mut()
+                    .local
+                    .replies
+                    .deliver_local_final(rid);
             }
-            drop(registry);
             drop(core);
             self.deliver();
             return;
         }
-        let route = core.0.answer_route(generation);
-        if let Some(route) = route {
-            for reply in replies.iter() {
-                if let Ok(response) = reply.into_response() {
-                    route.send_response(response);
-                }
-            }
-        }
         if release {
             let due = lock(&self.plane.holds).release(generation, rid);
-            if let (Some(qos), Some(route)) = (due, route) {
+            if let (Some(qos), Some(route)) = (due, core.0.answer_route(generation)) {
                 route.send_response_final(rid, qos);
             }
         }
@@ -4981,7 +4989,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             qos,
         };
         let query = opts.loopback_query();
-        let mut staged = self.plane.answer_stage(self.reply_bounds);
+        // The session's queryables only copy a query out and hold its Final (`QueryPlane::arrive`),
+        // so none stages a reply here: the stage the registry is handed has no room.
+        let mut staged = ReplyStage::<Lent>::default();
         let mut registry = core.registry.borrow_mut();
         self.plane.asking_locally(|| {
             registry.app.queryables.local_query_with_value(
@@ -4989,13 +4999,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 keyexpr,
                 &query,
                 None,
-                &mut *staged,
+                &mut staged,
             )
         });
         let gets = &mut registry.local;
-        for reply in staged.iter() {
-            gets.replies.deliver_local_reply(&reply.into());
-        }
         lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
         if own.release().is_some() {
             gets.replies.deliver_local_final(rid);
@@ -6896,10 +6903,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.dropping().end_links();
-        // The stages the queries were answered into lie in the arena, which the session's state
-        // gives back as it is dropped, after this.
-        #[cfg(feature = "queryable")]
-        self.plane.let_go_of_stages();
     }
 }
 

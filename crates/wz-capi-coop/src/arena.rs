@@ -47,10 +47,6 @@
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
 //!   queriers (`MAX_QUERIERS`), its matching listeners (`MAX_MATCHING_LISTENERS`), and the
 //!   Interests those filters and listeners hold open, at most one for each of them;
-//! - with `queryable`, the stages the queries the session holds for its callbacks are answered
-//!   into, one for each (`MAX_PENDING_FINALS`), each with the rows and the bytes of a face's stage of
-//!   replies, taken by an answer and given back when its replies are sent
-//!   (`ArenaPlan::answer_stages`);
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
@@ -134,7 +130,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 25;
+pub const ARENA_ROWS: usize = 24;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -446,13 +442,6 @@ impl ArenaPlan {
         } else {
             0
         };
-        // The stages those queries are answered into, one for each, as a face's peer tables stage
-        // the replies to its queries (`QueryPlane::answer_stage` in `crate::engine`).
-        let (stages, _, _) = plan.answer_stages();
-        let stage_bytes = plan.answer_stage_bytes().ok_or(ArenaRefused::TooLarge)?;
-        if stages > 0 && stage_bytes > 0 {
-            plan.put("answer stages", "MAX_PENDING_FINALS", stages, stage_bytes);
-        }
         plan.entities = entity_rows(limits)?;
         plan.put_entities()?;
         plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
@@ -556,29 +545,10 @@ impl ArenaPlan {
 
     /// How many queries the session holds for its queryables' callbacks at once
     /// (`MAX_PENDING_FINALS`), resolved as the arena's rows are and none in a build without
-    /// `queryable`. Their Finals are no row of the arena: the query plane holds them in a fixed
-    /// table of its own, as it is shared with what answers outside the session's lock.
+    /// `queryable`. They are no row of the arena: the query plane holds them in a fixed table of
+    /// its own, as it is shared with what answers outside the session's lock.
     pub fn held_queries(&self) -> usize {
         self.held_queries
-    }
-
-    /// The stages the session's queries are answered into: how many (one for each query it holds,
-    /// [`Self::held_queries`]), and the rows and the bytes of each, a face's stage of the replies
-    /// to its peer's queries (`MAX_PENDING_REPLIES`, with a key of `MAX_KEYEXPR_BYTES` and a
-    /// payload of `MAX_REPLY_PAYLOAD_BYTES` each).
-    pub fn answer_stages(&self) -> (usize, usize, usize) {
-        (
-            self.held_queries,
-            self.peers.rows.replies,
-            self.peers.rows.reply_bytes,
-        )
-    }
-
-    /// The bytes one of [`Self::answer_stages`] takes in the arena, its rows and its bytes as
-    /// two spans. `None` past the address space.
-    pub fn answer_stage_bytes(&self) -> Option<usize> {
-        let (_, replies, bytes) = self.answer_stages();
-        ReplyStage::<Lent>::arena_bytes(replies, bytes)
     }
 
     /// Add a row. A plan has room for every row of the build with every feature (`ARENA_ROWS`).
