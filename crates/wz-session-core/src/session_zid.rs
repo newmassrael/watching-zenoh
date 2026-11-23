@@ -65,12 +65,37 @@ impl core::fmt::Display for ZidError {
 impl SessionZid {
     /// The zid `src` spells, or the refusal when it is not one to [`ZID_MAX`]
     /// bytes long or its bytes are all zero.
-    pub const fn new(src: &[u8]) -> Result<Self, ZidError> {
-        if src.is_empty() || src.len() > ZID_MAX {
-            return Err(ZidError::LengthOutOfRange { len: src.len() });
+    pub fn new(src: &[u8]) -> Result<Self, ZidError> {
+        let len = src.len();
+        let mut bytes = [0u8; ZID_MAX];
+        // The prefix of the array as long as `src` exists exactly when `src` is at most
+        // `ZID_MAX` bytes: the length check and the copy's bound are one test.
+        let into = match bytes.get_mut(..len) {
+            Some(into) if len != 0 => into,
+            _ => return Err(ZidError::LengthOutOfRange { len }),
+        };
+        if src.iter().all(|&byte| byte == 0) {
+            return Err(ZidError::AllZero { len });
+        }
+        into.copy_from_slice(src);
+        Ok(Self {
+            bytes,
+            len: len as u8,
+        })
+    }
+
+    /// The zid of an array whose length is checked when the build is made: an
+    /// array of no bytes or of more than [`ZID_MAX`] does not compile. Panics
+    /// when the bytes are all zero, which a caller writing the array chose.
+    ///
+    /// A `const fn` for the constants that name a zid; a zid read at run time is
+    /// made by [`Self::new`], whose copy is one `memcpy` and not this loop.
+    pub const fn from_array<const N: usize>(src: [u8; N]) -> Self {
+        const {
+            assert!(N != 0 && N <= ZID_MAX, "a zid is 1 to 16 bytes on the wire");
         }
         let mut nonzero = false;
-        let mut rest = src;
+        let mut rest = src.as_slice();
         while let [byte, tail @ ..] = rest {
             if *byte != 0 {
                 nonzero = true;
@@ -78,13 +103,13 @@ impl SessionZid {
             rest = tail;
         }
         if !nonzero {
-            return Err(ZidError::AllZero { len: src.len() });
+            panic!("a zid is not zero");
         }
-        // At most `ZID_MAX` bytes, checked above. The array is rebuilt by value, the
-        // bytes pushed in from the last, so the zid's first byte ends up first and
-        // the bytes past it stay zero: no index and no mutable borrow in a const fn.
+        // The array is rebuilt by value, the bytes pushed in from the last, so the
+        // zid's first byte ends up first and the bytes past it stay zero: no index
+        // and no mutable borrow, which a const fn of Rust 1.81 cannot take.
         let mut bytes = [0u8; ZID_MAX];
-        let mut rest = src;
+        let mut rest = src.as_slice();
         while let [head @ .., last] = rest {
             let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, _] = bytes;
             bytes = [
@@ -92,22 +117,9 @@ impl SessionZid {
             ];
             rest = head;
         }
-        Ok(Self {
+        Self {
             bytes,
-            len: src.len() as u8,
-        })
-    }
-
-    /// The zid of an array whose length is checked when the build is made: an
-    /// array of no bytes or of more than [`ZID_MAX`] does not compile. Panics
-    /// when the bytes are all zero, which a caller writing the array chose.
-    pub const fn from_array<const N: usize>(src: [u8; N]) -> Self {
-        const {
-            assert!(N != 0 && N <= ZID_MAX, "a zid is 1 to 16 bytes on the wire");
-        }
-        match Self::new(&src) {
-            Ok(zid) => zid,
-            Err(_) => panic!("a zid is not zero"),
+            len: N as u8,
         }
     }
 
@@ -227,6 +239,18 @@ mod tests {
         );
         assert!(SessionZid::new(&[0, 0, 0, 0x01]).is_ok());
         assert!(SessionZid::new(&[0x01, 0, 0, 0]).is_ok());
+    }
+
+    /// The constant's zid and the run-time zid of the same bytes are one value.
+    #[test]
+    fn an_array_and_a_slice_of_the_same_bytes_make_the_same_zid() {
+        const ONE: SessionZid = SessionZid::from_array([0x01]);
+        const LAST_SET: SessionZid = SessionZid::from_array([0, 0, 0, 0x7f]);
+        const FULL: SessionZid = SessionZid::from_array([0xc3; ZID_MAX]);
+        assert_eq!(SessionZid::new(&[0x01]), Ok(ONE));
+        assert_eq!(SessionZid::new(&[0, 0, 0, 0x7f]), Ok(LAST_SET));
+        assert_eq!(SessionZid::new(&[0xc3; ZID_MAX]), Ok(FULL));
+        assert_eq!(LAST_SET.as_slice(), &[0, 0, 0, 0x7f]);
     }
 
     #[test]
