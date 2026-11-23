@@ -514,6 +514,30 @@ pub const MAX_PEER_NODES: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_FACES`] is bound.
+pub const MAX_FACES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ACCEPT_PENDING`] is bound.
+pub const MAX_ACCEPT_PENDING: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::QUERIER_MAX_PENDING_QUERIES`] is bound.
 pub const QUERIER_MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
