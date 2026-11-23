@@ -512,7 +512,6 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let rows = built.peers().rows;
-    assert_eq!(rows.sub_interests, caps::MAX_INBOUND_SUB_INTERESTS);
     assert_eq!(rows.pending_declares, caps::MAX_PENDING_DECLARES);
     let answers = cfg!(feature = "queryable");
     assert_eq!(
@@ -533,6 +532,75 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     assert!(
         row(&at_one, "peer tables").entry_bytes < row(&built, "peer tables").entry_bytes,
         "the staging lent fewer rows"
+    );
+}
+
+/// The pools of what the faces' peers write hold the fewer of the session's limit and what the
+/// faces could hold together, each at the bound of one peer: a session of one face lends what that
+/// face's tables held, a listener of four lends four faces' worth, and a session limit lowered at
+/// the open lowers its pool and no other, the faces' own tables untouched.
+#[test]
+fn the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could() {
+    let one = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let four = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 3,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    let face = |each: usize, session: usize, sets: usize| (each * sets).min(session);
+    for (plan, sets) in [(&one, 1), (&four, 4)] {
+        let pools = plan.peers().pools;
+        assert_eq!(
+            (pools.remote_decls, pools.aliases, pools.interests),
+            (
+                face(caps::MAX_REMOTE_DECLS, caps::SESSION_MAX_REMOTE_DECLS, sets),
+                face(
+                    caps::MAX_PEER_KEYEXPR_ALIASES,
+                    caps::SESSION_MAX_PEER_KEYEXPR_ALIASES,
+                    sets
+                ),
+                face(
+                    caps::MAX_INBOUND_SUB_INTERESTS,
+                    caps::SESSION_MAX_INBOUND_SUB_INTERESTS,
+                    sets
+                ),
+            ),
+            "a session of {sets} faces"
+        );
+    }
+    if caps::MAX_REMOTE_DECLS < 2 || caps::SESSION_MAX_REMOTE_DECLS < 2 {
+        // A pool of one row cannot be lowered and still hold one.
+        return;
+    }
+    let lowered = lowered(|l| l.select_session_max_remote_decls(Quota::at_most(1)));
+    let at_one = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 3,
+            ..client_config()
+        },
+        &lowered,
+    )
+    .expect("lays an arena out");
+    assert_eq!(at_one.peers().pools.remote_decls, 1);
+    assert_eq!(
+        (at_one.peers().pools.aliases, at_one.peers().rows),
+        (four.peers().pools.aliases, four.peers().rows),
+        "the other pools and the faces' tables are untouched"
+    );
+    assert!(
+        row(&at_one, "peer declaration pools").entry_bytes
+            < row(&four, "peer declaration pools").entry_bytes,
+        "the declarations' pools lent fewer rows"
     );
 }
 
@@ -1000,9 +1068,12 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
     let mut held = 0;
     for row in plan.rows() {
-        // The lane's row is one buffer of the limit's bytes, and the key arena's one area of
-        // them, not a row of each.
-        if row.basis == "DELIVERY_LANE_BYTES" || row.basis == "KEY_ARENA_BYTES" {
+        // The lane's row is one buffer of the limit's bytes, the key arena's one area of them,
+        // and a pool's one area of the rows its faces share, not a row of each.
+        if row.basis == "DELIVERY_LANE_BYTES"
+            || row.basis == "KEY_ARENA_BYTES"
+            || POOL_PARTS.contains(&row.part)
+        {
             continue;
         }
         if let Some(value) = preset_of(&presets, row.basis) {
@@ -1089,6 +1160,14 @@ fn the_pico_presets_lane_holds_one_record() {
 /// its table of pending gets and the ends of their legs.
 const FACE_PARTS: [&str; 3] = ["peer tables", "pending gets", "ended legs"];
 
+/// The parts of an arena held once for the session whose size follows its faces: the pools of what
+/// the faces' peers write, each one area.
+const POOL_PARTS: [&str; 3] = [
+    "peer alias pool",
+    "peer declaration pools",
+    "peer interest pool",
+];
+
 /// The parts of an arena held once for each link: its buffers and the flags that lend them.
 const LINK_PARTS: [&str; 4] = [
     "link receive flags",
@@ -1122,7 +1201,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         "zenoh-pico accepts one link at a time"
     );
     // What a peer writes keeps the build's bounds: the peer decides how much it sends, and
-    // zenoh-pico takes each as it comes.
+    // zenoh-pico takes each as it comes. What the peers write together is bounded by the session.
     for id in [
         "MAX_REMOTE_DECLS",
         "MAX_PEER_KEYEXPR_ALIASES",
@@ -1133,6 +1212,14 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             "the pico preset lowers no limit of what a peer writes, {id}"
         );
     }
+    assert_eq!(
+        (
+            preset("SESSION_MAX_REMOTE_DECLS"),
+            preset("SESSION_MAX_PEER_KEYEXPR_ALIASES"),
+            preset("SESSION_MAX_INBOUND_SUB_INTERESTS"),
+        ),
+        (32, 32, 16)
+    );
     let limits = pico_preset_limits();
     let faces = admitted_faces(&limits).expect("the preset is under the build");
     let handshakes = admitted_handshakes(&limits).expect("the preset is under the build");
@@ -1168,11 +1255,49 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         1 + faces + handshakes
     );
 
+    // The pools hold the fewer of the session's limit and what the faces could hold, each at a
+    // peer's own bound: a client's one face what its tables held, and the peer's eleven the
+    // preset's.
+    let shared = |each: usize, session: &str, sets: usize| (each * sets).min(preset(session));
+    for (plan, sets) in [(&client, 1), (&peer, 1 + faces)] {
+        let pools = plan.peers().pools;
+        assert_eq!(
+            (pools.remote_decls, pools.aliases, pools.interests),
+            (
+                shared(caps::MAX_REMOTE_DECLS, "SESSION_MAX_REMOTE_DECLS", sets),
+                shared(
+                    caps::MAX_PEER_KEYEXPR_ALIASES,
+                    "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+                    sets
+                ),
+                shared(
+                    caps::MAX_INBOUND_SUB_INTERESTS,
+                    "SESSION_MAX_INBOUND_SUB_INTERESTS",
+                    sets
+                ),
+            ),
+            "the pools of a session of {sets} faces"
+        );
+    }
+
     assert_eq!(peer.rows().len(), client.rows().len());
     for (theirs, ours) in peer.rows().iter().zip(client.rows()) {
         assert_eq!(
-            (theirs.part, theirs.basis, theirs.entry_bytes),
-            (ours.part, ours.basis, ours.entry_bytes),
+            (theirs.part, theirs.basis),
+            (ours.part, ours.basis),
+            "the same rows in the same order"
+        );
+        if POOL_PARTS.contains(&theirs.part) {
+            assert!(
+                theirs.entry_bytes >= ours.entry_bytes,
+                "{}: a pool of more faces is no smaller",
+                theirs.part
+            );
+            assert_eq!(theirs.count, 1, "{} is one area", theirs.part);
+            continue;
+        }
+        assert_eq!(
+            theirs.entry_bytes, ours.entry_bytes,
             "a face's and a link's items are the same size on either"
         );
         let count = if LINK_PARTS.contains(&theirs.part) {

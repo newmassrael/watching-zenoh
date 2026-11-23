@@ -17,15 +17,20 @@
 //!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
 //!   pending on the session's own queryables, which no face holds ([`GetTables`]), and with
 //!   `query` a row for the end of each get those tables hold, waiting for its delivery;
-//! - one table of what a face's peer writes and is owed for each face the session may hold at once,
-//!   taken and given back as the face's gets are ([`FacePeers`]): its subscriber interests
-//!   (`MAX_INBOUND_SUB_INTERESTS`), the answers staged back to them and to its liveliness
-//!   interests (`MAX_PENDING_DECLARES`), the replies staged for its queries
-//!   (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
+//! - one table of what a face's peer is owed for each face the session may hold at once, taken
+//!   and given back as the face's gets are ([`FacePeers`]): the answers staged back to its
+//!   interests and to its liveliness interests (`MAX_PENDING_DECLARES`), the replies staged for
+//!   its queries (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
 //!   `MAX_REPLY_PAYLOAD_BYTES`) and the `Final`s owed after them (`MAX_PENDING_FINALS`), the
-//!   replies and `Final`s none in a build without `queryable`. What a peer declares by its own
-//!   ids is held inline in the table, at the build's capacities, each row the place of its key in
-//!   the key arena below;
+//!   replies and `Final`s none in a build without `queryable`;
+//! - one pool of each kind of row a peer writes by its own choice, which every face's tables share
+//!   ([`PeerPoolRows`]): its aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`), its subscribers,
+//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and its subscriber
+//!   interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the fewer of the session's value of its
+//!   limit and what the faces could hold at the bound of each peer (`MAX_PEER_KEYEXPR_ALIASES`,
+//!   `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row the place of its key in the key
+//!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
+//!   takes each from its heap as it comes;
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -95,7 +100,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerRows, PeerTables};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerPools, PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
 use wz_session_core::reply_stage::ReplyStage;
@@ -134,7 +139,7 @@ impl ArenaRow {
 }
 
 /// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 24;
+pub const ARENA_ROWS: usize = 27;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -228,13 +233,15 @@ type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Le
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
-/// once.
+/// once; and how many rows each pool the faces' tables share holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FacePeers {
     /// The rows of each table of one face's.
     pub rows: PeerRows,
     /// How many faces' tables.
     pub tables: usize,
+    /// The rows of each pool of what the faces' peers write, which the faces share.
+    pub pools: PeerPoolRows,
 }
 
 impl EntityRows {
@@ -437,17 +444,37 @@ impl ArenaPlan {
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
             core::mem::size_of::<u64>(),
         );
-        // A row of tables, each what one face's peer writes and is owed: a face takes one whole.
+        // A row of tables, each what one face's peer is owed: a face takes one whole. What the
+        // peers write by their own choice lies in pools the faces share, one area each.
         plan.peers = FacePeers {
             rows: peer_rows(limits)?,
             tables: faces,
+            pools: pool_rows(limits, faces)?,
         };
         plan.put(
             "peer tables",
-            "MAX_INBOUND_SUB_INTERESTS + MAX_PENDING_DECLARES + MAX_PENDING_REPLIES + \
-             MAX_PENDING_FINALS",
+            "MAX_PENDING_DECLARES + MAX_PENDING_REPLIES + MAX_PENDING_FINALS",
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
+        );
+        let pools = plan.peers.pools;
+        plan.put(
+            "peer alias pool",
+            "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+            1,
+            PeerPools::alias_bytes(pools.aliases).ok_or(ArenaRefused::TooLarge)?,
+        );
+        plan.put(
+            "peer declaration pools",
+            "SESSION_MAX_REMOTE_DECLS",
+            1,
+            PeerPools::decl_bytes(pools.remote_decls).ok_or(ArenaRefused::TooLarge)?,
+        );
+        plan.put(
+            "peer interest pool",
+            "SESSION_MAX_INBOUND_SUB_INTERESTS",
+            1,
+            PeerPools::interest_bytes(pools.interests).ok_or(ArenaRefused::TooLarge)?,
         );
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
@@ -657,9 +684,47 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
     })
 }
 
-/// The rows of each table of what one face's peer writes and is owed, under `limits`. The replies'
-/// area holds as many replies as the stage has rows, each of the longest key and payload the
-/// session admits, as the build's stage holds them at the build's values.
+/// The rows of each pool of what the peers of a session of `faces` faces write, under `limits`: the
+/// session's value of the pool's limit under the build's, and no more than the faces could hold
+/// together, each at the bound of one peer the session resolved. So a session of one face lends
+/// what one face's tables held, and one of many lends what its limit says the faces hold together.
+/// Refused when a limit is over the build's value.
+fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
+    let shared = |each: usize, session: usize| each.saturating_mul(faces).min(session);
+    Ok(PeerPoolRows {
+        aliases: shared(
+            lent::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
+                "MAX_PEER_KEYEXPR_ALIASES",
+                limits.max_peer_keyexpr_aliases(),
+            )?,
+            lent::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
+                "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+                limits.session_max_peer_keyexpr_aliases(),
+            )?,
+        ),
+        remote_decls: shared(
+            lent::<{ caps::MAX_REMOTE_DECLS }>("MAX_REMOTE_DECLS", limits.max_remote_decls())?,
+            lent::<{ caps::SESSION_MAX_REMOTE_DECLS }>(
+                "SESSION_MAX_REMOTE_DECLS",
+                limits.session_max_remote_decls(),
+            )?,
+        ),
+        interests: shared(
+            lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
+                "MAX_INBOUND_SUB_INTERESTS",
+                limits.max_inbound_sub_interests(),
+            )?,
+            lent::<{ caps::SESSION_MAX_INBOUND_SUB_INTERESTS }>(
+                "SESSION_MAX_INBOUND_SUB_INTERESTS",
+                limits.session_max_inbound_sub_interests(),
+            )?,
+        ),
+    })
+}
+
+/// The rows of each table of what one face's peer is owed, under `limits`. The replies' area holds
+/// as many replies as the stage has rows, each of the longest key and payload the session admits,
+/// as the build's stage holds them at the build's values.
 fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
     let replies = if cfg!(feature = "queryable") {
         lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?
@@ -680,10 +745,6 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
         .ok_or(ArenaRefused::TooLarge)?
     };
     Ok(PeerRows {
-        sub_interests: lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
-            "MAX_INBOUND_SUB_INTERESTS",
-            limits.max_inbound_sub_interests(),
-        )?,
         pending_declares: lent::<{ caps::MAX_PENDING_DECLARES }>(
             "MAX_PENDING_DECLARES",
             limits.max_pending_declares(),
