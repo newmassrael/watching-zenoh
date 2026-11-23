@@ -102,9 +102,6 @@ use crate::bounded::{
     Arena, BoundedString, BoundedVec, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
 };
 use crate::key_arena::{KeySpace, LentKeys};
-// The fixed own-zid row of a peer's naming is its one reader.
-#[cfg(feature = "storage-profile")]
-use crate::bounded::Static;
 // Not every build reads a held chain here: the arms that do are gated on the body codecs.
 use crate::caps;
 #[cfg(feature = "storage-profile")]
@@ -516,7 +513,37 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION: two sessions of one process may carry two zids, and an echo
     /// is a sample that names the zid of the session it came back on.
     // Inline whatever the policy: sixteen bytes no table lends.
-    own_zid: Option<BoundedVec<u8, 16, Static>>,
+    own_zid: Option<OwnZid>,
+}
+
+/// This session's own zid as the self-echo check compares it: 1 to 16 bytes inline and their
+/// count, in no more than the bytes themselves and one.
+#[cfg(feature = "storage-profile")]
+#[derive(Clone, Copy)]
+struct OwnZid {
+    bytes: [u8; 16],
+    len: u8,
+}
+
+#[cfg(feature = "storage-profile")]
+impl OwnZid {
+    /// The zid `zid` spells, or `None` for one not 1 to 16 bytes long.
+    fn of(zid: &[u8]) -> Option<Self> {
+        if !(1..=16).contains(&zid.len()) {
+            return None;
+        }
+        let mut bytes = [0u8; 16];
+        bytes.get_mut(..zid.len())?.copy_from_slice(zid);
+        Some(Self {
+            bytes,
+            len: u8::try_from(zid.len()).ok()?,
+        })
+    }
+
+    /// The zid's bytes.
+    fn as_slice(&self) -> &[u8] {
+        self.bytes.get(..usize::from(self.len)).unwrap_or(&[])
+    }
 }
 
 /// What a session's peer asked to be told about our subscriptions, and what is
@@ -3349,16 +3376,9 @@ impl<P: Storage> SubscriberPeer<P> {
     /// the session-FSM completion event is an R232+ carry.
     #[cfg(feature = "storage-profile")]
     pub fn set_own_zid_bytes(&mut self, zid: &[u8]) -> bool {
-        if !(1..=16).contains(&zid.len()) {
+        let Some(own) = OwnZid::of(zid) else {
             return false;
-        }
-        let mut own: BoundedVec<u8, 16, Static> = BoundedVec::default();
-        for byte in zid {
-            // At most 16 were admitted above, so the fixed backing has room.
-            if own.push(*byte).is_err() {
-                return false;
-            }
-        }
+        };
         self.naming.own_zid = Some(own);
         true
     }
@@ -3378,7 +3398,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// `source_info.zid_prefix()`.
     #[cfg(feature = "storage-profile")]
     pub fn own_zid(&self) -> Option<&[u8]> {
-        self.naming.own_zid.as_deref()
+        self.naming.own_zid.as_ref().map(OwnZid::as_slice)
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
