@@ -25,6 +25,9 @@ use core::task::{Context, Poll};
 
 use wz_runtime_core::RuntimeError;
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::rc::Rc;
+
 use crate::atomic::{AtomicBool, Ordering};
 use crate::executor::{flag_waker, SpawnRefusal, SpawnRefused, TaskJoin};
 use crate::runtime_impl::CoopRuntime;
@@ -73,18 +76,48 @@ impl<T> Unpin for CoopLocalJoinHandle<T> {}
 
 /// A `!Send` task pool bound to one [`CoopRuntime`]: a view of the runtime's task
 /// table that takes futures that need not be `Send`.
+///
+/// On the heap profile the set's tasks go when the set's last handle does, as they did when a set
+/// kept its own list of them: a session task holds a handle of the runtime, so a task kept by the
+/// runtime's table alone would keep itself, its link and its socket, for as long as the process.
+/// The slot profile's runtime is a `static` that never ends, and its tasks stay.
 pub struct CoopLocalSet<C: ClockSource> {
     runtime: CoopRuntime<C>,
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    owner: Rc<SetOwner<C>>,
     local: PhantomData<*const ()>,
 }
 
-/// A second handle to the same task pool, on the same thread (the type stays `!Send`): what is
-/// spawned through either is polled by a pass of either. A holder that must let the pool's tasks
-/// run while it waits, with no reference to the set's owner, keeps one.
+/// What every handle of one local set shares: its number, and the runtime whose table its tasks
+/// lie in, so the last handle to go drops them.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct SetOwner<C: ClockSource> {
+    runtime: CoopRuntime<C>,
+    set: u32,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<C: ClockSource> Drop for SetOwner<C> {
+    fn drop(&mut self) {
+        self.runtime.inner.executor.drop_tasks_of(self.set);
+    }
+}
+
+/// The number the tasks of the slot profile's local sets are marked with: there is no set to
+/// drop them with, so every set has the one number.
+#[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+const STATIC_SET: u32 = 1;
+
+/// A second handle to the same local set, on the same thread (the type stays `!Send`): what is
+/// spawned through either is polled by a pass of either, and the set's tasks stay while either
+/// does. A holder that must let the pool's tasks run while it waits, with no reference to the
+/// set's owner, keeps one.
 impl<C: ClockSource> Clone for CoopLocalSet<C> {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            owner: Rc::clone(&self.owner),
             local: PhantomData,
         }
     }
@@ -95,9 +128,29 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// local set and any other holder of the same runtime share one task table and
     /// one timer table.
     pub fn new<D: ?Sized>(runtime: &CoopRuntime<C, D>) -> Self {
+        let runtime: CoopRuntime<C> = runtime.with_driver();
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        let owner = Rc::new(SetOwner {
+            set: runtime.inner.executor.new_local_set(),
+            runtime: runtime.clone(),
+        });
         Self {
-            runtime: runtime.with_driver(),
+            runtime,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            owner,
             local: PhantomData,
+        }
+    }
+
+    /// The number this set's tasks are marked with.
+    fn set(&self) -> u32 {
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        {
+            self.owner.set
+        }
+        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
+        {
+            STATIC_SET
         }
     }
 
@@ -118,7 +171,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     where
         F: Future + 'static,
     {
-        let cell = self.runtime.inner.executor.spawn(fut, true)?;
+        let cell = self.runtime.inner.executor.spawn(fut, self.set())?;
         Ok(CoopLocalJoinHandle::new(TaskJoin::attached(cell)))
     }
 
@@ -157,7 +210,7 @@ impl<C: ClockSource> CoopLocalSet<C> {
     where
         F: Future + 'static,
     {
-        let cell = self.runtime.inner.executor.spawn_with(make, true)?;
+        let cell = self.runtime.inner.executor.spawn_with(make, self.set())?;
         Ok(CoopLocalJoinHandle::new(TaskJoin::attached(cell)))
     }
 

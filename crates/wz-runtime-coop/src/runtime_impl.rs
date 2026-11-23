@@ -591,7 +591,7 @@ impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        match self.inner.executor.spawn(fut, false) {
+        match self.inner.executor.spawn(fut, 0) {
             Ok(cell) => CoopJoinHandle::new(TaskJoin::attached(cell)),
             Err(_refused) => CoopJoinHandle::new(TaskJoin::refused()),
         }

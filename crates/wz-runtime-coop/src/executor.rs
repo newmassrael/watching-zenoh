@@ -107,8 +107,9 @@ struct Ops {
 /// What a cell's bookkeeping holds; touched only inside a critical section.
 struct Meta {
     state: State,
-    /// The task was spawned on a local set (`CoopLocalSet`), which counts its own.
-    local: bool,
+    /// The local set (`CoopLocalSet`) the task was spawned on, 0 for none: a set counts its own
+    /// tasks, and the heap profile's drops them when the set is gone.
+    set: u32,
     /// A handle still points at this cell: it is not freed until the handle is
     /// consumed or dropped, so a handle never reads the next task's result.
     handle: bool,
@@ -132,7 +133,7 @@ impl Meta {
     const fn new() -> Self {
         Self {
             state: State::Free,
-            local: false,
+            set: 0,
             handle: false,
             aborted: false,
             has_output: false,
@@ -337,7 +338,7 @@ impl TaskStore {
     /// Add a chunk of free cells, as many as the store holds and at least `FIRST_CHUNK`, with
     /// its first cell already taken for a spawn (`Spawning`): the cell a grown table hands the
     /// spawn that found every other taken.
-    fn grow(&self, local: bool) -> &'static TaskCell {
+    fn grow(&self, set: u32) -> &'static TaskCell {
         let owner: *const TaskStore = self;
         let count = self.len().max(FIRST_CHUNK);
         let chunk: Box<[TaskCell]> = (0..count)
@@ -348,7 +349,7 @@ impl TaskStore {
         let cells: &[TaskCell] = unsafe { &*raw };
         cells[0].with_meta(|meta| {
             meta.state = State::Spawning;
-            meta.local = local;
+            meta.set = set;
         });
         let first: *const TaskCell = &cells[0];
         crate::cs::with(|cs| self.chunks.borrow(cs).borrow_mut().push(raw));
@@ -446,6 +447,12 @@ pub struct ExecutorState {
     /// The bytes of every cell of a fixed table (a `static` one or one reserved); `None` for a
     /// grown table, whose cells take the bytes each task needs.
     cell_bytes: Option<usize>,
+    /// How the table grows; `None` for a fixed one.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    growth: Option<Growth>,
+    /// The number the next local set's tasks are marked with.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    next_set: Mutex<Cell<u32>>,
     refused: Mutex<Cell<Refusals>>,
     /// The most cells the table has held at once: zero-sized unless the build keeps the mark
     /// (`pool-monitor`), so the state is the size it was.
@@ -529,11 +536,26 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> *mut u8 {
     fresh
 }
 
+/// What a grown table does that a fixed one does not, reached only through the table that
+/// grows: a program that makes no grown table links none of it.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone, Copy)]
+struct Growth {
+    /// A cell of a new chunk, already taken for a spawn of the set given.
+    grow: fn(&TaskStore, u32) -> &'static TaskCell,
+    /// Bytes for a task of the size and alignment given, in the cell given.
+    fit: fn(&TaskCell, usize, usize) -> *mut u8,
+}
+
 impl ExecutorState {
     fn over(cells: Cells, cell_bytes: Option<usize>) -> Self {
         Self {
             cells,
             cell_bytes,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            growth: None,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            next_set: Mutex::new(Cell::new(1)),
             refused: Mutex::new(Cell::new(Refusals::default())),
             #[cfg(feature = "session-slot")]
             high: Mutex::new(Cell::new(wz_session_core::pool_gauge::HighWater::new())),
@@ -548,7 +570,12 @@ impl ExecutorState {
             region: ptr::null_mut(),
             region_layout: Layout::new::<u8>(),
         };
-        Self::over(Cells::Store(Arc::new(store)), None)
+        let mut state = Self::over(Cells::Store(Arc::new(store)), None);
+        state.growth = Some(Growth {
+            grow: TaskStore::grow,
+            fit: fit_cell,
+        });
+        state
     }
 
     /// `tasks` cells of `task_bytes` each, reserved now in one block: a spawn past them is
@@ -586,31 +613,40 @@ impl ExecutorState {
         Self::over(Cells::Store(store), Some(task_bytes))
     }
 
+    /// A number for a new local set, which its tasks are marked with: never 0, which marks a task
+    /// that is no set's.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn new_local_set(&self) -> u32 {
+        crate::cs::with(|cs| {
+            let next = self.next_set.borrow(cs);
+            let set = next.get();
+            next.set(set.wrapping_add(1).max(1));
+            set
+        })
+    }
+
     /// The cell at `index`, in the table's order.
     fn cell_at(&self, index: usize) -> Option<&'static TaskCell> {
-        match &self.cells {
+        match self.cells {
             #[cfg(feature = "session-slot")]
-            Cells::Table(cells) => {
-                let cells: &'static [TaskCell] = *cells;
-                cells.get(index)
-            }
+            Cells::Table(cells) => cells.get(index),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Cells::Store(store) => store.cell_at(index),
+            Cells::Store(ref store) => store.cell_at(index),
         }
     }
 
     /// A cell made for a spawn that found every other taken: one of a grown table's new chunk.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn grow(&self, local: bool) -> Option<&'static TaskCell> {
-        match &self.cells {
-            Cells::Store(store) if self.cell_bytes.is_none() => Some(store.grow(local)),
-            _ => None,
+    fn grow(&self, set: u32) -> Option<&'static TaskCell> {
+        let growth = self.growth?;
+        match self.cells {
+            Cells::Store(ref store) => Some((growth.grow)(store, set)),
         }
     }
 
     /// A fixed table does not grow.
     #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
-    fn grow(&self, _local: bool) -> Option<&'static TaskCell> {
+    fn grow(&self, _set: u32) -> Option<&'static TaskCell> {
         None
     }
 
@@ -633,16 +669,16 @@ impl ExecutorState {
 
     /// The cell count of the table: for a grown one, the cells it has grown to so far.
     pub fn capacity(&self) -> usize {
-        match &self.cells {
+        match self.cells {
             #[cfg(feature = "session-slot")]
             Cells::Table(cells) => cells.len(),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Cells::Store(store) => store.len(),
+            Cells::Store(ref store) => store.len(),
         }
     }
 
     /// Write `fut` into a free cell and mark it ready, or refuse it, counted, and
-    /// hand it back. `local`: the task is a local set's.
+    /// hand it back. `set`: the local set the task is spawned on, 0 for none.
     ///
     /// The future is a value passed through here and handed back in the refusal, so a future of
     /// some size is copied through this frame and the caller's result: a large one is made in
@@ -650,9 +686,9 @@ impl ExecutorState {
     pub(crate) fn spawn<F: Future + 'static>(
         &self,
         fut: F,
-        local: bool,
+        set: u32,
     ) -> Result<&'static TaskCell, SpawnRefused<F>> {
-        match self.claim::<F>(local) {
+        match self.claim::<F>(set) {
             Ok(claimed) => Ok(Self::start(claimed, fut)),
             Err(why) => Err(SpawnRefused { future: fut, why }),
         }
@@ -667,19 +703,38 @@ impl ExecutorState {
     pub(crate) fn spawn_with<F: Future + 'static>(
         &self,
         make: impl FnOnce() -> F,
-        local: bool,
+        set: u32,
     ) -> Result<&'static TaskCell, SpawnRefusal> {
-        let claimed = self.claim::<F>(local)?;
+        let claimed = self.claim::<F>(set)?;
         Ok(Self::start(claimed, make()))
     }
 
     /// Take a free cell for a future of type `F`, or refuse, counted: the cell is `Spawning`,
-    /// held by this caller alone, and the offset its output will lie at comes with it.
-    fn claim<F: Future + 'static>(&self, local: bool) -> Result<Claimed, SpawnRefusal> {
+    /// held by this caller alone, and the offset its output will lie at comes with it. Only the
+    /// sizes are `F`'s; the search is [`Self::claim_bytes`], one body for every task type.
+    #[inline(always)]
+    fn claim<F: Future + 'static>(&self, set: u32) -> Result<Claimed, SpawnRefusal> {
         let out_off = round_up(size_of::<F>(), align_of::<F::Output>());
         let need = out_off + size_of::<F::Output>();
+        let align = if align_of::<F>() > align_of::<F::Output>() {
+            align_of::<F>()
+        } else {
+            align_of::<F::Output>()
+        };
+        let (cell, buf) = self.claim_bytes(set, need, align)?;
+        Ok(Claimed { cell, buf, out_off })
+    }
+
+    /// Take a free cell for a task of `need` bytes at `align`, or refuse, counted.
+    #[inline(never)]
+    fn claim_bytes(
+        &self,
+        set: u32,
+        need: usize,
+        align: usize,
+    ) -> Result<(&'static TaskCell, *mut u8), SpawnRefusal> {
         if let Some(cap) = self.cell_bytes {
-            if align_of::<F>() > CELL_ALIGN || align_of::<F::Output>() > CELL_ALIGN || need > cap {
+            if align > CELL_ALIGN || need > cap {
                 self.refuse(SpawnRefusal::TooLarge);
                 return Err(SpawnRefusal::TooLarge);
             }
@@ -692,7 +747,7 @@ impl ExecutorState {
             let taken = cell.with_meta(|meta| {
                 if meta.state == State::Free {
                     meta.state = State::Spawning;
-                    meta.local = local;
+                    meta.set = set;
                     Some(meta.buf)
                 } else {
                     None
@@ -705,7 +760,7 @@ impl ExecutorState {
         };
         let (cell, buf) = match found {
             Some(taken) => taken,
-            None => match self.grow(local) {
+            None => match self.grow(set) {
                 Some(cell) => (cell, cell.with_meta(|meta| meta.buf)),
                 None => {
                     self.refuse(SpawnRefusal::NoTaskCell);
@@ -715,10 +770,9 @@ impl ExecutorState {
         };
         // A grown table's cell takes the bytes this task needs.
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let buf = if self.cell_bytes.is_none() {
-            fit_cell(cell, need, align_of::<F>().max(align_of::<F::Output>()))
-        } else {
-            buf
+        let buf = match self.growth {
+            Some(growth) => (growth.fit)(cell, need, align),
+            None => buf,
         };
         // The cell is taken: the mark is what the table holds now, if that is the most so far.
         #[cfg(all(feature = "pool-monitor", feature = "session-slot"))]
@@ -731,7 +785,7 @@ impl ExecutorState {
                 high.set(mark);
             });
         }
-        Ok(Claimed { cell, buf, out_off })
+        Ok((cell, buf))
     }
 
     /// Write `fut` into the cell `claimed` names and make the task live.
@@ -742,14 +796,26 @@ impl ExecutorState {
         // are long enough and aligned for `F` and its output, which `claim` checked
         // (a fixed table) or gave the cell (a grown one).
         unsafe { ptr::write(buf.cast::<F>(), fut) };
-        cell.cancel.store(false, Ordering::Release);
-        cell.wake.store(true, Ordering::Release);
-        cell.with_meta(|meta| {
-            meta.ops = Some(Ops {
+        Self::go_live(
+            cell,
+            Ops {
                 poll: poll_erased::<F>,
                 drop_future: drop_erased::<F>,
                 drop_output: drop_erased::<F::Output>,
-            });
+            },
+            out_off,
+        );
+        cell
+    }
+
+    /// Make the task whose future `cell` now holds live, driven by `ops`, its output to lie at
+    /// `out_off`: one body for every task type.
+    #[inline(never)]
+    fn go_live(cell: &'static TaskCell, ops: Ops, out_off: usize) {
+        cell.cancel.store(false, Ordering::Release);
+        cell.wake.store(true, Ordering::Release);
+        cell.with_meta(|meta| {
+            meta.ops = Some(ops);
             meta.out_off = out_off;
             meta.has_output = false;
             meta.aborted = false;
@@ -757,7 +823,6 @@ impl ExecutorState {
             meta.join_waker = None;
             meta.state = State::Live;
         });
-        cell
     }
 
     /// The task at `cell` is over (`completed`: its future answered and left its
@@ -801,7 +866,7 @@ impl ExecutorState {
             meta.has_output = false;
             meta.aborted = false;
             meta.handle = false;
-            meta.local = false;
+            meta.set = 0;
             meta.join_waker = None;
             meta.state = State::Free;
         });
@@ -885,7 +950,8 @@ impl ExecutorState {
         while let Some(cell) = self.cell_at(index) {
             index += 1;
             let is = cell.with_meta(|meta| {
-                meta.local && matches!(meta.state, State::Spawning | State::Live | State::Polling)
+                meta.set != 0
+                    && matches!(meta.state, State::Spawning | State::Live | State::Polling)
             });
             if is {
                 running += 1;
@@ -915,11 +981,20 @@ impl ExecutorState {
 /// and handle let go of the table.
 impl Drop for ExecutorState {
     fn drop(&mut self) {
+        self.drop_live(None);
+    }
+}
+
+impl ExecutorState {
+    /// Drop, where it lies, every task that has not ended and was spawned on local set `set` (on
+    /// any set, and on none, for `None`); a handle that still waits for one reads
+    /// `JoinCancelled`. A task being polled is not one of them.
+    fn drop_live(&self, set: Option<u32>) {
         let mut index = 0;
         while let Some(cell) = self.cell_at(index) {
             index += 1;
             let live = cell.with_meta(|meta| {
-                if meta.state != State::Live {
+                if meta.state != State::Live || set.is_some_and(|set| set != meta.set) {
                     return None;
                 }
                 let ops = meta.ops?;
@@ -934,6 +1009,14 @@ impl Drop for ExecutorState {
                 Self::finish(cell, false);
             }
         }
+    }
+
+    /// The last handle of local set `set` is gone: its tasks go with it, as they did when a set
+    /// kept its own list of them. A task that holds a handle of the runtime would otherwise keep
+    /// itself, and the socket it reads, alive through the runtime's table.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn drop_tasks_of(&self, set: u32) {
+        self.drop_live(Some(set));
     }
 }
 

@@ -314,7 +314,8 @@ fn a_reserved_runtime_allocates_when_it_is_made_and_never_after() {
                 })
                 .expect("a cell");
             let spinner = local.try_spawn_local(forever()).expect("a cell");
-            let _ = runtime.spawn(async move { round });
+            // Held to the round's end, so its cell is the runtime contract's until then.
+            let _contract = runtime.spawn(async move { round });
             assert_eq!(local.block_on_local(answer).expect("ran"), round);
             spinner.abort();
             local.run_until_idle();
@@ -521,6 +522,42 @@ fn dropping_the_runtime_drops_its_tasks_and_their_handles_read_cancelled() {
         poll_once(&mut handle),
         Poll::Ready(Err(RuntimeError::JoinCancelled))
     ));
+}
+
+/// A session's task holds a handle of the runtime, so the runtime's table alone would keep it, and
+/// what it reads with, for good: its set's last handle takes it, and another set's tasks stay.
+#[test]
+fn dropping_a_local_set_drops_its_tasks_while_the_runtime_lives() {
+    static DROPS: AtomicU32 = AtomicU32::new(0);
+    let runtime = CoopRuntime::new(Still);
+    let first = CoopLocalSet::new(&runtime);
+    let second = CoopLocalSet::new(&runtime);
+    let held = runtime.clone();
+    let guard = Counted(&DROPS);
+    let mut gone = first.spawn_local(async move {
+        let _runtime = held;
+        let _guard = guard;
+        forever().await;
+    });
+    let stays = second.spawn_local(forever());
+    second.run_until_idle();
+    assert_eq!(DROPS.load(Ordering::SeqCst), 0, "alive while its set is");
+    drop(first);
+    assert_eq!(
+        DROPS.load(Ordering::SeqCst),
+        1,
+        "the set's task went with the set, though it held the runtime"
+    );
+    assert!(matches!(
+        poll_once(&mut gone),
+        Poll::Ready(Err(RuntimeError::JoinCancelled))
+    ));
+    assert!(!stays.is_finished(), "another set's task stays");
+    assert_eq!(second.live_local_task_count(), 1);
+    stays.abort();
+    second.run_until_idle();
+    drop(stays);
+    assert_eq!(runtime.live_task_count(), 0);
 }
 
 #[test]
