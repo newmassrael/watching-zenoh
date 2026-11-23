@@ -423,6 +423,48 @@ config WZ_LIMIT_MAX_ACCEPT_PENDING
 	  memory when it opens, so that a link past either bound can be taken off its
 	  port and closed, and a session may lower this and never raise it.
 
+config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
+	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The key expressions all the peers of a session may have declared to it at
+	  a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES. One more is
+	  refused and counted as one past a peer's own bound is. The cooperative
+	  engine keeps them in one pool its faces share, the fewer of this and as
+	  many as its faces could hold, so a peer that declares few leaves its share
+	  to the others. The default is MAX_PEER_KEYEXPR_ALIASES for each face of
+	  the default MAX_FACES and the dial's, so it refuses nothing a face's bound
+	  admits.
+
+config WZ_LIMIT_SESSION_MAX_REMOTE_DECLS
+	int "SESSION_MAX_REMOTE_DECLS"
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The declarations of one kind (subscribers, queryables, liveliness tokens)
+	  all the peers of a session may hold open to it at a time, each peer also
+	  held to MAX_REMOTE_DECLS. One more is refused and counted as one past a
+	  peer's own bound is, and the application is not told of it. The
+	  cooperative engine keeps them in one pool of each kind its faces share,
+	  the fewer of this and as many as its faces could hold. The default is
+	  MAX_REMOTE_DECLS for each face of the default MAX_FACES and the dial's, so
+	  it refuses nothing a face's bound admits.
+
+config WZ_LIMIT_SESSION_MAX_INBOUND_SUB_INTERESTS
+	int "SESSION_MAX_INBOUND_SUB_INTERESTS"
+	default 16 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The interests in this session's subscribers that all its peers may have
+	  it remember at a time, each peer also held to MAX_INBOUND_SUB_INTERESTS.
+	  Past it a peer still gets the subscribers of the moment, not the later
+	  ones, as past a peer's own bound. The cooperative engine keeps them in one
+	  pool its faces share, the fewer of this and as many as its faces could
+	  hold. The default is MAX_INBOUND_SUB_INTERESTS for each face of the
+	  default MAX_FACES and the dial's, so it refuses nothing a face's bound
+	  admits.
+
 config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	int "QUERIER_MAX_PENDING_QUERIES"
 	default 0

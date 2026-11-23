@@ -72,6 +72,16 @@ pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STA
 pub(super) const MAX_PEER_NODES: usize = limit(option_env!("WZ_LIMIT_MAX_PEER_NODES"), 0);
 pub(super) const MAX_FACES: usize = limit(option_env!("WZ_LIMIT_MAX_FACES"), 1000);
 pub(super) const MAX_ACCEPT_PENDING: usize = limit(option_env!("WZ_LIMIT_MAX_ACCEPT_PENDING"), 100);
+pub(super) const SESSION_MAX_PEER_KEYEXPR_ALIASES: usize = limit(
+    option_env!("WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"),
+    16016,
+);
+pub(super) const SESSION_MAX_REMOTE_DECLS: usize =
+    limit(option_env!("WZ_LIMIT_SESSION_MAX_REMOTE_DECLS"), 16016);
+pub(super) const SESSION_MAX_INBOUND_SUB_INTERESTS: usize = limit(
+    option_env!("WZ_LIMIT_SESSION_MAX_INBOUND_SUB_INTERESTS"),
+    16016,
+);
 pub(super) const QUERIER_MAX_PENDING_QUERIES: usize =
     limit(option_env!("WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"), 0);
 pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
