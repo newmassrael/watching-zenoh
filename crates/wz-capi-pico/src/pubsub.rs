@@ -1264,14 +1264,16 @@ impl PublisherQos {
     /// pointer means (`vendor/zenoh-pico/src/api/api.c` @
     /// `z_publisher_options_default(&opt);`) and what the heartbeat publisher of
     /// an advanced publisher is declared with.
+    ///
+    /// Read from the options `z_publisher_options_default` writes, so the defaults are stated
+    /// once, where C reads them.
     pub(crate) fn pico_default() -> Self {
-        Self {
-            encoding: None,
-            congestion_control: push_congestion_from_pico(crate::qos::Z_CONGESTION_CONTROL_DROP),
-            priority: crate::qos::priority_from_pico(crate::qos::Z_PRIORITY_DEFAULT),
-            is_express: false,
-            reliability: reliability_from_pico(Z_RELIABILITY_RELIABLE),
-            destination: crate::locality::default_locality!("local-subscriber"),
+        let mut options = core::mem::MaybeUninit::<z_publisher_options_t>::uninit();
+        // SAFETY: the default writes every field of the options, which hold no moved encoding, so
+        // reading them consumes nothing.
+        unsafe {
+            z_publisher_options_default(options.as_mut_ptr());
+            Self::declared_by(options.as_ptr())
         }
     }
 
@@ -1974,6 +1976,40 @@ mod put_options_tests {
             "the publisher's encoding fills the gap"
         );
         assert_eq!(bare.attachment, None);
+    }
+
+    /// A publisher declared with no options, or with null ones, takes what
+    /// `z_publisher_options_default` states: no encoding, drop, the default priority, not express,
+    /// reliable, and the build's destination. Turned red by a default read from anywhere else that
+    /// states another value.
+    #[test]
+    fn a_publisher_with_no_options_takes_the_c_defaults() {
+        use super::{
+            push_congestion_from_pico, reliability_from_pico, PublisherQos, Z_RELIABILITY_RELIABLE,
+        };
+        // SAFETY: a null options pointer is the default.
+        for declared in [PublisherQos::pico_default(), unsafe {
+            PublisherQos::declared_by(core::ptr::null())
+        }] {
+            assert!(declared.encoding.is_none());
+            assert_eq!(
+                declared.congestion_control,
+                push_congestion_from_pico(crate::qos::Z_CONGESTION_CONTROL_DROP)
+            );
+            assert_eq!(
+                declared.priority,
+                crate::qos::priority_from_pico(crate::qos::Z_PRIORITY_DEFAULT)
+            );
+            assert!(!declared.is_express);
+            assert_eq!(
+                declared.reliability,
+                reliability_from_pico(Z_RELIABILITY_RELIABLE)
+            );
+            assert_eq!(
+                declared.destination,
+                crate::locality::default_locality!("local-subscriber")
+            );
+        }
     }
 
     /// A session's put consumes its payload and its options' moved attachment on every path, as
