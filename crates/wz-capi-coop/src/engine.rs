@@ -445,12 +445,13 @@ impl EndpointRefusal {
     /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
     /// longer than that is kept up to the last whole character that fits.
     pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
-        let mut kept = LocatorText::new();
-        for c in endpoint.chars() {
-            if kept.push(c).is_err() {
-                break;
-            }
+        let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
+        while !endpoint.is_char_boundary(cut) {
+            cut = cut.saturating_sub(1);
         }
+        let mut kept = LocatorText::new();
+        // The cut is at most a row's length, so the text before it fits whole.
+        let _ = kept.push_str(endpoint.get(..cut).unwrap_or_default());
         Self {
             endpoint: kept,
             why,

@@ -332,6 +332,7 @@ pub struct ArenaPlan {
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
+    #[inline(never)]
     pub fn of<E: EndpointList>(
         config: &CoopConfig<E>,
         limits: &SessionLimits,
