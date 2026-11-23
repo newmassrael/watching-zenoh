@@ -437,9 +437,9 @@ enum Keeps {
     #[default]
     Nothing,
     /// An object of the ABI's that retracts the declaration when the last holder lets it go.
-    Anchor(Arc<dyn Send + Sync>),
+    Anchor { _held: Arc<dyn Send + Sync> },
     /// One hold on the declaration, counted by the engine itself.
-    Hold(KeyHold),
+    Hold { _held: KeyHold },
 }
 
 impl core::fmt::Debug for WireKey {
@@ -514,20 +514,20 @@ impl WireKey {
         Self {
             mapping_id,
             suffix,
-            keeps: None,
+            keeps: Keeps::Nothing,
         }
     }
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
     pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Keeps::Anchor(anchor);
+        self.keeps = Keeps::Anchor { _held: anchor };
         self
     }
 
     /// This key, holding the declaration `hold` holds for as long as a declaration made on it
     /// stays recorded, in the engine's own count and with nothing of its own on the heap.
     pub fn holding(mut self, hold: KeyHold) -> Self {
-        self.keeps = Keeps::Hold(hold);
+        self.keeps = Keeps::Hold { _held: hold };
         self
     }
 
