@@ -559,10 +559,13 @@ impl Blocks {
         *byte & bit != 0
     }
 
-    /// Put the block at `offset` of `order` first on its list of free blocks, marked.
+    /// Put the block at `offset` of `order` first on its list of free blocks, marked. Out of
+    /// line, as [`Self::unlink`] is: laying the area, splitting a block and joining one each
+    /// call it, and each would otherwise hold a copy.
     ///
     /// # Safety
     /// The block lies in the area and nothing holds it.
+    #[inline(never)]
     unsafe fn push(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
         let head = self.free[order];
         self.free_block(base, offset).write(FreeBlock {
@@ -582,6 +585,7 @@ impl Blocks {
     ///
     /// # Safety
     /// A free block of `order` starts at `offset`.
+    #[inline(never)]
     unsafe fn unlink(&mut self, base: NonNull<u8>, offset: usize, order: usize) {
         let FreeBlock { prev, next, .. } = self.free_block(base, offset).read();
         if prev == NONE {
