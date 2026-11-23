@@ -28,7 +28,7 @@
 #![no_main]
 
 use std::cell::{Cell, UnsafeCell};
-use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use libfuzzer_sys::fuzz_target;
 use wz_fuzz_ingress_common::{
@@ -73,7 +73,8 @@ type Runtime = CoopRuntime<Clock, Nowhere>;
 /// application layer's observer.
 static RUNTIME: RuntimeCell<Clock, 4, 512, 4> = RuntimeCell::new();
 static SESSIONS: SessionSlots<Runtime, CoopTime<Clock>, Nowhere, Counting, 1> = SessionSlots::new();
-static PUMPS: PumpSlots<Clock, Rc<Feed>, 1, Nowhere> = PumpSlots::new();
+static PUMPS: PumpSlots<Clock, Feed, 1, Nowhere> = PumpSlots::new();
+static DATAGRAMS: Datagrams = Datagrams::new();
 static APP: SlotApp = SlotApp::new();
 
 std::thread_local! {
@@ -164,54 +165,74 @@ impl BoxedLinkDriver for Nowhere {
     }
 }
 
-/// The link's inbound half: the far end's replies and the fuzzer's units, laid out before the
-/// session runs, and lent one at a time, where they lie, as the harness lets each go.
-struct Feed {
+/// The far end's replies and the fuzzer's units, laid out before the session runs and lent one
+/// at a time, where they lie, as the harness lets each go. A `static`, as an image's receive
+/// buffers are: the slot profile moves its link into the pump's cell by value and shares it by
+/// no pointer, so the link is a handle to this ([`Feed`]).
+struct Datagrams(Mutex<Queue>);
+
+struct Queue {
     bytes: Vec<u8>,
     bounds: Vec<(usize, usize)>,
-    next: Cell<usize>,
-    released: Cell<usize>,
+    next: usize,
+    released: usize,
 }
 
-impl Feed {
-    fn new<'a>(datagrams: impl IntoIterator<Item = &'a [u8]>) -> Self {
-        let mut bytes = Vec::new();
-        let mut bounds = Vec::new();
+impl Datagrams {
+    const fn new() -> Self {
+        Self(Mutex::new(Queue {
+            bytes: Vec::new(),
+            bounds: Vec::new(),
+            next: 0,
+            released: 0,
+        }))
+    }
+
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Lay out `datagrams` in place of the last input's, none of them let go yet.
+    fn fill<'a>(&self, datagrams: impl IntoIterator<Item = &'a [u8]>) {
+        let mut queue = self.queue();
+        queue.bytes.clear();
+        queue.bounds.clear();
         for datagram in datagrams {
-            let at = bytes.len();
-            bytes.extend_from_slice(datagram);
-            bounds.push((at, bytes.len()));
+            let at = queue.bytes.len();
+            queue.bytes.extend_from_slice(datagram);
+            let end = queue.bytes.len();
+            queue.bounds.push((at, end));
         }
-        Self {
-            bytes,
-            bounds,
-            next: Cell::new(0),
-            released: Cell::new(0),
-        }
+        queue.next = 0;
+        queue.released = 0;
     }
 
     /// Let the next datagram go; `false` once every one has been.
     fn release(&self) -> bool {
-        let released = self.released.get();
-        if released == self.bounds.len() {
+        let mut queue = self.queue();
+        if queue.released == queue.bounds.len() {
             return false;
         }
-        self.released.set(released + 1);
+        queue.released += 1;
         true
     }
 }
+
+/// The link's inbound half: a handle to [`DATAGRAMS`], moved into the pump's cell.
+struct Feed(&'static Datagrams);
 
 impl SessionDatagramLink for Feed {
     fn service(&self) {}
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        let next = self.next.get();
-        if next >= self.released.get() {
+        let mut queue = self.0.queue();
+        let next = queue.next;
+        if next >= queue.released {
             return false;
         }
-        self.next.set(next + 1);
-        let (start, end) = self.bounds[next];
-        f(&self.bytes[start..end]);
+        queue.next = next + 1;
+        let (start, end) = queue.bounds[next];
+        f(&queue.bytes[start..end]);
         true
     }
 }
@@ -252,9 +273,7 @@ fuzz_target!(|data: &[u8]| {
         None => (0, data),
     };
     let replies = handshake_replies();
-    let feed = Rc::new(Feed::new(
-        replies.iter().map(Vec::as_slice).chain(units(stream)),
-    ));
+    DATAGRAMS.fill(replies.iter().map(Vec::as_slice).chain(units(stream)));
     let runtime = STARTED.with(Runtime::clone);
     let Ok(claim) = SESSIONS.claim(Nowhere::new(), Counting(0)) else {
         panic!("the session slot is free when an input begins");
@@ -267,7 +286,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let Ok(mut pump) = PUMPS.claim(
         runtime.clone(),
-        feed.clone(),
+        Feed(&DATAGRAMS),
         actions.clone(),
         CoopTime::new(&runtime),
         config,
@@ -282,7 +301,7 @@ fuzz_target!(|data: &[u8]| {
 
     let window = Window::open();
     for _ in replies.iter() {
-        feed.release();
+        DATAGRAMS.release();
     }
     for _ in 0..HANDSHAKE_STEPS {
         if actions.is_established() || pump.step(&mut on_event).is_some() {
@@ -293,7 +312,7 @@ fuzz_target!(|data: &[u8]| {
         actions.is_established(),
         "the far end's handshake opens the session: the harness is wrong when it does not"
     );
-    'units: while feed.release() {
+    'units: while DATAGRAMS.release() {
         advance_ms(pace);
         for _ in 0..=STEPS_PER_UNIT {
             if pump.step(&mut on_event).is_some() {
