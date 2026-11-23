@@ -185,7 +185,7 @@ pub fn set_chain<S: MsgPutStorage>(
     entries: impl IntoIterator<Item = ExtEntryOwned<S>>,
 ) -> Result<(), CodecError> {
     let mut list = <ChainList<S> as SceList<ExtEntryOwned<S>>>::empty();
-    let mut count = 0;
+    let mut count = 0usize;
     for entry in entries {
         list.try_push(entry)?;
         count = count.saturating_add(1);
