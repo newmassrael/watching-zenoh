@@ -410,9 +410,8 @@ For round 5 (section 9): `--scope 'drop_glue::<.*(NetworkMessage|DeclareIn|PushI
 (R3-d), `--scope '_(take|drop)$|take_block|drop_block'` (R5-a), and `nm -C` for
 `decode_one_record::<alloc::vec::Vec` and `decide_unit_in` (next list item 1).
 
-For round 6 (section 10): `--scope 'core::net::parser|dial::(socket_addr|ipv4_address|ipv6_)'` (R6-a),
-`--scope 'BTreeMap|zp_config_insert|z_config_clone|ConfigState'` (R6-b) and
-`--scope '^z_put$|^z_publisher_put$|PutCarried|put_options'` (R6-c).
+For round 6 (section 10): `--scope 'core::net::parser|dial::(socket_addr|ipv4_address|ipv6_)'` (R6-a)
+and `--scope '^z_put$|^z_publisher_put$|PutCarried|put_options'` (R6-c).
 
 ## 5. Round 2: where the no_std form's code goes, and what pico's build does not carry
 
@@ -822,7 +821,7 @@ goal still needs the session core's send side and the engine's own size read fro
 this branch, in that order.
 
 
-## 10. Round 6: section 9's list read against a newer build, and three cuts
+## 10. Round 6: section 9's list read against a newer build, and two cuts
 
 Nothing of round 6 was built or measured when this was written. The starting figures are measured
 on the base of this round (rounds 1 to 5 merged; the same linker on both arms, both packed and
@@ -843,7 +842,7 @@ rounds did not change it; where they did, this branch's code is read instead, as
 | 3 | the address parser | `core::net`'s parser 2,963 (`read_ipv4_addr` 953, `read_number::<u16>` 669, `read_ipv6_addr` and its groups 842, `read_socket_addr_v6` 415), reached only from `dial::parse_endpoint` through `SocketAddrV6::from_str`; the IPv4 reader (1,193) was wz's already | R6-a below | -2K to -2.5K |
 | 4 | the registry's teardown | `Rc<RefCell<Registry>>::drop_slow` 1,566, the engine's drop 1,537, `Registry::new` 1,823 | not done: the registry and the arena are the faces work's files in this round | (-2K to -4K) |
 | 5 | the put doors | `z_put` 2,206, `z_publisher_put` 2,526 | R6-c below | -0.5K to -1.5K |
-| 6 | the config door | `zp_config_insert` 3,328 is a `BTreeMap<u8, String>` insert inlined, beside the map's `clone_subtree` 902 and its share of `Box<ConfigState>`'s drop 898: the cost is the map, not a match over keys | R6-b below, in that form | -3K to -4.5K |
+| 6 | the config door | `zp_config_insert` 3,328 is a `BTreeMap<u8, String>` insert inlined, beside the map's `clone_subtree` 902 and its share of `Box<ConfigState>`'s drop 898: the cost is the map, not a match over keys | moved to the no-heap unit U14, which replaces `ConfigState`'s storage with a fixed table reserved by the limits; a list made here (R6-b) was reverted, as `config.rs` is that unit's | (-3K to -4.5K, in U14) |
 | 7 | the key expression matcher | 11,008, `keyexpr_canon` 3,995; the matcher is generated from `sources/algorithms/keyexpr_*.scxml`, so a shared chunk walk is a change of those documents and a regeneration | not done | (-1K to -3K) |
 | 8 | the handshake and OAM decode | a transport OAM's decode gives the length the unit's reader goes on from, and a network OAM's decode is how the walk steps over one; `parse_init` and `parse_open` read the syn and the ack by one document each | not done: without the decode a batch holding an OAM delivers nothing after it, and a reader of the acks alone is a second document | (-1K to -2.5K) |
 | 9 | the outbound key mappings | `RawTable<(u16, String)>::reserve_rehash` 1,424, `foldhash` 463 | not done: the key storage work's | (-1.5K to -2K) |
@@ -860,20 +859,17 @@ octets of both forms are one reader (`ipv4_address`), and `decimal` sums in 64 b
 which reads 11,776 texts both ways (each count of groups before and after `::`, `::` twice, a fifth
 digit, either case, an IPv4 address in each place and malformed, scopes and ports on either side of
 their rules, malformed brackets and non-ASCII digits) and asserts both answers are reached; the
-IPv4 reader is still held to `SocketAddrV4`'s by `the_ipv4_reader_reads_what_core_reads`. In the
+IPv4 reader is still held to `SocketAddrV4`'s by `the_ipv4_reader_reads_what_core_reads`. The
+module is compiled with `dial`, so a default build of the crate runs neither; Layer C1m's
+`adminspace-write` and `adminspace-core,adminspace-write` legs do (62 and 74). In the
 std form `core::net`'s parser stays where the host's standard library names it, so the estimate
 is the no_std form's.
 
-### R6-b: a config's keys in a list (landed)
+### R6-b: a config's keys in a list (reverted; item 6 is U14's)
 
-`refactor(capi-pico): Hold a config's keys in a list, not a map`. `ConfigState::entries` is a
-`Vec<(u8, String)>` read by one scan: `insert` replaces the value of a key set before and appends
-otherwise, `get` and `zp_config_get` find the key. Nothing read the keys in order. A value
-`zp_config_get` lent stays where it is while other keys are set, because each value is an
-allocation of its own that moving the list does not move. Held by `config::tests`: a key set
-twice holds the value set last, an absent key and an empty value, the lent pointer unchanged after
-64 other keys, a value that is not text or is null refused with the key left as it was, and a
-clone that holds its own values. Both forms.
+`ConfigState::entries` as a `Vec<(u8, String)>` read by one scan was committed and reverted in
+this round: the no-heap unit U14 replaces the config's storage with a fixed table the limits
+reserve, so the config door's bytes are counted there and `config.rs` is that unit's file.
 
 ### R6-c: one fold for both put doors (landed)
 
@@ -894,7 +890,9 @@ tests that were there. Both forms.
 | 3 | the delivery lane | `lane` 14,274 (`LaneHeld::offer_sample` 4,435, `SampleLane::over_in` 2,191) | kept by D8; read for a body per sample kind that one body with the kind as data would do | -1K to -3K |
 | 4 | the bound a client decides at each handshake | `region_partition::transient_region_of` 895 and the interface list `decide_local_remote_bound` collects | with `config-policy` off nothing states a south partition, so it is `Auto` and the answer `None`; compile the decision only where a partition can be stated | -0.8K to -1.2K |
 | 5 | items 4, 7, 8 and 9 of section 9 | as the table above says | as section 9 says | -5.5K to -11.5K |
+| 6 | item 6 of section 9, the config door | `zp_config_insert`, the map's clone and drop | U14's fixed table | -3K to -4.5K |
 
-Round 6's three cuts are estimated at -5.5K to -8.5K in the no_std form, about 452K to 456K against
-329,664 (1.37x to 1.38x). The 1.0x goal needs about -125K more: the engine's own code (item 2) and the
+Round 6's two cuts are estimated at -2.5K to -4K in the no_std form, about 457K to 458.5K against
+329,664 (1.39x); U14's config table is estimated at -3K to -4.5K of its own. The 1.0x goal needs
+about -128K more: the engine's own code (item 2) and the
 session core's send side are where the volume is, in that order.
