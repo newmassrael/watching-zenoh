@@ -581,6 +581,10 @@ impl<L: SessionDatagramLink + ?Sized, F: EventSink + ?Sized> EventSink for LinkS
     fn holds_datagram(&self) -> bool {
         self.link.keeps_input()
     }
+
+    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+        self.sink.lend_rejoined(message)
+    }
 }
 
 /// A shared link is a link: the same object is usually the session's

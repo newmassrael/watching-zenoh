@@ -684,6 +684,9 @@ pub(crate) struct Round {
     /// where it lies until it is next asked to receive (`RoundGate::recv_with`): its first byte
     /// and its length. Written under the session's lock.
     lending: UnsafeCell<Option<(*const u8, usize)>>,
+    /// The datagram lent before a rejoined message was lent in its place ([`Self::lend_rejoined`]),
+    /// lent again once the message's records are dispatched. Written under the session's lock.
+    lent_before: UnsafeCell<Option<(*const u8, usize)>>,
     /// The callbacks of the subscribers the samples offered now reach, copied out of their rows
     /// instead of held, while the session's own put asks for them ([`Self::capture`]). Written
     /// under the session's lock.
@@ -776,6 +779,7 @@ impl Round {
             ptr::write(addr_of_mut!((*at).lends), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).owes), AtomicBool::new(false));
             ptr::write(addr_of_mut!((*at).lending), UnsafeCell::new(None));
+            ptr::write(addr_of_mut!((*at).lent_before), UnsafeCell::new(None));
             #[cfg(feature = "local-subscriber")]
             ptr::write(addr_of_mut!((*at).capturing), UnsafeCell::new(None));
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
@@ -805,6 +809,7 @@ impl Round {
             lends: _,
             owes: _,
             lending: _,
+            lent_before: _,
             #[cfg(feature = "local-subscriber")]
                 capturing: _,
             dropped: _,
@@ -1264,6 +1269,28 @@ impl Round {
         self.owes.load(Ordering::Acquire)
     }
 
+    /// The records offered from here on lie in `message`, a message rejoined from its fragments in
+    /// its chain's buffer, until the same call with `None`, which lends again the datagram lent
+    /// before it. A part is read there only while the round lends nothing else
+    /// (`Table::lent`); otherwise it is copied, as one from any source but the lent one is. The
+    /// buffer is written again only when a fragment is staged into it, which needs a link read,
+    /// and the gate reads none while the round lends.
+    ///
+    /// # Safety
+    /// The caller holds the session's lock.
+    pub(crate) unsafe fn lend_rejoined(&self, message: Option<&[u8]>) {
+        // SAFETY: the caller's contract: both are written under the session's lock alone.
+        unsafe {
+            match message {
+                Some(bytes) => {
+                    *self.lent_before.get() = *self.lending.get();
+                    *self.lending.get() = Some((bytes.as_ptr(), bytes.len()));
+                }
+                None => *self.lending.get() = (*self.lent_before.get()).take(),
+            }
+        }
+    }
+
     /// Whether a record lies in the datagram a link lent: no link is read or serviced until its
     /// callbacks have returned. Asked by the session's step, which holds the session's lock.
     pub(crate) fn lends_a_datagram(&self) -> bool {
@@ -1555,8 +1582,8 @@ impl ReplyView for RoundReply<'_> {
 
 /// The group twin of [`RoundGate`]: whether the round has the room one record of a group can
 /// take (`room`, decision Q4), asked before each datagram of the group and before each further
-/// message and record of one its transport keeps. While it has not, what the members send waits
-/// in the group's socket.
+/// message and record of one its transport keeps, and holds nothing lent. While it has not, what
+/// the members send waits in the group's socket.
 ///
 /// # Safety
 /// The gate it answers is asked by the session's step alone, under the session's lock, as the
@@ -1567,7 +1594,7 @@ pub(crate) unsafe fn takes_a_group_read(
     room: ReadRoom,
 ) -> impl Fn() -> bool + 'static {
     // SAFETY: the caller's contract: the session's lock is held whenever this is asked.
-    move || !round.owes() && unsafe { round.has_room(room) }
+    move || !round.owes() && !round.lends_a_datagram() && unsafe { round.has_room(room) }
 }
 
 /// `pump`, which gives the session nothing while the round has not the room one record can take

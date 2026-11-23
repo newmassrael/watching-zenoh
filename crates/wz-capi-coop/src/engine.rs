@@ -1901,9 +1901,8 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     /// The link's generation, which the queries it carries are answered under.
     #[cfg(feature = "queryable")]
     generation: u64,
-    /// What a debug build tells, while a record is dispatched, that what is offered waited for
-    /// room (`Gated`).
-    #[cfg(debug_assertions)]
+    /// The session's round of deliveries: told where a rejoined message lies while its records are
+    /// dispatched, and, in a debug build, that what is offered waited for room (`Gated`).
     lane: Arc<Round>,
 }
 
@@ -1973,6 +1972,13 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             feature = "declarations-synced-event"
         ))]
         registry.settle_decl_events(|| actions.peer_zid());
+    }
+
+    /// A rejoined message's records are read where its chain lies for as long as the round holds
+    /// them: the gate reads no link meanwhile, so no fragment is staged over it.
+    fn lend_rejoined(&mut self, message: Option<&[u8]>) {
+        // SAFETY: a link's records are dispatched by the session's step, under the session's lock.
+        unsafe { self.lane.lend_rejoined(message) };
     }
 }
 
@@ -2315,7 +2321,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             plane: self.plane.clone(),
             #[cfg(feature = "queryable")]
             generation,
-            #[cfg(debug_assertions)]
             lane: self.lane.clone(),
         };
         // The link's fragmented messages are staged in buffers of the session's one table, which

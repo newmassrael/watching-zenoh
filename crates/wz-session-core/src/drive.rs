@@ -3050,6 +3050,9 @@ where
                 #[cfg(feature = "alloc")]
                 has_ext: false,
             };
+            // The message lies in its chain's buffer until the next fragment is staged: a host
+            // that holds the records it is handed may read them there.
+            on_event.lend_rejoined(Some(message));
             dropped_by_decode = walk_records_in_place(
                 message,
                 carrier,
@@ -3066,6 +3069,7 @@ where
                 &mut *on_event,
             )
             .err();
+            on_event.lend_rejoined(None);
         },
     );
     // The chain this fragment ended besides its own, which the in-place

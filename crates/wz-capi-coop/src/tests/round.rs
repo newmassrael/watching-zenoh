@@ -221,6 +221,41 @@ fn the_samples_of_a_lent_datagram_are_handed_where_they_lie() {
     );
 }
 
+/// A rejoined message's records are read where its chain lies while the round lends nothing else,
+/// and the datagram lent before the message is lent again after it; the round lends one source,
+/// so the datagram's record that follows is copied. The CONTROL is its payload's place.
+#[test]
+fn a_rejoined_message_is_read_where_its_chain_lies() {
+    let round = round(1024, 4);
+    let seen: Noted = Arc::default();
+    let first = noting(1, &seen);
+    let datagram = [1u8, 1];
+    let chain = [2u8, 2];
+    // SAFETY (each call): this thread is the round's one writer, and both buffers outlive it.
+    unsafe { round.set_lending(Some(&datagram[..])) };
+    unsafe { round.lend_rejoined(Some(&chain[..])) };
+    unsafe { round.offer_sample(1, Some(&first), &borrowed(&chain[..])) };
+    unsafe { round.lend_rejoined(None) };
+    unsafe { round.offer_sample(1, Some(&first), &borrowed(&datagram[..])) };
+    unsafe { round.set_lending(None) };
+    assert!(round.lends_a_datagram(), "the chain is held where it lies");
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    let places: Vec<usize> = seen.lock().unwrap().iter().map(|(_, _, at)| *at).collect();
+    assert_eq!(places.len(), 2);
+    assert_eq!(
+        places[0],
+        chain.as_ptr() as usize,
+        "read where the chain lies"
+    );
+    assert_ne!(
+        places[1],
+        datagram.as_ptr() as usize,
+        "CONTROL: the round lent the chain, so the datagram's record was copied"
+    );
+    assert_eq!(round.samples_lent(), 1);
+}
+
 /// A sample offered again for a subscriber it is for already is a record of its own, handed to
 /// that subscriber twice.
 #[test]
