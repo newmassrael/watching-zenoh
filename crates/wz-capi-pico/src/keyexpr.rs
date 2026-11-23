@@ -12,6 +12,7 @@
 use alloc::sync::{Arc, Weak};
 use core::ffi::{c_char, c_void, CStr};
 use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 
 use crate::prelude::*;
 
@@ -128,51 +129,123 @@ impl Drop for WireDeclaration {
 }
 
 /// A key's text as an object of this ABI keeps it: in its session's key arena when the session
-/// keeps one, a block the session's own record of an equal key shares ([`SessionKey`]), and a copy
-/// of its own otherwise: a key made with no session, or for an engine that keeps no key arena.
-pub(crate) enum KeyText {
-    /// A copy of its own.
-    Owned(String),
-    /// A block of the session's key arena.
-    Session(SessionKey),
+/// keeps one, a block the session's own record of an equal key shares, and a copy of its own
+/// otherwise: a key made with no session, or for an engine that keeps no key arena.
+///
+/// The text is read where its keeper keeps it the same way for either keeper, two words and no
+/// branch; sharing it and letting go of it are one body each, out of line, for every object that
+/// keeps a key, since a block of the arena is shared and let go of under the session's lock.
+pub(crate) struct KeyText {
+    /// The first byte of the text, where `keeper` keeps it: a `String`'s heap buffer, or a held
+    /// block of the session's key arena. Neither moves with the keeper, nor is written while held.
+    text: NonNull<u8>,
+    len: usize,
+    /// Taken only by the drop.
+    keeper: ManuallyDrop<Keeper>,
 }
 
+/// Who keeps the bytes of a [`KeyText`].
+enum Keeper {
+    /// A copy of its own.
+    Owned(String),
+    /// A block of the session's key arena, shared and let go of through the engine, which the
+    /// holder keeps for as long as the block is held.
+    Session { engine: Arc<Engine>, key: HeldKey },
+}
+
+// SAFETY: what is read through `text` with no lock is the bytes the keeper keeps, which nothing
+// writes while it lives; the keeper itself (a `String`, or the engine's `Arc` and a `HeldKey`,
+// each `Send` and `Sync`) is touched only by `share` and by the drop, which reach a block of the
+// arena through the engine under the session's lock.
+unsafe impl Send for KeyText {}
+// SAFETY: as `Send`: a shared reference reads the text and shares the keeper.
+unsafe impl Sync for KeyText {}
+
 impl KeyText {
+    /// `text` as a copy of its own.
+    pub(crate) fn owned(text: String) -> Self {
+        let (start, len) = (NonNull::from(text.as_bytes()).cast::<u8>(), text.len());
+        Self {
+            text: start,
+            len,
+            keeper: ManuallyDrop::new(Keeper::Owned(text)),
+        }
+    }
+
+    /// `key`, a block of `engine`'s key arena.
+    fn held(engine: Arc<Engine>, key: HeldKey) -> Self {
+        let (start, len) = (
+            NonNull::from(key.as_str().as_bytes()).cast::<u8>(),
+            key.as_str().len(),
+        );
+        Self {
+            text: start,
+            len,
+            keeper: ManuallyDrop::new(Keeper::Session { engine, key }),
+        }
+    }
+
     /// `text` kept for an object of `shared`'s session: in its key arena when it keeps one, and
     /// refused as zenoh-pico refuses what its heap cannot hold (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`) when
     /// the arena has no room, or with `Z_EINVAL` when it is longer than the session's
     /// `MAX_KEYEXPR_BYTES`; a copy of its own for a session with no key arena or a closed one,
-    /// which keeps nothing more.
+    /// which keeps nothing more. Out of line, one body for every key a declaration keeps.
+    #[inline(never)]
     pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
-        let Some(keys) = shared.key_arena() else {
-            return Ok(Self::Owned(text.to_owned()));
+        let refused = match shared.key_arena().map(|keys| keys.hold_key(text)) {
+            Some(Ok(key)) => return Ok(Self::held(shared.clone(), key)),
+            Some(Err(why)) => refusal_of(why),
+            None => None,
         };
-        match keys.hold_key(text) {
-            Ok(key) => Ok(Self::Session(SessionKey {
-                engine: shared.clone(),
-                key: ManuallyDrop::new(key),
-            })),
-            Err(why) => match refusal_of(why) {
-                Some(code) => Err(code),
-                None => Ok(Self::Owned(text.to_owned())),
-            },
+        match refused {
+            Some(code) => Err(code),
+            None => Ok(Self::owned(text.to_owned())),
         }
     }
 
     /// The key.
     pub(crate) fn as_str(&self) -> &str {
-        match self {
-            Self::Owned(text) => text,
-            Self::Session(key) => key.as_str(),
+        // SAFETY: `text` and `len` are the bytes of the `str` the keeper keeps, which does not
+        // move or change while `self` holds it.
+        unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                self.text.as_ptr(),
+                self.len,
+            ))
         }
     }
 
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
     /// copy for one of its own.
+    #[inline(never)]
     pub(crate) fn share(&self) -> Self {
-        match self {
-            Self::Owned(text) => Self::Owned(text.clone()),
-            Self::Session(key) => key.share(),
+        if let Keeper::Session { engine, key } = &*self.keeper {
+            // An engine that keeps no key arena made no key of one; a copy reads the same.
+            if let Some(keys) = engine.key_arena() {
+                return Self::held(engine.clone(), keys.share_key(key));
+            }
+        }
+        Self::owned(self.as_str().to_owned())
+    }
+
+    /// Whether the text is a block of the session's key arena.
+    #[cfg(test)]
+    fn is_session(&self) -> bool {
+        matches!(*self.keeper, Keeper::Session { .. })
+    }
+}
+
+impl Drop for KeyText {
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: the keeper is taken here, once, and not read again.
+        match unsafe { ManuallyDrop::take(&mut self.keeper) } {
+            Keeper::Owned(text) => drop(text),
+            Keeper::Session { engine, key } => {
+                if let Some(keys) = engine.key_arena() {
+                    keys.release_key(key);
+                }
+            }
         }
     }
 }
@@ -185,48 +258,6 @@ fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
         KeyNotHeld::TooLong => Some(Z_EINVAL),
         KeyNotHeld::NoRoom => Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
         KeyNotHeld::Closed => None,
-    }
-}
-
-/// A key held in its session's key arena by an object of this ABI, which shares and lets go of it
-/// through the engine, under the session's lock. It holds the engine, whose arena the key's text
-/// lies in, for as long as it lives.
-pub(crate) struct SessionKey {
-    engine: Arc<Engine>,
-    /// Taken only by the drop, which hands it back to the engine.
-    key: ManuallyDrop<HeldKey>,
-}
-
-impl SessionKey {
-    fn as_str(&self) -> &str {
-        self.key.as_str()
-    }
-
-    /// One more holder of the key's block. Out of line, one body for every object that shares a
-    /// key: each share takes the session's lock, which a copy inlined in each caller would repeat.
-    #[inline(never)]
-    fn share(&self) -> KeyText {
-        match self.engine.key_arena() {
-            Some(keys) => KeyText::Session(Self {
-                engine: self.engine.clone(),
-                key: ManuallyDrop::new(keys.share_key(&self.key)),
-            }),
-            // An engine that keeps no key arena made no key of one; a copy reads the same.
-            None => KeyText::Owned(self.as_str().to_owned()),
-        }
-    }
-}
-
-impl Drop for SessionKey {
-    /// Out of line, one body for every object that keeps a key: the release takes the session's
-    /// lock, which a copy inlined in the drop of each object that holds a key would repeat.
-    #[inline(never)]
-    fn drop(&mut self) {
-        // SAFETY: the key is taken here, once, and the field is not read again.
-        let key = unsafe { ManuallyDrop::take(&mut self.key) };
-        if let Some(keys) = self.engine.key_arena() {
-            keys.release_key(key);
-        }
     }
 }
 
@@ -253,7 +284,7 @@ impl DeclaredKeyexpr {
     /// A key with no declaration.
     pub(crate) fn literal_only(literal: String) -> Self {
         Self {
-            literal: KeyText::Owned(literal),
+            literal: KeyText::owned(literal),
             declaration: None,
         }
     }
@@ -304,7 +335,7 @@ impl DeclaredKeyexpr {
                 && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
         });
         Self {
-            literal: KeyText::Owned(literal),
+            literal: KeyText::owned(literal),
             declaration,
         }
     }
@@ -457,41 +488,34 @@ impl DeclaredKeyexpr {
         // own row, which it then shares; a declaration made first is let go of when the text is
         // refused. Any other key is kept before anything is declared, so one the session's key
         // arena has no room for is refused having sent nothing.
-        let first = if declares && prefix_len == literal.len() {
-            Some(declare_prefix(shared, literal, prefix_len)?)
+        let early = if declares && prefix_len == literal.len() {
+            None
+        } else {
+            Some(KeyText::of_session(shared, literal)?)
+        };
+        let declaration = if declares {
+            // A session that holds no more declarations, its table at the limit it opened under or
+            // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
+            let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
+                return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+            };
+            Some(Arc::new(WireDeclaration {
+                session: Arc::downgrade(shared),
+                id,
+                prefix_len,
+            }))
         } else {
             None
         };
-        let text = KeyText::of_session(shared, literal)?;
-        let declaration = match first {
-            Some(declaration) => Some(declaration),
-            None if declares => Some(declare_prefix(shared, literal, prefix_len)?),
-            None => None,
+        let literal = match early {
+            Some(text) => text,
+            None => KeyText::of_session(shared, literal)?,
         };
         Ok(Self {
-            literal: text,
+            literal,
             declaration,
         })
     }
-}
-
-/// The first `prefix_len` bytes of `literal` declared on `shared` (pico
-/// `_z_keyexpr_declare_prefix`). A session that holds no more declarations, its table at the
-/// limit it opened under or its ids spent, refuses as pico refuses one it cannot hold, having sent
-/// nothing.
-fn declare_prefix(
-    shared: &Arc<Engine>,
-    literal: &str,
-    prefix_len: usize,
-) -> Result<Arc<WireDeclaration>, ZResult> {
-    let id = shared
-        .acquire_keyexpr(&literal[..prefix_len])
-        .ok_or(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
-    Ok(Arc::new(WireDeclaration {
-        session: Arc::downgrade(shared),
-        id,
-        prefix_len,
-    }))
 }
 
 /// pico `_z_keyexpr_non_wild_prefix_len`: the length up to the `/` before the
@@ -1712,8 +1736,15 @@ mod key_text_tests {
     #[test]
     fn a_key_with_no_session_is_a_copy_of_its_own() {
         let key = DeclaredKeyexpr::literal_only("demo/own/key".to_owned());
-        assert!(matches!(key.literal, KeyText::Owned(_)));
+        assert!(!key.literal.is_session());
         let shared = key.share();
+        assert!(!shared.literal.is_session());
+        assert_ne!(
+            shared.literal().as_ptr(),
+            key.literal().as_ptr(),
+            "the share is a copy of its own"
+        );
+        drop(key);
         assert_eq!(shared.literal(), "demo/own/key");
         let loaned = shared.loaned();
         assert_eq!(loaned._start, shared.literal().as_ptr());
@@ -1818,7 +1849,7 @@ mod arena_key_tests {
         let (session, engine) = listening();
         let held = fill_leaving(&engine, 10, 2);
         let key = DeclaredKeyexpr::declare(&engine, "demo/pk/a1", None).expect("declared");
-        assert!(matches!(key.literal, KeyText::Session(_)));
+        assert!(key.literal.is_session());
         assert_eq!(key.literal(), "demo/pk/a1");
         assert!(room_for(&engine, 10), "one block is left");
         let shared = key.share();
@@ -1877,12 +1908,12 @@ mod arena_key_tests {
             Some(Z_EINVAL)
         );
         let held = KeyText::of_session(&engine, "demo/a").expect("a short key");
-        assert!(matches!(held, KeyText::Session(_)));
+        assert!(held.is_session());
         // SAFETY: the session is live and owned here.
         let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
         assert_eq!(closed, Z_OK);
         let copy = KeyText::of_session(&engine, "demo/b").expect("a copy of its own");
-        assert!(matches!(copy, KeyText::Owned(_)));
+        assert!(!copy.is_session());
         assert_eq!(held.share().as_str(), "demo/a");
         close(session);
     }
