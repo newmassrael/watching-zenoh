@@ -259,8 +259,6 @@ pub mod policy_document;
 // Needs `alloc`. Documented from inside.
 #[cfg(feature = "alloc")]
 #[doc(hidden)]
-// Totality debt TD-141 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod limit_corpus;
 
 /// How fast the fragments of one message leave a datagram link: the rule of the

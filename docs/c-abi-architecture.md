@@ -309,7 +309,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-119 | `wz-session-core` | `extqos_offer` | `arithmetic_side_effects` | 2 | open |
 | TD-132 | `wz-session-core` | `app_transport` | `expect_used` | 1 | open |
 | TD-137 | `wz-session-core` | `held_list` | `unreachable` | 1 | open |
-| TD-141 | `wz-session-core` | `limit_corpus` | `panic` | 1 | open |
 | TD-144 | `wz-session-core` | `process_limits` | `panic` | 1 | open |
 | TD-145 | `wz-session-core` | `publish_options` | `unreachable` | 1 | open |
 | TD-149 | `wz-session-core` | `scout_responder` | `expect_used` | 1 | open |
