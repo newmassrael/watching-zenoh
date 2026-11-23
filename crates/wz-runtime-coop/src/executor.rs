@@ -41,9 +41,9 @@
 //! interrupt or another thread may do to a cell is raise its wake flag. Every other field is
 //! touched only inside a critical section.
 
-#[cfg(feature = "session-slot")]
-use core::cell::UnsafeCell;
-use core::cell::{Cell, RefCell};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use core::cell::RefCell;
+use core::cell::{Cell, UnsafeCell};
 use core::future::Future;
 use core::marker::PhantomData;
 #[cfg(feature = "session-slot")]
@@ -153,17 +153,18 @@ impl Meta {
 pub struct TaskCell {
     wake: AtomicBool,
     cancel: AtomicBool,
-    meta: Mutex<RefCell<Meta>>,
+    /// Reached only inside a critical section (`Self::with_meta`).
+    meta: UnsafeCell<Meta>,
     /// The store that owns the cell, whose count a waker and a handle hold; null for a cell of a
     /// `static` table, which is never freed. Written when the cell is made and never after.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     owner: *const TaskStore,
 }
 
-// SAFETY: see the module's contract. The flags are atomics; `meta` is behind a
-// critical section; the cell's bytes are written only by the one claimant of the
-// cell (state `Spawning`) and the one poller (state `Polling`), which the state
-// word makes exclusive; `owner` is only read.
+// SAFETY: see the module's contract. The flags are atomics; `meta` is reached only inside a
+// critical section, by closures that run no code but this module's; the cell's bytes are written
+// only by the one claimant of the cell (state `Spawning`) and the one poller (state `Polling`),
+// which the state word makes exclusive; `owner` is only read once the cell is handed out.
 unsafe impl Sync for TaskCell {}
 
 impl TaskCell {
@@ -172,28 +173,40 @@ impl TaskCell {
         Self {
             wake: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
-            meta: Mutex::new(RefCell::new(Meta::new())),
+            meta: UnsafeCell::new(Meta::new()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             owner: ptr::null(),
         }
     }
 
-    /// A free cell of `owner`'s, over `cap` bytes at `buf` (none yet for a grown table).
+    /// A free cell over `cap` bytes at `buf` (none yet for a grown table), whose store is named
+    /// once the store is made (`own_cells`).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn owned(owner: *const TaskStore, buf: *mut u8, cap: usize) -> Self {
+    fn owned(buf: *mut u8, cap: usize) -> Self {
         let mut meta = Meta::new();
         meta.buf = buf;
         meta.cap = cap;
         Self {
             wake: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
-            meta: Mutex::new(RefCell::new(meta)),
-            owner,
+            meta: UnsafeCell::new(meta),
+            owner: ptr::null(),
         }
     }
 
+    /// Run `f` on the cell's bookkeeping, inside a critical section.
+    ///
+    /// The section is what keeps another context off the bookkeeping: a join handle is `Send`, so
+    /// one may be polled or dropped on another thread than the executor's. `f` reads and writes
+    /// fields and runs no other code: a waker it takes out is woken or dropped by the caller after,
+    /// and one it stores was cloned before, so no code of another crate runs while the
+    /// bookkeeping is borrowed and none can borrow it again on the same thread.
     fn with_meta<R>(&self, f: impl FnOnce(&mut Meta) -> R) -> R {
-        crate::cs::with(|cs| f(&mut self.meta.borrow(cs).borrow_mut()))
+        crate::cs::with(|_cs| {
+            // SAFETY: as above: one context holds the section, and nothing `f` runs reaches
+            // this cell's bookkeeping again.
+            f(unsafe { &mut *self.meta.get() })
+        })
     }
 }
 
@@ -278,16 +291,21 @@ impl<const TASKS: usize, const BYTES: usize> Default for TaskTable<TASKS, BYTES>
 
 /// The cells of a table the runtime owns, reserved or grown, and the bytes of a reserved one.
 ///
-/// Held by a count: the executor, every waker and every join handle of its cells. The cells are
-/// in chunks that never move once made and are let go only with the store, so a reference to a
-/// cell is good for as long as a count is held.
+/// Held by a count: the executor, every waker and every join handle of its cells. The cells made
+/// with the store (all of a reserved table's) never change, so they are reached without a section;
+/// the chunks a grown table adds later are in a list behind one, which only the table of
+/// `CoopRuntime::new` adds to. A cell lies where it was made until the store goes, so a reference
+/// to it is good for as long as a count is held.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) struct TaskStore {
-    /// Each chunk a box given up to a raw pointer: the list moves when it grows, and a box moved
-    /// with it would be asserted unique again over the cells other holders point at.
-    chunks: Mutex<RefCell<Vec<*const [TaskCell]>>>,
-    /// The block a reserved table's cells lie in, and its layout; null for a grown table, whose
-    /// cells each keep bytes of their own.
+    /// The cells made with the store: a box given up to a raw pointer, so that moving the store
+    /// does not assert the box unique again over the cells other holders point at.
+    fixed: *const [TaskCell],
+    /// The chunks a grown table added since, each a box given up likewise: the list moves when it
+    /// grows, and a box moved with it would be asserted unique again.
+    grown: Mutex<RefCell<Vec<*const [TaskCell]>>>,
+    /// The block a reserved table's cells lie in, and its layout; null when no cell has bytes of
+    /// the block, as a grown table's do not.
     region: *mut u8,
     region_layout: Layout,
 }
@@ -302,12 +320,48 @@ unsafe impl Sync for TaskStore {}
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl TaskStore {
-    /// The cell at `index` in the order of the chunks, if the store has that many. Out of line:
-    /// every pass over the table asks it, and its section and its walk are one body for all.
-    #[inline(never)]
-    fn cell_at(&self, index: usize) -> Option<&'static TaskCell> {
+    /// A store of `count` free cells: the first `reserved` over a block reserved now, `bytes`
+    /// each at steps of the cells' alignment, and the rest with no bytes yet, which a spawn gives
+    /// them (`fit_cell`).
+    fn new(count: usize, reserved: usize, bytes: usize) -> Arc<Self> {
+        let stride = round_up(bytes.max(1), CELL_ALIGN);
+        let layout = stride
+            .checked_mul(reserved)
+            .and_then(|size| Layout::from_size_align(size, CELL_ALIGN).ok())
+            .expect("a task table's size");
+        let region = if layout.size() == 0 {
+            ptr::null_mut()
+        } else {
+            // SAFETY: the layout's size is not zero.
+            let region = unsafe { alloc::alloc::alloc(layout) };
+            if region.is_null() {
+                alloc::alloc::handle_alloc_error(layout);
+            }
+            region
+        };
+        let fixed = make_cells(count, region, reserved, stride, bytes);
+        let store = Arc::new(Self {
+            fixed: fixed.cast_const(),
+            grown: Mutex::new(RefCell::new(Vec::new())),
+            region,
+            region_layout: layout,
+        });
+        own_cells(fixed, Arc::as_ptr(&store));
+        store
+    }
+
+    /// The cells made with the store.
+    fn fixed(&self) -> &'static [TaskCell] {
+        // SAFETY: a box the store gave up, never changed and let go only when the store is; every
+        // holder of a cell past the executor's own call holds a count on the store (`retain`), so
+        // the reference does not outlive the cells.
+        unsafe { &*self.fixed }
+    }
+
+    /// The cell at `index` in the order of the chunks a grown table added, if it added that many.
+    fn grown_at(&self, index: usize) -> Option<&'static TaskCell> {
         let at = crate::cs::with(|cs| {
-            let chunks = self.chunks.borrow(cs).borrow();
+            let chunks = self.grown.borrow(cs).borrow();
             let mut left = index;
             for &chunk in chunks.iter() {
                 // SAFETY: a chunk the list holds is alive until the store is dropped.
@@ -319,61 +373,65 @@ impl TaskStore {
             }
             None
         })?;
-        // SAFETY: a chunk is a box the list owns, which never moves and is let go only when the
-        // store is; every holder of a cell past the executor's own call holds a count on the store
-        // (`retain`), so the reference does not outlive the cell.
+        // SAFETY: as for `Self::fixed`: a chunk is a box the list owns, which never moves and is
+        // let go only when the store is.
         Some(unsafe { &*at })
     }
 
-    /// The cells the store holds.
-    #[inline(never)]
-    fn len(&self) -> usize {
-        crate::cs::with(|cs| {
-            self.chunks
-                .borrow(cs)
-                .borrow()
-                .iter()
-                .map(|c| c.len())
-                .sum()
-        })
+    /// The cells of the chunks a grown table added.
+    fn grown_len(&self) -> usize {
+        crate::cs::with(|cs| self.grown.borrow(cs).borrow().iter().map(|c| c.len()).sum())
     }
 
-    /// Add a chunk of `count` free cells (at least one), with its first cell already taken for a
-    /// spawn (`Spawning`): the cell a growing table hands the spawn that found no other.
+    /// Add a chunk of `count` free cells with no bytes (at least one), its first cell already taken
+    /// for a spawn (`Spawning`): the cell a grown table hands the spawn that found no other.
     fn grow(&self, set: u32, count: usize) -> &'static TaskCell {
-        let cells = self.add_chunk(count.max(1), 0, 0);
+        let raw = make_cells(count.max(1), ptr::null_mut(), 0, CELL_ALIGN, 0);
+        own_cells(raw, self);
+        crate::cs::with(|cs| self.grown.borrow(cs).borrow_mut().push(raw.cast_const()));
+        // SAFETY: as for `Self::grown_at`: the chunk is the store's now and never moves.
+        let cells: &'static [TaskCell] = unsafe { &*raw };
         cells[0].with_meta(|meta| {
             meta.state = State::Spawning;
             meta.set = set;
         });
         &cells[0]
     }
+}
 
-    /// Add a chunk of `count` free cells: the first `reserved` over the store's region, `bytes`
-    /// each at steps of `round_up(bytes, CELL_ALIGN)`, and the rest with no bytes yet, which a
-    /// spawn gives them (`fit_cell`). The one maker of cells, for a reserved table and a grown
-    /// one alike.
-    #[inline(never)]
-    fn add_chunk(&self, count: usize, reserved: usize, bytes: usize) -> &'static [TaskCell] {
-        let owner: *const TaskStore = self;
-        let stride = round_up(bytes.max(1), CELL_ALIGN);
-        let region = self.region;
-        let chunk: Box<[TaskCell]> = (0..count)
-            .map(|at| {
-                if at < reserved {
-                    // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn
-                    // takes it, and each offset is inside the region.
-                    TaskCell::owned(owner, region.wrapping_add(at * stride), bytes)
-                } else {
-                    TaskCell::owned(owner, ptr::null_mut(), 0)
-                }
-            })
-            .collect();
-        let raw: *const [TaskCell] = Box::into_raw(chunk).cast_const();
-        crate::cs::with(|cs| self.chunks.borrow(cs).borrow_mut().push(raw));
-        // SAFETY: as for `cell_at`: the chunk is a box the store owns now, which never moves and
-        // is let go only with the store.
-        unsafe { &*raw }
+/// `count` free cells in a box given up to a raw pointer, the first `reserved` over `region`,
+/// `bytes` each at steps of `stride`, the rest with no bytes yet; no owner yet (`own_cells`).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[inline(never)]
+fn make_cells(
+    count: usize,
+    region: *mut u8,
+    reserved: usize,
+    stride: usize,
+    bytes: usize,
+) -> *mut [TaskCell] {
+    let cells: Box<[TaskCell]> = (0..count)
+        .map(|at| {
+            if at < reserved {
+                // `wrapping_add` and not `add`: no cell's bytes are reached until a spawn takes
+                // it, and each offset is inside the region.
+                TaskCell::owned(region.wrapping_add(at * stride), bytes)
+            } else {
+                TaskCell::owned(ptr::null_mut(), 0)
+            }
+        })
+        .collect();
+    Box::into_raw(cells)
+}
+
+/// Name `owner` the store of every cell of `cells`.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn own_cells(cells: *mut [TaskCell], owner: *const TaskStore) {
+    let first = cells.cast::<TaskCell>();
+    for at in 0..cells.len() {
+        // SAFETY: `cells` is a box `make_cells` just gave up, which nothing else points at yet;
+        // each write is through the raw pointer, in bounds, and makes no reference.
+        unsafe { (*first.add(at)).owner = owner };
     }
 }
 
@@ -382,19 +440,19 @@ impl Drop for TaskStore {
     fn drop(&mut self) {
         // The last count is gone, so nothing else reaches the store: its cells are read without a
         // section.
-        let chunks = core::mem::take(self.chunks.get_mut().get_mut());
-        for raw in chunks {
-            // SAFETY: each chunk is a box the store gave up to the list, taken back here once.
+        let grown = core::mem::take(self.grown.get_mut().get_mut());
+        for raw in core::iter::once(self.fixed).chain(grown) {
+            // SAFETY: each chunk is a box the store gave up, taken back here once.
             let mut chunk = unsafe { Box::from_raw(raw.cast_mut()) };
             for cell in chunk.iter_mut() {
-                let meta = cell.meta.get_mut().get_mut();
+                let meta = cell.meta.get_mut();
                 let (buf, cap, align) = (meta.buf, meta.cap, meta.buf_align);
                 // A reserved cell's bytes are the region's, given back below with it.
                 let in_region = !self.region.is_null()
                     && (buf as usize) >= (self.region as usize)
                     && (buf as usize) < (self.region as usize) + self.region_layout.size();
                 if !buf.is_null() && !in_region {
-                    // SAFETY: a grown table's cell holds bytes `fit_cell` allocated with this
+                    // SAFETY: a cell outside the region holds bytes `fit_cell` allocated with this
                     // size and alignment, and no task is in them: the executor that dropped its
                     // tasks is gone, and a done task's output went with its handle.
                     unsafe {
@@ -404,7 +462,7 @@ impl Drop for TaskStore {
             }
         }
         if !self.region.is_null() {
-            // SAFETY: the region was allocated with this layout by `ExecutorState::reserved`.
+            // SAFETY: the region was allocated with this layout by `TaskStore::new`.
             unsafe { alloc::alloc::dealloc(self.region, self.region_layout) }
         }
     }
@@ -469,9 +527,13 @@ pub struct ExecutorState {
     /// The bytes of every cell of a fixed table (a `static` one or one reserved); `None` for a
     /// grown table, whose cells take the bytes each task needs.
     cell_bytes: Option<usize>,
-    /// How the table grows; `None` for a fixed one.
+    /// Bytes for a task in a cell with none or too few, for a table that takes memory after it is
+    /// made (grown, or reserved while its open lasts); `None` for a fixed one.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    growth: Option<Growth>,
+    fit: Option<fn(&TaskCell, usize, usize) -> *mut u8>,
+    /// What a grown table does that no other does; `None` for every other.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    grower: Option<Grower>,
     /// The number the next local set's tasks are marked with.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     next_set: Mutex<Cell<u32>>,
@@ -580,47 +642,17 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> *mut u8 {
     fresh
 }
 
-/// The store of `tasks` cells of `task_bytes` each, in one block reserved now, and `empty` cells
-/// beside them with no bytes yet.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-fn reserved_store(tasks: usize, task_bytes: usize, empty: usize) -> Arc<TaskStore> {
-    let stride = round_up(task_bytes.max(1), CELL_ALIGN);
-    let layout = stride
-        .checked_mul(tasks)
-        .and_then(|size| Layout::from_size_align(size, CELL_ALIGN).ok())
-        .expect("a task table's size");
-    let region = if layout.size() == 0 {
-        ptr::null_mut()
-    } else {
-        // SAFETY: the layout's size is not zero.
-        let region = unsafe { alloc::alloc::alloc(layout) };
-        if region.is_null() {
-            alloc::alloc::handle_alloc_error(layout);
-        }
-        region
-    };
-    let store = Arc::new(TaskStore {
-        chunks: Mutex::new(RefCell::new(Vec::new())),
-        region,
-        region_layout: layout,
-    });
-    store.add_chunk(tasks.saturating_add(empty), tasks, task_bytes);
-    store
-}
-
-/// What a table that takes memory after it is made does, reached only through such a table: a
-/// program that makes none links none of it.
+/// What a grown table (`CoopRuntime::new`) does that no other does, reached only through such a
+/// table: a program that makes none links none of it.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 #[derive(Clone, Copy)]
-struct Growth {
-    /// A grown table's (`CoopRuntime::new`): a cell of a new chunk of the count given, already
-    /// taken for a spawn of the set given; its chunks double, and a free cell too small for a
-    /// task is given new bytes. `None` for a table reserved while its open lasts
-    /// (`CoopRuntime::opening`), whose cells are all made with it: only a cell with no bytes yet
-    /// is given the bytes of the task that takes it, and none once it is sealed.
-    grow: Option<fn(&TaskStore, u32, usize) -> &'static TaskCell>,
-    /// Bytes for a task of the size and alignment given, in the cell given.
-    fit: fn(&TaskCell, usize, usize) -> *mut u8,
+struct Grower {
+    /// A cell of a new chunk of the count given, already taken for a spawn of the set given.
+    grow: fn(&TaskStore, u32, usize) -> &'static TaskCell,
+    /// The cell at the index given among the chunks added.
+    cell_at: fn(&TaskStore, usize) -> Option<&'static TaskCell>,
+    /// The cells of the chunks added.
+    len: fn(&TaskStore) -> usize,
 }
 
 impl ExecutorState {
@@ -629,7 +661,9 @@ impl ExecutorState {
             cells,
             cell_bytes,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            growth: None,
+            fit: None,
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            grower: None,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             next_set: Mutex::new(Cell::new(1)),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -643,15 +677,12 @@ impl ExecutorState {
     /// A table that grows when every cell is taken.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn growing() -> Self {
-        let store = TaskStore {
-            chunks: Mutex::new(RefCell::new(Vec::new())),
-            region: ptr::null_mut(),
-            region_layout: Layout::new::<u8>(),
-        };
-        let mut state = Self::over(Cells::Store(Arc::new(store)), None);
-        state.growth = Some(Growth {
-            grow: Some(TaskStore::grow),
-            fit: fit_cell,
+        let mut state = Self::over(Cells::Store(TaskStore::new(0, 0, 0)), None);
+        state.fit = Some(fit_cell);
+        state.grower = Some(Grower {
+            grow: TaskStore::grow,
+            cell_at: TaskStore::grown_at,
+            len: TaskStore::grown_len,
         });
         state
     }
@@ -663,11 +694,9 @@ impl ExecutorState {
     /// that finds every added cell taken. The table never holds more cells than it was made with.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn opening(tasks: usize, task_bytes: usize, added: usize) -> Self {
-        let mut state = Self::over(Cells::Store(reserved_store(tasks, task_bytes, added)), None);
-        state.growth = Some(Growth {
-            grow: None,
-            fit: fit_cell,
-        });
+        let count = tasks.saturating_add(added);
+        let mut state = Self::over(Cells::Store(TaskStore::new(count, tasks, task_bytes)), None);
+        state.fit = Some(fit_cell);
         state
     }
 
@@ -683,7 +712,7 @@ impl ExecutorState {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(tasks: usize, task_bytes: usize) -> Self {
         Self::over(
-            Cells::Store(reserved_store(tasks, task_bytes, 0)),
+            Cells::Store(TaskStore::new(tasks, tasks, task_bytes)),
             Some(task_bytes),
         )
     }
@@ -706,16 +735,25 @@ impl ExecutorState {
             #[cfg(feature = "session-slot")]
             Cells::Table(cells) => cells.get(index),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Cells::Store(ref store) => store.cell_at(index),
+            Cells::Store(ref store) => {
+                let fixed = store.fixed();
+                match fixed.get(index) {
+                    Some(cell) => Some(cell),
+                    None => self
+                        .grower
+                        .and_then(|grower| (grower.cell_at)(store, index - fixed.len())),
+                }
+            }
         }
     }
 
     /// A cell made for a spawn that found every other taken: one of a grown table's new chunk.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn grow(&self, set: u32) -> Option<&'static TaskCell> {
-        let grow = self.growth?.grow?;
+        let grower = self.grower?;
+        let count = self.capacity().max(FIRST_CHUNK);
         match self.cells {
-            Cells::Store(ref store) => Some(grow(store, set, store.len().max(FIRST_CHUNK))),
+            Cells::Store(ref store) => Some((grower.grow)(store, set, count)),
         }
     }
 
@@ -728,7 +766,7 @@ impl ExecutorState {
     /// Whether a free cell too small for a task is given new bytes: a grown table's are.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn refits(&self) -> bool {
-        self.growth.is_some_and(|growth| growth.grow.is_some())
+        self.grower.is_some()
     }
 
     /// A fixed table's cells keep the bytes they have.
@@ -741,7 +779,7 @@ impl ExecutorState {
     /// open lasts, until it is sealed.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn fills(&self) -> bool {
-        self.growth.is_some() && !self.sealed.load(Ordering::Acquire)
+        self.fit.is_some() && !self.sealed.load(Ordering::Acquire)
     }
 
     /// A `static` table's cells all have their bytes.
@@ -773,7 +811,9 @@ impl ExecutorState {
             #[cfg(feature = "session-slot")]
             Cells::Table(cells) => cells.len(),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Cells::Store(ref store) => store.len(),
+            Cells::Store(ref store) => {
+                store.fixed().len() + self.grower.map_or(0, |grower| (grower.len)(store))
+            }
         }
     }
 
@@ -886,8 +926,8 @@ impl ExecutorState {
         };
         // A cell with no bytes yet, or a grown table's cell, takes the bytes the task needs.
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let buf = match self.growth {
-            Some(growth) if refits || buf.is_null() => (growth.fit)(cell, need, align),
+        let buf = match self.fit {
+            Some(fit) if refits || buf.is_null() => fit(cell, need, align),
             _ => buf,
         };
         // The cell is taken: the mark is what the table holds now, if that is the most so far.
@@ -931,12 +971,13 @@ impl ExecutorState {
         cell.cancel.store(false, Ordering::Release);
         cell.wake.store(true, Ordering::Release);
         cell.with_meta(|meta| {
+            // A cell is freed with no waker of a handle (`Self::release`).
+            debug_assert!(meta.join_waker.is_none());
             meta.ops = Some(ops);
             meta.out_off = out_off;
             meta.has_output = false;
             meta.aborted = false;
             meta.handle = true;
-            meta.join_waker = None;
             meta.state = State::Live;
         });
     }
@@ -977,15 +1018,17 @@ impl ExecutorState {
 
     /// Give the cell back. Its bytes stay with it, for the next task.
     fn release(cell: &'static TaskCell) {
-        cell.with_meta(|meta| {
+        let waker = cell.with_meta(|meta| {
             meta.ops = None;
             meta.has_output = false;
             meta.aborted = false;
             meta.handle = false;
             meta.set = 0;
-            meta.join_waker = None;
             meta.state = State::Free;
+            meta.join_waker.take()
         });
+        // Dropped outside the section: a waker's drop is its owner's code.
+        drop(waker);
     }
 
     /// Poll every ready task at most once, and sweep every task whose handle
@@ -1300,27 +1343,32 @@ impl<T> TaskJoin<T> {
             Cancelled,
             Output(*mut u8, Ops, bool),
         }
-        let seen = cell.with_meta(|meta| match meta.state {
+        // Cloned, and the waker it replaces dropped, outside the section: a waker's clone and drop
+        // are its owner's code.
+        let mut fresh = Some(cx.waker().clone());
+        let (seen, gone) = cell.with_meta(|meta| match meta.state {
             State::Done => {
                 let ops = meta.ops.expect("a done cell holds its operations");
-                Seen::Output(
+                let at = Seen::Output(
                     // SAFETY of the offset: `out_off` was computed in bounds.
                     meta.buf.wrapping_add(meta.out_off),
                     ops,
                     meta.aborted,
-                )
+                );
+                (at, None)
             }
             _ if meta.aborted => {
                 // Detach: the executor frees the cell when it finishes sweeping.
                 meta.handle = false;
-                meta.join_waker = None;
-                Seen::Cancelled
+                (Seen::Cancelled, meta.join_waker.take())
             }
-            _ => {
-                meta.join_waker = Some(cx.waker().clone());
-                Seen::Pending
-            }
+            _ => (
+                Seen::Pending,
+                core::mem::replace(&mut meta.join_waker, fresh.take()),
+            ),
         });
+        drop(gone);
+        drop(fresh);
         match seen {
             Seen::Pending => Poll::Pending,
             Seen::Cancelled => {
@@ -1359,23 +1407,21 @@ impl<T> Drop for TaskJoin<T> {
         if !self.taken {
             /// How to drop an output nobody read: the function and where it lies.
             type Unread = Option<(unsafe fn(*mut u8), *mut u8)>;
-            enum Left {
-                Detached,
-                Done(Unread),
-            }
-            let left = cell.with_meta(|meta| {
+            // `Some` for a task that is done, with its output to drop; otherwise the task runs on
+            // without its handle, and the waker the handle left is dropped outside the section.
+            let (done, waker): (Option<Unread>, Option<Waker>) = cell.with_meta(|meta| {
                 if meta.state == State::Done {
                     let ops = if meta.has_output { meta.ops } else { None };
                     let output =
                         ops.map(|ops| (ops.drop_output, meta.buf.wrapping_add(meta.out_off)));
-                    Left::Done(output)
+                    (Some(output), None)
                 } else {
                     meta.handle = false;
-                    meta.join_waker = None;
-                    Left::Detached
+                    (None, meta.join_waker.take())
                 }
             });
-            if let Left::Done(output) = left {
+            drop(waker);
+            if let Some(output) = done {
                 if let Some((drop_output, at)) = output {
                     // SAFETY: a done cell that holds an output holds it live and no
                     // handle has read it; it is dropped once.

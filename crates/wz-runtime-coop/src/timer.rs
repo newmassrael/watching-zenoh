@@ -42,18 +42,31 @@ struct TimerEntry {
     waker: Waker,
 }
 
-/// One entry of the table: empty, or a deadline waiting.
-pub struct TimerSlot(Mutex<RefCell<Option<TimerEntry>>>);
+/// One entry of the table: empty, or a deadline waiting. The table is borrowed whole, once, inside
+/// a critical section, so an entry carries no lock of its own.
+pub struct TimerSlot(Option<TimerEntry>);
 
 impl TimerSlot {
     const fn new() -> Self {
-        Self(Mutex::new(RefCell::new(None)))
+        Self(None)
     }
+}
 
-    /// An entry that holds `entry` from the start: the one a grown table adds.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn holding(entry: TimerEntry) -> Self {
-        Self(Mutex::new(RefCell::new(Some(entry))))
+/// A table's entries behind the runtime's critical section, of a length the table's type states:
+/// what `critical_section::Mutex` is for a value whose size is known.
+#[cfg(feature = "session-slot")]
+struct Entries<T: ?Sized>(RefCell<T>);
+
+// SAFETY: the entries are borrowed only through `Entries::borrow`, which asks for a critical
+// section, so one context at a time reaches them; what they hold (deadlines and wakers) may be
+// handed between contexts.
+#[cfg(feature = "session-slot")]
+unsafe impl<T: ?Sized + Send> Sync for Entries<T> {}
+
+#[cfg(feature = "session-slot")]
+impl<T: ?Sized> Entries<T> {
+    fn borrow<'cs>(&'cs self, _cs: CriticalSection<'cs>) -> &'cs RefCell<T> {
+        &self.0
     }
 }
 
@@ -61,7 +74,7 @@ impl TimerSlot {
 /// runtime's cell (`RuntimeCell`) holds.
 #[cfg(feature = "session-slot")]
 pub struct TimerTable<const TIMERS: usize> {
-    slots: [TimerSlot; TIMERS],
+    entries: Entries<[TimerSlot; TIMERS]>,
 }
 
 #[cfg(feature = "session-slot")]
@@ -69,12 +82,12 @@ impl<const TIMERS: usize> TimerTable<TIMERS> {
     /// A table of empty entries.
     pub const fn new() -> Self {
         Self {
-            slots: [const { TimerSlot::new() }; TIMERS],
+            entries: Entries(RefCell::new([const { TimerSlot::new() }; TIMERS])),
         }
     }
 
     pub(crate) fn queue(&'static self) -> TimerQueue {
-        TimerQueue::over(Slots::Table(&self.slots))
+        TimerQueue::over(Slots::Table(&self.entries))
     }
 }
 
@@ -89,10 +102,10 @@ impl<const TIMERS: usize> Default for TimerTable<TIMERS> {
 enum Slots {
     /// A `static` table the image declares.
     #[cfg(feature = "session-slot")]
-    Table(&'static [TimerSlot]),
+    Table(&'static Entries<[TimerSlot]>),
     /// A table reserved when the runtime was made.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    Reserved(Box<[TimerSlot]>),
+    Reserved(Mutex<RefCell<Box<[TimerSlot]>>>),
     /// A table that grows by an entry when every entry is taken.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     Growing(Mutex<RefCell<Vec<TimerSlot>>>),
@@ -125,22 +138,21 @@ impl TimerQueue {
     /// allocates.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub(crate) fn reserved(timers: usize) -> Self {
-        Self::over(Slots::Reserved(
+        Self::over(Slots::Reserved(Mutex::new(RefCell::new(
             (0..timers).map(|_| TimerSlot::new()).collect(),
-        ))
+        ))))
     }
 
-    /// Run `f` over the table's entries, inside the critical section `cs`.
-    // A `static` table's entries need no section to be reached; a grown one's list does.
-    #[cfg_attr(feature = "session-slot", allow(unused_variables))]
-    fn with_slots<R>(&self, cs: CriticalSection<'_>, f: impl FnOnce(&[TimerSlot]) -> R) -> R {
+    /// Run `f` over the table's entries, borrowed once inside the critical section `cs`. `f`
+    /// runs no code but this module's: a waker it takes out is woken or dropped after.
+    fn with_slots<R>(&self, cs: CriticalSection<'_>, f: impl FnOnce(&mut [TimerSlot]) -> R) -> R {
         match &self.slots {
             #[cfg(feature = "session-slot")]
-            Slots::Table(slots) => f(slots),
+            Slots::Table(entries) => f(&mut entries.borrow(cs).borrow_mut()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Slots::Reserved(slots) => f(slots),
+            Slots::Reserved(slots) => f(&mut slots.borrow(cs).borrow_mut()),
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-            Slots::Growing(grown) => f(&grown.borrow(cs).borrow()),
+            Slots::Growing(grown) => f(&mut grown.borrow(cs).borrow_mut()),
         }
     }
 
@@ -156,29 +168,26 @@ impl TimerQueue {
                 next.set(seq.wrapping_add(1));
                 seq
             };
-            let mut entry = Some(TimerEntry {
+            let entry = TimerEntry {
                 deadline_us,
                 seq,
                 waker,
-            });
-            self.with_slots(cs, |slots| {
-                for slot in slots {
-                    let mut held = slot.0.borrow(cs).borrow_mut();
-                    if held.is_none() {
-                        *held = entry.take();
-                        return;
+            };
+            let unplaced = self.with_slots(cs, |slots| {
+                match slots.iter_mut().find(|slot| slot.0.is_none()) {
+                    Some(slot) => {
+                        slot.0 = Some(entry);
+                        None
                     }
+                    None => Some(entry),
                 }
             });
-            let Some(entry) = entry else {
+            let Some(entry) = unplaced else {
                 return true;
             };
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             if let Slots::Growing(grown) = &self.slots {
-                grown
-                    .borrow(cs)
-                    .borrow_mut()
-                    .push(TimerSlot::holding(entry));
+                grown.borrow(cs).borrow_mut().push(TimerSlot(Some(entry)));
                 return true;
             }
             // The entry was not placed: its waker goes with it.
@@ -195,8 +204,8 @@ impl TimerQueue {
         loop {
             let due = crate::cs::with(|cs| {
                 self.with_slots(cs, |slots| {
-                    earliest(cs, slots, now_us)
-                        .and_then(|(index, _)| slots[index].0.borrow(cs).borrow_mut().take())
+                    let (index, _) = earliest(slots, now_us)?;
+                    slots[index].0.take()
                 })
             });
             match due {
@@ -210,10 +219,7 @@ impl TimerQueue {
     pub fn pending_count(&self) -> usize {
         crate::cs::with(|cs| {
             self.with_slots(cs, |slots| {
-                slots
-                    .iter()
-                    .filter(|slot| slot.0.borrow(cs).borrow().is_some())
-                    .count()
+                slots.iter().filter(|slot| slot.0.is_some()).count()
             })
         })
     }
@@ -223,7 +229,7 @@ impl TimerQueue {
     pub fn next_deadline_us(&self) -> Option<u64> {
         crate::cs::with(|cs| {
             self.with_slots(cs, |slots| {
-                earliest(cs, slots, u64::MAX).map(|(_, deadline_us)| deadline_us)
+                earliest(slots, u64::MAX).map(|(_, deadline_us)| deadline_us)
             })
         })
     }
@@ -243,10 +249,10 @@ impl TimerQueue {
 /// The entry of `slots` due first at `until_us` or before, ties in registration order: its index
 /// and its deadline. One body for the pass that wakes what is due and for the look at what is next.
 #[inline(never)]
-fn earliest(cs: CriticalSection<'_>, slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
+fn earliest(slots: &[TimerSlot], until_us: u64) -> Option<(usize, u64)> {
     let mut best: Option<(usize, u64, u64)> = None;
     for (index, slot) in slots.iter().enumerate() {
-        if let Some(entry) = slot.0.borrow(cs).borrow().as_ref() {
+        if let Some(entry) = &slot.0 {
             if entry.deadline_us <= until_us
                 && best.map_or(true, |(_, deadline, seq)| {
                     (entry.deadline_us, entry.seq) < (deadline, seq)
