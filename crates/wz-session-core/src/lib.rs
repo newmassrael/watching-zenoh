@@ -1518,8 +1518,6 @@ pub mod declare_routing_context;
 /// `codec-declare` gated; the builders and readers over the owned chain are
 /// alloc-gated, the layout constants and the borrowed resolve are not.
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
-// Totality debt TD-114 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod declare_ext_keyexpr;
 
 /// Declare `ext_qos` extension (R311y801): `QOS_DECLARE` /
