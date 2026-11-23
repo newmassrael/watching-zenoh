@@ -3931,6 +3931,10 @@ layer_c0_test_discipline() {
     # synthetic input: its matcher, its budget arithmetic and the control that every plane it
     # forbids somewhere it requires somewhere else.
     _runci_leg capability_cost_gate.selftest -- python3 scripts/lib/capability_cost_gate.py --selftest
+    # The size ledger (docs/c-abi-architecture.md P9), which reads one case of the gate above by
+    # area: its symbol readers, its classification rules and its ratchet on synthetic input, and the
+    # committed ledger held to its own rules.
+    _runci_leg size_ledger_gate.selftest -- python3 scripts/lib/size_ledger_gate.py --selftest
     # Z8 -- the harness that runs upstream's tests against the family (Layer Z8) and the gate that
     # holds its report to the table of what each file must still do: the parsers and the verdicts,
     # on synthetic text, before the lane that needs a network and an hour uses them.
@@ -12944,12 +12948,23 @@ layer_c1cf_reduced_features() {
 # its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
 # of its 1200 s budget at run 45051019628. Each shard is a runner of its own, so the one-lane rule
 # above holds inside it. Unset, every case is built here, as before.
+#
+# The second leg is the size ledger (docs/c-abi-architecture.md P9): `size_ledger_gate.py` reads
+# the release case the cost gate just built, and its zenoh-pico reference, by AREA, and holds each
+# area's ratio under its row of `deploy/size_ledger.json`, so a change that grows one area is
+# refused there and not only in the total. It builds nothing the first leg did not (the same
+# commands, target directory and reference directory), reads its case only on the shard the first
+# leg deals that case to, and checks the ledger itself on every shard. The two legs are
+# independent: a red case of the first does not hide the ledger's verdict.
 layer_c1cs_capability_cost() {
     local c1cs_shard_args=()
     if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
         c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
     fi
-    python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"} || return 1
+    _runci_legs_open C1cs || return 1
+    _runci_leg capability_cost_gate -- python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    _runci_leg size_ledger_gate -- python3 scripts/lib/size_ledger_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    _runci_legs_close
 }
 
 # ─── Layer Z8 — upstream's own tests against the patched graph ──────────

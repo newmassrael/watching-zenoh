@@ -275,6 +275,20 @@ DEFERRED: dict[str, str] = {
         "the builds, and Layer C0 runs its --selftest, which holds the "
         "derivation to the declaration without building anything."
     ),
+    "size_ledger_gate.py": (
+        "it JOINED this population by importing the cost gate, whose builds "
+        "it reads. Its subject is BUILT: the release case of "
+        "`scripts/lib/capability_cost_gate.py` and its zenoh-pico reference, "
+        "whose symbol tables it reads by area and holds to "
+        "`deploy/size_ledger.json`. The hook builds no cdylib, so wiring it "
+        "here would either red every push or grade whatever stale artifact "
+        "the target directory happened to hold. Cost is not the reason "
+        "(unmeasured): the reason is the build. Hosted Layer C1cs runs it as "
+        "the leg after the cost gate, which built the same case, and Layer "
+        "C0 runs its --selftest, which holds the readers, the rules and the "
+        "ratchet on synthetic input and the committed ledger to its own "
+        "rules without building anything."
+    ),
     "capi_c_abi_pin.py": (
         "its subject is the BUILT `libwz_capi_c.so`, one per cargo profile, "
         "and it refuses to grade without them (0.04s to say so). The hook "
