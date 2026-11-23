@@ -30,7 +30,7 @@ use wz_session_core::lifecycle_node::Commander;
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome, RefusedReason};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
-use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
+use wz_session_core::query::{QueryPeer, QueryReply, QueryableRegistry, ReplyBody};
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed_with_open, AdminHost, AdminQuerySink, FixedNodeIdentity,
@@ -135,9 +135,12 @@ impl NodeOpening for Recording {
 
 fn get(rid: wz_session_core::wire_id::RequestId, keyexpr: &str) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
-        RequestQueryBuilder::new(rid, 0, Some(keyexpr))
-            .build()
-            .expect("build"),
+        RequestQueryBuilder::new(
+            rid,
+            wz_session_core::wire_key::WireKey::literal(keyexpr).expect("a literal key"),
+        )
+        .build()
+        .expect("build"),
     ))
 }
 
@@ -188,7 +191,8 @@ fn ask<O: InBand>(opener: &'static O, key: &str) -> (Vec<(String, String)>, usiz
     let mut peers = session();
     let messages = [get(1, key)];
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
             &messages,
             peers.subscribers.mapping_spaces(),
             &mut peers.replies,

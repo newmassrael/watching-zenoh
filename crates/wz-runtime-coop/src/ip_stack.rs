@@ -19,6 +19,7 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
+// The port a stack listens on is shared by its links; the tests share a channel's answer.
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),

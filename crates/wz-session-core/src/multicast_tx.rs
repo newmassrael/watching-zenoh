@@ -972,6 +972,28 @@ pub fn multicast_tx_interest<R>(
     }))
 }
 
+/// `f` handed the get `writer` writes from its borrowed parts
+/// ([`crate::lent_request::RequestWriter`]), as a message lent for the call: framed as the owned
+/// `Request` is, on the band its own `ext_qos` (`qos`) names, reliable. `None` when its writer
+/// refuses it, with `f` not called.
+#[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-request"))]
+pub fn multicast_tx_request<R>(
+    writer: &crate::lent_request::RequestWriter<'_>,
+    qos: crate::sample::QosLevel,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| writer.encode(sink);
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::OwnBand {
+            qos,
+            reliable: true,
+        },
+        size,
+        body: &body,
+    }))
+}
+
 /// [`crate::declare_build::build_group_announcement`] written from its parts and handed to `f` as a
 /// message lent for the call ([`multicast_tx_declaration`]); the builder's errors, and
 /// `FeatureDisabled` for a kind this build has no declaration plane of.
@@ -1507,22 +1529,21 @@ impl MulticastTxLanes {
     /// The index, by priority wire byte, of the lane a message of `priority` takes: its own on a
     /// QoS group, the DEFAULT one otherwise.
     pub fn lane_index(&self, priority: Priority) -> usize {
-        self.lane(priority)
+        usize::from(self.lane(priority).wire_byte())
     }
 
     /// The lane a message of `priority` takes: its own on a QoS group, the DEFAULT one otherwise.
-    fn lane(&self, priority: Priority) -> usize {
-        let lane = if self.shape.qos {
+    fn lane(&self, priority: Priority) -> Priority {
+        if self.shape.qos {
             priority
         } else {
             Priority::DEFAULT
-        };
-        usize::from(lane.wire_byte())
+        }
     }
 
     /// Whether `priority`'s lane holds less than its bound.
     pub fn has_room(&self, priority: Priority) -> bool {
-        self.held[self.lane(priority)] < self.shape.lane_bytes(priority)
+        *self.lane(priority).of(&self.held) < self.shape.lane_bytes(priority)
     }
 
     /// What a message of `priority` asking with `wait` is answered before it waits:
@@ -1535,35 +1556,35 @@ impl MulticastTxLanes {
     ) -> Option<crate::link::LinkRoom> {
         let has_room = self.has_room(priority);
         let lane = self.lane(priority);
-        crate::link::lane_room_at_once(&mut self.congested[lane], has_room, wait)
+        crate::link::lane_room_at_once(lane.of_mut(&mut self.congested), has_room, wait)
     }
 
     /// A message of `priority` took `bytes` of its lane.
     pub fn taken(&mut self, priority: Priority, bytes: usize) {
-        let lane = self.lane(priority);
-        self.held[lane] = self.held[lane].saturating_add(bytes);
+        let held = self.lane(priority).of_mut(&mut self.held);
+        *held = held.saturating_add(bytes);
     }
 
     /// A message of `priority` that took `bytes` of its lane left it for the wire: room is made,
     /// and the lane's mark is lowered.
     pub fn written(&mut self, priority: Priority, bytes: usize) {
         let lane = self.lane(priority);
-        self.held[lane] = self.held[lane].saturating_sub(bytes);
-        self.congested[lane] = false;
+        let held = lane.of_mut(&mut self.held);
+        *held = held.saturating_sub(bytes);
+        *lane.of_mut(&mut self.congested) = false;
     }
 
     /// A message of `priority` found no room within its wait and was dropped: its lane's mark is
     /// raised, and the drop is counted by the message's own priority.
     pub fn dropped(&mut self, priority: Priority) {
-        let lane = self.lane(priority);
-        self.congested[lane] = true;
-        let at = usize::from(priority.wire_byte());
-        self.dropped[at] = self.dropped[at].saturating_add(1);
+        *self.lane(priority).of_mut(&mut self.congested) = true;
+        let dropped = priority.of_mut(&mut self.dropped);
+        *dropped = dropped.saturating_add(1);
     }
 
     /// How many messages of `priority` were dropped for want of room.
     pub fn drops(&self, priority: Priority) -> u32 {
-        self.dropped[usize::from(priority.wire_byte())]
+        *priority.of(&self.dropped)
     }
 }
 
@@ -1873,7 +1894,7 @@ where
                     bytes: fragment,
                 },
             );
-            emitted += 1;
+            emitted = emitted.saturating_add(1);
             deadline.next_fragment();
         }
         return PushOutcome::Pushed;
@@ -2392,8 +2413,9 @@ pub fn multicast_tx_emit_lent(
             .ok()
             .map(|()| TxBuf::len(&capped))
     };
-    if let Some(len) = whole {
-        send(&datagram[..len]);
+    // The length is what the buffer over `datagram` holds.
+    if let Some(frame) = whole.and_then(|len| datagram.get(..len)) {
+        send(frame);
         return Ok(1);
     }
 
@@ -2422,8 +2444,12 @@ pub fn multicast_tx_emit_lent(
                 .map_err(|_| MulticastTxRefused::DatagramTooSmall)?;
                 TxBuf::len(&buf)
             };
-            send(&datagram[..len]);
-            sent += 1;
+            send(
+                datagram
+                    .get(..len)
+                    .ok_or(MulticastTxRefused::DatagramTooSmall)?,
+            );
+            sent = sent.saturating_add(1);
         }
         Ok(sent)
     }

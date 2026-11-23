@@ -289,9 +289,11 @@ fn established_session_over(
 fn session_close_ingress_closes_a_running_session() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
 
     // Nothing has asked yet, and the comparator says so rather than raising.
     assert!(
@@ -342,16 +344,20 @@ fn session_close_ingress_closes_a_running_session() {
 fn a_lifecycle_command_from_an_unverified_peer_is_refused() {
     let (actions, mut engine) = established_unverified_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
     let opener = RecordingOpener {
         accept: true,
         ..RecordingOpener::default()
     };
-    observer
-        .switchboard
-        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT)
+    });
 
     let admit = AdmitAll;
     for keyexpr in [CLOSE_KEYEXPR, OPEN_KEYEXPR] {
@@ -380,9 +386,11 @@ fn a_lifecycle_command_from_an_unverified_peer_is_refused() {
 fn session_close_ingress_leaves_an_unmapped_message_alone() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
 
     let outcome = frame_event(put_push("@/node-a/peer/session/something-else/peer-b"));
     let admit = AdmitAll;
@@ -433,9 +441,9 @@ fn session_close_ingress_closes_from_a_switchboard_document() {
     };
 
     let mut observer = ApplicationLayerObserver::new();
-    observer.switchboard.apply_spec(&spec);
+    observer.with_app(|app_half| app_half.switchboard.apply_spec(&spec));
     assert_eq!(
-        observer.switchboard.len(),
+        observer.read_app(|app_half| app_half.switchboard.len()),
         1,
         "the document's one row is the registry's one row"
     );
@@ -478,12 +486,12 @@ fn a_documented_row_is_still_refused_by_the_authority() {
     };
 
     let mut observer = ApplicationLayerObserver::new();
-    observer.switchboard.apply_spec(&spec);
+    observer.with_app(|app_half| app_half.switchboard.apply_spec(&spec));
     // The row IS there. Without this, "nothing happened" would also be what a
     // mapping that dropped the lifecycle section produces, and this arm would
     // pass for the opposite of its reason.
     assert_eq!(
-        observer.switchboard.len(),
+        observer.read_app(|app_half| app_half.switchboard.len()),
         1,
         "the document registered its row; the refusal below is the authority's"
     );
@@ -516,7 +524,7 @@ fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
     // A wildcard row wide enough to match keys of any shape under `@`.
-    observer.switchboard.register_command("@/**", CLOSE_EVENT);
+    observer.with_app(|app_half| app_half.switchboard.register_command("@/**", CLOSE_EVENT));
 
     // Five chunks, not six — the shape every test in this file used before the
     // grammar was parsed, and the shape a deployment could reach for by analogy.
@@ -554,9 +562,11 @@ fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
 fn session_close_ingress_hands_the_authority_the_parsed_target() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
 
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
     // Scoped to the TARGET chunk alone. An authority still comparing whole
@@ -580,9 +590,11 @@ fn session_close_ingress_hands_the_authority_the_parsed_target() {
 fn session_open_ingress_asks_the_opener_for_the_named_peer() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT)
+    });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
     let admit = AdmitAll;
@@ -625,9 +637,11 @@ fn session_open_ingress_asks_the_opener_for_the_named_peer() {
 fn session_open_ingress_refuses_when_no_opener_is_bound() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT)
+    });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
     let admit = AdmitAll;
@@ -652,9 +666,11 @@ fn session_open_ingress_refuses_when_no_opener_is_bound() {
 fn an_authority_that_never_heard_of_open_refuses_it() {
     let (actions, _engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT)
+    });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
     let deny = DenyAll;
@@ -681,9 +697,11 @@ fn an_authority_that_never_heard_of_open_refuses_it() {
 fn an_opener_that_declines_is_not_counted_as_an_injection() {
     let (actions, _engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT)
+    });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
     let admit = AdmitAll;
@@ -711,9 +729,11 @@ fn an_opener_that_declines_is_not_counted_as_an_injection() {
 fn session_close_ingress_refuses_a_close_the_authority_denies() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
-    observer
-        .switchboard
-        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
 
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
     let deny = DenyAll;
@@ -751,7 +771,7 @@ fn session_close_ingress_cannot_be_reached_through_the_signal_path() {
     let (actions, mut engine) = established_session();
     let mut observer = ApplicationLayerObserver::new();
     // `register`, not `register_command` -- the misregistration this guards.
-    observer.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT);
+    observer.with_app(|app_half| app_half.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT));
 
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
     let admit = AdmitAll;
@@ -786,9 +806,11 @@ fn session_close_ingress_judges_the_arriving_keyexpr_not_the_row() {
     for (keyexpr, expect_closed) in [(TARGET, true), (SIBLING, false)] {
         let (actions, mut engine) = established_session();
         let mut observer = ApplicationLayerObserver::new();
-        observer
-            .switchboard
-            .register_command("@/node-a/peer/session/close/*", CLOSE_EVENT);
+        observer.with_app(|app_half| {
+            app_half
+                .switchboard
+                .register_command("@/node-a/peer/session/close/*", CLOSE_EVENT)
+        });
 
         let outcome = frame_event(put_push(keyexpr));
         // R2718 — the authority is scoped to the TARGET chunk, so this arm now

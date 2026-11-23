@@ -37,12 +37,24 @@ pub struct ProcessRefused {
     pub why: UnlentRows,
 }
 
+// A build whose own values give a machine of the process no rows does not compile: the refusal is
+// a constant's, evaluated where the build is made.
+const _: () = assert!(
+    ProcessRows::of(&RuntimeLimits::BUILD).is_ok(),
+    "the build's runtime limits give every machine of the process its rows"
+);
+
 impl ProcessRows {
     /// The rows of a process whose runtime states nothing: the build's values. A build whose own
     /// values give a machine no rows does not compile.
     pub const BUILD: Self = match Self::of(&RuntimeLimits::BUILD) {
         Ok(rows) => rows,
-        Err(_) => panic!("the build's runtime limits give every machine of the process its rows"),
+        // Never taken: the assertion below stops the build that would take it.
+        Err(_) => Self {
+            supervision_checkpoints: 0,
+            message_catalog_entries: 0,
+            e2e_supervised_streams: 0,
+        },
     };
 
     /// The rows `limits` give, each value lent under the build's: refused, naming the limit, where

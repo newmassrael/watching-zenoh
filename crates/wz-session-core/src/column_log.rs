@@ -76,12 +76,22 @@ const fn width_of(distance: u64) -> u8 {
 }
 
 fn put(bytes: &mut Vec<u8>, width: u8, distance: u64) {
-    bytes.extend_from_slice(&distance.to_le_bytes()[..usize::from(width)]);
+    bytes.extend_from_slice(
+        distance
+            .to_le_bytes()
+            .get(..usize::from(width))
+            .unwrap_or_default(),
+    );
 }
 
 /// Zero bytes after the last row of a chunk, so that a column is read as one
 /// eight-byte word and masked, whatever its width and wherever it is.
 const PAD: usize = 8;
+
+/// The bytes a chunk of `cap` rows of `stride` bytes reserves, its padding included.
+fn buffer_bytes(cap: usize, stride: usize) -> usize {
+    cap.saturating_mul(stride).saturating_add(PAD)
+}
 
 /// The bits of an eight-byte word a column of this many bytes keeps.
 const MASK: [u64; 9] = [
@@ -100,8 +110,11 @@ const MASK: [u64; 9] = [
 /// row, so the word read always lies inside it.
 #[inline]
 fn take(bytes: &[u8], at: usize, width: u8) -> u64 {
-    let word: [u8; 8] = bytes[at..at + 8].try_into().expect("eight bytes");
-    u64::from_le_bytes(word) & MASK[usize::from(width)]
+    let word = bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<8>())
+        .map_or(0, |word| u64::from_le_bytes(*word));
+    word & MASK.get(usize::from(width)).copied().unwrap_or(u64::MAX)
 }
 
 /// One chunk: a base, the width of each column, and the packed rows.
@@ -130,9 +143,10 @@ struct Chunk<const C: usize> {
 fn layout<const C: usize>(width: &[u8; C]) -> ([usize; C], usize) {
     let mut offset = [0usize; C];
     let mut at = 0usize;
-    for j in 0..C {
-        offset[j] = at;
-        at += usize::from(width[j]);
+    // At most eight bytes a column: the sum is far from overflowing.
+    for (begins, width) in offset.iter_mut().zip(width) {
+        *begins = at;
+        at = at.saturating_add(usize::from(*width));
     }
     (offset, at)
 }
@@ -143,23 +157,29 @@ impl<const C: usize> Chunk<C> {
     /// as its largest distance needs.
     fn from_rows(start: u64, kinds: &[Kind; C], rows: &[[u64; C]], cap: usize) -> Self {
         let mut base = [0u64; C];
-        for j in 0..C {
-            if kinds[j] == Kind::Rising {
-                base[j] = rows.iter().map(|row| row[j]).min().unwrap_or(0);
+        for (j, (base, kind)) in base.iter_mut().zip(kinds).enumerate() {
+            if *kind == Kind::Rising {
+                *base = rows
+                    .iter()
+                    .filter_map(|row| row.get(j).copied())
+                    .min()
+                    .unwrap_or(0);
             }
         }
+        // A rising column's base is its lowest value and a plain one's is zero, so no
+        // distance below falls under zero.
         let mut width = [0u8; C];
         for row in rows {
-            for j in 0..C {
-                width[j] = width[j].max(width_of(row[j] - base[j]));
+            for ((width, value), base) in width.iter_mut().zip(row).zip(&base) {
+                *width = (*width).max(width_of(value.saturating_sub(*base)));
             }
         }
         let cap = cap.max(rows.len());
         let (offset, stride) = layout(&width);
-        let mut bytes = Vec::with_capacity(cap * stride + PAD);
+        let mut bytes = Vec::with_capacity(buffer_bytes(cap, stride));
         for row in rows {
-            for j in 0..C {
-                put(&mut bytes, width[j], row[j] - base[j]);
+            for ((width, value), base) in width.iter().zip(row).zip(&base) {
+                put(&mut bytes, *width, value.saturating_sub(*base));
             }
         }
         bytes.extend_from_slice(&[0; PAD]);
@@ -184,22 +204,32 @@ impl<const C: usize> Chunk<C> {
     /// zero, so the base is added to every column alike.
     #[inline]
     fn value(&self, col: usize, at: usize) -> u64 {
-        self.base[col]
-            + take(
-                &self.bytes,
-                at * self.stride + self.offset[col],
-                self.width[col],
-            )
+        let (Some(base), Some(offset), Some(width)) = (
+            self.base.get(col),
+            self.offset.get(col),
+            self.width.get(col),
+        ) else {
+            return 0;
+        };
+        let distance = take(
+            &self.bytes,
+            at.saturating_mul(self.stride).saturating_add(*offset),
+            *width,
+        );
+        // The distance was the value less the base: the sum is the value, and never wraps.
+        base.wrapping_add(distance)
     }
 
     /// Each column's distance for `row`, or `None` when a rising value is below
     /// the base.
     fn distances(&self, kinds: &[Kind; C], row: &[u64; C]) -> Option<[u64; C]> {
         let mut out = [0u64; C];
-        for j in 0..C {
-            out[j] = match kinds[j] {
-                Kind::Rising => row[j].checked_sub(self.base[j])?,
-                Kind::Plain => row[j],
+        for ((out, kind), (value, base)) in
+            out.iter_mut().zip(kinds).zip(row.iter().zip(&self.base))
+        {
+            *out = match kind {
+                Kind::Rising => value.checked_sub(*base)?,
+                Kind::Plain => *value,
             };
         }
         Some(out)
@@ -208,9 +238,12 @@ impl<const C: usize> Chunk<C> {
     /// The columns' distances of the row at `at`.
     fn distances_at(&self, at: usize) -> [u64; C] {
         let mut out = [0u64; C];
-        let row = &self.bytes[at * self.stride..];
-        for (j, value) in out.iter_mut().enumerate() {
-            *value = take(row, self.offset[j], self.width[j]);
+        let row = self
+            .bytes
+            .get(at.saturating_mul(self.stride)..)
+            .unwrap_or_default();
+        for ((value, offset), width) in out.iter_mut().zip(&self.offset).zip(&self.width) {
+            *value = take(row, *offset, *width);
         }
         out
     }
@@ -224,7 +257,8 @@ impl<const C: usize> Chunk<C> {
         }
         let mut out = self.distances_at(at);
         for (value, base) in out.iter_mut().zip(&self.base) {
-            *value += base;
+            // The distance was the value less the base: the sum is the value, and never wraps.
+            *value = value.wrapping_add(*base);
         }
         Some(out)
     }
@@ -233,11 +267,11 @@ impl<const C: usize> Chunk<C> {
     /// `cap` rows.
     fn rewrite(&mut self, width: [u8; C], cap: usize) {
         let (offset, stride) = layout(&width);
-        let mut bytes = Vec::with_capacity(cap * stride + PAD);
+        let mut bytes = Vec::with_capacity(buffer_bytes(cap, stride));
         for at in 0..self.len {
             let distances = self.distances_at(at);
-            for j in 0..C {
-                put(&mut bytes, width[j], distances[j]);
+            for (width, distance) in width.iter().zip(&distances) {
+                put(&mut bytes, *width, *distance);
             }
         }
         bytes.extend_from_slice(&[0; PAD]);
@@ -253,44 +287,46 @@ impl<const C: usize> Chunk<C> {
         if self.len < self.cap {
             return;
         }
-        self.cap = (self.cap * 2).clamp(FIRST_ROWS, CHUNK_ITEMS);
-        let target = self.cap * self.stride() + PAD;
-        self.bytes.reserve_exact(target - self.bytes.len());
+        self.cap = self.cap.saturating_mul(2).clamp(FIRST_ROWS, CHUNK_ITEMS);
+        let target = buffer_bytes(self.cap, self.stride());
+        self.bytes
+            .reserve_exact(target.saturating_sub(self.bytes.len()));
     }
 
     /// The columns' widths a row of these distances needs, the chunk's own or
     /// wider.
     fn widths_for(&self, distances: &[u64; C]) -> [u8; C] {
         let mut need = self.width;
-        for j in 0..C {
-            need[j] = need[j].max(width_of(distances[j]));
+        for (need, distance) in need.iter_mut().zip(distances) {
+            *need = (*need).max(width_of(*distance));
         }
         need
     }
 
-    /// Append `row`, which this chunk takes: its rising columns are at or above
-    /// the base and it has a row to spare.
-    fn append(&mut self, kinds: &[Kind; C], row: &[u64; C]) {
-        let distances = self
-            .distances(kinds, row)
-            .expect("a row appended to a chunk is at or above its base");
+    /// Append `row` when this chunk takes it: its rising columns are at or above
+    /// the base and it has a row to spare. `false`, and nothing changed, when it
+    /// does not.
+    fn try_append(&mut self, kinds: &[Kind; C], row: &[u64; C]) -> bool {
+        if self.len >= CHUNK_ITEMS {
+            return false;
+        }
+        let Some(distances) = self.distances(kinds, row) else {
+            return false;
+        };
         let need = self.widths_for(&distances);
         if need != self.width {
             self.rewrite(need, self.cap);
         }
         self.make_room();
         // The padding gives way to the row and is put back after it.
-        self.bytes.truncate(self.len * self.stride);
+        self.bytes.truncate(self.len.saturating_mul(self.stride));
         for (width, distance) in self.width.iter().zip(&distances) {
             put(&mut self.bytes, *width, *distance);
         }
         self.bytes.extend_from_slice(&[0; PAD]);
-        self.len += 1;
-    }
-
-    /// Whether this chunk can take `row` at its end.
-    fn takes(&self, kinds: &[Kind; C], row: &[u64; C]) -> bool {
-        self.len < CHUNK_ITEMS && self.distances(kinds, row).is_some()
+        // Below `CHUNK_ITEMS`, checked above.
+        self.len = self.len.saturating_add(1);
+        true
     }
 
     /// Say the row at `at` is `row`.
@@ -300,22 +336,28 @@ impl<const C: usize> Chunk<C> {
             if need != self.width {
                 self.rewrite(need, self.cap);
             }
-            let mut offset = at * self.stride();
+            let mut offset = at.saturating_mul(self.stride());
             for (width, distance) in self.width.iter().zip(&distances) {
                 let width = usize::from(*width);
-                self.bytes[offset..offset + width]
-                    .copy_from_slice(&distance.to_le_bytes()[..width]);
-                offset += width;
+                let word = distance.to_le_bytes();
+                let into = self
+                    .bytes
+                    .get_mut(offset..)
+                    .and_then(|rest| rest.get_mut(..width));
+                if let (Some(into), Some(from)) = (into, word.get(..width)) {
+                    into.copy_from_slice(from);
+                }
+                offset = offset.saturating_add(width);
             }
             return;
         }
         // A rising value below the base: the base moves to the lowest the chunk
         // holds, which is one rewrite of the chunk and a thing no capture asks
         // for twice.
-        let mut rows: Vec<[u64; C]> = (0..self.len)
-            .map(|k| self.row(k).expect("a row of the chunk"))
-            .collect();
-        rows[at] = *row;
+        let mut rows: Vec<[u64; C]> = (0..self.len).map_while(|k| self.row(k)).collect();
+        if let Some(slot) = rows.get_mut(at) {
+            *slot = *row;
+        }
         *self = Self::from_rows(self.start, kinds, &rows, self.cap);
     }
 
@@ -357,7 +399,8 @@ impl<const C: usize> ColumnLog<C> {
     /// Rows held.
     #[inline]
     pub fn len(&self) -> usize {
-        (self.pushed - self.released) as usize
+        // Never more released than pushed.
+        self.pushed.saturating_sub(self.released) as usize
     }
 
     /// No row is held.
@@ -369,21 +412,20 @@ impl<const C: usize> ColumnLog<C> {
     /// Bytes the log has allocated: every chunk's buffer, and the list of
     /// chunks.
     pub fn allocated_bytes(&self) -> usize {
-        self.chunks.capacity() * core::mem::size_of::<Chunk<C>>()
-            + self
-                .chunks
-                .iter()
-                .map(|chunk| chunk.bytes.capacity())
-                .sum::<usize>()
+        self.chunks
+            .capacity()
+            .saturating_mul(core::mem::size_of::<Chunk<C>>())
+            .saturating_add(self.chunks.iter().fold(0usize, |sum, chunk| {
+                sum.saturating_add(chunk.bytes.capacity())
+            }))
     }
 
     /// Append one row.
     pub fn push_back(&mut self, row: [u64; C]) {
         let mut after_full = false;
         if let Some(last) = self.chunks.back_mut() {
-            if last.takes(&self.kinds, &row) {
-                last.append(&self.kinds, &row);
-                self.pushed += 1;
+            if last.try_append(&self.kinds, &row) {
+                self.pushed = self.pushed.saturating_add(1);
                 return;
             }
             // A chunk that ends short (a row that did not fit it) gives back what
@@ -408,7 +450,7 @@ impl<const C: usize> ColumnLog<C> {
             core::slice::from_ref(&row),
             cap,
         ));
-        self.pushed += 1;
+        self.pushed = self.pushed.saturating_add(1);
     }
 
     /// The chunk the row at absolute number `at` is in, and its place in it.
@@ -417,11 +459,15 @@ impl<const C: usize> ColumnLog<C> {
             return None;
         }
         let hint = self.hint.load(Ordering::Relaxed);
-        for guess in [hint, hint + 1, hint.wrapping_sub(1)] {
+        // A guess past either end is no chunk, which `get` says.
+        for guess in [hint, hint.wrapping_add(1), hint.wrapping_sub(1)] {
             if let Some(chunk) = self.chunks.get(guess) {
-                if chunk.start <= at && at < chunk.start + chunk.len as u64 {
+                if let Some(place) = at
+                    .checked_sub(chunk.start)
+                    .filter(|&p| p < chunk.len as u64)
+                {
                     self.hint.store(guess, Ordering::Relaxed);
-                    return Some((guess, (at - chunk.start) as usize));
+                    return Some((guess, place as usize));
                 }
             }
         }
@@ -430,7 +476,10 @@ impl<const C: usize> ColumnLog<C> {
             .partition_point(|c| c.start <= at)
             .checked_sub(1)?;
         self.hint.store(chunk, Ordering::Relaxed);
-        Some((chunk, (at - self.chunks.get(chunk)?.start) as usize))
+        Some((
+            chunk,
+            at.checked_sub(self.chunks.get(chunk)?.start)? as usize,
+        ))
     }
 
     /// Where the row at `index` (counted from the oldest held) sits; `None` for an
@@ -449,7 +498,7 @@ impl<const C: usize> ColumnLog<C> {
     pub fn column(&self, index: usize, col: usize) -> Option<u64> {
         let (chunk, at) = self.locate_index(index)?;
         let chunk = self.chunks.get(chunk)?;
-        (at < chunk.len).then(|| chunk.value(col, at))
+        (at < chunk.len && col < C).then(|| chunk.value(col, at))
     }
 
     /// Say the row at `index` is `row`. `false`, and nothing changed, when there
@@ -485,11 +534,12 @@ impl<const C: usize> ColumnLog<C> {
     /// Release the oldest row.
     pub fn pop_front(&mut self) -> Option<[u64; C]> {
         let first = self.chunks.front()?;
-        let row = first.row((self.released - first.start) as usize)?;
-        self.released += 1;
+        // The oldest row is always in the first chunk: at or past its start.
+        let row = first.row(self.released.saturating_sub(first.start) as usize)?;
+        self.released = self.released.saturating_add(1);
         // A chunk with nothing left in it is given back, so a log that is emptied
         // holds no chunk, and the oldest row is always in the first.
-        if self.released >= first.start + first.len as u64 {
+        if self.released >= first.start.saturating_add(first.len as u64) {
             self.chunks.pop_front();
         }
         Some(row)
@@ -504,35 +554,37 @@ impl<const C: usize> ColumnLog<C> {
         col: usize,
         mut pred: impl FnMut(u64) -> bool,
     ) -> usize {
-        let (mut low, mut high) = (0usize, self.chunks.len());
-        while low < high {
-            let mid = low + (high - low) / 2;
-            let last = &self.chunks[mid];
-            if pred(last.value(col, last.len - 1)) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
+        // A column the rows do not have holds no row the predicate is true of.
+        if col >= C {
+            return 0;
         }
+        // A chunk holds at least one row: its last is `len - 1`.
+        let low = self
+            .chunks
+            .partition_point(|last| pred(last.value(col, last.len.saturating_sub(1))));
         let Some(chunk) = self.chunks.get(low) else {
             return self.len();
         };
         // The first chunk's front may have been released.
         let floor = if low == 0 {
-            (self.released - chunk.start) as usize
+            self.released.saturating_sub(chunk.start) as usize
         } else {
             0
         };
         let (mut a, mut b) = (floor, chunk.len);
         while a < b {
-            let mid = a + (b - a) / 2;
+            // `a < b`: neither the difference nor the sum wraps.
+            let mid = a.saturating_add(b.saturating_sub(a) / 2);
             if pred(chunk.value(col, mid)) {
-                a = mid + 1;
+                a = mid.saturating_add(1);
             } else {
                 b = mid;
             }
         }
-        (chunk.start + a as u64 - self.released) as usize
+        chunk
+            .start
+            .saturating_add(a as u64)
+            .saturating_sub(self.released) as usize
     }
 
     /// The rows from position `from`, oldest first.
@@ -562,11 +614,11 @@ impl<const C: usize> Iterator for Iter<'_, C> {
             let chunk = self.chunks.get(self.chunk)?;
             match chunk.row(self.at) {
                 Some(row) => {
-                    self.at += 1;
+                    self.at = self.at.saturating_add(1);
                     return Some(row);
                 }
                 None => {
-                    self.chunk += 1;
+                    self.chunk = self.chunk.saturating_add(1);
                     self.at = 0;
                 }
             }

@@ -491,7 +491,10 @@ mod tests {
                 .map(|(id, s)| (id, s.map(<[u8]>::to_vec))),
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
-            timestamp: view.timestamp().cloned(),
+            timestamp: view.timestamp_parts().map(|stamp| TimestampHint {
+                time: stamp.time,
+                zid: stamp.zid.to_vec(),
+            }),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
             #[cfg(feature = "pubsub-ts-stack")]
@@ -569,16 +572,24 @@ mod tests {
         let mut stack = TsStack::new(point::SEND | point::RECEIVE);
         stack.record(point::SEND, alloc::vec![5, 6], false);
         for response in [
-            ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"v")
-                .ts_stack(&stack)
-                .build()
-                .expect("build"),
-            ResponseErrBuilder::new(RID, 0, Some("demo/b"), b"oops")
-                .ts_stack(&stack)
-                .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
-                .responder(&[0xCA, 0xFE], 3)
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+                b"v",
+            )
+            .ts_stack(&stack)
+            .build()
+            .expect("build"),
+            ResponseErrBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/b").expect("a literal key"),
+                b"oops",
+            )
+            .ts_stack(&stack)
+            .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+            .responder(&[0xCA, 0xFE], 3)
+            .build()
+            .expect("build"),
         ] {
             let (owned, lent) = both(&response);
             #[cfg(not(feature = "rx-lent-only"))]
@@ -591,9 +602,13 @@ mod tests {
             assert!(owned[0].routed, "it came in over a link");
         }
         // One that carries none is delivered with none, and as routed all the same.
-        let plain = ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"v")
-            .build()
-            .expect("build");
+        let plain = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            b"v",
+        )
+        .build()
+        .expect("build");
         let (owned, lent) = both(&plain);
         assert_eq!(lent, owned);
         assert_eq!(owned[0].ts_stack, None);
@@ -612,67 +627,115 @@ mod tests {
             schema: Some(b"text".to_vec()),
         };
         let cases = [
-            ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"plain")
-                .build()
-                .expect("build"),
-            ResponseReplyBuilder::new(RID, 0, Some("demo/b"), b"full")
-                .encoding(&schema)
-                .timestamp(&stamp)
-                .attachment(b"att")
-                .source_info(&info)
-                .build()
-                .expect("build"),
-            ResponseReplyBuilder::new(RID, 0, Some("demo/c"), b"")
-                .reply_del()
-                .attachment(b"del-att")
-                .timestamp(&stamp)
-                .source_info(&info)
-                .build()
-                .expect("build"),
-            ResponseErrBuilder::new(RID, 0, Some("demo/d"), b"oops")
-                .encoding(0x0D, Some(&b"why"[..]))
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+                b"plain",
+            )
+            .build()
+            .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/b").expect("a literal key"),
+                b"full",
+            )
+            .encoding(&schema)
+            .timestamp(&stamp)
+            .attachment(b"att")
+            .source_info(&info)
+            .build()
+            .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/c").expect("a literal key"),
+                b"",
+            )
+            .reply_del()
+            .attachment(b"del-att")
+            .timestamp(&stamp)
+            .source_info(&info)
+            .build()
+            .expect("build"),
+            ResponseErrBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/d").expect("a literal key"),
+                b"oops",
+            )
+            .encoding(0x0D, Some(&b"why"[..]))
+            .build()
+            .expect("build"),
             // Through the peer's alias, with and without a suffix.
-            ResponseReplyBuilder::new(RID, 5, None, b"mapped")
-                .build()
-                .expect("build"),
-            ResponseReplyBuilder::new(RID, 5, Some("/more"), b"composed")
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::from_parts(5, None).expect("a key"),
+                b"mapped",
+            )
+            .build()
+            .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::from_parts(5, Some("/more")).expect("a key"),
+                b"composed",
+            )
+            .build()
+            .expect("build"),
             // The envelope's own fields: who answered, and the QoS it was sent at, on a
             // reply, a delete and an error alike.
-            ResponseReplyBuilder::new(RID, 0, Some("demo/e"), b"named")
-                .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
-                .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
-                .build()
-                .expect("build"),
-            ResponseReplyBuilder::new(RID, 0, Some("demo/f"), b"")
-                .reply_del()
-                .responder(&[0x11; 16], 1)
-                .build()
-                .expect("build"),
-            ResponseErrBuilder::new(RID, 0, Some("demo/g"), b"nope")
-                .responder(&[0x22], u32::MAX)
-                .qos(crate::sample::QosLevel::from_raw(0b0000_0011))
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/e").expect("a literal key"),
+                b"named",
+            )
+            .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
+            .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+            .build()
+            .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/f").expect("a literal key"),
+                b"",
+            )
+            .reply_del()
+            .responder(&[0x11; 16], 1)
+            .build()
+            .expect("build"),
+            ResponseErrBuilder::new(
+                RID,
+                crate::wire_key::WireKey::literal("demo/g").expect("a literal key"),
+                b"nope",
+            )
+            .responder(&[0x22], u32::MAX)
+            .qos(crate::sample::QosLevel::from_raw(0b0000_0011))
+            .build()
+            .expect("build"),
             // An error is not about a key, so it is delivered whether it names none (the
             // `Timeout` that upstream's routing sends for a query it forwarded) or one the peer
             // never declared.
             crate::response_build::build_response_err_empty(RID, b"Timeout").expect("build"),
-            ResponseErrBuilder::new(RID, 77, None, b"unplaced")
-                .build()
-                .expect("build"),
+            ResponseErrBuilder::new(
+                RID,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+                b"unplaced",
+            )
+            .build()
+            .expect("build"),
             // An id the peer never declared: nothing is delivered.
-            ResponseReplyBuilder::new(RID, 77, None, b"lost")
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::from_parts(77, None).expect("a key"),
+                b"lost",
+            )
+            .build()
+            .expect("build"),
             // Past the bounded buffer: the fixed backing falls back to the
             // owned projection, which delivers it.
-            ResponseReplyBuilder::new(RID, 6, Some("/tail"), b"long")
-                .build()
-                .expect("build"),
+            ResponseReplyBuilder::new(
+                RID,
+                crate::wire_key::WireKey::from_parts(6, Some("/tail")).expect("a key"),
+                b"long",
+            )
+            .build()
+            .expect("build"),
         ];
         let mut delivered = 0;
         for (i, response) in cases.iter().enumerate() {
@@ -712,11 +775,15 @@ mod tests {
 
     #[test]
     fn a_reply_shows_who_answered_and_the_qos_it_was_sent_at_on_either_path() {
-        let named = ResponseReplyBuilder::new(RID, 0, Some("demo/e"), b"named")
-            .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
-            .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
-            .build()
-            .expect("build");
+        let named = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::literal("demo/e").expect("a literal key"),
+            b"named",
+        )
+        .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
+        .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+        .build()
+        .expect("build");
         let (owned, lent) = both(&named);
         for seen in [&owned, &lent] {
             assert_eq!(
@@ -729,9 +796,13 @@ mod tests {
             );
         }
         // A Response that names neither shows neither.
-        let bare = ResponseReplyBuilder::new(RID, 0, Some("demo/h"), b"bare")
-            .build()
-            .expect("build");
+        let bare = ResponseReplyBuilder::new(
+            RID,
+            crate::wire_key::WireKey::literal("demo/h").expect("a literal key"),
+            b"bare",
+        )
+        .build()
+        .expect("build");
         let (owned, lent) = both(&bare);
         for seen in [&owned, &lent] {
             assert_eq!((seen[0].responder.clone(), seen[0].qos), (None, None));

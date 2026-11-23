@@ -307,8 +307,6 @@ use crate::interest_build::*;
 use crate::interest_build::InterestKinds;
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 use crate::push_build::*;
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
-use crate::request_build::*;
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use crate::response_final_build::*;
 
@@ -13540,7 +13538,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => (
                     crate::request_build::query_value_shm_descriptors(query),
                     crate::held_list::HeldList::entries(&request.extensions).unwrap_or(&[]),
-                    Self::REQUEST_ROUTE_PRIORITY,
+                    crate::declare_ext_qos::read_request_qos(request).priority(),
                 ),
                 _ => return None,
             },
@@ -13913,12 +13911,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    /// R3122 -- the priority a Request is ROUTED on: the data plane, zenoh's default
-    /// `Priority::Data`. One definition for the dispatch below and for the sender's handoff, which
-    /// must open its transaction on the link the dispatch will pick.
-    #[cfg(all(feature = "codec-request", feature = "alloc"))]
-    const REQUEST_ROUTE_PRIORITY: Priority = Priority::DEFAULT;
-
     /// See [`Self::dispatch_push`].
     #[cfg(feature = "codec-request")]
     #[cfg(feature = "alloc")]
@@ -13943,6 +13935,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
     ) -> Result<Dispatched, SendWireError> {
         let class = self.outbound_request_class(request);
+        // The band and the express bit come off the Request itself, as a Response's do. Upstream's
+        // transport reads both off the message:
+        // `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.get_priority(),`
+        // and `commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Request(msg) => msg.ext_qos.is_express(),`,
+        // and an express message leaves its batch at once
+        // (`io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
+        let qos = crate::declare_ext_qos::read_request_qos(request);
         let encode_body = crate::frame_encode::request_body(request);
         // The lend-only build counts with the encoder it sends with
         // (`frame_encode::push_capacity_hint` says why).
@@ -13950,16 +13949,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = crate::tx_buf::encoded_len(as_encoder(&encode_body));
         #[cfg(not(feature = "tx-lend-only"))]
         let len = wz_codecs::request::RequestWire::measure(request).len();
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             stage,
-            // Request/Response = the data plane; zenoh default `Priority::Data`.
-            Self::REQUEST_ROUTE_PRIORITY,
+            qos.priority(),
             reliable,
-            crate::declare_ext_qos::read_request_qos(request),
+            qos,
             len,
             class,
             as_encoder(&encode_body),
-        )
+        )?;
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() && ended == Dispatched::Sent {
+            self.flush_express(qos.priority());
+        }
+        Ok(ended)
     }
 
     /// See [`Self::dispatch_push`]. The linkstate-peer query RETURN path: a
@@ -16902,101 +16905,67 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = interest_id;
     }
 
-    /// R121j-1 — encode + dispatch a `Request(Query)` on the outbound
-    /// link, sending a query to the peer for the keyexpr resolved by
-    /// `(keyexpr_mapping_id, keyexpr_suffix)`. The peer's inbound
-    /// dispatch (zenoh-pico's `_z_session_recv_request` ->
-    /// `_z_trigger_queryables`) routes the query into every queryable
-    /// callback registered for a matching keyexpr; each callback's
-    /// reply is delivered back to this peer as a `Response(Reply)`
-    /// carrying the same `rid`. Termination is signaled by the peer
-    /// emitting `ResponseFinal` with this `rid`.
+    /// Send a `Request(Query)` that asks nothing beyond its key, `(keyexpr_mapping_id,
+    /// keyexpr_suffix)` as the wire names it: [`Self::send_get_parts`] with every slot of the
+    /// query left out. The peer routes it into its queryables, answers with `Response`s naming
+    /// `rid` and ends it with a `ResponseFinal`.
     ///
-    /// AP MVP minimal shape: no consolidation, no parameters, no
-    /// Query-level extensions, no Request-level extensions. The
-    /// builder doc describes the layered helpers that lift those
-    /// constraints when needed.
-    ///
-    /// Reliable channel — the peer must observe the Query and any
-    /// out-of-order Reply / ResponseFinal must not race ahead of the
-    /// Request itself. SN-window ordering on the reliable channel
-    /// gives this guarantee; an unreliable Query could silently drop
-    /// and leave the local z_get future hung indefinitely.
-    /// R311j signature-stability retrofit per `feedback_signature_stability`
-    /// MEMORY note — body cfg-gated on `codec-request`; silent no-op
-    /// when the feature is off. The matching peer's z_get future hangs
-    /// until its per-call timeout fires (documented minus-codec-request
-    /// contract).
+    /// The id `0` with no text names no key and is refused as `Codec(LengthOutOfRange)`, and a
+    /// build without the Request codec refuses every query as `FeatureDisabled`: the asker's get
+    /// then ends at its own timeout.
     pub fn send_request_query(
         &self,
         rid: crate::wire_id::RequestId,
         keyexpr_mapping_id: crate::wire_id::ExprId,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        #[cfg(all(feature = "codec-request", feature = "alloc"))]
+        #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
         {
-            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_request(request, /*reliable=*/ true)?;
-            Ok(())
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            self.send_get_parts(crate::query_parts::GetParts {
+                rid,
+                key,
+                query: crate::query_parts::QueryParts::PLAIN,
+            })
         }
-        // With no allocator the query is written from the caller's own text through the
-        // borrowed writer, which names a LITERAL keyexpr: a request that names a mapping
-        // id has no owned mirror to build, and is refused as a build without the codec
-        // refuses.
-        #[cfg(all(
-            feature = "codec-request",
-            feature = "storage-profile",
-            not(feature = "alloc")
-        ))]
-        {
-            match (keyexpr_mapping_id, keyexpr_suffix) {
-                (0, Some(keyexpr)) => self.send_get_parts(crate::lent_request::GetParts {
-                    rid,
-                    keyexpr,
-                    parameters: &[],
-                    consolidation: None,
-                    target: None,
-                    timeout_ms: 0,
-                    qos: crate::sample::QosLevel::DEFAULT,
-                }),
-                _ => Err(SendWireError::FeatureDisabled),
-            }
-        }
-        #[cfg(not(all(
-            feature = "codec-request",
-            any(feature = "alloc", feature = "storage-profile")
-        )))]
+        #[cfg(not(all(feature = "codec-request", feature = "storage-profile")))]
         {
             let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
         }
     }
 
-    /// A `get` written from the caller's own text, as the codec's borrowed `Request`,
-    /// straight into the slot the link lends ([`crate::lent_request::RequestWriter`]): no
-    /// owned request, no `String`, no `Vec`, so a session with no allocator can ask. The wire
-    /// is the owned builder's for the same description, which the writer's tests hold.
+    /// Send a `get`: written from its borrowed description straight into the slot the link lends
+    /// ([`crate::lent_request::RequestWriter`]), with no owned request and nothing allocated, the
+    /// bytes the owned builder writes for the same description.
     ///
-    /// Reliable, as every query is, and routed on the data plane at the band the request's QoS
-    /// names. An empty keyexpr is refused as `Codec(PresentIfMismatch)`: the same typed refusal
-    /// the owned builders give a description that contradicts itself.
+    /// The owned `Request` goes out instead where the session needs that message itself: a
+    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), and a
+    /// build whose network counters classify a message by its owned form (`transport-stats`). A
+    /// build with no allocator has no owned message, and refuses such a query as `FeatureDisabled`.
+    ///
+    /// Reliable, as every query is: a Query lost on the way would leave the asker waiting for
+    /// answers and a final that never come. Routed at the band its QoS names, and an express one
+    /// drains the open batch, as a `Response` is.
     #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
     pub fn send_get_parts(
         &self,
-        parts: crate::lent_request::GetParts<'_>,
+        parts: crate::query_parts::GetParts<'_>,
     ) -> Result<(), SendWireError> {
-        let writer = crate::lent_request::RequestWriter::new(parts).map_err(|_| {
-            SendWireError::Codec(sce_forge_runtime::codec::CodecError::PresentIfMismatch)
-        })?;
-        let qos = parts.qos;
+        if crate::lent_request::COUNTED_FROM_OWNED || self.rewrites_originated_keys() {
+            return self.send_owned_get(parts);
+        }
+        let writer = crate::lent_request::RequestWriter::new(parts);
+        let qos = parts.query.qos;
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
-        // Request has no size constant (its value's bound is a u32 length), and the link lends a
-        // slot of this size. A query the writer refuses is refused by the encode below too.
+        // Request has no size constant, and the link lends a slot of this size. A query the
+        // writer refuses counts as zero and is refused by the encode below with its own error.
         let size = {
             let mut count = sce_forge_runtime::codec::CountSink::new();
             writer.encode(&mut count).map_or(0, |()| count.len())
         };
-        self.dispatch_network_message_at(
+        let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
             qos.priority(),
             /*reliable=*/ true,
@@ -17004,53 +16973,38 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             size,
             crate::stats::NetworkStatsClass::unread(),
             as_encoder(&|sink| writer.encode(sink)),
-        )
-        .map(|_| ())?;
+        )?;
         #[cfg(feature = "transport-batching")]
-        if qos.is_express() {
+        if qos.is_express() && ended == Dispatched::Sent {
             self.flush_express(qos.priority());
         }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = ended;
         Ok(())
     }
 
-    /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
-    /// Threads the caller-supplied [`QueryMetadata`] bundle through
-    /// the layered [`RequestQueryBuilder`] so the outbound
-    /// `Request(Query)` carries (when set):
-    ///
-    /// * `meta.target` → Q_T flag + request_target ext entry
-    ///   (`vendor/zenoh-pico/src/protocol/codec/network.c:140`)
-    /// * `meta.consolidation` → Q_C flag + consolidation wire byte
-    ///   (`vendor/zenoh-pico/src/protocol/codec/message.c:402-412`)
-    /// * `meta.parameters` → Q_P flag + params slice, gated
-    ///   `query-selector-parameters`
-    /// * `meta.value` → Query-body VALUE ext (id=0x03 ZBUF: encoding +
-    ///   payload) — emitted FIRST in the Query body ext chain — gated
-    ///   `query-value` (R311y250)
-    /// * `meta.source_info` → Query-body source-info ext (id=0x01 ZBUF),
-    ///   gated `query-source-info`
-    /// * `meta.attachment` → Query-body attachment ext (id=0x05 ZBUF),
-    ///   gated `query-attachment`
-    /// * `meta.timeout_ms` → Request-level timeout ext (gated by the
-    ///   `_z_n_msg_request_needed_exts._ext_timeout_ms != 0`
-    ///   predicate at `network.c`).
-    ///
-    /// The three Query-body exts emit in zenoh-pico's `_z_query_encode`
-    /// order (value 0x03 → source_info 0x01 → attachment 0x05,
-    /// `message.c:433-448`) regardless of `meta` field order.
-    ///
-    /// Empty slots elide the corresponding wire byte / ext so a
-    /// `meta = QueryMetadata::default()` call produces the same wire
-    /// frame as [`Self::send_request_query`]. Mirrors R233's
-    /// [`Self::send_push_with_meta_literal`] pattern on the publish
-    /// side — the queryable / z_get split now has matching
-    /// metadata-bearing surfaces.
-    ///
-    /// Same reliability contract as the no-metadata form: hard-coded
-    /// `reliable=true` per zenoh-pico's reliable-channel guarantee
-    /// for the Query / Reply / Final correlation chain.
-    /// R311j signature-stability retrofit — body cfg, signature stable.
-    /// Silent no-op when `codec-request` off.
+    /// The owned `Request` of `parts`, sent where [`Self::send_get_parts`] does not write it
+    /// from its parts.
+    #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+    fn send_owned_get(&self, parts: crate::query_parts::GetParts<'_>) -> Result<(), SendWireError> {
+        #[cfg(feature = "alloc")]
+        {
+            self.dispatch_request(parts.owned_request()?, /*reliable=*/ true)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            let _ = parts;
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
+    /// Send the `get` `meta` describes, on the key `(keyexpr_mapping_id, keyexpr_suffix)`:
+    /// [`Self::send_get_parts`] with the description read from the metadata
+    /// ([`crate::query_parts::QueryParts::of_metadata`]). Each slot rides as the owned builder
+    /// writes it, in the build that composes it: the target, the timeout and the QoS on the
+    /// envelope, and the consolidation, the parameters, the value, the source info and the
+    /// attachment in the Query, in zenoh-pico's order (`_z_query_encode`). Empty metadata is the
+    /// wire of [`Self::send_request_query`].
     #[cfg(feature = "alloc")]
     pub fn send_request_query_with_meta(
         &self,
@@ -17061,15 +17015,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-request")]
         {
-            // R311mu (B5b-2b-2) — the RequestQueryBuilder assembly moved to
-            // request_build::build_request_query_with_meta (the build/dispatch
-            // split), so the seam-routed z_get path and this send_* wrapper
-            // share one builder SSOT. This method keeps the dispatch half
-            // (reliable, no batch flush — a Query carries no express window).
-            let request =
-                build_request_query_with_meta(rid, keyexpr_mapping_id, keyexpr_suffix, meta)?;
-            self.dispatch_request(request, /*reliable=*/ true)?;
-            Ok(())
+            let key = crate::wire_key::WireKey::from_parts(keyexpr_mapping_id, keyexpr_suffix)
+                .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+            self.send_get_parts(crate::query_parts::GetParts {
+                rid,
+                key,
+                query: crate::query_parts::QueryParts::of_metadata(meta),
+            })
         }
         #[cfg(not(feature = "codec-request"))]
         {
@@ -17146,7 +17098,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// built upstream by `ResponseReplyBuilder` /
     /// `ResponseErrBuilder` (or composed from a
     /// `crate::query::QueryReply::into_response` call drained out of
-    /// `crate::query::QueryableRegistry::dispatch_messages`).
+    /// `crate::query::QueryPeer::dispatch_messages`).
     ///
     /// Always reliable — Reply data delivery loss would leave the
     /// requesting peer's `z_get` future waiting for a reply that never

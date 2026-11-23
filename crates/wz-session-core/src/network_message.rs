@@ -1130,7 +1130,12 @@ fn parse_batch(bytes: &[u8], origin: Origin<'_>) -> Result<Vec<NetworkMessage>, 
 /// included, as one [`NetworkMessage::Unknown`]. The caller stops walking.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 fn absorb_unknown(cursor: &mut SceCursor<'_>, out: &mut impl RecordOut) -> Result<(), CodecError> {
-    let mid = cursor.peek_slice(1)?[0] & 0x1F;
+    let mid = cursor
+        .peek_slice(1)?
+        .first()
+        .copied()
+        .ok_or(CodecError::NeedMoreBytes)?
+        & 0x1F;
     let rem = cursor.remaining();
     let body = cursor.peek_slice(rem)?.to_vec();
     cursor.advance(rem)?;
@@ -1656,7 +1661,8 @@ fn walk_records<'f>(
         if is_transport_mid(
             cursor
                 .peek_slice(1)
-                .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+                .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                .map_err(crate::parse_error::InboundParseError::Codec)?
                 & 0x1F,
         ) {
             break;
@@ -1705,7 +1711,11 @@ fn walk_records<'f>(
                 feature = "codec-response"
             ))]
             if form == RecordForm::Lent {
-                let mid = cursor.peek_slice(1).map_err(InboundParseError::Codec)?[0] & 0x1F;
+                let mid = cursor
+                    .peek_slice(1)
+                    .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+                    .map_err(InboundParseError::Codec)?
+                    & 0x1F;
                 if lend_record(mid, &mut cursor, each)? {
                     continue;
                 }
@@ -1731,7 +1741,7 @@ fn walk_records<'f>(
     record.clear();
     // How much of the payload the walk read: all of it, or up to the transport message that
     // ended it, or up to the record `go_on` stopped it before.
-    Ok((payload.len() - cursor.remaining(), stopped))
+    Ok((payload.len().saturating_sub(cursor.remaining()), stopped))
 }
 
 /// The lent half of [`try_for_each_record`]: when the record at the cursor is of
@@ -2005,7 +2015,8 @@ fn lend_any_record<'f>(
 ) -> Result<Walk, crate::parse_error::InboundParseError> {
     let mid = cursor
         .peek_slice(1)
-        .map_err(crate::parse_error::InboundParseError::Codec)?[0]
+        .and_then(|byte| byte.first().copied().ok_or(CodecError::NeedMoreBytes))
+        .map_err(crate::parse_error::InboundParseError::Codec)?
         & 0x1F;
     match mid {
         // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
@@ -2393,8 +2404,11 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
     while cursor.remaining() > 0 {
         // The offset is recomputed per record rather than tracked, so it
         // cannot drift from the cursor the decoders actually advance.
-        let offset = total - cursor.remaining();
-        if end == RecordsEnd::AtTransportMessage && is_transport_mid(bytes[offset] & 0x1F) {
+        // The cursor runs over `bytes`, so what it has left is at most their length.
+        let offset = total.saturating_sub(cursor.remaining());
+        let rest = bytes.get(offset..).unwrap_or_default();
+        let header = rest.first().copied().unwrap_or_default();
+        if end == RecordsEnd::AtTransportMessage && is_transport_mid(header & 0x1F) {
             next_message_at = Some(offset);
             break;
         }
@@ -2412,7 +2426,9 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
         let before = messages.len();
         match decode_one_record(&mut cursor, &mut messages, NO_ORIGIN) {
             Ok(true) => {
-                let len = (total - cursor.remaining()) - offset;
+                let len = total
+                    .saturating_sub(cursor.remaining())
+                    .saturating_sub(offset);
                 spans.resize(before, (0, 0));
                 for _ in before..messages.len() {
                     spans.push((offset, len));
@@ -2422,9 +2438,9 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
                 // An unknown MID: absorb the rest verbatim (the strict
                 // parse's own behaviour) and stop, since the record's
                 // length is unknowable and there is nothing to resync on.
-                let mid = bytes[offset] & 0x1F;
+                let mid = header & 0x1F;
                 let rem = cursor.remaining();
-                let body = bytes[offset..].to_vec();
+                let body = rest.to_vec();
                 // `advance` past a slice the cursor already reports as
                 // remaining cannot fail; the outcome is checked anyway so
                 // a future cursor change cannot silently desync the walk.
@@ -2452,7 +2468,7 @@ fn parse_payload_best_effort(bytes: &[u8], max_records: usize, end: RecordsEnd) 
     }
     let unparsed_bytes = match halt {
         Some(BatchHalt::UnknownMid { offset, .. }) | Some(BatchHalt::CodecError { offset, .. }) => {
-            total - offset
+            total.saturating_sub(offset)
         }
         None => 0,
     };
@@ -2497,7 +2513,11 @@ fn decode_one_record(
     out: &mut impl RecordOut,
     origin: Origin<'_>,
 ) -> Result<bool, CodecError> {
-    let header = cursor.peek_slice(1)?[0];
+    let header = cursor
+        .peek_slice(1)?
+        .first()
+        .copied()
+        .ok_or(CodecError::NeedMoreBytes)?;
     let mid = header & 0x1F;
     // The dispatch by the masked id stays here and not in a document: upstream
     // refuses an id it does not know (`commons/zenoh-codec/src/network/mod.rs` @
@@ -3131,11 +3151,10 @@ fn zbuf_ext_len<E: crate::ext_view::ExtEntryView>(extensions: Option<&[E]>, eid:
 fn put_payload_size<S: wz_codecs::msg_put::MsgPutStorage>(
     put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> usize {
-    crate::put_payload::payload_len(put)
-        + zbuf_ext_len(
-            Some(crate::put_payload::chain(put)),
-            crate::ext_header::body_eid::PUT_ATTACHMENT,
-        )
+    crate::put_payload::payload_len(put).saturating_add(zbuf_ext_len(
+        Some(crate::put_payload::chain(put)),
+        crate::ext_header::body_eid::PUT_ATTACHMENT,
+    ))
 }
 
 /// See [`put_payload_size`].
@@ -3279,8 +3298,9 @@ where
 /// reports none.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 fn query_payload_size(extensions: Option<&[crate::wire::parts::QueryExtEntryOwned]>) -> usize {
-    crate::ext_view::query_value_payload_len(extensions.unwrap_or_default())
-        + zbuf_ext_len(extensions, crate::ext_header::body_eid::QUERY_ATTACHMENT)
+    crate::ext_view::query_value_payload_len(extensions.unwrap_or_default()).saturating_add(
+        zbuf_ext_len(extensions, crate::ext_header::body_eid::QUERY_ATTACHMENT),
+    )
 }
 
 /// [`stats_class`] for a `Response` body. Reply and Err BOTH fold onto
@@ -3852,7 +3872,10 @@ fn put_view_class(
         kind,
         message,
         space,
-        payload + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::PUT_ATTACHMENT),
+        payload.saturating_add(zbuf_ext_len_in(
+            entries(),
+            crate::ext_header::body_eid::PUT_ATTACHMENT,
+        )),
         entries(),
         DATA_SHM_MARKER,
     );
@@ -4031,7 +4054,10 @@ fn query_view_class(
         MessageLabel::Query,
         StatMessage::Query,
         space,
-        value + zbuf_ext_len_in(entries(), crate::ext_header::body_eid::QUERY_ATTACHMENT),
+        value.saturating_add(zbuf_ext_len_in(
+            entries(),
+            crate::ext_header::body_eid::QUERY_ATTACHMENT,
+        )),
         entries(),
         crate::ext_header::body_ext_id::QUERY_SHM,
     )
@@ -4316,32 +4342,43 @@ mod record_walk_tests {
         let mut records = vec![push_record("a/1"), oam_record(2), push_record("a/3")];
         #[cfg(feature = "codec-request")]
         records.push(
-            crate::request_build::RequestQueryBuilder::new(12, 0, Some("q/1"))
-                .request_qos(0x0D)
+            crate::request_build::RequestQueryBuilder::new(
+                12,
+                crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+            )
+            .request_qos(0x0D)
+            .build()
+            .expect("build")
+            .try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec(),
+        );
+        #[cfg(feature = "codec-response")]
+        {
+            records.push(
+                crate::response_build::ResponseReplyBuilder::new(
+                    9,
+                    crate::wire_key::WireKey::literal("r/1").expect("a literal key"),
+                    b"reply",
+                )
+                .attachment(b"att")
                 .build()
                 .expect("build")
                 .try_as_borrowed()
                 .expect("a view")
                 .encode_to_vec(),
-        );
-        #[cfg(feature = "codec-response")]
-        {
-            records.push(
-                crate::response_build::ResponseReplyBuilder::new(9, 0, Some("r/1"), b"reply")
-                    .attachment(b"att")
-                    .build()
-                    .expect("build")
-                    .try_as_borrowed()
-                    .expect("a view")
-                    .encode_to_vec(),
             );
             records.push(
-                crate::response_build::ResponseErrBuilder::new(9, 0, Some("r/2"), b"oops")
-                    .build()
-                    .expect("build")
-                    .try_as_borrowed()
-                    .expect("a view")
-                    .encode_to_vec(),
+                crate::response_build::ResponseErrBuilder::new(
+                    9,
+                    crate::wire_key::WireKey::literal("r/2").expect("a literal key"),
+                    b"oops",
+                )
+                .build()
+                .expect("build")
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec(),
             );
         }
         let payload = records.concat();
@@ -4688,12 +4725,19 @@ mod record_walk_tests {
     #[cfg(all(feature = "codec-request", feature = "codec-response"))]
     #[test]
     fn the_lent_walk_lends_requests_and_responses_and_refuses_them_alike() {
-        let request = crate::request_build::RequestQueryBuilder::new(3, 0, Some("q/1"))
-            .build()
-            .expect("build");
-        let response = crate::response_build::ResponseReplyBuilder::new(3, 0, Some("q/1"), b"v")
-            .build()
-            .expect("build");
+        let request = crate::request_build::RequestQueryBuilder::new(
+            3,
+            crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+        )
+        .build()
+        .expect("build");
+        let response = crate::response_build::ResponseReplyBuilder::new(
+            3,
+            crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+            b"v",
+        )
+        .build()
+        .expect("build");
         let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
         let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
         let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
@@ -5559,9 +5603,13 @@ mod shared_decode_tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn a_reply_put_payload_is_a_range_of_the_lent_frame() {
-        let bytes = crate::response_build::build_response_reply_literal(7, "demo/q", PAYLOAD)
-            .expect("build a literal reply")
-            .wire();
+        let bytes = crate::response_build::build_response_reply(
+            7,
+            crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            PAYLOAD,
+        )
+        .expect("build a literal reply")
+        .wire();
         let frame = RxBytes::lend(bytes);
         let messages = parse_frame_payload_in(&frame).expect("the batch parses");
         let NetworkMessage::Response(response) = &messages[0] else {
@@ -5764,7 +5812,13 @@ mod mandatory_extension_rule_tests {
 
     #[test]
     fn a_request_defines_the_node_id_and_the_target_and_its_query_nothing() {
-        let request = || crate::request_build::build_request_query(1, 0, Some("k")).unwrap();
+        let request = || {
+            crate::request_build::build_request_query(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            )
+            .unwrap()
+        };
         every_header("request envelope", &[NODE_ID, TARGET], |header| {
             let mut request = request();
             request.extensions = Some(crate::held_list::one_entry(entry(header)));
@@ -5787,7 +5841,14 @@ mod mandatory_extension_rule_tests {
 
     #[test]
     fn a_response_defines_nothing_mandatory_and_its_reply_put_and_err_the_shm_marker() {
-        let reply = || crate::response_build::build_response_reply_literal(1, "k", b"v").unwrap();
+        let reply = || {
+            crate::response_build::build_response_reply(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap()
+        };
         every_header("response envelope", &[], |header| {
             let mut response = reply();
             response.extensions = Some(crate::held_list::one_entry(entry(header)));
@@ -5819,8 +5880,12 @@ mod mandatory_extension_rule_tests {
             NetworkMessage::Response(Box::new(response))
         });
         every_header("err body", SHM, |header| {
-            let mut response =
-                crate::response_build::build_response_err_literal(1, "k", b"e").unwrap();
+            let mut response = crate::response_build::build_response_err(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"e",
+            )
+            .unwrap();
             match &mut response.body {
                 crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
                     err.extensions = Some(crate::held_list::one_entry(entry(header)));

@@ -141,15 +141,15 @@ pub trait ResourceSource {
 
 /// The bucket an interval of `interval_us` microseconds falls in, in a histogram of `buckets`.
 pub const fn bucket_of(interval_us: u32, buckets: usize) -> usize {
-    let bit = if interval_us < 2 {
-        0
-    } else {
-        (31 - interval_us.leading_zeros()) as usize
+    // The highest set bit, which is 0 for 0 and 1 too.
+    let bit = match interval_us.checked_ilog2() {
+        Some(bit) => bit as usize,
+        None => 0,
     };
     if bit < buckets {
         bit
     } else {
-        buckets - 1
+        buckets.saturating_sub(1)
     }
 }
 
@@ -162,17 +162,21 @@ pub struct IntervalHistogram<const B: usize> {
 impl<const B: usize> IntervalHistogram<B> {
     /// An empty histogram.
     pub const fn new() -> Self {
-        assert!(
-            B >= 1 && B <= MAX_BUCKETS,
-            "a histogram has one to thirty-two buckets"
-        );
+        const {
+            assert!(
+                B >= 1 && B <= MAX_BUCKETS,
+                "a histogram has one to thirty-two buckets"
+            )
+        };
         Self { counts: [0; B] }
     }
 
     /// Count one interval.
     pub fn observe(&mut self, interval_us: u32) {
-        let bucket = &mut self.counts[bucket_of(interval_us, B)];
-        *bucket = bucket.saturating_add(1);
+        // `bucket_of` answers below `B`, which `new` holds to at least 1.
+        if let Some(bucket) = self.counts.get_mut(bucket_of(interval_us, B)) {
+            *bucket = bucket.saturating_add(1);
+        }
     }
 
     /// The count in each bucket.
@@ -503,37 +507,52 @@ impl Header {
     /// Read the header of `bytes`, whatever its version and bucket count, to say what a reader
     /// would need to read the rest.
     pub fn peek(bytes: &[u8]) -> Result<Self, Refused> {
-        if bytes.len() < 5 {
+        let Some(&[v0, v1, s0, s1, buckets]) = bytes.first_chunk::<5>() else {
             return Err(Refused::TooShort);
-        }
-        let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+        };
+        let version = u16::from_le_bytes([v0, v1]);
         if version == 0 {
             return Err(Refused::UnknownVersion);
         }
         Ok(Self {
             version,
-            size: u16::from_le_bytes([bytes[2], bytes[3]]),
-            buckets: bytes[4],
+            size: u16::from_le_bytes([s0, s1]),
+            buckets,
         })
     }
 }
 
+// The writer and the readers below are handed a buffer of at least the layout's size, checked by
+// their callers; a field past it would be written as nothing and read as 0.
+
 fn put(out: &mut [u8], at: usize, bytes: &[u8]) {
-    out[at..at + bytes.len()].copy_from_slice(bytes);
+    if let Some(field) = out
+        .get_mut(at..)
+        .and_then(|rest| rest.get_mut(..bytes.len()))
+    {
+        field.copy_from_slice(bytes);
+    }
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<2>())
+        .map_or(0, |word| u16::from_le_bytes(*word))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<4>())
+        .map_or(0, |word| u32::from_le_bytes(*word))
 }
 
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    let mut word = [0u8; 8];
-    word.copy_from_slice(&bytes[at..at + 8]);
-    u64::from_le_bytes(word)
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<8>())
+        .map_or(0, |word| u64::from_le_bytes(*word))
 }
 
 impl<const B: usize> Snapshot<B> {
@@ -548,8 +567,7 @@ impl<const B: usize> Snapshot<B> {
         }
         put(out, 0, &LAYOUT_VERSION.to_le_bytes());
         put(out, 2, &(Self::SIZE as u16).to_le_bytes());
-        out[4] = B as u8;
-        out[5] = self.available;
+        put(out, 4, &[B as u8, self.available]);
         put(out, 6, &self.cpu_permille.to_le_bytes());
         put(out, 8, &self.tasks.to_le_bytes());
         put(out, 10, &0u16.to_le_bytes());
@@ -561,8 +579,10 @@ impl<const B: usize> Snapshot<B> {
         put(out, 40, &self.features.to_le_bytes());
         put(out, 48, &self.messages.to_le_bytes());
         put(out, 56, &self.interval_sum_us.to_le_bytes());
-        for (index, count) in self.intervals.iter().enumerate() {
-            put(out, HEADER_SIZE + 8 * index, &count.to_le_bytes());
+        if let Some(cells) = out.get_mut(HEADER_SIZE..) {
+            for (cell, count) in cells.chunks_exact_mut(8).zip(&self.intervals) {
+                cell.copy_from_slice(&count.to_le_bytes());
+            }
         }
         Some(Self::SIZE)
     }
@@ -583,14 +603,15 @@ impl<const B: usize> Snapshot<B> {
             return Err(Refused::TooShort);
         }
         let mut intervals = [0u64; B];
-        for (index, count) in intervals.iter_mut().enumerate() {
-            *count = u64_at(bytes, HEADER_SIZE + 8 * index);
+        let cells = bytes.get(HEADER_SIZE..).unwrap_or_default().chunks_exact(8);
+        for (count, cell) in intervals.iter_mut().zip(cells) {
+            *count = u64_at(cell, 0);
         }
         Ok(Self {
             sequence: u32_at(bytes, 12),
             taken_at_us: u32_at(bytes, 16),
             events_dropped: u32_at(bytes, 20),
-            available: bytes[5],
+            available: bytes.get(5).copied().unwrap_or(0),
             cpu_permille: u16_at(bytes, 6),
             tasks: u16_at(bytes, 8),
             heap_in_use: u64_at(bytes, 24),
@@ -746,10 +767,17 @@ impl BuildSampler {
     /// node's creator resolved; a creator that holds none of its own hands
     /// [`RuntimeLimits::BUILD`](crate::limits::RuntimeLimits::BUILD).
     pub fn of_limits(limits: &crate::limits::RuntimeLimits, features: u64) -> Self {
-        // Every period the limit's domain allows was checked against the range above.
-        match Self::new(limits.snapshot_period_ms() as u32 * 1000, features) {
-            Ok(sampler) => sampler,
-            Err(PeriodOutOfRange) => unreachable!("checked at compile time"),
+        // Every period the limit's domain allows was checked against the range above, so the
+        // clamp keeps the sampler's range without a refusal no build reaches.
+        let period_us = (limits.snapshot_period_ms() as u32)
+            .saturating_mul(1000)
+            .clamp(1, MAX_TIMEOUT_TICKS);
+        Self {
+            period_us,
+            features,
+            last_sample_us: None,
+            sequence: 0,
+            latest: None,
         }
     }
 }

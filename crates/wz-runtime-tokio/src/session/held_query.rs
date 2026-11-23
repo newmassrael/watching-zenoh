@@ -92,7 +92,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             R::with_mutex_mut(&self.observer, |observer| {
                 for reply in replies {
                     let inbound: crate::reply::InboundReply = reply.into();
-                    observer.replies.deliver_local_reply(&inbound);
+                    observer.face().replies.deliver_local_reply(&inbound);
                 }
             });
             self.drain_or_wake_local();
@@ -180,7 +180,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             let observer = self.observer.clone();
             self.fires.stage(Box::new(move || {
                 R::with_mutex_mut(&observer, |observer| {
-                    observer.replies.deliver_local_final(key.rid);
+                    observer.face().replies.deliver_local_final(key.rid);
                 });
             }));
             if drain {

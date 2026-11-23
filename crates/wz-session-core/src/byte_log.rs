@@ -63,36 +63,33 @@ struct Chunk {
 impl Chunk {
     /// One past the last position the chunk can hold.
     fn end(&self) -> u64 {
-        self.at + self.bytes.capacity() as u64
+        self.at.saturating_add(self.bytes.capacity() as u64)
     }
 }
 
 impl ByteLog {
     /// Log `run` and return the position it was logged at.
     pub fn append(&mut self, run: &[u8]) -> u64 {
-        let fits = self
-            .chunks
-            .back()
-            .is_some_and(|last| last.bytes.capacity() - last.bytes.len() >= run.len());
-        if !fits {
-            let capacity = match self.last_capacity {
-                0 => FIRST_CHUNK,
-                last => (last * 2).min(MAX_CHUNK),
-            };
-            let chunk = Chunk {
-                at: self.next_chunk_at,
-                bytes: Vec::with_capacity(capacity.max(run.len())),
-            };
-            self.next_chunk_at = chunk.end();
-            self.last_capacity = capacity;
-            self.chunks.push_back(chunk);
+        let fits =
+            |last: &&mut Chunk| last.bytes.capacity().saturating_sub(last.bytes.len()) >= run.len();
+        if let Some(last) = self.chunks.back_mut().filter(fits) {
+            let at = last.at.saturating_add(last.bytes.len() as u64);
+            last.bytes.extend_from_slice(run);
+            return at;
         }
-        let last = self
-            .chunks
-            .back_mut()
-            .unwrap_or_else(|| unreachable!("a chunk was started above"));
-        let at = last.at + last.bytes.len() as u64;
-        last.bytes.extend_from_slice(run);
+        let capacity = match self.last_capacity {
+            0 => FIRST_CHUNK,
+            last => last.saturating_mul(2).min(MAX_CHUNK),
+        };
+        let mut chunk = Chunk {
+            at: self.next_chunk_at,
+            bytes: Vec::with_capacity(capacity.max(run.len())),
+        };
+        let at = chunk.at;
+        chunk.bytes.extend_from_slice(run);
+        self.next_chunk_at = chunk.end();
+        self.last_capacity = capacity;
+        self.chunks.push_back(chunk);
         at
     }
 
@@ -113,13 +110,13 @@ impl ByteLog {
         while self
             .chunks
             .front()
-            .is_some_and(|c| c.at + c.bytes.len() as u64 <= at)
+            .is_some_and(|c| c.at.saturating_add(c.bytes.len() as u64) <= at)
         {
             let _ = self.chunks.pop_front();
         }
         // A deque does not give back what it grew to as its front goes; a log
         // that held many chunks and now holds few would keep the peak's list.
-        if self.chunks.len() * 4 <= self.chunks.capacity() {
+        if self.chunks.len().saturating_mul(4) <= self.chunks.capacity() {
             self.chunks.shrink_to_fit();
         }
     }
@@ -128,12 +125,12 @@ impl ByteLog {
     /// list of chunks that holds them, which doubles as the log grows and is as
     /// much the log's as the bytes are.
     pub fn allocated(&self) -> usize {
-        self.chunks.capacity() * core::mem::size_of::<Chunk>()
-            + self
-                .chunks
-                .iter()
-                .map(|c| c.bytes.capacity())
-                .sum::<usize>()
+        self.chunks.iter().map(|c| c.bytes.capacity()).fold(
+            self.chunks
+                .capacity()
+                .saturating_mul(core::mem::size_of::<Chunk>()),
+            usize::saturating_add,
+        )
     }
 }
 
@@ -266,7 +263,7 @@ impl UnitLog {
     /// goes, every earlier one having gone before it.
     pub fn release_through(&mut self, place: LogPlace, len: usize) {
         if let LogPlace::Kept(at) = place {
-            self.copies.release_before(at + len as u64);
+            self.copies.release_before(at.saturating_add(len as u64));
         }
     }
 

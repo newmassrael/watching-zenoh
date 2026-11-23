@@ -398,8 +398,7 @@ impl Pair {
         let seen = delivered.clone();
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 KEY,
                 Locality::Any,
                 BoxedSink::new(move |sample| {
@@ -798,8 +797,7 @@ mod query_and_reply {
     fn response(i: usize) -> Vec<u8> {
         wz_session_core::response_build::ResponseReplyBuilder::new(
             RID,
-            0,
-            Some(KEY),
+            wz_session_core::wire_key::WireKey::literal(KEY).expect("a literal key"),
             &payload_of(i),
         )
         .build()
@@ -810,12 +808,15 @@ mod query_and_reply {
     }
 
     fn request(rid: RequestId) -> Vec<u8> {
-        wz_session_core::request_build::RequestQueryBuilder::new(rid, 0, Some(KEY))
-            .build()
-            .expect("a query")
-            .try_as_borrowed()
-            .expect("a borrowed view")
-            .encode_to_vec()
+        wz_session_core::request_build::RequestQueryBuilder::new(
+            rid,
+            wz_session_core::wire_key::WireKey::literal(KEY).expect("a literal key"),
+        )
+        .build()
+        .expect("a query")
+        .try_as_borrowed()
+        .expect("a borrowed view")
+        .encode_to_vec()
     }
 
     /// What the shared batch decoder reads out of a payload of Responses: each
@@ -859,6 +860,7 @@ mod query_and_reply {
         // Through the sink form, which both backings have.
         pair.observer
             .borrow_mut()
+            .face()
             .replies
             .register_sink(
                 RID,
@@ -926,22 +928,23 @@ mod query_and_reply {
         let got: Arc<Mutex<Vec<Handed>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
         let into = got.clone();
         // Through the sink form, which both backings have.
-        pair.observer
-            .borrow_mut()
-            .queryables
-            .register_sink(
-                KEY,
-                Locality::Any,
-                false,
-                wz_session_core::query_sink::BoxedQuerySink::new(move |view, _out| {
-                    into.lock().expect("not poisoned").push(record(
-                        &[],
-                        view.keyexpr(),
-                        view.rid(),
-                    ));
-                }),
-            )
-            .expect("register the queryable");
+        pair.observer.borrow_mut().with_app(|app_half| {
+            app_half
+                .queryables
+                .register_sink(
+                    KEY,
+                    Locality::Any,
+                    false,
+                    wz_session_core::query_sink::BoxedQuerySink::new(move |view, _out| {
+                        into.lock().expect("not poisoned").push(record(
+                            &[],
+                            view.keyexpr(),
+                            view.rid(),
+                        ));
+                    }),
+                )
+                .expect("register the queryable")
+        });
         // A frame as wide as the widest measured one, first: the observer's
         // staging buffers for replies and Finals keep the capacity they grew
         // to, so what follows measures queries and not a first growth.

@@ -70,7 +70,7 @@ fn inbound_temp_push_drives_app_engine_to_hot_via_fan_out() {
     assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
     let mut observer = ApplicationLayerObserver::new();
-    register_bindings(&mut observer.switchboard);
+    observer.with_app(|app| register_bindings(app.switchboard));
 
     // 35.00 C > the 30.00 C native guard threshold.
     let outcome = frame_event(put_push("demo/sensor/temp", &temp_wire(3500)));
@@ -92,7 +92,7 @@ fn inbound_temp_push_drives_app_engine_to_hot_via_fan_out() {
 fn inbound_cold_temp_push_leaves_app_engine_idle_via_fan_out() {
     let mut engine = new_engine();
     let mut observer = ApplicationLayerObserver::new();
-    register_bindings(&mut observer.switchboard);
+    observer.with_app(|app| register_bindings(app.switchboard));
 
     // 20.00 C < threshold — the value row still fires but the guard misses.
     let outcome = frame_event(put_push("demo/sensor/temp", &temp_wire(2000)));
@@ -114,7 +114,7 @@ fn inbound_cold_temp_push_leaves_app_engine_idle_via_fan_out() {
 fn inbound_reset_push_returns_app_engine_to_idle_via_fan_out() {
     let mut engine = new_engine();
     let mut observer = ApplicationLayerObserver::new();
-    register_bindings(&mut observer.switchboard);
+    observer.with_app(|app| register_bindings(app.switchboard));
 
     // Drive to hot first.
     let hot = frame_event(put_push("demo/sensor/temp", &temp_wire(3500)));
@@ -141,7 +141,7 @@ fn inbound_reset_push_returns_app_engine_to_idle_via_fan_out() {
 fn inbound_unmapped_keyexpr_injects_nothing_via_fan_out() {
     let mut engine = new_engine();
     let mut observer = ApplicationLayerObserver::new();
-    register_bindings(&mut observer.switchboard);
+    observer.with_app(|app| register_bindings(app.switchboard));
 
     let outcome = frame_event(put_push("office/temp", &temp_wire(3500)));
     let fired = {

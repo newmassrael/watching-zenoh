@@ -44,6 +44,28 @@ use zenoh_pico_sys::{
     _z_wbuf_clear, _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
 };
 
+/// A key the builder takes for the Requests below, which compare against zenoh-pico's
+/// zero-initialised `_z_n_msg_request_t`: the id `1`, no suffix, so the header's `N` stays clear.
+fn one_key() -> wz_session_core::wire_key::WireKey<'static> {
+    wz_session_core::wire_key::WireKey::from_parts(1, None).expect("the id 1 names a key")
+}
+
+/// `request` with the key zenoh-pico's zeroed request carries: the id `0` and no suffix, which
+/// the builder has no key for. The bytes compared are the Query's, around that envelope.
+fn with_the_empty_key(
+    mut request: wz_session_core::wire::RequestOwned,
+) -> wz_session_core::wire::RequestOwned {
+    use wz_session_core::wire::parts::{WireexprLocalOwned, WireexprOwned, WireexprOwnedVariant};
+    request.keyexpr = WireexprOwned {
+        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id: 0,
+            suffix_len: None,
+            suffix: None,
+        }),
+    };
+    request
+}
+
 fn zenoh_pico_encode_request_default() -> Vec<u8> {
     // SAFETY: standard wbuf-extract path. The two field writes
     // (`_ext_qos._val` and `_body._query._consolidation`) target
@@ -141,7 +163,7 @@ fn layer3_request_query_value_byte_equivalent() {
     use wz_session_core::sample::EncodingHint;
 
     const PAYLOAD: &[u8] = b"the-query-value";
-    let owned = RequestQueryBuilder::new(0, 0, None)
+    let owned = RequestQueryBuilder::new(0, one_key())
         .query_value(
             PAYLOAD,
             EncodingHint {
@@ -151,6 +173,7 @@ fn layer3_request_query_value_byte_equivalent() {
         )
         .build()
         .expect("wz query-value request builds");
+    let owned = with_the_empty_key(owned);
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned request")
@@ -266,10 +289,11 @@ fn layer3_request_target_byte_equivalent() {
             zenoh_pico_sys::z_query_target_t_Z_QUERY_TARGET_ALL_COMPLETE,
         ),
     ] {
-        let owned = RequestQueryBuilder::new(0, 0, None)
+        let owned = RequestQueryBuilder::new(0, one_key())
             .request_target(wz_target)
             .build()
             .expect("wz target request builds");
+        let owned = with_the_empty_key(owned);
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
@@ -303,10 +327,11 @@ fn layer3_request_timeout_byte_equivalent() {
     // A one-byte VLE (1) and a multi-byte one (5000) — the ext's length prefix is where
     // a zint-vs-zint64 disagreement would surface.
     for timeout_ms in [1_u64, 5_000, 4_294_967_296] {
-        let owned = RequestQueryBuilder::new(0, 0, None)
+        let owned = RequestQueryBuilder::new(0, one_key())
             .request_timeout_ms(timeout_ms)
             .build()
             .expect("wz timeout request builds");
+        let owned = with_the_empty_key(owned);
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
@@ -374,10 +399,11 @@ fn layer3_request_consolidation_diverges_from_zenoh_pico_by_exactly_one_slot() {
             zenoh_pico_sys::z_consolidation_mode_t_Z_CONSOLIDATION_MODE_LATEST,
         ),
     ] {
-        let owned = RequestQueryBuilder::new(0, 0, None)
+        let owned = RequestQueryBuilder::new(0, one_key())
             .consolidation(wz_mode)
             .build()
             .expect("wz consolidation request builds");
+        let owned = with_the_empty_key(owned);
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
@@ -445,10 +471,11 @@ fn layer3_request_parameters_byte_equivalent() {
     use wz_session_core::request_build::RequestQueryBuilder;
 
     for params in [&b"k=v"[..], b"_time=[now(-1h)..now()];k=v"] {
-        let owned = RequestQueryBuilder::new(0, 0, None)
+        let owned = RequestQueryBuilder::new(0, one_key())
             .parameters(params)
             .build()
             .expect("wz parameters request builds");
+        let owned = with_the_empty_key(owned);
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
@@ -485,10 +512,11 @@ fn layer3_request_attachment_byte_equivalent() {
     let max_len = wz_session_core::request_build::QUERY_EXT_ZBUF_MAX_LEN;
     let ceiling = vec![0xA5_u8; max_len];
     for attachment in [&b"a"[..], b"query-attachment-bytes", &ceiling] {
-        let owned = RequestQueryBuilder::new(0, 0, None)
+        let owned = RequestQueryBuilder::new(0, one_key())
             .query_attachment(attachment)
             .build()
             .expect("wz attachment request builds");
+        let owned = with_the_empty_key(owned);
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
@@ -527,9 +555,10 @@ fn layer3_request_attachment_byte_equivalent() {
 fn layer3_request_builder_default_emits_no_spurious_ext() {
     use wz_session_core::request_build::RequestQueryBuilder;
 
-    let owned = RequestQueryBuilder::new(0, 0, None)
+    let owned = RequestQueryBuilder::new(0, one_key())
         .build()
         .expect("wz knob-less request builds");
+    let owned = with_the_empty_key(owned);
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned request")

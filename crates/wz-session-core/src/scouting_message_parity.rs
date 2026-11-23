@@ -180,7 +180,7 @@ fn every_hello_written_here_is_the_hello_the_document_reads() {
                     list.iter().map(|l| l.to_string()).collect(),
                 )
                 .expect("a well-formed identity");
-                let wire = hello_datagram(&identity);
+                let wire = hello_datagram(&identity).expect("an identity spells a Hello");
                 assert_hello_read_alike(&wire);
                 let view = read_whole!(ScoutingHelloView::decode, &wire);
                 assert_eq!(view.mid(), wire_const::S_MID_HELLO);

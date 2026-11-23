@@ -215,7 +215,7 @@ impl JsonOut {
         if s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
             crate::json::escape_into(s, &mut self.out);
         } else {
-            self.out.reserve(s.len() + 2);
+            self.out.reserve(s.len().saturating_add(2));
             self.out.push('"');
             self.out.push_str(s);
             self.out.push('"');
@@ -276,12 +276,13 @@ impl DocOut for JsonOut {
 
     fn hex(&mut self, bytes: &[u8]) {
         self.separate();
-        self.out.reserve(bytes.len() * 2 + 2);
+        self.out
+            .reserve(bytes.len().saturating_mul(2).saturating_add(2));
         self.out.push('"');
         for &b in bytes {
-            self.out.push(cbor::HEX_DIGITS[usize::from(b >> 4)] as char);
-            self.out
-                .push(cbor::HEX_DIGITS[usize::from(b & 0x0f)] as char);
+            let [high, low] = cbor::hex_pair(b);
+            self.out.push(char::from(high));
+            self.out.push(char::from(low));
         }
         self.out.push('"');
         self.after_value = true;
@@ -342,7 +343,7 @@ impl DocOut for JsonOut {
     }
 
     fn written_since(&self, mark: usize) -> &[u8] {
-        &self.out.as_bytes()[mark..]
+        self.out.as_bytes().get(mark..).unwrap_or_default()
     }
 
     fn splice(&mut self, item: &String) {
@@ -385,7 +386,7 @@ impl CborOut {
     fn element(&mut self) {
         if let Some(top) = self.open.last_mut() {
             if top.major == cbor::MAJOR_ARRAY {
-                top.members += 1;
+                top.members = top.members.saturating_add(1);
             }
         }
     }
@@ -437,7 +438,7 @@ impl DocOut for CborOut {
 
     fn key(&mut self, key: &str) {
         if let Some(top) = self.open.last_mut() {
-            top.members += 1;
+            top.members = top.members.saturating_add(1);
         }
         self.text_bytes(key.as_bytes());
     }
@@ -458,11 +459,14 @@ impl DocOut for CborOut {
 
     fn hex(&mut self, bytes: &[u8]) {
         self.element();
-        cbor::head(cbor::MAJOR_TEXT, bytes.len() as u64 * 2, &mut self.out);
-        self.out.reserve(bytes.len() * 2);
+        cbor::head(
+            cbor::MAJOR_TEXT,
+            (bytes.len() as u64).saturating_mul(2),
+            &mut self.out,
+        );
+        self.out.reserve(bytes.len().saturating_mul(2));
         for &b in bytes {
-            self.out.push(cbor::HEX_DIGITS[usize::from(b >> 4)]);
-            self.out.push(cbor::HEX_DIGITS[usize::from(b & 0x0f)]);
+            self.out.extend_from_slice(&cbor::hex_pair(b));
         }
     }
 
@@ -531,7 +535,7 @@ impl DocOut for CborOut {
     }
 
     fn written_since(&self, mark: usize) -> &[u8] {
-        &self.out[mark..]
+        self.out.get(mark..).unwrap_or_default()
     }
 
     fn splice(&mut self, item: &Vec<u8>) {
@@ -574,11 +578,18 @@ pub mod cbor {
 
     pub(crate) const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
+    /// The two lowercase hex digits of `b`, high first.
+    pub(crate) fn hex_pair(b: u8) -> [u8; 2] {
+        // Both nibbles are below 16, so neither read misses.
+        let digit = |nibble: u8| HEX_DIGITS.get(usize::from(nibble)).copied().unwrap_or(b'0');
+        [digit(b >> 4), digit(b & 0x0f)]
+    }
+
     /// A head: `major` with argument `n`, in the fewest bytes (RFC 8949 §3).
     pub fn head(major: u8, n: u64, out: &mut Vec<u8>) {
         let mut wide = [0u8; 9];
         let len = head_into(major, n, &mut wide);
-        out.extend_from_slice(&wide[..len]);
+        out.extend_from_slice(wide.get(..len).unwrap_or(&wide));
     }
 
     /// The head of `major` with argument `n`, into `wide`; returns how many of
@@ -621,9 +632,14 @@ pub mod cbor {
     pub fn close_head(place: usize, major: u8, members: u64, out: &mut Vec<u8>) {
         let mut wide = [0u8; 9];
         let len = head_into(major, members, &mut wide);
-        out[place] = wide[0];
-        if len > 1 {
-            out.splice(place + 1..place + 1, wide[1..len].iter().copied());
+        let Some(first) = out.get_mut(place) else {
+            return;
+        };
+        *first = wide[0];
+        // `place` holds a byte, so the place after it is at most the end.
+        let after = place.saturating_add(1);
+        if let Some(argument) = wide.get(1..len) {
+            out.splice(after..after, argument.iter().copied());
         }
     }
 
@@ -633,7 +649,8 @@ pub mod cbor {
         if let Ok(n) = u64::try_from(v) {
             head(MAJOR_UNSIGNED, n, out);
             true
-        } else if let Ok(n) = u64::try_from(-1 - v) {
+        } else if let Ok(n) = u64::try_from(!v) {
+            // `!v` is `-1 - v`, CBOR's negative argument, and never overflows.
             head(MAJOR_NEGATIVE, n, out);
             true
         } else {
@@ -657,7 +674,11 @@ pub mod cbor {
                 Some(
                     digits
                         .bytes()
-                        .fold(0u64, |n, d| n * 10 + u64::from(d.wrapping_sub(b'0'))),
+                        // Nineteen digits fit, so neither step wraps.
+                        .fold(0u64, |n, d| {
+                            n.wrapping_mul(10)
+                                .wrapping_add(u64::from(d.wrapping_sub(b'0')))
+                        }),
                 )
             } else {
                 digits.parse::<u64>().ok()
@@ -667,7 +688,7 @@ pub mod cbor {
                     (false, n) => head(MAJOR_UNSIGNED, n, out),
                     // `-0` is the integer 0; CBOR's negative head holds -1 - n.
                     (true, 0) => head(MAJOR_UNSIGNED, 0, out),
-                    (true, n) => head(MAJOR_NEGATIVE, n - 1, out),
+                    (true, n) => head(MAJOR_NEGATIVE, n.saturating_sub(1), out),
                 }
                 return true;
             }
@@ -720,21 +741,25 @@ pub mod cbor {
             // A single's subnormal is below every half.
             return None;
         }
-        let unbiased = exponent - 127;
+        // `exponent` is a byte, so its unbiased value and the rebias below are small.
+        let unbiased = exponent.wrapping_sub(127);
         if (-14..=15).contains(&unbiased) {
             // A normal half keeps ten mantissa bits.
             if mantissa & 0x1FFF != 0 {
                 return None;
             }
-            return Some(sign | (((unbiased + 15) as u16) << 10) | (mantissa >> 13) as u16);
+            return Some(
+                sign | ((unbiased.wrapping_add(15) as u16) << 10) | (mantissa >> 13) as u16,
+            );
         }
         if (-24..-14).contains(&unbiased) {
             // A subnormal half is m * 2^-24 with m below 1024. The single is
             // whole * 2^(unbiased - 23), so m = whole * 2^(unbiased + 1): a shift
             // right by -1 - unbiased, from 14 to 23, that must drop no set bit.
             let whole = mantissa | 0x80_0000;
-            let shift = (-1 - unbiased) as u32;
-            if whole & ((1 << shift) - 1) != 0 {
+            // `!unbiased` is `-1 - unbiased`, from 14 to 23 here.
+            let shift = (!unbiased) as u32;
+            if whole & (1u32 << shift).wrapping_sub(1) != 0 {
                 return None;
             }
             return Some(sign | (whole >> shift) as u16);
@@ -794,7 +819,7 @@ pub mod cbor {
         scratch: Vec<u8>,
     }
 
-    impl Reader<'_, '_> {
+    impl<'t> Reader<'t, '_> {
         fn refuse<T>(&self, why: &'static str) -> Result<T, Refused> {
             Err(Refused { at: self.at, why })
         }
@@ -811,17 +836,27 @@ pub mod cbor {
 
         fn skip_space(&mut self) {
             while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.text.get(self.at) {
-                self.at += 1;
+                self.advance(1);
             }
+        }
+
+        /// Move past `n` bytes the reader has just looked at.
+        fn advance(&mut self, n: usize) {
+            self.at = self.at.saturating_add(n);
+        }
+
+        /// The text from where the reader is.
+        fn rest(&self) -> &'t [u8] {
+            self.text.get(self.at..).unwrap_or_default()
         }
 
         fn peek(&self) -> Option<u8> {
             self.text.get(self.at).copied()
         }
 
-        fn expect(&mut self, byte: u8, why: &'static str) -> Result<(), Refused> {
+        fn consume(&mut self, byte: u8, why: &'static str) -> Result<(), Refused> {
             if self.peek() == Some(byte) {
-                self.at += 1;
+                self.advance(1);
                 Ok(())
             } else {
                 self.refuse(why)
@@ -829,8 +864,8 @@ pub mod cbor {
         }
 
         fn literal(&mut self, word: &[u8], head: u8) -> Result<(), Refused> {
-            if self.text[self.at..].starts_with(word) {
-                self.at += word.len();
+            if self.rest().starts_with(word) {
+                self.advance(word.len());
                 self.out.push(head);
                 Ok(())
             } else {
@@ -857,13 +892,14 @@ pub mod cbor {
             if self.depth == MAX_DEPTH {
                 return self.refuse("nested deeper than MAX_DEPTH");
             }
-            self.depth += 1;
-            self.at += 1;
+            // Below `MAX_DEPTH`, checked above.
+            self.depth = self.depth.saturating_add(1);
+            self.advance(1);
             let place = open_head(major, self.out);
             let mut members = 0u64;
             self.skip_space();
             if self.peek() == Some(close) {
-                self.at += 1;
+                self.advance(1);
             } else {
                 loop {
                     self.skip_space();
@@ -873,16 +909,16 @@ pub mod cbor {
                         }
                         self.string()?;
                         self.skip_space();
-                        self.expect(b':', "a key is not followed by ':'")?;
+                        self.consume(b':', "a key is not followed by ':'")?;
                         self.skip_space();
                     }
                     self.value()?;
-                    members += 1;
+                    members = members.saturating_add(1);
                     self.skip_space();
                     match self.peek() {
-                        Some(b',') => self.at += 1,
+                        Some(b',') => self.advance(1),
                         Some(c) if c == close => {
-                            self.at += 1;
+                            self.advance(1);
                             break;
                         }
                         _ => return self.refuse("a member is not followed by ',' or the close"),
@@ -890,30 +926,34 @@ pub mod cbor {
                 }
             }
             close_head(place, major, members, self.out);
-            self.depth -= 1;
+            self.depth = self.depth.saturating_sub(1);
             Ok(())
         }
 
         /// Where the run of plain string bytes from `from` ends: the first
         /// quote, backslash or control byte, or the end of the text.
         fn run_end(&self, from: usize) -> usize {
-            self.text[from..]
-                .iter()
-                .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
-                .map_or(self.text.len(), |p| from + p)
+            self.text
+                .get(from..)
+                .and_then(|rest| {
+                    rest.iter()
+                        .position(|&b| b == b'"' || b == b'\\' || b < 0x20)
+                })
+                .map_or(self.text.len(), |p| from.saturating_add(p))
         }
 
         /// A string, unescaped into a text string.
         fn string(&mut self) -> Result<(), Refused> {
-            self.at += 1;
+            self.advance(1);
             // Most strings hold no escape: they are copied as they stand, with
             // the length their run already gave.
             let start = self.at;
             let end = self.run_end(start);
             if self.text.get(end) == Some(&b'"') {
-                self.at = end + 1;
-                head(MAJOR_TEXT, (end - start) as u64, self.out);
-                self.out.extend_from_slice(&self.text[start..end]);
+                self.at = end.saturating_add(1);
+                let run = self.text.get(start..end).unwrap_or_default();
+                head(MAJOR_TEXT, run.len() as u64, self.out);
+                self.out.extend_from_slice(run);
                 return Ok(());
             }
             let mut scratch = core::mem::take(&mut self.scratch);
@@ -933,14 +973,14 @@ pub mod cbor {
                 // is copied as it stands: the text is UTF-8 already.
                 let start = self.at;
                 self.at = self.run_end(start);
-                into.extend_from_slice(&self.text[start..self.at]);
+                into.extend_from_slice(self.text.get(start..self.at).unwrap_or_default());
                 match self.peek() {
                     Some(b'"') => {
-                        self.at += 1;
+                        self.advance(1);
                         return Ok(());
                     }
                     Some(b'\\') => {
-                        self.at += 1;
+                        self.advance(1);
                         let c = self.escape()?;
                         let mut buf = [0u8; 4];
                         into.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
@@ -956,7 +996,7 @@ pub mod cbor {
             let Some(b) = self.peek() else {
                 return self.refuse("the text ends inside an escape");
             };
-            self.at += 1;
+            self.advance(1);
             Ok(match b {
                 b'"' => '"',
                 b'\\' => '\\',
@@ -971,15 +1011,17 @@ pub mod cbor {
                     let code = if (0xD800..0xDC00).contains(&first) {
                         // A high surrogate names a character only with the low
                         // one that follows it.
-                        if !self.text[self.at..].starts_with(b"\\u") {
+                        if !self.rest().starts_with(b"\\u") {
                             return self.refuse("a high surrogate with no low one after it");
                         }
-                        self.at += 2;
+                        self.advance(2);
                         let low = self.hex4()?;
                         if !(0xDC00..0xE000).contains(&low) {
                             return self.refuse("a high surrogate with no low one after it");
                         }
-                        0x10000 + ((first - 0xD800) << 10) + (low - 0xDC00)
+                        // The two ranges just checked make the masks the offsets into
+                        // them, and the sum at most 0x10FFFF.
+                        (((first & 0x3FF) << 10) | (low & 0x3FF)).wrapping_add(0x1_0000)
                     } else {
                         first
                     };
@@ -993,20 +1035,17 @@ pub mod cbor {
         }
 
         fn hex4(&mut self) -> Result<u32, Refused> {
-            let Some(digits) = self.text.get(self.at..self.at + 4) else {
+            let Some(digits) = self.rest().get(..4) else {
                 return self.refuse("the text ends inside a \\u escape");
             };
             let mut v = 0u32;
             for &d in digits {
-                let n = match d {
-                    b'0'..=b'9' => d - b'0',
-                    b'a'..=b'f' => d - b'a' + 10,
-                    b'A'..=b'F' => d - b'A' + 10,
-                    _ => return self.refuse("a \\u escape is not four hex digits"),
+                let Some(n) = char::from(d).to_digit(16) else {
+                    return self.refuse("a \\u escape is not four hex digits");
                 };
-                v = (v << 4) | u32::from(n);
+                v = (v << 4) | n;
             }
-            self.at += 4;
+            self.advance(4);
             Ok(v)
         }
 
@@ -1015,24 +1054,24 @@ pub mod cbor {
         fn number(&mut self) -> Result<(), Refused> {
             let start = self.at;
             if self.peek() == Some(b'-') {
-                self.at += 1;
+                self.advance(1);
             }
             match self.peek() {
-                Some(b'0') => self.at += 1,
+                Some(b'0') => self.advance(1),
                 Some(b'1'..=b'9') => self.digits(),
                 _ => return self.refuse("a number has no digits"),
             }
             if self.peek() == Some(b'.') {
-                self.at += 1;
+                self.advance(1);
                 if !matches!(self.peek(), Some(b'0'..=b'9')) {
                     return self.refuse("a fraction has no digits");
                 }
                 self.digits();
             }
             if let Some(b'e' | b'E') = self.peek() {
-                self.at += 1;
+                self.advance(1);
                 if let Some(b'+' | b'-') = self.peek() {
-                    self.at += 1;
+                    self.advance(1);
                 }
                 if !matches!(self.peek(), Some(b'0'..=b'9')) {
                     return self.refuse("an exponent has no digits");
@@ -1040,7 +1079,8 @@ pub mod cbor {
                 self.digits();
             }
             // ASCII digits and signs by construction above.
-            let spelled = core::str::from_utf8(&self.text[start..self.at]).unwrap_or("");
+            let spelled = core::str::from_utf8(self.text.get(start..self.at).unwrap_or_default())
+                .unwrap_or("");
             if number(spelled, self.out) {
                 Ok(())
             } else {
@@ -1053,7 +1093,7 @@ pub mod cbor {
 
         fn digits(&mut self) {
             while let Some(b'0'..=b'9') = self.peek() {
-                self.at += 1;
+                self.advance(1);
             }
         }
     }

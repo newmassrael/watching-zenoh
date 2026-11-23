@@ -735,7 +735,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             let complete_required = self.complete_required();
             R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "declare-queryable")]
-                let remote = obs.remote_queryables.has_matching_for(
+                let remote = obs.face_ref().remote_queryables.has_matching_for(
                     &wz_session_core::declare::queryable::QuerierCriterion::new(
                         &self.keyexpr,
                         locality,
@@ -747,9 +747,10 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 let remote = false;
                 #[cfg(feature = "query-queryable")]
                 let local = locality.allows_local()
-                    && obs
-                        .queryables
-                        .has_local_matching(&self.keyexpr, complete_required);
+                    && obs.read_app(|app| {
+                        app.queryables
+                            .has_local_matching(&self.keyexpr, complete_required)
+                    });
                 #[cfg(not(feature = "query-queryable"))]
                 let local = false;
                 remote || local
@@ -823,21 +824,25 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             let id = R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "query-queryable")]
                 let local = locality.allows_local()
-                    && obs
-                        .queryables
-                        .has_local_matching(&self.keyexpr, complete_required);
+                    && obs.read_app(|app| {
+                        app.queryables
+                            .has_local_matching(&self.keyexpr, complete_required)
+                    });
                 #[cfg(not(feature = "query-queryable"))]
                 let local = false;
-                obs.remote_queryables.declare_matching_listener_seeded(
-                    wz_session_core::declare::queryable::QuerierCriterion::new(
-                        &self.keyexpr,
-                        locality,
-                        complete_required,
+                obs.with_parts(|app, face| {
+                    app.remote_queryables.declare_matching_listener_seeded(
+                        &*face.remote_queryables,
+                        wz_session_core::declare::queryable::QuerierCriterion::new(
+                            &self.keyexpr,
+                            locality,
+                            complete_required,
+                        )
+                        .with_remote_inclusion(self.options.remote_inclusion()),
+                        local,
+                        sink,
                     )
-                    .with_remote_inclusion(self.options.remote_inclusion()),
-                    local,
-                    sink,
-                )
+                })
             });
             // R311y771 — the QUERYABLE-plane twin of the emit in
             // `Publisher::declare_matching_listener`; read its comment for
@@ -852,7 +857,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 let Some(interest_id) = self.session.actions().alloc_next_interest_id() else {
                     cell.kill();
                     R::with_mutex_mut(&self.session.observer, |obs| {
-                        obs.remote_queryables.undeclare_matching_listener(id)
+                        obs.with_app(|app| app.remote_queryables.undeclare_matching_listener(id))
                     });
                     return Err(MatchingListenerError::IdsExhausted);
                 };
@@ -889,7 +894,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                 if let Err(e) = emit {
                     cell.kill();
                     R::with_mutex_mut(&self.session.observer, |obs| {
-                        obs.remote_queryables.undeclare_matching_listener(id)
+                        obs.with_app(|app| app.remote_queryables.undeclare_matching_listener(id))
                     });
                     return Err(MatchingListenerError::Wire(e));
                 }
@@ -1115,7 +1120,7 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
             let complete_required = self.options.matching_needs_complete();
             R::with_mutex_mut(&self.session.observer, |obs| {
                 #[cfg(feature = "declare-queryable")]
-                let remote = obs.remote_queryables.has_matching_for(
+                let remote = obs.face_ref().remote_queryables.has_matching_for(
                     &wz_session_core::declare::queryable::QuerierCriterion::new(
                         &_effective_keyexpr,
                         locality,
@@ -1127,9 +1132,10 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
                 let remote = false;
                 #[cfg(feature = "query-queryable")]
                 let local = locality.allows_local()
-                    && obs
-                        .queryables
-                        .has_local_matching(&_effective_keyexpr, complete_required);
+                    && obs.read_app(|app| {
+                        app.queryables
+                            .has_local_matching(&_effective_keyexpr, complete_required)
+                    });
                 #[cfg(not(feature = "query-queryable"))]
                 let local = false;
                 remote || local

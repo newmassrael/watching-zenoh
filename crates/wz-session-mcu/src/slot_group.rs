@@ -299,6 +299,13 @@ where
         counts,
     } = parts;
     let mut requesters = Requesters::<NoReplies, NoReplies>::with_limits(&limits);
+    // The group is a face of its own: its answer to a query it cannot resolve is its policy's,
+    // stated once for the group's tables.
+    state
+        .peers
+        .borrow_mut()
+        .queries
+        .set_unanswerable_final(policy.query_unanswerable_final());
     let on_event = move |event: IterationEvent<'_, '_>| {
         match event {
             IterationEvent::MulticastPeerArrived(_) => state.member_arrived(),
@@ -307,10 +314,7 @@ where
         }
         let mut peers = state.peers.borrow_mut();
         let mut observer = observer.borrow_mut();
-        // The observer is the node's and serves its sessions too: the group states its own
-        // answer to a query it cannot resolve, as each session does before its dispatch.
-        observer.set_unanswerable_final(policy.query_unanswerable_final());
-        observer.dispatch_event(&mut peers, &mut requesters, event);
+        observer.dispatch_event(&mut (), &mut peers, &mut requesters, event);
     };
     let mut publisher = GroupPublisher::<P>::new();
     let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);

@@ -128,8 +128,7 @@ async fn lowlatency_negotiates_and_delivers_put_over_real_tcp() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),

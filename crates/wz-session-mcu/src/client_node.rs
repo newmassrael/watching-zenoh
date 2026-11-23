@@ -122,10 +122,10 @@ where
     /// come. `Err` when the observer refuses the registration.
     pub fn queryable(&mut self, key: &str, answer: BoxedQuerySink) -> Result<(), RegisterError> {
         // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
-        self.observer
-            .borrow_mut()
-            .queryables
-            .register_sink(key, Locality::Any, false, answer)?;
+        self.observer.borrow_mut().with_app(|app| {
+            app.queryables
+                .register_sink(key, Locality::Any, false, answer)
+        })?;
         self.declarations
             .push(Declaration::Queryable(String::from(key)));
         Ok(())
@@ -136,8 +136,7 @@ where
     pub fn subscriber(&mut self, key: &str, sink: BoxedSink) -> Result<(), RegisterError> {
         self.observer
             .borrow_mut()
-            .subscribers
-            .register_sink(key, Locality::Any, sink)?;
+            .register_subscriber(key, Locality::Any, sink)?;
         self.declarations
             .push(Declaration::Subscriber(String::from(key)));
         Ok(())
@@ -505,7 +504,12 @@ mod tests {
             node.subscriber("test/c", sink()),
             Err(RegisterError::TableFull)
         );
-        std::assert_eq!(node.observer().borrow().subscribers.len(), 2);
+        std::assert_eq!(
+            node.observer()
+                .borrow()
+                .read_app(|app| app.subscribers.len()),
+            2
+        );
         std::assert_eq!(
             node.declarations.len(),
             2,
@@ -525,7 +529,13 @@ mod tests {
                 .subscriber(key, sink())
                 .expect("the build's limits take it");
         }
-        std::assert_eq!(control.observer().borrow().subscribers.len(), 3);
+        std::assert_eq!(
+            control
+                .observer()
+                .borrow()
+                .read_app(|app| app.subscribers.len()),
+            3
+        );
         std::assert_eq!(control.declarations.len(), 3);
     }
 }

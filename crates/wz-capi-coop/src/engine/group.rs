@@ -52,7 +52,7 @@ use wz_session_core::multicast_reply_sink::{
 };
 use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
-    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded, MulticastTxItem,
+    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
@@ -70,8 +70,9 @@ use {
 };
 #[cfg(feature = "query")]
 use {
-    wz_session_core::metadata::QueryMetadata,
-    wz_session_core::request_build::build_request_query_with_meta,
+    wz_session_core::lent_request::RequestWriter,
+    wz_session_core::multicast_tx::multicast_tx_request,
+    wz_session_core::query_parts::{GetParts, QueryParts},
     wz_session_core::wire_id::RequestId,
 };
 
@@ -277,7 +278,7 @@ pub(super) struct GroupFace {
     /// The group's transport, which the task opens, reads and lets go of, and which the face
     /// writes the stage on ([`Self::write_staged`]).
     link: GroupLink<Watched>,
-    /// What a message of the session waits with on a full lane ([`Self::push`]).
+    /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The group socket's wait for room, asked from outside its task; `None` for a stack that
     /// gives none.
@@ -434,9 +435,11 @@ impl GroupFace {
         })
     }
 
-    /// Push `item`, a message of the session, onto the group's stage as the tokio engine's group
-    /// producer pushes it (`MulticastTxProducer::push`), through the same session core walk
-    /// (`multicast_tx_push`, [`GroupTxStage::push`]): its lane is asked for room before its
+    /// Push `message`, a message of the session written from its parts and lent for the call, onto
+    /// the group's stage as the tokio engine's group producer pushes one
+    /// (`MulticastTxProducer::push`), through the same session core walk
+    /// (`multicast_tx_push_encoded`, [`GroupTxStage::push_encoded`]): nothing of it is built on the
+    /// heap. Its lane is asked for room before its
     /// sequence number is minted and again before each further fragment, within the message's
     /// `wait_before_drop` when it may be dropped and its `wait_before_close` when it may not; while
     /// the lane is full, the session's tasks are run, in which the group's own writes what its
@@ -451,14 +454,6 @@ impl GroupFace {
     /// as zenoh-pico's put writes it (`vendor/zenoh-pico/src/transport/common/tx.c` @
     /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a batch window that holds the
     /// message puts nothing on a lane, and its flush writes it.
-    fn push(&self, item: MulticastTxItem) -> PushOutcome {
-        let outcome = self.tx.push(item, self);
-        self.write_staged();
-        outcome
-    }
-
-    /// [`Self::push`] of a message written from its parts, lent for the call: nothing of it is
-    /// built on the heap.
     fn push_lent(&self, message: &MulticastTxEncoded<'_>) -> PushOutcome {
         let outcome = self.tx.push_encoded(message, self);
         self.write_staged();
@@ -581,30 +576,29 @@ impl GroupFace {
         rid
     }
 
-    /// Ask the group the query `rid` on `keyexpr`, named to the peers as `wire`, with the slots
-    /// `meta` states. The key is named as a put on the group names it: by the declaration the
+    /// Ask the group the query `rid` on `keyexpr`, named to the peers as `wire`, asking what
+    /// `query` states. The key is named as a put on the group names it: by the declaration the
     /// group was told when it is told the session's keyexprs, and in full otherwise
-    /// (`GroupDeclarations::key`). Built by the session core's request builder, as a link's
-    /// query is, and sent reliably on the group, as zenoh-pico sends one on its multicast
-    /// transport. `false` when the query cannot be built, and nothing is pushed.
+    /// (`GroupDeclarations::key`). Written straight into the group's stage by the writer a link's
+    /// query is written by, and sent reliably on the group, as zenoh-pico sends one on its
+    /// multicast transport, its timestamp stack included. One asked from inside another push's wait is kept by the
+    /// stage and framed after it. `false` when nothing was queued: the key names none, or the
+    /// query cannot be written.
     #[cfg(feature = "query")]
     pub(super) fn ask(
         &self,
         rid: RequestId,
         keyexpr: &str,
         wire: &WireKey,
-        meta: &QueryMetadata,
+        query: QueryParts<'_>,
     ) -> bool {
         let key = self.join.declarations.key(keyexpr, wire);
-        match build_request_query_with_meta(rid, key.mapping_id, key.suffix, meta) {
-            Ok(request) => {
-                self.push(MulticastTxItem::Request {
-                    request: alloc::boxed::Box::new(request),
-                });
-                true
-            }
-            Err(_) => false,
-        }
+        let Some(key) = wz_session_core::wire_key::WireKey::from_parts(key.mapping_id, key.suffix)
+        else {
+            return false;
+        };
+        let writer = RequestWriter::new(GetParts { rid, key, query });
+        multicast_tx_request(&writer, query.qos, |message| self.push_lent(message)).is_some()
     }
 
     /// The face the group's tables are in.
@@ -1117,7 +1111,6 @@ pub(super) struct GroupPut<'a> {
 pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
-    policy: SessionPolicy,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
@@ -1126,9 +1119,6 @@ pub(super) fn dispatch(
     move |event, replies| {
         let mut registry = registry.borrow_mut();
         plane.arriving.store(generation, Ordering::Release);
-        registry
-            .app
-            .set_unanswerable_final(policy.query_unanswerable_final());
         registry.dispatch_event(face, event);
         registry.flush_pending_replies(face, replies);
         for (rid, qos) in registry.take_pending_final_rids(face) {

@@ -632,7 +632,7 @@ impl<'a> InPlaceFragment<'a> {
 
     /// The payload: the bytes staged into the chain's slot.
     pub fn payload(&self) -> &'a [u8] {
-        &self.unit[self.payload_at..]
+        self.unit.get(self.payload_at..).unwrap_or_default()
     }
 
     /// Whether the fragment rode the reliable channel (the R bit).

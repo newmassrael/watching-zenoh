@@ -339,8 +339,7 @@ fn run_router(
         let samples = seen.clone();
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 "**",
                 Locality::Any,
                 BoxedSink::new(move |sample: &dyn SampleView| {
@@ -367,19 +366,21 @@ fn run_router(
         let undeclared = seen.clone();
         let mut observer = observer.borrow_mut();
         observer
-            .liveliness
-            .on_token_declared(move |token| {
-                declared
-                    .lock()
-                    .unwrap()
-                    .tokens
-                    .push((token.id(), token.keyexpr().to_owned()));
+            .with_app(|app| {
+                app.liveliness.on_token_declared(move |token| {
+                    declared
+                        .lock()
+                        .unwrap()
+                        .tokens
+                        .push((token.id(), token.keyexpr().to_owned()));
+                })
             })
             .expect("no quota is stated on this table");
         observer
-            .liveliness
-            .on_token_undeclared(move |id| {
-                undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+            .with_app(|app| {
+                app.liveliness.on_token_undeclared(move |id| {
+                    undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+                })
             })
             .expect("no quota is stated on this table");
     }
@@ -540,18 +541,21 @@ fn run_router(
             Ok(Command::DeclareToken(id, key)) => {
                 let _ = holding
                     .borrow_mut()
-                    .local_tokens
-                    .register(u64::from(id), key);
+                    .with_app(|app| app.local_tokens.register(u64::from(id), key));
                 let _ = actions.send_declare_token(id, 0, Some(key));
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::UndeclareToken(id)) => {
-                holding.borrow_mut().local_tokens.unregister(id);
+                holding
+                    .borrow_mut()
+                    .with_app(|app| app.local_tokens.unregister(id));
                 actions.send_undeclare_token(id);
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::HoldToken(id, key)) => {
-                let _ = holding.borrow_mut().local_tokens.register(id, key);
+                let _ = holding
+                    .borrow_mut()
+                    .with_app(|app| app.local_tokens.register(id, key));
                 holds.lock().unwrap().held += 1;
             }
             Ok(Command::Push(key, value)) => {
@@ -610,17 +614,18 @@ fn run_router(
             Ok(Command::Answer(key, value)) => {
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        key,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                let _ = out.reply_keyed(query.keyexpr(), value);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    let _ = out.reply_keyed(query.keyexpr(), value);
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's queryable");
                 counted_queries.lock().unwrap().settled = true;
             }
@@ -629,18 +634,23 @@ fn run_router(
                 let stamp = router_stamp(zid);
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        key,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                let _ =
-                                    out.reply_keyed_stamped(query.keyexpr(), value, None, &stamp);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            key,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    let _ = out.reply_keyed_stamped(
+                                        query.keyexpr(),
+                                        value,
+                                        None,
+                                        &stamp,
+                                    );
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's queryable");
                 counted_queries.lock().unwrap().settled = true;
             }
@@ -691,21 +701,22 @@ fn run_router(
                 let asked = counted_queries.clone();
                 answering
                     .borrow_mut()
-                    .queryables
-                    .register_sink(
-                        ADVANCED_PUBLISHER_KEY,
-                        Locality::Any,
-                        false,
-                        BoxedQuerySink::new(
-                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
-                                asked.lock().unwrap().selectors.push(
-                                    String::from_utf8_lossy(query.parameters().unwrap_or(&[]))
-                                        .into_owned(),
-                                );
-                                cache(query, out);
-                            },
-                        ),
-                    )
+                    .with_app(|app| {
+                        app.queryables.register_sink(
+                            ADVANCED_PUBLISHER_KEY,
+                            Locality::Any,
+                            false,
+                            BoxedQuerySink::new(
+                                move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                    asked.lock().unwrap().selectors.push(
+                                        String::from_utf8_lossy(query.parameters().unwrap_or(&[]))
+                                            .into_owned(),
+                                    );
+                                    cache(query, out);
+                                },
+                            ),
+                        )
+                    })
                     .expect("the router's cache");
                 counted_queries.lock().unwrap().settled = true;
             }

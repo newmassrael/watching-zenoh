@@ -36,7 +36,9 @@ pub const CREDENTIAL_ZID_BYTES: usize = 16;
 pub fn zid_from_spki_der(spki_der: &[u8]) -> [u8; CREDENTIAL_ZID_BYTES] {
     let digest = Sha256::digest(spki_der);
     let mut zid = [0u8; CREDENTIAL_ZID_BYTES];
-    zid.copy_from_slice(&digest[..CREDENTIAL_ZID_BYTES]);
+    for (into, byte) in zid.iter_mut().zip(digest.iter()) {
+        *into = *byte;
+    }
     zid
 }
 
@@ -49,8 +51,11 @@ pub fn zid_from_spki_der(spki_der: &[u8]) -> [u8; CREDENTIAL_ZID_BYTES] {
 /// a zid it PARSED or was given compares both through this
 /// ([`crate::zid_hex::same_zid`], [`zid_from_wire`]).
 pub fn canonical_zid(zid: &[u8]) -> &[u8] {
-    let end = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    &zid[..end]
+    let end = zid
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(0, |i| i.saturating_add(1));
+    zid.get(..end).unwrap_or(zid)
 }
 
 /// The zid `wire_zid` spells, read back to sixteen bytes, or `None` for bytes
@@ -73,7 +78,10 @@ pub fn zid_from_wire(wire_zid: &[u8]) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
         return None;
     }
     let mut padded = [0u8; CREDENTIAL_ZID_BYTES];
-    padded[..canonical.len()].copy_from_slice(canonical);
+    // Refused above past sixteen bytes, so every byte has its place.
+    for (into, byte) in padded.iter_mut().zip(canonical) {
+        *into = *byte;
+    }
     Some(padded)
 }
 

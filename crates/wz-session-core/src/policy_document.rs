@@ -236,8 +236,9 @@ impl Provenance {
     pub fn origin(&self, policy: &str) -> Option<Origin> {
         POLICIES
             .iter()
-            .position(|entry| entry.id() == policy)
-            .map(|index| self.origins[index])
+            .zip(self.origins)
+            .find(|(entry, _)| entry.id() == policy)
+            .map(|(_, origin)| origin)
     }
 
     /// Each policy with the origin of its value, in the order of the generated `POLICIES`.
@@ -311,8 +312,8 @@ impl LimitProvenance {
     /// names no limit of either snapshot.
     pub fn origin(&self, limit: &str) -> Option<Origin> {
         match FoundLimit::find(limit)? {
-            FoundLimit::Session(index) => Some(self.session[index].origin()),
-            FoundLimit::Runtime(index) => Some(self.runtime[index].origin()),
+            FoundLimit::Session(index, _) => self.session.get(index).map(|held| held.origin()),
+            FoundLimit::Runtime(index, _) => self.runtime.get(index).map(|held| held.origin()),
             FoundLimit::Capacity(_) => None,
         }
     }
@@ -840,7 +841,7 @@ impl<'a> Refusals<'a> {
         if let Some(slot) = self.reported.get_mut(self.found) {
             *slot = Some(refusal);
         }
-        self.found += 1;
+        self.found = self.found.saturating_add(1);
     }
 
     /// How many refusals were found, those held and those only counted.
@@ -932,10 +933,13 @@ fn apply<'a>(
     let index = select_policy(
         table,
         &mut resolved.policy,
-        &layer.statements[..at],
+        layer.statements.get(..at).unwrap_or_default(),
         statement,
     )?;
-    resolved.provenance.origins[index] = layer.origin;
+    // The place of a policy in `table`, which the provenance has one origin for each of.
+    if let Some(held) = resolved.provenance.origins.get_mut(index) {
+        *held = layer.origin;
+    }
     Ok(())
 }
 
@@ -948,10 +952,13 @@ fn select_policy<'a>(
     statement: &Statement<'a>,
 ) -> Result<usize, Reason<'a>> {
     let (policy, value) = (statement.policy, statement.value);
-    let Some(index) = table.iter().position(|entry| entry.id() == policy) else {
+    let Some((index, entry)) = table
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.id() == policy)
+    else {
         return Err(Reason::UnknownPolicy { policy, value });
     };
-    let entry = &table[index];
     let id = entry.id();
     if earlier.iter().any(|stated| stated.policy == policy) {
         return Err(Reason::StatedTwice { policy: id, value });
@@ -975,22 +982,30 @@ fn select_policy<'a>(
 }
 
 /// Where a limit's id is found: a field of one of the two snapshots, by its place in that
-/// snapshot's table, or a capacity alone, which neither holds.
+/// snapshot's table and the entry there, or a capacity alone, which neither holds.
 #[derive(Clone, Copy)]
 enum FoundLimit {
-    Session(usize),
-    Runtime(usize),
+    Session(usize, &'static LimitEntry<SessionLimits>),
+    Runtime(usize, &'static LimitEntry<RuntimeLimits>),
     Capacity(&'static str),
 }
 
 impl FoundLimit {
     /// Where the limit whose id is `id` is, or `None` for an id the build has no limit of.
     fn find(id: &str) -> Option<Self> {
-        if let Some(index) = SESSION_LIMITS.iter().position(|entry| entry.id() == id) {
-            return Some(Self::Session(index));
+        if let Some((index, entry)) = SESSION_LIMITS
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.id() == id)
+        {
+            return Some(Self::Session(index, entry));
         }
-        if let Some(index) = RUNTIME_LIMITS.iter().position(|entry| entry.id() == id) {
-            return Some(Self::Runtime(index));
+        if let Some((index, entry)) = RUNTIME_LIMITS
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.id() == id)
+        {
+            return Some(Self::Runtime(index, entry));
         }
         CAPACITY_LIMITS
             .iter()
@@ -1002,8 +1017,8 @@ impl FoundLimit {
     /// The limit's id, as the declaration spells it.
     fn id(self) -> &'static str {
         match self {
-            Self::Session(index) => SESSION_LIMITS[index].id(),
-            Self::Runtime(index) => RUNTIME_LIMITS[index].id(),
+            Self::Session(_, entry) => entry.id(),
+            Self::Runtime(_, entry) => entry.id(),
             Self::Capacity(id) => id,
         }
     }
@@ -1012,8 +1027,8 @@ impl FoundLimit {
     /// in no snapshot, so it is read from the build.
     fn is_read(self) -> bool {
         match self {
-            Self::Session(index) => SESSION_LIMITS[index].read_from_snapshot(),
-            Self::Runtime(index) => RUNTIME_LIMITS[index].read_from_snapshot(),
+            Self::Session(_, entry) => entry.read_from_snapshot(),
+            Self::Runtime(_, entry) => entry.read_from_snapshot(),
             Self::Capacity(_) => false,
         }
     }
@@ -1031,7 +1046,7 @@ fn compose_limits<'a>(
     let holds_runtime = base.runtime_limits.is_some();
     for &(origin, statements) in layers {
         for (at, statement) in statements.iter().enumerate() {
-            let earlier = &statements[..at];
+            let earlier = statements.get(..at).unwrap_or_default();
             if let Err(reason) =
                 apply_limit(&mut resolved, holds_runtime, origin, earlier, statement)
             {
@@ -1056,8 +1071,17 @@ fn apply_limit<'a>(
 ) -> Result<(), Reason<'a>> {
     let runtime = holds_runtime.then_some(&mut resolved.runtime);
     match select_stated_limit(&mut resolved.session, runtime, earlier, statement)? {
-        FoundLimit::Session(index) => resolved.provenance.session[index] = origin,
-        FoundLimit::Runtime(index) => resolved.provenance.runtime[index] = origin,
+        // The place of a limit in its table, which the provenance has one origin for each of.
+        FoundLimit::Session(index, _) => {
+            if let Some(held) = resolved.provenance.session.get_mut(index) {
+                *held = origin;
+            }
+        }
+        FoundLimit::Runtime(index, _) => {
+            if let Some(held) = resolved.provenance.runtime.get_mut(index) {
+                *held = origin;
+            }
+        }
         // A capacity is refused before anything is selected, so it is never what was selected.
         FoundLimit::Capacity(_) => {}
     }
@@ -1085,9 +1109,9 @@ fn select_stated_limit<'a>(
         FoundLimit::Capacity(_) => return Err(Reason::LimitBuildOnly { limit: id }),
         // Before the scope and the value: a limit no machine reads is refused whatever is stated.
         _ if !found.is_read() => return Err(Reason::LimitNotRead { limit: id }),
-        FoundLimit::Session(index) => select_limit(&SESSION_LIMITS[index], session, value)?,
-        FoundLimit::Runtime(index) => match runtime {
-            Some(runtime) => select_limit(&RUNTIME_LIMITS[index], runtime, value)?,
+        FoundLimit::Session(_, entry) => select_limit(entry, session, value)?,
+        FoundLimit::Runtime(_, entry) => match runtime {
+            Some(runtime) => select_limit(entry, runtime, value)?,
             None => {
                 return Err(Reason::LimitWrongScope {
                     limit: id,
@@ -1272,12 +1296,11 @@ pub fn resolve_under_into<'a>(
     };
     write_layer(&POLICIES, policy, &api)?;
     for (at, statement) in overrides.limits.iter().enumerate() {
-        select_stated_limit(limits, None, &overrides.limits[..at], statement).map_err(
-            |reason| Refusal {
-                layer: Origin::Api,
-                reason,
-            },
-        )?;
+        let earlier = overrides.limits.get(..at).unwrap_or_default();
+        select_stated_limit(limits, None, earlier, statement).map_err(|reason| Refusal {
+            layer: Origin::Api,
+            reason,
+        })?;
     }
     Ok(())
 }
@@ -1292,11 +1315,10 @@ fn write_layer<'a>(
     layer: &Layer<'_, 'a>,
 ) -> Result<(), Refusal<'a>> {
     for (at, statement) in layer.statements.iter().enumerate() {
-        select_policy(table, snapshot, &layer.statements[..at], statement).map_err(|reason| {
-            Refusal {
-                layer: layer.origin,
-                reason,
-            }
+        let earlier = layer.statements.get(..at).unwrap_or_default();
+        select_policy(table, snapshot, earlier, statement).map_err(|reason| Refusal {
+            layer: layer.origin,
+            reason,
         })?;
     }
     Ok(())

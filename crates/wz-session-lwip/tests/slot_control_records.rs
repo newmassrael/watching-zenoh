@@ -222,21 +222,25 @@ fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserve
     {
         let mut observer = observer.borrow_mut();
         let seen = told.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_declared_sink(BoxedDeclSink::new(move |decl: &dyn DeclView| {
-                seen.declared.fetch_add(1, Ordering::SeqCst);
-                seen.declared_id.store(decl.id() as usize, Ordering::SeqCst);
-            }))
-            .expect("install the declaration observer");
+        observer.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_declared_sink(BoxedDeclSink::new(move |decl: &dyn DeclView| {
+                    seen.declared.fetch_add(1, Ordering::SeqCst);
+                    seen.declared_id.store(decl.id() as usize, Ordering::SeqCst);
+                }))
+                .expect("install the declaration observer")
+        });
         let seen = told.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_undeclared_sink(BoxedUndeclSink::new(move |id: u64| {
-                seen.undeclared.fetch_add(1, Ordering::SeqCst);
-                seen.undeclared_id.store(id as usize, Ordering::SeqCst);
-            }))
-            .expect("install the undeclaration observer");
+        observer.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_undeclared_sink(BoxedUndeclSink::new(move |id: u64| {
+                    seen.undeclared.fetch_add(1, Ordering::SeqCst);
+                    seen.undeclared_id.store(id as usize, Ordering::SeqCst);
+                }))
+                .expect("install the undeclaration observer")
+        });
     }
     (
         Box::new(app_layer::dispatch_to(observer.clone(), actions.clone())),
@@ -536,7 +540,12 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     );
     check("a DeclKexpr", n);
     assert_eq!(
-        acceptor.observer.borrow().subscribers.peer().alias_count(),
+        acceptor
+            .observer
+            .borrow()
+            .face_ref()
+            .subscribers
+            .alias_count(),
         1,
         "the alias was bound"
     );
@@ -613,8 +622,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     let interests_before = acceptor
         .observer
         .borrow()
+        .face_ref()
         .subscribers
-        .peer()
         .interest_count();
     let n = one_record(
         &measure,
@@ -629,8 +638,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
         acceptor
             .observer
             .borrow()
+            .face_ref()
             .subscribers
-            .peer()
             .interest_count(),
         interests_before + 1,
         "the interest was kept"
@@ -648,8 +657,8 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
         acceptor
             .observer
             .borrow()
+            .face_ref()
             .subscribers
-            .peer()
             .interest_count(),
         interests_before,
         "the interest was retired"

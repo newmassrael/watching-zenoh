@@ -86,15 +86,25 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
     let digits = text.as_bytes();
     assert!(!digits.is_empty(), "a WZ_LIMIT_* value is empty");
     let mut value = 0usize;
-    let mut i = 0;
-    while i < digits.len() {
-        let digit = digits[i];
+    let mut rest = digits;
+    while let [digit, tail @ ..] = rest {
         assert!(
             digit.is_ascii_digit(),
             "a WZ_LIMIT_* value is not a decimal number"
         );
-        value = value * 10 + (digit - b'0') as usize;
-        i += 1;
+        let next = match value.checked_mul(10) {
+            Some(tens) => tens.checked_add(digit.saturating_sub(b'0') as usize),
+            None => None,
+        };
+        assert!(
+            next.is_some(),
+            "a WZ_LIMIT_* value is past the address space"
+        );
+        value = match next {
+            Some(next) => next,
+            None => 0,
+        };
+        rest = tail;
     }
     value
 }
@@ -176,7 +186,7 @@ pub const DATAGRAM_FRAGMENT_GAP_US: usize = generated::DATAGRAM_FRAGMENT_GAP_US;
 
 /// The most bytes of selector parameters a query from a peer may carry for the node to run it;
 /// 0 sets no bound. A longer query reaches no queryable and is counted
-/// ([`crate::query::QueryableRegistry::oversize_refusals`]).
+/// ([`crate::query::QueryPeer::oversize_refusals`]).
 pub const QUERY_PARAMETERS_MAX_BYTES: usize = generated::QUERY_PARAMETERS_MAX_BYTES;
 
 /// The most bytes of attachment a query from a peer may carry for the node to run it; 0 sets no

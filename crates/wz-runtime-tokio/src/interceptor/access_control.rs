@@ -515,21 +515,30 @@ mod tests {
         // zenoh's RequestBody has only a Query variant.
         use wz_session_core::declare_build::build_declare_queryable;
         use wz_session_core::request_build::build_request_query;
-        use wz_session_core::response_build::build_response_reply_literal;
+        use wz_session_core::response_build::build_response_reply;
 
         let query = NetworkMessage::Request(Box::new(
-            build_request_query(1, 0, Some("demo/q")).expect("build query"),
+            build_request_query(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            )
+            .expect("build query"),
         ));
         assert_eq!(
-            acl_action(&query),
+            acl_action(query.view()),
             Some(GovernedAction::decl(AclMessage::Query))
         );
 
         let reply = NetworkMessage::Response(Box::new(
-            build_response_reply_literal(1, "demo/q", b"x").expect("build reply"),
+            build_response_reply(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                b"x",
+            )
+            .expect("build reply"),
         ));
         assert_eq!(
-            acl_action(&reply),
+            acl_action(reply.view()),
             Some(GovernedAction::decl(AclMessage::Reply))
         );
 
@@ -537,7 +546,7 @@ mod tests {
             build_declare_queryable(0, 0, Some("demo/q")).expect("build decl queryable"),
         ));
         assert_eq!(
-            acl_action(&decl_qabl),
+            acl_action(decl_qabl.view()),
             Some(GovernedAction::decl(AclMessage::DeclareQueryable))
         );
     }
@@ -742,7 +751,7 @@ mod tests {
         let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let put = aliased_put(7);
         assert_eq!(
-            acl_action(&put),
+            acl_action(put.view()),
             Some(GovernedAction::decl(AclMessage::Put)),
             "precondition: the message IS governed, so it reaches the keyexpr branch",
         );
@@ -822,7 +831,7 @@ mod tests {
             build_response_err_empty(42, b"Timeout").expect("build empty err"),
         ));
         assert_eq!(
-            acl_action(&err),
+            acl_action(err.view()),
             Some(GovernedAction::decl(AclMessage::Reply)),
             "precondition: an Err body is a governed Reply",
         );
@@ -861,7 +870,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            acl_action(&fin),
+            acl_action(fin.view()),
             None,
             "ResponseFinal is ungoverned at the ACTION arm",
         );
@@ -916,7 +925,7 @@ mod tests {
         let denied = build_undeclare_subscriber_with_keyexpr("admin/secret").expect("build");
         let denied = NetworkMessage::Declare(Box::new(denied));
         assert_eq!(
-            acl_action(&denied),
+            acl_action(denied.view()),
             Some(GovernedAction::undecl(AclMessage::DeclareSubscriber)),
             "precondition: an undeclare is governed under its declaration's action",
         );
@@ -949,7 +958,7 @@ mod tests {
         let ctx = MockCtx::with_subject(Some(Zid::from_slice(&[0x0A])));
         let undecl = NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7)));
         assert_eq!(
-            acl_action(&undecl),
+            acl_action(undecl.view()),
             Some(GovernedAction::undecl(AclMessage::DeclareSubscriber)),
             "precondition: it IS governed, so it reaches the keyexpr branch",
         );
@@ -991,7 +1000,7 @@ mod tests {
             build_declare_token(1, 0, Some("admin/secret")).expect("build decl token"),
         ));
         assert_eq!(
-            acl_action(&denied),
+            acl_action(denied.view()),
             Some(GovernedAction::decl(AclMessage::LivelinessToken)),
         );
         assert!(
@@ -1010,7 +1019,7 @@ mod tests {
         let undecl = build_undeclare_token_with_keyexpr("admin/secret").expect("build");
         let undecl = NetworkMessage::Declare(Box::new(undecl));
         assert_eq!(
-            acl_action(&undecl),
+            acl_action(undecl.view()),
             Some(GovernedAction::undecl(AclMessage::LivelinessToken)),
             "the undeclare shares the declaration's action",
         );
@@ -1031,7 +1040,7 @@ mod tests {
             build_interest_liveliness_get(1, 0, Some("demo/alive")).expect("build get"),
         );
         assert_eq!(
-            acl_action(&get),
+            acl_action(get.view()),
             Some(GovernedAction::decl(AclMessage::LivelinessQuery)),
             "CURRENT-only is the one-shot GET",
         );
@@ -1041,7 +1050,7 @@ mod tests {
                 .expect("build sub"),
         );
         assert_eq!(
-            acl_action(&sub),
+            acl_action(sub.view()),
             Some(GovernedAction::decl(
                 AclMessage::DeclareLivelinessSubscriber
             )),
@@ -1053,7 +1062,7 @@ mod tests {
                 .expect("build sub"),
         );
         assert_eq!(
-            acl_action(&sub_hist),
+            acl_action(sub_hist.view()),
             Some(GovernedAction::decl(
                 AclMessage::DeclareLivelinessSubscriber
             )),
@@ -1062,7 +1071,7 @@ mod tests {
 
         let fin = NetworkMessage::Interest(build_interest_final(1));
         assert_eq!(
-            acl_action(&fin),
+            acl_action(fin.view()),
             None,
             "the Final terminator is unfiltered, as in zenoh",
         );
@@ -1085,7 +1094,7 @@ mod tests {
         assert!(!body.to(), "precondition: the TOKENS bit is now clear");
         let untokened = NetworkMessage::Interest(untokened);
         assert_eq!(
-            acl_action(&untokened),
+            acl_action(untokened.view()),
             None,
             "a non-token Interest is ungoverned even though it carries a keyexpr",
         );

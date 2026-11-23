@@ -118,8 +118,7 @@ async fn run_pubsub(
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(sub_ke, move |sample| {
+            .subscribe(sub_ke, move |sample| {
                 assert_eq!(
                     sample.keyexpr(),
                     sub_ke,

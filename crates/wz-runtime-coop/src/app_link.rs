@@ -462,8 +462,10 @@ impl Held {
                 return Ok(());
             }
             let taken = self.send_once(&held)?;
-            self.transport
+            let effects = self
+                .transport
                 .with(|table| table.drop_remainder(self.handle, taken));
+            self.transport.perform(effects);
             if taken < held.len() {
                 return Ok(());
             }

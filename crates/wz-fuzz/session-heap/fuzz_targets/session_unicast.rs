@@ -155,8 +155,8 @@ fuzz_target!(|data: &[u8]| {
     };
     let mut pump = SessionPump::new(runtime, feed.clone(), actions.clone(), clock, config);
     let mut observer = ApplicationLayerObserver::new();
-    let _ = observer.subscribers.register("**", |_| {});
-    let _ = observer.queryables.register("**", |_, _| {});
+    let _ = observer.subscribe("**", |_| {});
+    let _ = observer.with_app(|app_half| app_half.queryables.register("**", |_, _| {}));
     let mut on_event = |event: IterationEvent<'_, '_>| {
         let _ = write!(Discard, "{event:?}");
         observer.set_unanswerable_final(actions.params.policy.query_unanswerable_final());

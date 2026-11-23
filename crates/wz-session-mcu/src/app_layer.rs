@@ -121,7 +121,7 @@ impl ReplySink for NoReplies {
 /// ```ignore
 /// static APP: SlotApp = SlotApp::new();
 /// let (observer, registered) = APP
-///     .install_with(|observer| observer.subscribers.register_sink(..))
+///     .install_with(|observer| observer.register_subscriber(..))
 ///     .ok()
 ///     .expect("installed once");
 /// ```
@@ -289,19 +289,28 @@ where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
-    K: ObserverSinks + 'static,
+    // The node's rows deliver themselves: the dispatch hands them no context.
+    K: ObserverSinks<Delivery = ()> + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_, '_>) {
         {
             let mut peers = self.handle.peers().borrow_mut();
             let mut observer = self.observer.borrow_mut();
-            // The observer is the process's and this session is one link: the queries of this
-            // dispatch are asked by whom the link's key proved, or by nobody shown (decision D12).
-            observer.set_requester(self.handle.verified_peer_zid());
-            observer.set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
-            observer.dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
-            observer.set_requester(None);
+            // The queries of this session's link are asked by whom its key proved, or by nobody
+            // shown (decision D12), and are answered by this session's policy: both are this
+            // face's, read where the link may have just been established.
+            peers.queries.set_requester(self.handle.verified_peer_zid());
+            peers
+                .queries
+                .set_unanswerable_final(self.handle.params.policy.query_unanswerable_final());
+            observer.dispatch(
+                &mut (),
+                &mut peers,
+                &mut self.requesters,
+                event,
+                &*self.handle,
+            );
         }
         // A query whose deadline has passed ends with a timeout reply and its final, here, because
         // this is the one place that runs on every iteration of the session and holds the pending
@@ -350,9 +359,10 @@ pub const DEFAULT_GET_TIMEOUT_MS: u32 = 10_000;
 pub enum GetError {
     /// The pending table is full, or the keyexpr is longer than the table keeps.
     Register(wz_session_core::registry_error::RegisterError),
-    /// The request could not be written or sent: the session has no transport at the moment, or
-    /// the keyexpr is empty.
+    /// The request could not be written or sent: the session has no transport at the moment.
     Send(wz_session_core::send_wire_error::SendWireError),
+    /// The keyexpr is empty: it names no key, so there is nothing to ask.
+    NoKey,
 }
 
 #[cfg(all(feature = "session-slot", feature = "query-get"))]
@@ -378,6 +388,7 @@ where
     ///
     /// # Errors
     ///
+    /// [`GetError::NoKey`] for an empty keyexpr, before anything is registered or sent;
     /// [`GetError::Register`] when the table has no free row, [`GetError::Send`] when the request
     /// could not go out.
     pub fn get(
@@ -387,6 +398,8 @@ where
     ) -> Result<wz_session_core::reply::ReplyHandle, GetError> {
         use wz_session_core::reply_acceptance::ReplyAcceptance;
 
+        let key =
+            wz_session_core::wire_key::WireKey::literal(request.keyexpr).ok_or(GetError::NoKey)?;
         let actions = &*self.handle;
         let rid = actions.alloc_next_request_id();
         let timeout_ms = match request.timeout_ms {
@@ -411,14 +424,17 @@ where
         // loop that went to sleep between this call and the next event would otherwise sleep past it.
         self.publish_wake_deadline();
         let actions = &*self.handle;
-        let sent = actions.send_get_parts(wz_session_core::lent_request::GetParts {
+        let sent = actions.send_get_parts(wz_session_core::query_parts::GetParts {
             rid,
-            keyexpr: request.keyexpr,
-            parameters: request.parameters,
-            consolidation: request.consolidation,
-            target: request.target,
-            timeout_ms: u64::from(request.timeout_ms),
-            qos: request.qos,
+            key,
+            query: wz_session_core::query_parts::QueryParts {
+                parameters: request.parameters,
+                consolidation: request.consolidation,
+                target: request.target,
+                timeout_ms: request.timeout_ms,
+                qos: request.qos,
+                ..wz_session_core::query_parts::QueryParts::PLAIN
+            },
         });
         if let Err(why) = sent {
             self.requesters.replies.unregister(rid);
@@ -654,8 +670,7 @@ mod tests {
         // `bounded-heapless`, which compiles out the infallible wrappers.
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 "home/temp",
                 wz_session_core::locality::Locality::Any,
                 wz_session_core::sink::BoxedSink::new(|_| {
@@ -663,18 +678,18 @@ mod tests {
                 }),
             )
             .expect("a fresh observer takes the subscriber");
-        observer
-            .borrow_mut()
-            .queryables
-            .register_sink(
-                "svc/a",
-                wz_session_core::locality::Locality::Any,
-                false,
-                wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
-                    responder.reply(b"pong");
-                }),
-            )
-            .expect("a fresh observer takes the queryable");
+        observer.borrow_mut().with_app(|app| {
+            app.queryables
+                .register_sink(
+                    "svc/a",
+                    wz_session_core::locality::Locality::Any,
+                    false,
+                    wz_session_core::query_sink::BoxedQuerySink::new(|_query, responder| {
+                        responder.reply(b"pong");
+                    }),
+                )
+                .expect("a fresh observer takes the queryable")
+        });
 
         on_event(IterationEvent::Poll(&frame(vec![push(), query()])));
         std::assert_eq!(
@@ -728,7 +743,11 @@ mod tests {
             let mut on_event = dispatch_to(observer.clone(), actions);
             on_event(IterationEvent::Poll(&frame(Vec::new())));
             std::assert_eq!(
-                observer.borrow().queryables.answers_unresolved_queries(),
+                observer
+                    .borrow()
+                    .face_ref()
+                    .queries
+                    .answers_unresolved_queries(),
                 value == QueryUnanswerableFinal::EmptyFinal,
                 "{}",
                 value.id()

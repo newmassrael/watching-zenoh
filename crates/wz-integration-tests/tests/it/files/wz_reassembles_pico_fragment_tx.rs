@@ -221,8 +221,7 @@ async fn run_pico_put_against_wz_acceptor(payload: &str, expect_match: bool) -> 
         let byte_exact = byte_exact.clone();
         let expect = payload.as_bytes().to_vec();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 if expect_match && (sample.keyexpr() != KEYEXPR || sample.payload() != &expect[..])
                 {
                     byte_exact.store(false, Ordering::SeqCst);

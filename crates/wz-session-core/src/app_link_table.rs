@@ -1009,7 +1009,14 @@ impl AppLinkTable {
             ProgramEvent::Writable => {
                 // Compared for equality only, so a count that wrapped still tells two apart.
                 link.writables = link.writables.wrapping_add(1);
-                link.drive(AppLinkEvent::LinkWritable)
+                let mut effects = link.drive(AppLinkEvent::LinkWritable);
+                // An open link that holds a remainder has no transition on a writable, but its
+                // writer waits for the program to take bytes again, to offer it what it holds.
+                if link.state() == AppLinkState::Open && !link.remainder.is_empty() {
+                    let writer = link.writer.take();
+                    effects.absorb(link.wake(writer));
+                }
+                effects
             }
         })
     }
@@ -1388,12 +1395,20 @@ impl AppLinkTable {
             .map_or(&[][..], |link| link.remainder.as_slice())
     }
 
-    /// The program took the first `taken` bytes of the remainder of `handle`.
-    pub fn drop_remainder(&mut self, handle: LinkHandle, taken: usize) {
-        if let Some(link) = self.link_mut(handle) {
-            let taken = taken.min(link.remainder.len());
-            link.remainder.drain(..taken);
+    /// The program took the first `taken` bytes of the remainder of `handle`. A remainder that
+    /// this leaves empty on an open link is room again, with no call of the program's to say so:
+    /// the writer waiting for it is woken (a writer may wait while another task drains the link).
+    pub fn drop_remainder(&mut self, handle: LinkHandle, taken: usize) -> Effects {
+        let Some(link) = self.link_mut(handle) else {
+            return Effects::default();
+        };
+        let taken = taken.min(link.remainder.len());
+        link.remainder.drain(..taken);
+        if taken > 0 && link.remainder.is_empty() && link.state() == AppLinkState::Open {
+            let writer = link.writer.take();
+            return link.wake(writer);
         }
+        Effects::default()
     }
 
     /// The session lets `handle` go. A link that is not closed is closed: its close is due
@@ -1626,6 +1641,58 @@ mod tests {
             room: false,
         };
         assert!(table.wait_link(link, nothing, &waker));
+    }
+
+    /// A wait for room on an open link that holds a remainder is woken by the program's writable,
+    /// which has no transition while the link is open: the writer offers the program what it holds.
+    /// Turned red by a writable that wakes only a blocked link's writer.
+    #[test]
+    fn a_writable_wakes_a_room_wait_on_a_link_that_holds_a_remainder() {
+        let mut table = AppLinkTable::new();
+        let link = open_stream(&mut table);
+        table
+            .hold_remainder(link, b"held")
+            .expect("an open link holds a remainder");
+        let (count, waker) = counter();
+        let room = LinkInterest {
+            input: false,
+            room: true,
+        };
+        assert!(
+            !table.wait_link(link, room, &waker),
+            "a remainder takes the room"
+        );
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .event(link, ProgramEvent::Writable)
+                .expect("an open link")),
+            1
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "the writer is woken");
+        assert_eq!(table.state(link), Some(AppLinkState::Open));
+    }
+
+    /// A drain that leaves a remainder empty on an open link wakes the writer waiting for room,
+    /// though the program made no call; a drain that leaves bytes held wakes no one. Turned red by
+    /// a room wait that sleeps past the drain another task did.
+    #[test]
+    fn a_drain_that_empties_a_remainder_wakes_the_room_wait() {
+        let mut table = AppLinkTable::new();
+        let link = open_stream(&mut table);
+        table
+            .hold_remainder(link, b"held")
+            .expect("an open link holds a remainder");
+        let (count, waker) = counter();
+        let room = LinkInterest {
+            input: false,
+            room: true,
+        };
+        assert!(!table.wait_link(link, room, &waker));
+        assert_eq!(wakes(&mut table, |table| table.drop_remainder(link, 2)), 0);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0, "bytes are still held");
+        assert_eq!(wakes(&mut table, |table| table.drop_remainder(link, 2)), 1);
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "the writer is woken");
+        assert!(table.wait_link(link, room, &waker), "room again");
     }
 
     #[test]
@@ -2273,7 +2340,7 @@ mod tests {
         table.hold_remainder(handle, b"abc").unwrap();
         table.hold_remainder(handle, b"de").unwrap();
         assert_eq!(table.remainder(handle), b"abcde");
-        table.drop_remainder(handle, 2);
+        let _ = table.drop_remainder(handle, 2);
         assert_eq!(table.remainder(handle), b"cde");
         assert_eq!(
             table.hold_remainder(handle, b"fghijk").unwrap_err(),
@@ -2285,7 +2352,7 @@ mod tests {
             b"cde",
             "nothing of the refused hold was kept"
         );
-        table.drop_remainder(handle, 99);
+        let _ = table.drop_remainder(handle, 99);
         assert!(table.remainder(handle).is_empty());
         let _ = table.event(handle, ProgramEvent::Closed).unwrap();
         assert_eq!(

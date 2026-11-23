@@ -3127,7 +3127,7 @@ reason = "No key of upstream's configuration bounds it: wz holds the replies of 
 
 [limit.pico_preset]
 value = 2
-reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to."
+reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to. The same count of rows holds back what the session's consolidating gets keep of their replies (`reply_hold::HeldReplies`), each row the room of one reply's payload and key (`MAX_REPLY_PAYLOAD_BYTES` and `MAX_KEYEXPR_BYTES`, 1,024 and 256 bytes here): two rows are about 2.6 KB of the session's arena, where zenoh-pico holds each reply of a `Latest` get in an allocation of its own (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h` @ `typedef struct _z_pending_reply_t {`)."
 
 [[limit]]
 id = "MAX_PENDING_FINALS"

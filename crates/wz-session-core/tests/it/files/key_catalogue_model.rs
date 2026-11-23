@@ -120,7 +120,11 @@ fn a_selection_is_the_subscriber_tables_own_answer() {
     for key in key_ids() {
         let text = CATALOGUE.text(key);
         fired.borrow_mut().clear();
-        table.local_publish(&Sample::new_put(text, Vec::new()));
+        wz_session_core::pubsub::LocalSubscribers::local_publish(
+            &mut table,
+            &mut (),
+            &Sample::new_put(text, Vec::new()),
+        );
         let mut scanned: Vec<usize> = fired.borrow().clone();
         scanned.sort_unstable();
         let selection: Vec<usize> = CATALOGUE

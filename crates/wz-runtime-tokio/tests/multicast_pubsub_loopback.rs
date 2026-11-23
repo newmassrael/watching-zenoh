@@ -153,8 +153,7 @@ async fn publisher_push_reaches_group_subscriber() {
     {
         let fired = fired.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(sample.payload(), PAYLOAD);
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -262,8 +261,7 @@ async fn compressing_group_delivers_a_compressed_publish() {
         let fired = fired.clone();
         let expected = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(sample.payload(), &expected[..]);
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -376,8 +374,7 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     {
         let fired = fired.clone();
         observer_b
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(sample.payload(), PAYLOAD);
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -511,8 +508,7 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     {
         let fired = fired.clone();
         observer_b
-            .subscribers
-            .register(KEYEXPR, move |_sample| {
+            .subscribe(KEYEXPR, move |_sample| {
                 fired.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -631,8 +627,7 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(FRAG_KEYEXPR, move |sample| {
+            .subscribe(FRAG_KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), FRAG_KEYEXPR);
                 assert_eq!(sample.payload(), &expect[..]);
                 fired.fetch_add(1, Ordering::SeqCst);
@@ -756,8 +751,7 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     {
         let delivered = delivered.clone();
         observer
-            .subscribers
-            .register(CONC_KEYEXPR, move |sample| {
+            .subscribe(CONC_KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), CONC_KEYEXPR);
                 delivered.lock().unwrap().push(sample.payload().to_vec());
             })
@@ -908,8 +902,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
     {
         let fired = fired.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(sample.payload(), PAYLOAD);
                 fired.fetch_add(1, Ordering::SeqCst);
