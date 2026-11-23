@@ -3133,7 +3133,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         let resolver: std::sync::Arc<dyn wz_session_core::extshm::ShmResolver + Send + Sync> =
             std::sync::Arc::from(resolver);
         R::with_mutex_mut(&self.observer, |observer| {
-            observer.with_app(|app| app.subscribers.set_shm_resolver_shared(resolver.clone()));
+            observer
+                .face()
+                .subscribers
+                .set_shm_resolver_shared(resolver.clone());
             observer
                 .face()
                 .replies
@@ -3644,7 +3647,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     #[cfg(feature = "transport-shm")]
     pub fn enable_shm(&self) {
         R::with_mutex_mut(&self.observer, |obs| {
-            obs.with_app(|app| app.subscribers.set_shm_negotiated(true));
+            obs.face().subscribers.set_shm_negotiated(true);
             obs.face().replies.set_shm_negotiated(true);
             obs.with_app(|app| app.queryables.set_shm_negotiated(true));
         });
@@ -4843,7 +4846,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             #[cfg(feature = "transport-shm")]
             {
                 let negotiated = self.actions().is_shm();
-                obs.with_app(|app| app.subscribers.set_shm_negotiated(negotiated));
+                obs.face().subscribers.set_shm_negotiated(negotiated);
                 // R3042 -- and onto the reply registry, which un-swaps a reply as
                 // the subscriber registry does a push, behind the same gate.
                 obs.face().replies.set_shm_negotiated(negotiated);
@@ -4865,7 +4868,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 // through the same handoff a push's is.
                 let shared: Option<std::sync::Arc<dyn wz_session_core::extshm::ShmHandoff>> =
                     update.map(std::sync::Arc::from);
-                obs.with_app(|app| app.subscribers.set_shm_handoff_shared(shared.clone()));
+                obs.face()
+                    .subscribers
+                    .set_shm_handoff_shared(shared.clone());
                 obs.face().replies.set_shm_handoff_shared(shared.clone());
                 obs.with_app(|app| app.queryables.set_shm_handoff_shared(shared));
             }

@@ -49,8 +49,11 @@ use crate::bounded::{
 };
 use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
-use crate::keyexpr_match::keyexpr_intersects;
+use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
+use crate::pubsub::{
+    any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
+};
 use crate::registry_error::RegisterError;
 use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
@@ -261,6 +264,9 @@ impl<Key: KeyBacking> KeyexprRow<Key> {
 pub struct SubscriberRow<Key, Cb> {
     id: EntityId,
     key: EntityKey<Key>,
+    /// What [`KeyFacts`] reads of the key, read once at the declaration so that a sample matched
+    /// against it does not scan the key again.
+    facts: KeyFacts,
     origin: Locality,
     callback: Cb,
 }
@@ -682,6 +688,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     next_request: RequestId,
     /// Moves after every subscriber declared or undeclared ([`crate::pubsub::LocalSubscribers::epoch`]).
     subscriber_epoch: u64,
+    /// Which subscribers the keys delivered lately reached, valid at one `subscriber_epoch`: the
+    /// subscriber table's receive match cache, over these rows' places.
+    memo: MatchMemo<P>,
     keyexprs: Keyexprs<P>,
     subscribers: Subscribers<F, P>,
     queryables: Queryables<F, P>,
@@ -901,6 +910,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
+            memo: MatchMemo::new(
+                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
+            ),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
             queryables: SlotMap::new(),
@@ -911,6 +923,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             matching: SlotMap::new(),
             pending_gets: SlotMap::new(),
         }
+    }
+
+    /// Size the subscribers' receive match cache to the `MATCH_MEMO_SLOTS` the session's open
+    /// resolved, `0` leaving it out, as [`crate::pubsub::SubscriberTable::limit_memo_to`] does: the
+    /// keys it remembered are forgotten, and a table of the fixed policy keeps the build's
+    /// `MATCH_MEMO_FIXED_SLOTS`.
+    pub fn limit_memo_to(&mut self, slots: usize) {
+        if !P::ENFORCES_CAPACITY {
+            self.memo = MatchMemo::new(slots);
+        }
+    }
+
+    /// How many distinct keys the subscribers' receive match cache remembers at once.
+    pub fn memo_slot_count(&self) -> usize {
+        self.memo.slot_count()
     }
 
     /// Hold each table to the rows `rows` gives it, under the build's bound.
@@ -1081,6 +1108,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             form,
             callback,
             |id, key, callback| SubscriberRow {
+                facts: KeyFacts::of(key.as_str()),
                 id,
                 key,
                 origin,
@@ -1729,6 +1757,9 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
+            // A table whose rows are lent at open remembers no key: each slot of the cache would
+            // be rows of its own, which only the arena could give it.
+            memo: MatchMemo::new(0),
             keyexprs: SlotMap::lent(arena, rows.keyexprs)?,
             subscribers: SlotMap::lent(arena, rows.subscribers)?,
             queryables: SlotMap::lent(arena, rows.queryables)?,
@@ -1760,10 +1791,43 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 }
 
+impl<Key: KeyBacking, Cb: crate::sink::SampleSink, P: Storage> SubscriberRows
+    for SlotMap<kind::Subscriber, SubscriberRow<Key, Cb>, { caps::MAX_SUBSCRIPTIONS }, P>
+{
+    type Sink = Cb;
+
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, &mut Cb)>(&mut self, mut f: F) {
+        for (place, row) in self.live_places_mut() {
+            let found = RowRef {
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+            };
+            f(place, found, &mut row.callback);
+        }
+    }
+
+    fn any_row<F: FnMut(RowRef<'_>) -> bool>(&self, mut f: F) -> bool {
+        self.iter().any(|(_, row)| {
+            f(RowRef {
+                pattern: text(&row.key.key),
+                facts: row.facts,
+                origin: row.origin,
+            })
+        })
+    }
+
+    fn sink_at(&mut self, position: usize) -> Option<&mut Cb> {
+        self.live_at_mut(position).map(|row| &mut row.callback)
+    }
+}
+
 impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTables<F, P>
 where
     F::Subscriber: crate::sink::SampleSink,
 {
+    type Sink = F::Subscriber;
+
     fn epoch(&self) -> u64 {
         self.subscriber_epoch
     }
@@ -1779,6 +1843,12 @@ where
         }
     }
 
+    fn any_subscription(&self, f: &mut dyn FnMut(u64, &str, Locality) -> bool) -> bool {
+        self.subscribers
+            .iter()
+            .any(|(_, row)| f(u64::from(row.id), text(&row.key.key), row.origin))
+    }
+
     fn pattern_of(&self, id: u64) -> Option<&str> {
         self.subscribers
             .iter()
@@ -1786,26 +1856,65 @@ where
             .map(|(_, row)| text(&row.key.key))
     }
 
-    fn has_local_matching(&self, key: &str) -> bool {
-        self.subscribers.iter().any(|(_, row)| {
-            row.origin.allows_local() && keyexpr_intersects(text(&row.key.key), key)
-        })
+    fn next_entity_id(&self) -> Option<u32> {
+        self.next_entity
     }
 
-    fn for_each_matching(
+    fn consume_entity_id(&mut self) {
+        let _ = self.take_entity_id();
+    }
+
+    fn has_local_matching(&self, key: &str) -> bool {
+        any_local_match(&self.subscribers, key)
+    }
+
+    fn fire_matching<D: FnMut(&mut Self::Sink)>(
         &mut self,
         key: &str,
         local: bool,
-        f: &mut dyn FnMut(u64, &mut dyn crate::sink::SampleSink),
+        repeats_previous: bool,
+        deliver: D,
     ) -> usize {
-        let mut reached = 0usize;
-        for (_, row) in self.subscribers.iter_mut() {
-            if admits(row.origin, local) && keyexpr_intersects(text(&row.key.key), key) {
-                f(u64::from(row.id), &mut row.callback);
-                reached = reached.saturating_add(1);
-            }
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.subscriber_epoch,
+            key,
+            !local,
+            repeats_previous,
+            deliver,
+        )
+    }
+
+    /// The table set holds no key gate yet: a peer's message on any key is matched against
+    /// every subscription that hears peers.
+    fn deliver_from_peer<D: FnMut(&mut Self::Sink)>(
+        &mut self,
+        key: &str,
+        _class: Option<crate::key_gate::ClassId>,
+        how: crate::pubsub::PeerDelivery,
+        deliver: D,
+    ) -> usize {
+        if how.no_allocation && !P::ENFORCES_CAPACITY {
+            return scan_subscribers(&mut self.subscribers, key, true, deliver, |_| {})
+                .unwrap_or(0);
         }
-        reached
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.subscriber_epoch,
+            key,
+            true,
+            how.repeats_previous,
+            deliver,
+        )
+    }
+
+    #[cfg(feature = "alloc")]
+    fn end_plain_frame(&mut self) {
+        for (_, row) in self.subscribers.iter_mut() {
+            crate::sink::SampleSink::end_plain_frame(&mut row.callback);
+        }
     }
 }
 

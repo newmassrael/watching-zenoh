@@ -645,6 +645,12 @@ impl<P: Storage> PeerTables<P> {
         self.finals.limit_to(limits.max_pending_finals_held());
         self.subscribers
             .limit_aliases_to(limits.max_peer_keyexpr_aliases_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interests_to(limits.max_inbound_sub_interests_held());
+        #[cfg(feature = "declare-subscriber")]
+        self.subscribers
+            .limit_interest_replies_to(limits.max_pending_declares_held());
         let remote_decls = limits.max_remote_decls_held();
         self.remote_subscribers.limit_to(remote_decls);
         self.remote_queryables.limit_to(remote_decls);

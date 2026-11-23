@@ -802,21 +802,221 @@ fn the_tables_read_as_the_sessions_local_subscribers() {
     );
     assert!(tables.has_local_matching("a/c"));
     assert!(!tables.has_local_matching("b"));
-    let mut reached = std::vec::Vec::new();
+    let count = |sink: &mut Counted| sink.0 += 1;
+    assert_eq!(tables.fire_matching("a/b", false, false, count), 2);
+    assert_eq!(heard(&tables, any.handle), 1);
+    assert_eq!(heard(&tables, remote.handle), 1);
+    assert_eq!(tables.fire_matching("a/b", true, false, count), 1);
+    assert_eq!(heard(&tables, any.handle), 2);
     assert_eq!(
-        tables.for_each_matching("a/b", false, &mut |id, _sink| reached.push(id)),
-        2
+        heard(&tables, remote.handle),
+        1,
+        "a subscriber of peers only does not hear the session"
     );
-    assert_eq!(reached, std::vec![u64::from(any.id), u64::from(remote.id)]);
-    reached.clear();
-    assert_eq!(
-        tables.for_each_matching("a/b", true, &mut |id, _sink| reached.push(id)),
-        1
-    );
-    assert_eq!(reached, std::vec![u64::from(any.id)]);
     let _ = tables.undeclare_subscriber(any.handle);
     assert_eq!(tables.epoch(), 3);
     assert!(!tables.has_local_matching("a/c"));
+}
+
+/// How many samples the subscriber `handle` names was handed.
+fn heard(tables: &SessionTables<Sinks>, handle: SubscriberHandle) -> usize {
+    tables.subscribers().get(handle).unwrap().callback().0
+}
+
+/// A key delivered again at the same epoch is answered from the match cache, the same function
+/// the subscriber table delivers through; a subscriber declared in the place an undeclared one
+/// left is reached, and the cache answers nothing it remembered from before.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_key_delivered_again_is_answered_from_the_match_cache_until_the_subscribers_change() {
+    use crate::bounded::Heap;
+    use crate::pubsub::{LocalSubscribers, MATCH_SCANS};
+    let scans = || MATCH_SCANS.with(|count| count.get());
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks, Heap>::new();
+    tables.limit_memo_to(4);
+    assert_eq!(tables.memo_slot_count(), 4);
+    let first = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let start = scans();
+    for _ in 0..3 {
+        assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    }
+    assert_eq!(
+        scans() - start,
+        1,
+        "matched once, then answered from the cache"
+    );
+    let gone = tables.undeclare_subscriber(first.handle).unwrap();
+    assert_eq!(gone.row.unwrap().callback().0, 3);
+    let second = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    assert_eq!(
+        second.handle.to_bits().get() & 0xFFFF,
+        first.handle.to_bits().get() & 0xFFFF,
+        "the second subscriber takes the place the first left"
+    );
+    let start = scans();
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(
+        scans() - start,
+        1,
+        "the subscribers changed: matched afresh"
+    );
+    assert_eq!(
+        tables
+            .subscribers()
+            .get(second.handle)
+            .unwrap()
+            .callback()
+            .0,
+        1
+    );
+    tables.limit_memo_to(0);
+    assert_eq!(tables.memo_slot_count(), 0);
+    let start = scans();
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(tables.fire_matching("a/x", false, false, count), 1);
+    assert_eq!(scans() - start, 2, "no cache: every key is matched");
+}
+
+/// A subscriber undeclared while a call of its callback runs leaves every delivery at once, the
+/// cache's answers among them, and the session-local half of a matching verdict, while its row
+/// waits in its place for the last unpin.
+#[test]
+fn a_retired_subscriber_is_neither_delivered_to_nor_counted_as_matching() {
+    use crate::pubsub::LocalSubscribers;
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks>::new();
+    let sub = tables
+        .declare_subscriber("a/x", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    assert_eq!(tables.fire_matching("a/x", true, false, count), 1);
+    assert!(tables.has_local_matching("a/x"));
+    let pinned = tables.pin_subscriber(sub.handle).unwrap();
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert!(undeclared.row.is_none(), "handed back by the last unpin");
+    assert_eq!(tables.fire_matching("a/x", true, false, count), 0);
+    assert_eq!(tables.fire_matching("a/x", false, true, count), 0);
+    assert!(!tables.has_local_matching("a/x"));
+    let row = tables.unpin_subscriber(pinned).unwrap();
+    assert_eq!(
+        row.callback().0,
+        1,
+        "delivered to once, before it was undeclared"
+    );
+}
+
+/// A peer's message is matched afresh where the delivery may not allocate (the in-place receive
+/// path), through the cache otherwise, and reaches only the subscribers that hear peers.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_peers_message_is_matched_afresh_where_it_may_not_allocate() {
+    use crate::bounded::Heap;
+    use crate::pubsub::{LocalSubscribers, PeerDelivery, MATCH_SCANS};
+    let scans = || MATCH_SCANS.with(|count| count.get());
+    let count = |sink: &mut Counted| sink.0 += 1;
+    let mut tables = SessionTables::<Sinks, Heap>::new();
+    tables.limit_memo_to(4);
+    let peers = tables
+        .declare_subscriber(
+            "a/x",
+            Locality::Remote,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let own = tables
+        .declare_subscriber(
+            "a/x",
+            Locality::SessionLocal,
+            KeyForm::default(),
+            Counted::default(),
+        )
+        .unwrap();
+    let lent = PeerDelivery {
+        no_allocation: true,
+        ..PeerDelivery::default()
+    };
+    let start = scans();
+    for _ in 0..2 {
+        assert_eq!(tables.deliver_from_peer("a/x", None, lent, count), 1);
+    }
+    assert_eq!(scans() - start, 2, "no cache slot is taken");
+    let start = scans();
+    for _ in 0..2 {
+        assert_eq!(
+            tables.deliver_from_peer("a/x", None, PeerDelivery::default(), count),
+            1
+        );
+    }
+    assert_eq!(scans() - start, 1, "the cache answers the second");
+    assert_eq!(
+        tables.subscribers().get(peers.handle).unwrap().callback().0,
+        4
+    );
+    assert_eq!(
+        tables.subscribers().get(own.handle).unwrap().callback().0,
+        0,
+        "a subscriber of the session's own messages hears no peer"
+    );
+}
+
+/// A sink that counts the plain frames it was told ended.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+struct FrameEnds(usize);
+
+#[cfg(feature = "alloc")]
+impl crate::sink::SampleSink for FrameEnds {
+    fn deliver(&mut self, _sample: &dyn crate::sink::SampleView) {}
+
+    fn end_plain_frame(&mut self) {
+        self.0 += 1;
+    }
+}
+
+/// Callbacks whose subscribers count the ends of plain frames.
+#[cfg(feature = "alloc")]
+enum FrameSinks {}
+
+#[cfg(feature = "alloc")]
+impl RowCallbacks for FrameSinks {
+    type Subscriber = FrameEnds;
+    type Queryable = u32;
+    type LivelinessSubscriber = u32;
+    type Matching = u32;
+    type Reply = u32;
+}
+
+/// The end of a plain frame is told to every subscriber, whatever it hears.
+#[cfg(feature = "alloc")]
+#[test]
+fn every_subscriber_is_told_a_plain_frame_ended() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = SessionTables::<FrameSinks>::new();
+    let any = tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), FrameEnds::default())
+        .unwrap();
+    let own = tables
+        .declare_subscriber(
+            "b",
+            Locality::SessionLocal,
+            KeyForm::default(),
+            FrameEnds::default(),
+        )
+        .unwrap();
+    tables.end_plain_frame();
+    assert_eq!(
+        tables.subscribers().get(any.handle).unwrap().callback().0,
+        1
+    );
+    assert_eq!(
+        tables.subscribers().get(own.handle).unwrap().callback().0,
+        1
+    );
 }
 
 #[test]
@@ -831,4 +1031,60 @@ fn a_refused_subscriber_leaves_the_epoch_where_it_was() {
         .declare_subscriber("a", Locality::Any, KeyForm::default(), Counted::default())
         .is_err());
     assert_eq!(tables.epoch(), 0);
+}
+
+#[cfg(feature = "declare-subscriber")]
+#[test]
+fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
+    use crate::pubsub::{SubInterestReply, SubscriberPeer};
+    let mut tables = SessionTables::<Sinks>::new();
+    let sub = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    tables
+        .declare_subscriber("c", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    let mut peer: SubscriberPeer = SubscriberPeer::default();
+    // A CURRENT interest on a/**: one subscription answers it, then the Final.
+    assert_eq!(
+        peer.answer_subscriber_interest(&mut tables, 7, Some("a/**"), false, true, false),
+        1
+    );
+    let staged = peer.take_staged_sub_interest_replies();
+    assert_eq!(staged.len(), 2);
+    let concrete = staged.first().unwrap();
+    assert!(matches!(
+        concrete,
+        SubInterestReply::Concrete { interest_id: 7, .. }
+    ));
+    assert_eq!(
+        peer.sub_interest_reply(&tables, concrete),
+        Some((u64::from(sub.id), "a/b"))
+    );
+    assert!(matches!(
+        staged.last(),
+        Some(SubInterestReply::Final { interest_id: 7 })
+    ));
+    // The remembered row took the next entity id from the tables' one space.
+    let after = tables.next_entity_id();
+    assert_eq!(after, Some(sub.id + 3));
+    // A FUTURE interest is told of a subscription registered after it.
+    assert_eq!(
+        peer.answer_subscriber_interest(&mut tables, 8, Some("d/*"), false, false, true),
+        0
+    );
+    let _ = peer.take_staged_sub_interest_replies();
+    let later = tables
+        .declare_subscriber("d/e", Locality::Any, KeyForm::default(), Counted::default())
+        .unwrap();
+    peer.stage_registered(&tables, u64::from(later.id));
+    let pushed = peer.take_staged_sub_interest_replies();
+    assert!(pushed.iter().any(|item| matches!(
+        item,
+        SubInterestReply::Concrete { interest_id: 8, subscription_id } if *subscription_id == u64::from(later.id)
+    )));
+    assert_eq!(
+        peer.sub_interest_reply(&tables, &SubInterestReply::Final { interest_id: 8 }),
+        None
+    );
 }
