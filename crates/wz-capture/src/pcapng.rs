@@ -961,15 +961,137 @@ impl<'a> Iterator for LocalOptions<'a> {
     }
 }
 
-/// Scan a block's option list for `if_tsresol`.
-///
-/// An absent or malformed list leaves the default — an option list is
-/// metadata, and refusing a whole capture over one is the wrong trade.
 /// `if_name`: the interface's name, UTF-8.
 const OPT_IF_NAME: u16 = 2;
 /// `if_tsoffset`: seconds to add to every timestamp of the interface, a signed
 /// 64-bit integer.
 const OPT_IF_TSOFFSET: u16 = 14;
+/// `opt_comment`: a note in UTF-8 that any block may carry, as many times as
+/// its writer chose (pcapng, Options). What a person typed against a packet in
+/// a capture tool is stored here.
+pub const OPT_COMMENT: u16 = 1;
+
+/// One `opt_comment` value as a document writes it.
+///
+/// The format requires UTF-8 and writers do not always keep to it. A value
+/// that is not UTF-8 is still carried, decoded with each invalid sequence
+/// replaced by U+FFFD, and `utf8` says so: dropping it would hide that the
+/// packet was commented at all, and the replacement text is what every viewer
+/// of such a capture shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    /// The text, exactly as stored when it is UTF-8.
+    pub text: alloc::string::String,
+    /// Whether the stored bytes were UTF-8, so `text` is them unchanged.
+    pub utf8: bool,
+}
+
+impl Comment {
+    /// The comment one option value holds. Nothing is trimmed: a trailing NUL
+    /// or space is part of what the writer stored.
+    pub fn of(value: &[u8]) -> Self {
+        match core::str::from_utf8(value) {
+            Ok(text) => Self {
+                text: alloc::string::String::from(text),
+                utf8: true,
+            },
+            Err(_) => Self {
+                text: alloc::string::String::from_utf8_lossy(value).into_owned(),
+                utf8: false,
+            },
+        }
+    }
+}
+
+impl<'a> OptionList<'a> {
+    /// Every `opt_comment` value of the list, in the order the block holds
+    /// them, repeats included.
+    pub fn comments(self) -> impl Iterator<Item = &'a [u8]> {
+        self.iter()
+            .filter(|option| option.code == OPT_COMMENT)
+            .map(|option| option.value)
+    }
+}
+
+/// One block a metadata scan reached: which section it is in, that section's
+/// byte order, its type and its body (the bytes between the two lengths).
+struct ScannedBlock<'a> {
+    section: usize,
+    swapped: bool,
+    block_type: u32,
+    body: &'a [u8],
+}
+
+/// The blocks of a pcapng capture in file order, read by the block walk's
+/// byte-order and length rules, for the scans that read metadata and no packet
+/// ([`interface_descriptions`], [`comment_census`]). A block that breaks the
+/// rules ends the walk where it stands, and a growing capture's partial last
+/// block is simply not reached yet. Nothing for a container that is not
+/// pcapng.
+struct ScannedBlocks<'a> {
+    bytes: &'a [u8],
+    off: usize,
+    swapped: bool,
+    section: Option<usize>,
+}
+
+impl<'a> ScannedBlocks<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            off: 0,
+            swapped: false,
+            section: None,
+        }
+    }
+
+    /// End the walk: every later call answers `None`.
+    fn stop(&mut self) -> Option<ScannedBlock<'a>> {
+        self.off = self.bytes.len();
+        None
+    }
+}
+
+impl<'a> Iterator for ScannedBlocks<'a> {
+    type Item = ScannedBlock<'a>;
+
+    fn next(&mut self) -> Option<ScannedBlock<'a>> {
+        let bytes = self.bytes;
+        let off = self.off;
+        if off + MIN_BLOCK_LEN > bytes.len() {
+            return None;
+        }
+        let raw_type = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+        if u32::from_be_bytes(raw_type) == BT_SHB {
+            let bom = u32::from_le_bytes([
+                bytes[off + 8],
+                bytes[off + 9],
+                bytes[off + 10],
+                bytes[off + 11],
+            ]);
+            self.swapped = match bom {
+                BOM => false,
+                x if x == BOM.swap_bytes() => true,
+                _ => return self.stop(),
+            };
+            self.section = Some(self.section.map_or(0, |s| s + 1));
+        }
+        let Some(section) = self.section else {
+            return self.stop();
+        };
+        let total = u32_at(bytes, off + 4, self.swapped) as usize;
+        if total < MIN_BLOCK_LEN || !total.is_multiple_of(4) || off + total > bytes.len() {
+            return self.stop();
+        }
+        self.off = off + total;
+        Some(ScannedBlock {
+            section,
+            swapped: self.swapped,
+            block_type: u32_at(bytes, off, self.swapped),
+            body: &bytes[off + 8..off + total - 4],
+        })
+    }
+}
 
 /// One interface a capture described, as the field document names it: which
 /// section's numbering it is in, its id there, and what its IDB said.
@@ -988,78 +1110,131 @@ pub struct InterfaceDescription {
     pub ts_resol: u8,
     /// `if_tsoffset` in seconds, 0 when unstated.
     pub ts_offset: i64,
+    /// The IDB's `opt_comment` values, in order; empty when it has none.
+    pub comments: Vec<Comment>,
 }
 
-/// Every interface a pcapng capture's IDBs describe, in file order, read by
-/// the block walk's byte-order and length rules. A block that breaks them ends
-/// the scan where it stands: the interfaces before it are returned, and a
-/// growing capture's partial last block is simply not reached yet. Empty for
-/// a container that is not pcapng.
+/// Every interface a pcapng capture's IDBs describe, in file order (see
+/// [`ScannedBlocks`] for where the scan stops). Empty for a container that is
+/// not pcapng.
 pub fn interface_descriptions(bytes: &[u8]) -> Vec<InterfaceDescription> {
     let mut out = Vec::new();
-    let mut off = 0usize;
-    let mut swapped = false;
     let mut section: Option<usize> = None;
     let mut next_id = 0u32;
-    while off + MIN_BLOCK_LEN <= bytes.len() {
-        let raw_type = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
-        if u32::from_be_bytes(raw_type) == BT_SHB {
-            let bom = u32::from_le_bytes([
-                bytes[off + 8],
-                bytes[off + 9],
-                bytes[off + 10],
-                bytes[off + 11],
-            ]);
-            swapped = match bom {
-                BOM => false,
-                x if x == BOM.swap_bytes() => true,
-                _ => break,
-            };
-            section = Some(section.map_or(0, |s| s + 1));
+    for block in ScannedBlocks::new(bytes) {
+        if section != Some(block.section) {
+            section = Some(block.section);
             next_id = 0;
         }
-        let Some(current) = section else {
-            break;
-        };
-        let total = u32_at(bytes, off + 4, swapped) as usize;
-        if total < MIN_BLOCK_LEN || !total.is_multiple_of(4) || off + total > bytes.len() {
-            break;
+        let (body, swapped) = (block.body, block.swapped);
+        if block.block_type != BT_IDB || body.len() < 8 {
+            continue;
         }
-        let body = &bytes[off + 8..off + total - 4];
-        if u32_at(bytes, off, swapped) == BT_IDB && body.len() >= 8 {
-            let options = OptionList::new(&body[8..], swapped);
-            let name = options
-                .iter()
-                .find(|o| o.code == OPT_IF_NAME)
-                .and_then(|o| core::str::from_utf8(o.value).ok())
-                .map(|s| alloc::string::String::from(s.trim_end_matches('\0')));
-            let ts_offset = options
-                .iter()
-                .find(|o| o.code == OPT_IF_TSOFFSET && o.value.len() == 8)
-                .map(|o| {
-                    let raw: [u8; 8] = o.value.try_into().unwrap_or([0; 8]);
-                    if swapped {
-                        i64::from_be_bytes(raw)
-                    } else {
-                        i64::from_le_bytes(raw)
-                    }
-                })
-                .unwrap_or(0);
-            out.push(InterfaceDescription {
-                section: current,
-                id: next_id,
-                link_type: u32::from(u16_at(body, 0, swapped)),
-                name,
-                ts_resol: scan_tsresol(&body[8..], swapped).unwrap_or(Interface::DEFAULT_TSRESOL),
-                ts_offset,
-            });
-            next_id += 1;
-        }
-        off += total;
+        let options = OptionList::new(&body[8..], swapped);
+        let name = options
+            .iter()
+            .find(|o| o.code == OPT_IF_NAME)
+            .and_then(|o| core::str::from_utf8(o.value).ok())
+            .map(|s| alloc::string::String::from(s.trim_end_matches('\0')));
+        let ts_offset = options
+            .iter()
+            .find(|o| o.code == OPT_IF_TSOFFSET && o.value.len() == 8)
+            .map(|o| {
+                let raw: [u8; 8] = o.value.try_into().unwrap_or([0; 8]);
+                if swapped {
+                    i64::from_be_bytes(raw)
+                } else {
+                    i64::from_le_bytes(raw)
+                }
+            })
+            .unwrap_or(0);
+        out.push(InterfaceDescription {
+            section: block.section,
+            id: next_id,
+            link_type: u32::from(u16_at(body, 0, swapped)),
+            name,
+            ts_resol: scan_tsresol(&body[8..], swapped).unwrap_or(Interface::DEFAULT_TSRESOL),
+            ts_offset,
+            comments: options.comments().map(Comment::of).collect(),
+        });
+        next_id += 1;
     }
     out
 }
 
+/// One Section Header Block comment, with the section it heads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionComment {
+    /// The section, counted from 0 as [`InterfaceDescription::section`] counts.
+    pub section: usize,
+    /// The comment.
+    pub comment: Comment,
+}
+
+/// What a pcapng capture's comments amount to, without listing its packets.
+///
+/// The packet half is counted and not carried: a packet's comments travel with
+/// the rows that packet holds the first byte of, and this answers whether the
+/// file has any before a reader walks them. The section half is carried,
+/// because a section comment describes the whole capture and no row holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommentCensus {
+    /// Packet blocks (Enhanced and obsolete) carrying at least one comment.
+    pub commented_packets: u64,
+    /// Comments over those blocks, repeats included.
+    pub packet_comments: u64,
+    /// Of those, how many were not UTF-8.
+    pub not_utf8: u64,
+    /// Every Section Header Block comment, in file order.
+    pub sections: Vec<SectionComment>,
+}
+
+/// The comments of a pcapng capture, counted for its packets and carried for
+/// its sections (see [`ScannedBlocks`] for where the scan stops). Empty for a
+/// container that is not pcapng: a classic pcap has no options.
+///
+/// A Simple Packet Block has no option list. A packet block whose captured
+/// length runs past its body has no list this scan can find, the same answer
+/// the walk's own option reader gives it.
+pub fn comment_census(bytes: &[u8]) -> CommentCensus {
+    let mut out = CommentCensus::default();
+    for block in ScannedBlocks::new(bytes) {
+        let (body, swapped) = (block.body, block.swapped);
+        match block.block_type {
+            // byte-order magic, major and minor version, section length
+            BT_SHB if body.len() >= 16 => {
+                for value in OptionList::new(&body[16..], swapped).comments() {
+                    out.sections.push(SectionComment {
+                        section: block.section,
+                        comment: Comment::of(value),
+                    });
+                }
+            }
+            // the captured length is at 12 in both packet blocks
+            BT_EPB | BT_PB if body.len() >= 20 => {
+                let captured = u32_at(body, 12, swapped) as usize;
+                let mut held = 0u64;
+                for value in packet_options(body, 20, captured, swapped).comments() {
+                    held += 1;
+                    if core::str::from_utf8(value).is_err() {
+                        out.not_utf8 += 1;
+                    }
+                }
+                if held > 0 {
+                    out.commented_packets += 1;
+                    out.packet_comments += held;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Scan a block's option list for `if_tsresol`.
+///
+/// An absent or malformed list leaves the default — an option list is
+/// metadata, and refusing a whole capture over one is the wrong trade.
 fn scan_tsresol(body: &[u8], swapped: bool) -> Option<u8> {
     OptionList::new(body, swapped)
         .iter()
@@ -4137,5 +4312,204 @@ mod custom_option_tests {
         let mut empty = OptionList::empty().local();
         assert!(empty.next().is_none());
         assert_eq!(empty.malformed(), 0);
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+    use alloc::vec;
+
+    /// An option list in `order`: each value padded to four, then
+    /// `opt_endofopt`. Laid out from the format, not through the reader.
+    fn list(order: ByteOrder, options: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (code, value) in options {
+            out.extend_from_slice(&order.u16(*code));
+            out.extend_from_slice(&order.u16(value.len() as u16));
+            out.extend_from_slice(value);
+            out.extend_from_slice(&vec![0u8; (4 - value.len() % 4) % 4]);
+        }
+        out.extend_from_slice(&order.u16(0));
+        out.extend_from_slice(&order.u16(0));
+        out
+    }
+
+    /// One block of `block_type` around `body`, both lengths in `order`.
+    fn block(order: ByteOrder, block_type: u32, body: &[u8]) -> Vec<u8> {
+        let total = (12 + body.len()) as u32;
+        let mut out = order.u32(block_type).to_vec();
+        out.extend_from_slice(&order.u32(total));
+        out.extend_from_slice(body);
+        out.extend_from_slice(&order.u32(total));
+        out
+    }
+
+    fn shb(order: ByteOrder, options: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = order.u32(BOM).to_vec();
+        body.extend_from_slice(&order.u16(1));
+        body.extend_from_slice(&order.u16(0));
+        body.extend_from_slice(&order.u64(u64::MAX));
+        body.extend_from_slice(&list(order, options));
+        block(order, BT_SHB, &body)
+    }
+
+    fn idb(order: ByteOrder, options: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = order.u16(1).to_vec();
+        body.extend_from_slice(&order.u16(0));
+        body.extend_from_slice(&order.u32(0));
+        body.extend_from_slice(&list(order, options));
+        block(order, BT_IDB, &body)
+    }
+
+    /// An Enhanced Packet Block on interface 0 holding `data`.
+    fn epb(order: ByteOrder, data: &[u8], options: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = order.u32(0).to_vec();
+        body.extend_from_slice(&order.u32(0));
+        body.extend_from_slice(&order.u32(7));
+        body.extend_from_slice(&order.u32(data.len() as u32));
+        body.extend_from_slice(&order.u32(data.len() as u32));
+        body.extend_from_slice(data);
+        body.extend_from_slice(&vec![0u8; (4 - data.len() % 4) % 4]);
+        if !options.is_empty() {
+            body.extend_from_slice(&list(order, options));
+        }
+        block(order, BT_EPB, &body)
+    }
+
+    /// A Simple Packet Block holding `data`: it has no option list.
+    fn spb(order: ByteOrder, data: &[u8]) -> Vec<u8> {
+        let mut body = order.u32(data.len() as u32).to_vec();
+        body.extend_from_slice(data);
+        body.extend_from_slice(&vec![0u8; (4 - data.len() % 4) % 4]);
+        block(order, BT_SPB, &body)
+    }
+
+    #[test]
+    fn every_comment_of_a_list_comes_out_in_order_and_nothing_else_does() {
+        for (order, swapped) in [(ByteOrder::Little, false), (ByteOrder::Big, true)] {
+            let raw = list(
+                order,
+                &[
+                    (OPT_COMMENT, b"first"),
+                    (OPT_EPB_FLAGS, &order.u32(1)),
+                    (OPT_COMMENT, b""),
+                    (OPT_COMMENT, b"second"),
+                ],
+            );
+            let got: Vec<&[u8]> = OptionList::new(&raw, swapped).comments().collect();
+            assert_eq!(got, vec![&b"first"[..], &b""[..], &b"second"[..]]);
+            assert_eq!(OptionList::empty().comments().count(), 0);
+        }
+    }
+
+    #[test]
+    fn a_comment_that_is_not_utf8_is_carried_replaced_and_marked() {
+        assert_eq!(
+            Comment::of("caf\u{e9} ok\0".as_bytes()),
+            Comment {
+                text: alloc::string::String::from("caf\u{e9} ok\0"),
+                utf8: true,
+            }
+        );
+        assert_eq!(
+            Comment::of(b"bad \xff end"),
+            Comment {
+                text: alloc::string::String::from("bad \u{fffd} end"),
+                utf8: false,
+            }
+        );
+    }
+
+    /// Two sections, one in each byte order: the section comments are carried
+    /// with their section, the packet comments counted per packet, and a
+    /// packet with none, a Simple Packet Block and an interface comment count
+    /// nothing.
+    #[test]
+    fn the_census_counts_commented_packets_and_carries_section_comments() {
+        let mut file = shb(ByteOrder::Little, &[(OPT_COMMENT, b"site A")]);
+        file.extend(idb(ByteOrder::Little, &[(OPT_COMMENT, b"uplink")]));
+        file.extend(epb(
+            ByteOrder::Little,
+            b"abc",
+            &[(OPT_COMMENT, b"one"), (OPT_COMMENT, b"two")],
+        ));
+        file.extend(epb(ByteOrder::Little, b"abcd", &[]));
+        file.extend(spb(ByteOrder::Little, b"xy"));
+        file.extend(shb(
+            ByteOrder::Big,
+            &[(OPT_COMMENT, b"site B"), (OPT_COMMENT, b"\xfe")],
+        ));
+        file.extend(idb(ByteOrder::Big, &[]));
+        file.extend(epb(
+            ByteOrder::Big,
+            b"z",
+            &[
+                (OPT_EPB_FLAGS, &ByteOrder::Big.u32(2)),
+                (OPT_COMMENT, b"\xff"),
+            ],
+        ));
+        let census = comment_census(&file);
+        assert_eq!(census.commented_packets, 2);
+        assert_eq!(census.packet_comments, 3);
+        assert_eq!(census.not_utf8, 1);
+        assert_eq!(
+            census.sections,
+            vec![
+                SectionComment {
+                    section: 0,
+                    comment: Comment::of(b"site A"),
+                },
+                SectionComment {
+                    section: 1,
+                    comment: Comment::of(b"site B"),
+                },
+                SectionComment {
+                    section: 1,
+                    comment: Comment::of(b"\xfe"),
+                },
+            ]
+        );
+        assert!(!census.sections[2].comment.utf8);
+    }
+
+    /// The scan ends where a block breaks the rules or is not all there yet,
+    /// and what was before it stands; a container that is not pcapng has none.
+    #[test]
+    fn a_cut_or_foreign_container_counts_what_was_reached() {
+        let mut file = shb(ByteOrder::Little, &[]);
+        file.extend(idb(ByteOrder::Little, &[]));
+        file.extend(epb(ByteOrder::Little, b"a", &[(OPT_COMMENT, b"kept")]));
+        let whole = file.len();
+        file.extend(epb(ByteOrder::Little, b"b", &[(OPT_COMMENT, b"cut")]));
+        let census = comment_census(&file[..file.len() - 2]);
+        assert_eq!(census.commented_packets, 1);
+        assert_eq!(census.packet_comments, 1);
+        assert_eq!(comment_census(&file[..whole]), census);
+        assert_eq!(comment_census(&file).packet_comments, 2);
+        assert_eq!(
+            comment_census(b"not a capture at all"),
+            CommentCensus::default()
+        );
+        let classic = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &[(0, 0, &b"abc"[..])]);
+        assert_eq!(comment_census(&classic), CommentCensus::default());
+    }
+
+    #[test]
+    fn an_interface_carries_its_own_comments_in_order() {
+        let mut file = shb(ByteOrder::Big, &[(OPT_COMMENT, b"not an interface's")]);
+        file.extend(idb(
+            ByteOrder::Big,
+            &[(OPT_COMMENT, b"left port"), (OPT_COMMENT, b"\xc3")],
+        ));
+        file.extend(idb(ByteOrder::Big, &[]));
+        let got = interface_descriptions(&file);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0].comments,
+            vec![Comment::of(b"left port"), Comment::of(b"\xc3")]
+        );
+        assert!(!got[0].comments[1].utf8);
+        assert!(got[1].comments.is_empty());
     }
 }

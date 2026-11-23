@@ -1413,6 +1413,23 @@
  *     Each tag is four bytes that follow the span, the EtherType field then
  *     reads the tag's protocol id, and this object does not place the tags.
  *
+ *   "packet_comments":[{"text":"slow reply","utf8":true}]|null
+ *
+ *     (field-document revision 81, row_facts 21) Every comment the pcapng
+ *     block of that same packet carries (`opt_comment`, what a capture tool
+ *     stores when a person comments a packet), in the block's order, repeats
+ *     included. `text` is the comment as stored when it is UTF-8; when it is
+ *     not, `utf8` is `false` and `text` is its decoding with each invalid
+ *     sequence replaced by U+FFFD. Nothing is trimmed or interpreted. `[]` for
+ *     a packet with none, which every classic pcap record is. `null` when the
+ *     packet is not in hand: `first_byte` is `null`, or the packet could not be
+ *     re-read from the bytes this call was given. Only the packet holding the
+ *     row's FIRST byte is read, so every row of a packet carries its comments
+ *     and a packet that holds no row's first byte (a bare acknowledgement, a
+ *     message's middle segment) is on no row: the summary's `comments` counts
+ *     every commented packet, so a reader can tell the capture has comments
+ *     without walking the rows.
+ *
  * Per FLOW, beside `flow`:
  *
  *   "context":{"phase":..,"negotiated":bool,"lowlatency":bool|null,
@@ -1785,7 +1802,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":80,"key":"kind","values":[...],
+ *     {"name":"fields","revision":81,"key":"kind","values":[...],
  *      "carries":[{"word":"bits",
  *                  "shapes":[["end","name","selector_path","start","value"]]},
  *                 {"word":"opaque",
@@ -2399,6 +2416,25 @@ int wz_dissect_transport_message_in(const char *context_json,
  * keys they carry reach are decrypted before the summary is written, so their
  * `frames` count the zenoh messages inside. See wz_dissect_pcap_session_table
  * for the pass and what it does not reach.
+ *
+ * (summary revision 9) THE CAPTURE'S COMMENTS, after `health`:
+ *
+ *     "comments":{"commented_packets":2,"packet_comments":3,"not_utf8":0,
+ *                 "sections":[{"section":0,"text":"lab bench","utf8":true}]}
+ *
+ * `commented_packets` counts the pcapng packet blocks (Enhanced and the
+ * obsolete Packet Block) carrying at least one `opt_comment`, and
+ * `packet_comments` the comments over them, repeats included: whether the file
+ * holds comments is answered here without walking a row. Each packet's own
+ * comments are its rows' `packet_comments` in the field document.
+ * `not_utf8` counts the packet comments whose bytes were not UTF-8.
+ * `sections` carries every Section Header Block comment in file order, with
+ * the section it heads counted from 0 as `capture_interfaces` counts it; such
+ * a comment describes the whole capture, and no row or interface holds it. An
+ * interface's comments are its `capture_interfaces` entry's. Read from the
+ * container's blocks by their length rules, so a block cut short at the end of
+ * the bytes and everything after a block that breaks them is not counted. All
+ * zeros and `[]` for a classic pcap, which has no options.
  *
  * SUBSUMED BY wz_dissect_pcap_summary_keyed -- that door takes the limits
  * preset and a key log as ARGUMENTS, and with WZ_DISSECT_LIMITS_NONE and no key
@@ -3374,7 +3410,7 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * ingest. The document carries, after `membership`,
  *
  *   "capture_interfaces":[{"section":0,"id":0,"link_type":1,"name":"eth0",
- *                          "ts_resolution":6,"ts_offset_s":0}]
+ *                          "ts_resolution":6,"ts_offset_s":0,"comments":[]}]
  *
  * every interface a pcapng capture's IDBs describe, in file order: `section`
  * counts Section Header Blocks from 0 and `id` restarts in each; `name` is
@@ -3382,7 +3418,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * ten, or of two with the high bit set; 6 is microseconds); `ts_offset_s` the
  * `if_tsoffset` seconds. Empty for a classic pcap. A frame snapped shorter than
  * it was sent is counted capture-wide only, in `health.skips.truncated` when it
- * could not be read at all.
+ * could not be read at all. Since field-document revision 81 (row_facts 21)
+ * each entry carries `comments`, the IDB's own `opt_comment` values in order,
+ * each `{"text":..,"utf8":..}` as a row's `packet_comments` writes one; `[]`
+ * when it has none.
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
@@ -6509,7 +6548,7 @@ int wz_dissect_transport_layout_e2e(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":80,"key":"state",
+ *     "value_families":[{"name":"fields","revision":81,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

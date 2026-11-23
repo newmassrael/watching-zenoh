@@ -5402,6 +5402,30 @@ fn push_first_byte<W: DocOut>(at: Option<FirstByte>, reread: Option<&Reread>, ou
             .and_then(|p| crate::link::ethernet_header(p.link_type, p.data)),
         out,
     );
+    push_packet_comments(packet.as_ref().map(|p| p.options), out);
+}
+
+/// The row's `packet_comments` key (revision 81): every `opt_comment` of the
+/// packet that holds the row's first byte, in the order its block lists them,
+/// each as [`crate::report::write_comment`] writes it. `[]` for a packet with
+/// none (every classic pcap record), and `null` when the packet is not in
+/// hand: no first byte, or a packet this document could not re-read.
+///
+/// The first byte's packet and no other, so the comment sits on the rows a
+/// viewer lists under that packet; a packet holding no row's first byte is
+/// counted in the summary's `comments` and is on no row.
+fn push_packet_comments<W: DocOut>(options: Option<crate::pcapng::OptionList<'_>>, out: &mut W) {
+    out.key("packet_comments");
+    match options {
+        None => out.null(),
+        Some(options) => {
+            out.open_array();
+            for value in options.comments() {
+                crate::report::write_comment(&crate::pcapng::Comment::of(value), out);
+            }
+            out.close_array();
+        }
+    }
 }
 
 /// The row's `l2` key: the Ethernet II header's source, destination and place
@@ -6252,6 +6276,9 @@ fn write_dns<W: DocOut>(
 /// the high bit set; 6 is microseconds), `ts_offset_s` the `if_tsoffset`
 /// seconds every timestamp of the interface is shifted by. Empty for a classic
 /// pcap, whose one interface is the file's own link type.
+///
+/// Revision 81 adds `comments`, the IDB's `opt_comment` values in order, each
+/// as [`crate::report::write_comment`] writes it; `[]` when it has none.
 fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
     out.key("capture_interfaces");
     out.open_array();
@@ -6269,6 +6296,12 @@ fn write_capture_interfaces<W: DocOut>(capture: &[u8], out: &mut W) {
         out.uint(u64::from(i.ts_resol));
         out.key("ts_offset_s");
         out.int(i.ts_offset);
+        out.key("comments");
+        out.open_array();
+        for comment in &i.comments {
+            crate::report::write_comment(comment, out);
+        }
+        out.close_array();
         out.close_map();
     }
     out.close_array();
@@ -8112,6 +8145,8 @@ struct RereadPacket<'a> {
     link_type: u32,
     index: usize,
     data: &'a [u8],
+    /// The block's option list, empty for a classic pcap record.
+    options: crate::pcapng::OptionList<'a>,
 }
 
 impl<'a> Reread<'a> {
@@ -8170,6 +8205,7 @@ impl<'a> Reread<'a> {
             link_type: frame.link_type,
             index: frame.index,
             data: frame.data,
+            options: frame.options,
         };
         match &self.packets {
             RereadPackets::All(frames) => {
@@ -10335,6 +10371,14 @@ mod tests {
             let pcapng = crate::pcapng::write(&[(crate::link::LINKTYPE_ETHERNET, 6)], &[]);
             arms.push(members(|out| write_capture_interfaces(&pcapng, out)));
         }
+        // Revision 81 — a comment object, which a capture whose packets carry
+        // no comment never opens.
+        arms.push(members(|out| {
+            out.key("packet_comments");
+            out.open_array();
+            crate::report::write_comment(&crate::pcapng::Comment::of(b"note"), out);
+            out.close_array();
+        }));
         // Revision 74 — every `open_syn` and `open_ack` word, on a context.
         {
             use wz_session_core::passive::{ShmExtEncoding, ShmHandshake};
@@ -11872,6 +11916,67 @@ mod tests {
                  out is not the message's first byte"
             );
         }
+    }
+
+    /// Revision 81 — A PACKET'S COMMENTS ARE ON THE ROWS IT HOLDS THE FIRST
+    /// BYTE OF, every one in its block's order, a value that is not UTF-8
+    /// carried replaced and marked. A packet with none says `[]`, and a packet
+    /// the document could not re-read says `null`: not known, which is not
+    /// "none".
+    #[test]
+    fn a_packets_comments_reach_the_rows_it_holds_the_first_byte_of() {
+        use crate::datagram_tests::{init_datagram, udp_packet};
+        use crate::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let syn = udp_packet(
+            [10, 0, 0, 1],
+            43210,
+            [10, 0, 0, 2],
+            7447,
+            &init_datagram(false, &[]),
+        );
+        let ack = udp_packet(
+            [10, 0, 0, 2],
+            7447,
+            [10, 0, 0, 1],
+            43210,
+            &init_datagram(true, &[]),
+        );
+        let commented = PacketSpec {
+            interface: 0,
+            ticks: 1_000_000,
+            data: &syn,
+            options: &[(OPT_COMMENT, b"slow reply"), (OPT_COMMENT, b"\xff")],
+        };
+        let plain = PacketSpec {
+            interface: 0,
+            ticks: 2_000_000,
+            data: &ack,
+            options: &[],
+        };
+        let ifaces = [(LINKTYPE_ETHERNET, 6u8)];
+        let capture = write_with_options(ByteOrder::Little, &ifaces, &[commented, plain]);
+        let d = Dissection::from_capture(&capture).expect("the capture reads");
+        let doc = fields_json(&d, &capture, None, None);
+        let marked = "\"packet_comments\":[{\"text\":\"slow reply\",\"utf8\":true},\
+                      {\"text\":\"\u{fffd}\",\"utf8\":false}]";
+        assert_eq!(doc.matches(marked).count(), 1, "{doc}");
+        assert_eq!(doc.matches("\"packet_comments\":[]").count(), 1, "{doc}");
+
+        // The same two rows against a container holding only the first packet:
+        // the second row's packet is not in hand.
+        let first_only = write_with_options(ByteOrder::Little, &ifaces, &[commented]);
+        let doc = fields_json(&d, &first_only, None, None);
+        assert_eq!(doc.matches(marked).count(), 1, "{doc}");
+        assert_eq!(doc.matches("\"packet_comments\":null").count(), 1, "{doc}");
+
+        // A classic pcap has no options: every row says none.
+        let classic = crate::pcap::write(
+            LINKTYPE_ETHERNET,
+            &[(0, 0, syn.as_slice()), (1, 0, ack.as_slice())],
+        );
+        let d = Dissection::from_capture(&classic).expect("the capture reads");
+        let doc = fields_json(&d, &classic, None, None);
+        assert_eq!(doc.matches("\"packet_comments\":[]").count(), 2, "{doc}");
     }
 
     #[test]

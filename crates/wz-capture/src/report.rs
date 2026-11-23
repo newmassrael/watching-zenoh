@@ -3843,6 +3843,69 @@ pub fn health_document_json(d: &crate::Dissection) -> String {
     out
 }
 
+/// One pcapng comment as every document writes it:
+/// `{"text":"..","utf8":true}`. `text` is the stored bytes when they are
+/// UTF-8, and otherwise their decoding with each invalid sequence replaced by
+/// U+FFFD, `utf8` then `false` ([`crate::pcapng::Comment`]).
+pub(crate) fn write_comment<W: DocOut>(comment: &crate::pcapng::Comment, out: &mut W) {
+    out.open_map();
+    out.key("text");
+    out.text(&comment.text);
+    out.key("utf8");
+    out.bool(comment.utf8);
+    out.close_map();
+}
+
+/// The summary document's `comments` member (summary revision 9): what a
+/// pcapng capture's comments amount to, read from the container
+/// ([`crate::pcapng::comment_census`]).
+///
+/// ```text
+/// "comments":{"commented_packets":2,"packet_comments":3,"not_utf8":0,
+///             "sections":[{"section":0,"text":"lab bench","utf8":true}]}
+/// ```
+///
+/// `commented_packets` counts the packet blocks carrying at least one
+/// comment and `packet_comments` the comments over them, so a reader knows
+/// the capture is commented without walking its rows; each packet's own
+/// comments are its rows' `packet_comments` in the field document.
+/// `not_utf8` counts the packet comments whose bytes were not UTF-8.
+/// `sections` carries every Section Header Block comment, in file order, with
+/// the section it heads (counted from 0): such a comment describes the whole
+/// capture and no row holds it. All zeros and `[]` for a classic pcap, which
+/// has no options.
+pub fn capture_comments_json(capture: &[u8]) -> String {
+    let mut out = JsonOut::default();
+    write_capture_comments(&crate::pcapng::comment_census(capture), &mut out);
+    out.finish()
+}
+
+/// [`capture_comments_json`] through any [`DocOut`], from a census already
+/// taken.
+pub fn write_capture_comments<W: DocOut>(census: &crate::pcapng::CommentCensus, out: &mut W) {
+    out.open_map();
+    out.key("commented_packets");
+    out.uint(census.commented_packets);
+    out.key("packet_comments");
+    out.uint(census.packet_comments);
+    out.key("not_utf8");
+    out.uint(census.not_utf8);
+    out.key("sections");
+    out.open_array();
+    for entry in &census.sections {
+        out.open_map();
+        out.key("section");
+        out.uint(entry.section as u64);
+        out.key("text");
+        out.text(&entry.comment.text);
+        out.key("utf8");
+        out.bool(entry.comment.utf8);
+        out.close_map();
+    }
+    out.close_array();
+    out.close_map();
+}
+
 /// R311y857 — the same counters for a person at a terminal.
 ///
 /// A SECOND rendering of one value and not a second selection of the counters,
@@ -3969,6 +4032,33 @@ pub fn health_text(d: &crate::Dissection) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The capture's comment census is written with its three counts and its
+    /// section comments, each beside the section it heads; a container that
+    /// is not pcapng writes zeros and an empty list rather than nothing.
+    #[test]
+    fn the_comment_census_is_written_with_its_counts_and_its_section_comments() {
+        let census = crate::pcapng::CommentCensus {
+            commented_packets: 2,
+            packet_comments: 3,
+            not_utf8: 1,
+            sections: alloc::vec![crate::pcapng::SectionComment {
+                section: 1,
+                comment: crate::pcapng::Comment::of(b"bench \"B\""),
+            }],
+        };
+        let mut out = JsonOut::default();
+        write_capture_comments(&census, &mut out);
+        assert_eq!(
+            out.finish(),
+            "{\"commented_packets\":2,\"packet_comments\":3,\"not_utf8\":1,\
+             \"sections\":[{\"section\":1,\"text\":\"bench \\\"B\\\"\",\"utf8\":true}]}"
+        );
+        assert_eq!(
+            capture_comments_json(b"not a capture"),
+            "{\"commented_packets\":0,\"packet_comments\":0,\"not_utf8\":0,\"sections\":[]}"
+        );
+    }
 
     /// EACH COUNTER OF THE SEQUENCE GROUP IS WRITTEN UNDER ITS OWN NAME.
     ///

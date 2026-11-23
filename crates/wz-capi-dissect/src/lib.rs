@@ -1117,7 +1117,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary(
         Ok(d) => decrypted(d, input, None),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y748 — the same summary, read under the BOUNDED preset, so a C caller
@@ -1172,7 +1172,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_bounded(
             Ok(d) => decrypted(d, input, None),
             Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
         };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// The summary with a preset AND a key log beside the capture: the document
@@ -1219,7 +1219,7 @@ pub unsafe extern "C" fn wz_dissect_pcap_summary_keyed(
         Ok(d) => decrypted(d, input, keys),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
-    write_string(summary_json(&dissection), out)
+    write_string(summary_json(&dissection, input), out)
 }
 
 /// R311y851 — the ANALYSIS PLANES, which this ABI could not reach at all.
@@ -6579,7 +6579,10 @@ pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
 /// The summary shape. Hand-rolled rather than via serde for the same reason
 /// [`to_json`] is: this crate must not force a serde dependency on a
 /// consumer that only wants a decode out of the library.
-fn summary_json(d: &Dissection) -> String {
+///
+/// `capture` is the container `d` was read from: the `comments` member is a
+/// fact of the container's blocks and not of the dissection.
+fn summary_json(d: &Dissection, capture: &[u8]) -> String {
     // R2100 (open-debt item 509) — this document's own revision, first key.
     let mut s = String::from("{");
     wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::SUMMARY, &mut s);
@@ -6610,6 +6613,9 @@ fn summary_json(d: &Dissection) -> String {
     s.push_str(&format!("],\"skipped\":{},", d.skipped().len()));
     s.push_str("\"health\":");
     s.push_str(&wz_capture::report::health_json(d));
+    // Summary revision 9 — the container's comments.
+    s.push_str(",\"comments\":");
+    s.push_str(&wz_capture::report::capture_comments_json(capture));
     s.push('}');
     s
 }
@@ -7537,6 +7543,45 @@ mod tests {
         assert!(
             json.contains("\"capture_reported_drops\":17"),
             "the capture tool's own admission must cross the boundary: {json}"
+        );
+    }
+
+    /// Summary revision 9 — a pcapng's comments cross the boundary: the packet
+    /// carrying two is counted once and its comments twice, by each summary
+    /// door alike, and a classic pcap says zero and none.
+    #[test]
+    fn a_pcapngs_commented_packets_are_counted_in_the_summary() {
+        use wz_capture::pcapng::{write_with_options, ByteOrder, PacketSpec, OPT_COMMENT};
+        let commented = PacketSpec {
+            interface: 0,
+            ticks: 1_000_000,
+            data: &[0u8; 4],
+            options: &[(OPT_COMMENT, b"first"), (OPT_COMMENT, b"second")],
+        };
+        let plain = PacketSpec {
+            interface: 0,
+            ticks: 2_000_000,
+            data: &[0u8; 4],
+            options: &[],
+        };
+        let file = write_with_options(ByteOrder::Little, &[(1, 6)], &[commented, plain]);
+        let counted = "\"comments\":{\"commented_packets\":1,\"packet_comments\":2,\
+                       \"not_utf8\":0,\"sections\":[]}";
+        for json in [
+            call_summary(&file).expect("the pcapng reads"),
+            call_summary_bounded(&file).expect("the pcapng reads"),
+            call_summary_keyed(&file, WZ_DISSECT_LIMITS_NONE, None).expect("the pcapng reads"),
+        ] {
+            assert!(json.contains(counted), "{json}");
+        }
+        let classic = wz_capture::pcap::write(1, &[(0, 0, &[0u8; 4])]);
+        let json = call_summary(&classic).expect("a classic pcap still reads");
+        assert!(
+            json.contains(
+                "\"comments\":{\"commented_packets\":0,\"packet_comments\":0,\
+                 \"not_utf8\":0,\"sections\":[]}"
+            ),
+            "{json}"
         );
     }
 

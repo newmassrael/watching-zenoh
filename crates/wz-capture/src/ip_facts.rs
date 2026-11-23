@@ -278,6 +278,7 @@ mod tests {
                 name: name.map(alloc::string::String::from),
                 ts_resol: 9,
                 ts_offset,
+                comments: alloc::vec::Vec::new(),
             };
         assert_eq!(
             got,
