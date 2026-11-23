@@ -290,10 +290,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         if self.pending.iter().any(|p| p.interest_id == interest_id) {
             return Ok(false);
         }
-        if self.pending.len() >= self.finalized.free_slots() {
-            return Err(RegisterError::TableFull);
-        }
-        if !self.quota.admits(self.pending.len() + 1) {
+        if !self.has_room() {
             return Err(RegisterError::TableFull);
         }
         self.pending
@@ -304,6 +301,15 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             })
             .map_err(|_| RegisterError::TableFull)?;
         Ok(true)
+    }
+
+    /// Whether one more get may be held pending: inside the quota its creator stated, and with a
+    /// marker row free for its final, which [`Self::register`] keeps for each get it holds. A
+    /// caller asks before it makes what a registration would hold, so a get it cannot hold costs
+    /// nothing.
+    pub fn has_room(&self) -> bool {
+        self.pending.len() < self.finalized.free_slots()
+            && self.quota.admits(self.pending.len() + 1)
     }
 
     /// Drop every pending get and every staged marker without firing anything: what the loss of
@@ -1111,6 +1117,10 @@ mod tests {
             reg.dispatch_final(0),
             "get 0 terminates; its marker is staged"
         );
+        assert!(
+            !reg.has_room(),
+            "a caller asking first is told there is no room"
+        );
         assert_eq!(
             reg.register(100, None, make_get(r.clone(), f.clone())),
             Err(RegisterError::TableFull),
@@ -1118,6 +1128,7 @@ mod tests {
         );
         let staged: Vec<u64> = reg.take_finalized().into_iter().collect();
         assert_eq!(staged, vec![0]);
+        assert!(reg.has_room(), "CONTROL: the drain gives the room back");
         assert_eq!(
             reg.register(100, None, make_get(r.clone(), f.clone())),
             Ok(true),

@@ -12,14 +12,12 @@
 //!
 //! A liveliness subscriber is the observer's, registered under the id its Interest carries, and
 //! its Interest is sent again over each new link. What the observer hands its sink happens under
-//! the session's lock, and a C callback never runs there (decision D8), so the sink only queues
-//! each sample in the session's delivery lane (`crate::lane`): a token declared, retracted,
-//! already alive when the subscriber asked for its history, or gone with a lost link. The
-//! deliveries hand them out with no lock held.
+//! the session's lock, and a C callback never runs there (decision D8), so the sink only holds
+//! each sample in the session's round of deliveries (`crate::round`): a token declared, retracted
+//! or gone with a lost link. The deliveries hand them out with no lock held; the tokens alive when
+//! the subscriber asked for its history are handed on the declaring thread.
 
 use alloc::sync::Arc;
-
-use wz_capi_port::os::Mutex;
 
 use wz_capi_port::{SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
@@ -27,14 +25,10 @@ use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, Liv
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_mcu::dial::McuActions;
 
-use crate::lane::SharedLane;
+use super::LivelinessCallback;
 #[allow(unused_imports)]
 use crate::prelude::*;
-
-/// A liveliness subscriber's callback, as the ABI's sink minted it, locked while it runs as a
-/// subscriber's is.
-pub(super) type LivelinessCallback =
-    Arc<Mutex<Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>>>;
+use crate::round::Round;
 
 /// A token the session holds: what its declaration says on the wire, kept to announce it again
 /// over a new link; holding the key also keeps alive what it holds.
@@ -97,12 +91,17 @@ impl LiveSubEntry {
     }
 }
 
-/// The sink subscriber `id` is registered with: each sample is queued in the session's delivery
-/// lane, its key copied into the lane's bytes.
-pub(super) fn sample_sink(id: SubId, lane: &Arc<SharedLane>) -> BoxedLivelinessSampleSink {
-    let lane = Arc::clone(lane);
+/// The sink a liveliness subscriber is registered with, holding its `callback`: each sample is held
+/// for the callback in the session's round of deliveries, its key read where it lies or written
+/// into the round (`Round::offer_liveliness`).
+pub(super) fn sample_sink(
+    callback: &LivelinessCallback,
+    round: &Arc<Round>,
+) -> BoxedLivelinessSampleSink {
+    let round = Arc::clone(round);
+    let callback = Arc::clone(callback);
     BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
         // SAFETY: the registry hands its sinks a token under the session's lock.
-        unsafe { lane.held() }.offer_liveliness(id, &sample);
+        unsafe { round.offer_liveliness(&callback, &sample) };
     })
 }

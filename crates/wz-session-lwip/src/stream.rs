@@ -75,6 +75,11 @@ where
 {
     type Error = TcpError;
 
+    type Link<B: AsMut<[u8]> + 'static, X: wz_runtime_coop::link_storage::TxStore + 'static>
+        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+    where
+        Self: 'static;
+
     fn local(&self) -> SocketAddr {
         let addr = route_source(ipv4_addr_from_octets(self.peer.ip().octets()))
             .map_or([0; 4], ipv4_octets);

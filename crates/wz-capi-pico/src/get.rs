@@ -130,7 +130,7 @@ use alloc::sync::Arc;
 use core::ffi::c_void;
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
-use wz_capi_port::{NoRoomToHold, ReplyCallback};
+use wz_capi_port::{Refusal, ReplyCallback};
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
 use wz_session_core::query_options::QueryOptions;
@@ -144,7 +144,7 @@ use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
-use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use crate::result::{refusal_code, Door, ZResult, Z_ERR_NULL, Z_OK};
 use crate::session::{z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
 
@@ -1411,42 +1411,16 @@ pub(crate) fn issue_get(
     // build.)
     const TARGETED: bool = crate::get_to_peer::TARGETED_IN_DOMAIN;
     let target_peer = if TARGETED { target_peer } else { None };
-    let Some(target_peer) = target_peer else {
-        // A get the session has no room to hold pending issues no leg and sends nothing; the fan
-        // completes it with no reply, and the caller is told `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, the
-        // code this ABI answers a full table of the session with.
-        let mut unheld = false;
-        let issued = fan_get(closure, gate, token, |fan, leg| {
-            engine
-                .get_held(&keyexpr, &wire, &opts, fan, leg)
-                .unwrap_or_else(|NoRoomToHold| {
-                    unheld = true;
-                    Some(0)
-                })
-        });
-        return if unheld {
-            crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY
-        } else {
-            issued
-        };
+    // A get the engine refuses issues no leg and sends nothing; the fan completes it with no
+    // reply, and the caller is told the code pico's get answers for the cause: a session with no
+    // room to hold it pending, a closed one, or an engine that cannot address it to one node.
+    let opts = match target_peer {
+        Some(target_peer) => opts.with_target_peer(target_peer),
+        None => opts,
     };
-    let opts = opts.with_target_peer(target_peer);
-    // The engine's refusal issues no leg, so the fan completes the get with no reply and answers
-    // `Z_OK`; the refusal is what the caller is told.
-    let mut refused = false;
-    let issued = fan_get(closure, gate, token, |fan, leg| {
-        engine
-            .get_stated(&keyexpr, &wire, &opts, fan, leg)
-            .unwrap_or_else(|_| {
-                refused = true;
-                Some(0)
-            })
-    });
-    if refused {
-        crate::result::WZ_EXT_ERR_UNSUPPORTED
-    } else {
-        issued
-    }
+    fan_get(closure, gate, token, |fan, leg| {
+        engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
+    })
 }
 
 /// Fan one C get across every connected face and, where its destination admits
@@ -1479,7 +1453,10 @@ pub(crate) fn fan_get(
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
     token: Option<Arc<CancellationToken>>,
-    issue: impl FnOnce(Option<&CancellableFan>, &mut dyn FnMut() -> ReplyCallback) -> Option<usize>,
+    issue: impl FnOnce(
+        Option<&CancellableFan>,
+        &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<usize, Refusal>,
 ) -> ZResult {
     let guard = closure.clone();
     // R311y575 — the cancellation is registered BEFORE the first face is
@@ -1528,7 +1505,7 @@ pub(crate) fn fan_get(
         // real final, a timeout sweep, and a face death alike — whereas a counter
         // incremented on a final would never be reached by the face-death path. See
         // the module doc.
-        Box::new(move |view: &dyn ReplyView| leg.fire(view)) as ReplyCallback
+        ReplyCallback::shared(move |view: &dyn ReplyView| leg.fire(view))
     });
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
@@ -1536,10 +1513,9 @@ pub(crate) fn fan_get(
     // could return before the zero-face path's C `drop(context)` had run.
     drop(registration);
     match issued {
-        Some(_) => Z_OK,
-        // An engine with no requesting end in this build: a build defect, said rather
-        // than reported as a get nobody answered.
-        None => crate::result::Z_ERR_GENERIC,
+        // Zero legs included: a get that reached nobody is over, as pico's is.
+        Ok(_) => Z_OK,
+        Err(refused) => refusal_code(refused, Door::Get),
     }
 }
 

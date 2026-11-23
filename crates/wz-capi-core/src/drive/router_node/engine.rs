@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink,
-    PeerIdentity, QblId, QueryableSink, ReplyCallback, SessionEngine, StatementNotHonoured, SubId,
-    SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    PeerIdentity, QblId, QueryableSink, Refusal, ReplyCallback, SessionEngine,
+    StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
@@ -199,8 +199,11 @@ impl SessionEngine for RouterState {
         self.forwarder.face_snapshots()
     }
 
-    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
-        self.forwarder.watch_faces(sink)
+    fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Refusal> {
+        if RouterState::is_closed(self) {
+            return Err(Refusal::Closed);
+        }
+        Ok(self.forwarder.watch_faces(sink))
     }
 
     fn unwatch_faces(&self, id: u64) -> bool {
@@ -263,19 +266,21 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left hosts nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // One callback for the node's one data plane, where a registry mints one for each face.
-        let host = self
-            .forwarder
-            .host_subscriber_from(keyexpr, allowed_origin, sink());
+        let host = self.forwarder.host_subscriber_from(
+            keyexpr,
+            allowed_origin,
+            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample)),
+        );
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Held::Plain(host));
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
@@ -294,9 +299,9 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_session_core::wire_id::ExprId, Refusal> {
         // A node names every key whole: there is no alias to hold.
-        None
+        Err(Refusal::NotBuilt)
     }
 
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
@@ -311,18 +316,18 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
-    ) -> MatchId {
+    ) -> Result<MatchId, Refusal> {
         let origin = if count_local {
             Locality::Any
         } else {
             Locality::Remote
         };
-        self.watch_matching(
+        Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             origin,
             Box::new(move |matching| sink(matching)),
-        )
+        ))
     }
 
     fn declare_matching_listener_in(
@@ -331,8 +336,8 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
-    ) -> Option<MatchId> {
-        Some(self.watch_matching(
+    ) -> Result<MatchId, Refusal> {
+        Ok(self.watch_matching(
             plane_of(plane),
             keyexpr,
             locality,
@@ -365,10 +370,10 @@ impl SessionEngine for RouterState {
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
         // nothing, so the filter takes no entity id.
-        Some(self.engine.local_id())
+        Ok(self.engine.local_id())
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {
@@ -413,9 +418,9 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Option<QblId> {
+    ) -> Result<QblId, Refusal> {
         // The id first, so a session with none left hosts nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let host = self.forwarder.host_queryable_from(
             keyexpr,
             complete,
@@ -427,7 +432,7 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, host);
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_queryable(&self, id: QblId) {
@@ -447,16 +452,16 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Option<TokenId> {
+    ) -> Result<TokenId, Refusal> {
         // The id first, so a session with none left declares nothing.
-        let id = self.engine.entity_id()?;
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let host = self.declare_token(keyexpr);
         self.engine
             .tokens
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, host);
-        Some(id)
+        Ok(id)
     }
 
     fn undeclare_liveliness_token(&self, id: TokenId) {
@@ -477,16 +482,24 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Option<SubId> {
+    ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left subscribes nothing.
-        let id = self.engine.entity_id()?;
-        let face = self.liveliness.subscribe(keyexpr, history, sink());
+        let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
+        let face = self.liveliness.subscribe(
+            keyexpr,
+            history,
+            Box::new(
+                move |sample: wz_session_core::declare::liveliness_sample::LivelinessSample<'_>| {
+                    sink.call(sample)
+                },
+            ),
+        );
         self.engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Held::Liveliness(face));
-        Some(id)
+        Ok(id)
     }
 
     fn get_on_wire(
@@ -496,31 +509,29 @@ impl SessionEngine for RouterState {
         opts: &QueryOptions,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
-        // A get limited to some links or addressed to one node is asked of none: the router reads
-        // neither, and asking every link would widen it. `get_stated` is the door that refuses it
-        // by name.
-        if StatementNotHonoured::of_query(opts).is_err() {
-            return Some(0);
-        }
+    ) -> Result<usize, Refusal> {
+        // A get limited to some links or addressed to one node is refused by that statement: the
+        // router reads neither, and asking every link would widen it.
+        StatementNotHonoured::of_query(opts)?;
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered(
                 keyexpr,
                 opts,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
-            .ok()?;
+            // The one way the node fails to ask: a query its codec cannot build.
+            .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
             fan.record(move || face.cancel_query(id));
         }
-        Some(1)
+        Ok(1)
     }
 
     #[cfg(feature = "transport-shm")]
@@ -532,30 +543,29 @@ impl SessionEngine for RouterState {
         value: wz_session_core::extshm::ShmSendHandle,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
-        // Asked of none when it states what the router does not read, as `get_on_wire` is.
-        if StatementNotHonoured::of_query(opts).is_err() {
-            return Some(0);
-        }
+    ) -> Result<usize, Refusal> {
+        // Refused when it states what the router does not read, as `get_on_wire` is.
+        StatementNotHonoured::of_query(opts)?;
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered_shm(
                 keyexpr,
                 opts,
                 value,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
-            .ok()?;
+            // The node fails to ask a query its codec cannot build, or a chunk it cannot send.
+            .map_err(|_| Refusal::ExceedsCapacity)?;
         if let Some(fan) = fan {
             let face = Arc::clone(&self.liveliness);
             fan.record(move || face.cancel_query(id));
         }
-        Some(1)
+        Ok(1)
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -566,7 +576,7 @@ impl SessionEngine for RouterState {
         _timeout_ms: u32,
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
-    ) -> Option<usize> {
+    ) -> Result<usize, Refusal> {
         // One leg: the node's own face tells the tokens the router's tables hold and the ones the
         // program declared, and then those a router above the node answers, as upstream's peer
         // hat sends its session's current interest to a gateway; a router tells a peer below it
@@ -580,9 +590,9 @@ impl SessionEngine for RouterState {
         let ended = Arc::clone(&callback);
         let face = Arc::clone(&self.liveliness);
         let on_key: KeyHandler = Box::new(move |key: &str| {
-            let mut held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(callback) = held.as_mut() {
-                callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
+            let held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(callback) = held.as_ref() {
+                callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
                     rid: 0,
                     keyexpr: key,
                     kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
@@ -604,24 +614,27 @@ impl SessionEngine for RouterState {
         // held, is not called.
         let id = face.tokens_get_id();
         let cancel_face = Arc::clone(&face);
+        // A fan already cancelled issues no leg: the get is over, having asked nobody.
         if fan.is_some_and(|fan| !fan.record(move || cancel_face.end_tokens_get(id))) {
-            return Some(0);
+            return Ok(0);
         }
         *callback.lock().unwrap_or_else(PoisonError::into_inner) = Some(leg());
         face.get_tokens(id, keyexpr, on_key, on_final);
-        Some(1)
+        Ok(1)
     }
 
-    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
-        // At least a millisecond, so that a job cannot make the node spin.
-        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)?;
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Result<TickerId, Refusal> {
+        // At least a millisecond, so that a job cannot make the node spin. A job runs on a thread
+        // of its own, so a host with no thread left to give holds no more of them.
+        let job = PeriodicJob::start(Duration::from_millis(period_ms.max(1)), tick)
+            .ok_or(Refusal::TableFull)?;
         let id = self.engine.local_id();
         self.engine
             .jobs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, job);
-        Some(id)
+        Ok(id)
     }
 
     fn stop_ticker(&self, id: TickerId) {

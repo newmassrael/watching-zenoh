@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
@@ -293,7 +293,11 @@ fn a_join_asked_between_two_beacons_is_sent_at_once() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(network.beacons_of(1), 1, "no beacon is due within a minute");
 
-    assert_eq!(member.send_join_on_groups(), 1, "the one group is asked");
+    assert_eq!(
+        member.send_join_on_groups(),
+        Ok(1),
+        "the one group is asked"
+    );
     eventually("the JOIN asked for", || network.beacons_of(1) == 2);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(network.beacons_of(1), 2, "and the cadence runs from it");
@@ -301,8 +305,8 @@ fn a_join_asked_between_two_beacons_is_sent_at_once() {
     SessionDrive::close(&*member);
     assert_eq!(
         member.send_join_on_groups(),
-        0,
-        "a closed session asks no group"
+        Err(wz_capi_port::Refusal::Closed),
+        "a closed session asks no group, and says why"
     );
 }
 
@@ -329,18 +333,12 @@ fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = Arc::clone(&heard);
     engine
-        .declare_subscriber_on_wire(
-            keyexpr,
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(keyexpr, WireKey::literal(), Locality::Any, None, {
+            let into = Arc::clone(&into);
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }
@@ -427,7 +425,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
         .expect("a session with ids left declares");
     eventually("the announcement to open the first's filter", || {
@@ -457,7 +455,8 @@ mod asked {
     use std::sync::{Arc, Mutex};
 
     use wz_capi_port::{
-        HeldQuery, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+        HeldQuery, QueryCallback, QueryHolder, Refusal, ReplyCallback, SessionDrive, SessionEngine,
+        WireKey,
     };
     use wz_session_core::locality::Locality;
     use wz_session_core::query_options::QueryOptions;
@@ -490,7 +489,7 @@ mod asked {
     }
 
     /// Ask the peers of `engine` on `keyexpr`, with a deadline long past the test's waits.
-    fn ask(engine: &Engine, keyexpr: &str) -> (Option<usize>, Arc<Mutex<Seen>>) {
+    fn ask(engine: &Engine, keyexpr: &str) -> (Result<usize, Refusal>, Arc<Mutex<Seen>>) {
         let mut opts = QueryOptions::get();
         opts.allowed_destination = Locality::Remote;
         opts.timeout_ms = 3_000;
@@ -499,13 +498,13 @@ mod asked {
         let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), &opts, None, &mut || {
             into.lock().unwrap().open += 1;
             let ends = Ends(Arc::clone(&into));
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 ends.0.lock().unwrap().replies.push((
                     view.kind(),
                     view.keyexpr().to_owned(),
                     view.payload().to_vec(),
                 ));
-            }) as ReplyCallback
+            })
         });
         (issued, seen)
     }
@@ -537,7 +536,7 @@ mod asked {
 
         // Alone in the group: the group is owed no Final, so the get asks nobody.
         let (issued, seen) = ask(&first, "demo/group/ask");
-        assert_eq!(issued, Some(0), "a group with no member is asked nothing");
+        assert_eq!(issued, Ok(0), "a group with no member is asked nothing");
         assert!(seen.lock().unwrap().replies.is_empty());
 
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
@@ -548,7 +547,7 @@ mod asked {
         // One leg, owed one Final by the one member: the reply and the Final come back on the
         // group, long before the deadline would end the leg with a timeout.
         let (issued, seen) = ask(&first, "demo/group/ask");
-        assert_eq!(issued, Some(1), "one leg: the group");
+        assert_eq!(issued, Ok(1), "one leg: the group");
         eventually("the leg to end", || seen.lock().unwrap().ended);
         assert_eq!(
             seen.lock().unwrap().replies,
@@ -602,7 +601,7 @@ mod asked {
         until_members_know_each_other(&first, &second);
 
         let (issued, seen) = ask(&first, "demo/group/kept");
-        assert_eq!(issued, Some(1), "one leg: the group");
+        assert_eq!(issued, Ok(1), "one leg: the group");
         eventually("the second's queryable to keep the query", || {
             kept.lock().unwrap().is_some()
         });
@@ -682,10 +681,11 @@ mod watched {
         let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
         let told: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> = Arc::default();
         let into = Arc::clone(&told);
-        let _watcher =
-            first.watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
+        first
+            .watch_faces(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
                 into.lock().unwrap().push((kind, face.clone()));
-            }));
+            }))
+            .expect("an open session watches its faces");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
@@ -747,13 +747,10 @@ mod alive {
     fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
         let heard: Heard = Arc::default();
         let into = heard.clone();
-        let sink: LivelinessSink = Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: LivelinessSample<'_>| {
-                into.lock()
-                    .unwrap()
-                    .push((sample.kind, sample.keyexpr.to_owned()));
-            })
+        let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+            into.lock()
+                .unwrap()
+                .push((sample.kind, sample.keyexpr.to_owned()));
         });
         let id = engine
             .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
@@ -856,9 +853,9 @@ mod mapped {
             &WireKey::aliased(id, None),
             &opts,
             None,
-            &mut || Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback,
+            &mut || ReplyCallback::shared(|_view: &dyn ReplyView| {}),
         );
-        assert!(issued.is_some(), "the get was asked");
+        assert!(issued.is_ok(), "the get was asked");
         // The query is the first datagram after the clear that is not a beacon.
         eventually("the query to leave", || {
             network
@@ -1432,7 +1429,7 @@ mod cut {
         // A JOIN asked while the socket is full waits for it, behind what the writer holds, and
         // leaves at the group's next step once the socket takes datagrams again: the put after it
         // waits for it, since the put writes what is staged itself.
-        assert_eq!(first.engine.send_join_on_groups(), 1);
+        assert_eq!(first.engine.send_join_on_groups(), Ok(1));
         let joins_in_the_cut = joins_on(&first.wire);
         first.writable();
         SessionDrive::start_read_task(&*first.engine).expect("the first's read task starts");

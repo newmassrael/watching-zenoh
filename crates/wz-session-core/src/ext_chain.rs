@@ -443,11 +443,19 @@ pub(crate) fn collect_ext_chain<'a>(
 /// Each entry is lent where it lies, which is the step of `received_entry` that can refuse:
 /// its second step stores the lent entry at the transport profile, which is the heap in every
 /// build this is compiled in, and the heap refuses no body. So a ZBuf extension's body is judged
-/// without the copy of it the stored entry would make.
+/// without the copy of it the stored entry would make. The walk of a group datagram reads a
+/// transport OAM's chain through it too, to step past the OAM (`inbound::control_extent`).
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    any(
+        feature = "session-unicast",
+        all(
+            feature = "session-multicast",
+            feature = "codec-join",
+            feature = "codec-close"
+        )
+    )
 ))]
 pub(crate) fn check_ext_chain<'a>(
     walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,

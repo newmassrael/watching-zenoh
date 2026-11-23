@@ -10,6 +10,9 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::os::{Mutex, MutexGuard};
+use wz_capi_port::MatchId;
+use wz_session_core::bounded::{BoundedVec, Static};
+use wz_session_core::caps;
 
 /// What a queue tells its word: whether it holds anything.
 pub(super) trait Pending {
@@ -83,7 +86,60 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
     }
 }
 
-impl Pending for crate::lane::MatchFlips {
+/// The changes of the session's matching statuses its lock found, handed to their listeners after
+/// it, in the order they were found. A listener holds one row at most: a change and the change
+/// back before the first was handed leave the listener where it stood, so the second takes the
+/// first's row away rather than a row of its own, and the table needs a row for each listener the
+/// build admits and no more.
+pub(crate) struct MatchFlips {
+    flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
+}
+
+impl MatchFlips {
+    pub(crate) fn new() -> Self {
+        Self {
+            flips: BoundedVec::new_static(),
+        }
+    }
+
+    /// The status of `listener` changed to `matching`. A change back takes the waiting row away;
+    /// the same change again finds it already waiting and is that change, not a second one.
+    pub(crate) fn flip(&mut self, listener: MatchId, matching: bool) {
+        if let Some(at) = self.flips.iter().position(|(id, _)| *id == listener) {
+            if self
+                .flips
+                .get(at)
+                .is_some_and(|&(_, waiting)| waiting != matching)
+            {
+                self.flips.remove(at);
+            }
+            return;
+        }
+        let held = self.flips.push((listener, matching));
+        debug_assert!(held.is_ok(), "a row for each listener the build admits");
+    }
+
+    /// The change found first, to hand to its listener.
+    pub(crate) fn next(&mut self) -> Option<(MatchId, bool)> {
+        if self.flips.is_empty() {
+            None
+        } else {
+            Some(self.flips.remove(0))
+        }
+    }
+
+    /// `listener` is gone: nothing it was owed is handed.
+    pub(crate) fn forget(&mut self, listener: MatchId) {
+        self.flips.retain(|(id, _)| *id != listener);
+    }
+
+    /// Whether no change is owed.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.flips.is_empty()
+    }
+}
+
+impl Pending for MatchFlips {
     fn is_pending(&self) -> bool {
         !self.is_empty()
     }
@@ -109,5 +165,59 @@ mod tests {
         assert!(!queue.is_pending(), "the last was taken");
         assert_eq!(queue.lock().pop_front(), None);
         assert!(!queue.is_pending());
+    }
+
+    /// The changes of matching statuses are handed in the order they were found; a change and the
+    /// change back before the first was handed leave the listener where it stood and are handed as
+    /// nothing.
+    #[test]
+    fn a_change_and_its_change_back_are_handed_as_nothing() {
+        let mut flips = MatchFlips::new();
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(1, false);
+        assert_eq!(flips.next(), Some((2, true)));
+        assert_eq!(flips.next(), None, "listener 1 stands where it stood");
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
+    }
+
+    /// The same change found twice before it was handed is that one change, handed once: a second
+    /// report of a status already owed neither cancels it nor queues it again.
+    #[test]
+    fn the_same_change_found_twice_is_handed_once() {
+        let mut flips = MatchFlips::new();
+        flips.flip(1, true);
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
+        assert_eq!(flips.next(), None);
+    }
+
+    /// A listener that is gone is handed nothing it was owed, and the others keep their order.
+    #[test]
+    fn a_listener_that_is_gone_is_handed_nothing() {
+        let mut flips = MatchFlips::new();
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(3, false);
+        flips.forget(2);
+        assert_eq!(flips.next(), Some((1, true)));
+        assert_eq!(flips.next(), Some((3, false)));
+        assert_eq!(flips.next(), None);
+    }
+
+    /// Every listener the build admits has a row: as many listeners as the build's value each owe a
+    /// change, and each is handed.
+    #[test]
+    fn every_listener_the_build_admits_has_a_row() {
+        let mut flips = MatchFlips::new();
+        let listeners = caps::MAX_MATCHING_LISTENERS as u64;
+        for id in 0..listeners {
+            flips.flip(id, true);
+        }
+        for id in 0..listeners {
+            assert_eq!(flips.next(), Some((id, true)));
+        }
+        assert_eq!(flips.next(), None);
     }
 }

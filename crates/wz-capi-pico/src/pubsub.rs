@@ -52,18 +52,16 @@ use crate::result::{
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
 /// (`Z_ERR_TRANSPORT_TX_FAILED`, which pico's put answers when its held transmit lock dropped the
-/// message), one the session's own subscribers had no room for pico's resource error
-/// (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`), and any other refusal the generic error.
+/// message), and any other refusal the generic error.
 fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
         Err(FanoutError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
-        Err(FanoutError::LocalNoRoom) => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -71,9 +69,7 @@ fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
 #[cfg(test)]
 mod publish_code_tests {
     use super::publish_code;
-    use crate::result::{
-        Z_ERR_GENERIC, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
-    };
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
     use wz_capi_port::FanoutError;
 
     /// A publication dropped behind a held conduit answers pico's code for a failed send; one the
@@ -89,10 +85,6 @@ mod publish_code_tests {
         assert_eq!(
             publish_code(Err(FanoutError::ExceedsCapacity)),
             Z_ERR_GENERIC
-        );
-        assert_eq!(
-            publish_code(Err(FanoutError::LocalNoRoom)),
-            Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
     }
 }
@@ -599,12 +591,6 @@ pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 // `call` (a running callback holds a reference).
 unsafe impl Sync for CClosure {}
 
-/// Build the wz-side subscriber callback for ONE face from a shared C closure.
-///
-/// On each delivery it marshals the wz `SampleView` into a borrowed
-/// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
-/// borrowed keyexpr / payload) is valid only for the duration of that call —
-/// pico's contract, which is why the C side must copy anything it keeps.
 /// Marshal a wz LIVELINESS event into the borrowed `z_loaned_sample_t` a C
 /// sample closure expects.
 ///
@@ -615,59 +601,96 @@ unsafe impl Sync for CClosure {}
 /// going away is `DELETE`. Upstream's `z_sub_liveliness.c` switches on exactly
 /// that to print "Alive"/"Dropped".
 #[cfg(feature = "liveliness")]
-pub(crate) fn make_liveliness_callback(
-    closure: Arc<CClosure>,
-) -> impl FnMut(LivelinessSample<'_>) + Send + 'static {
-    move |sample: LivelinessSample<'_>| {
-        let call = match closure.call {
-            Some(f) => f,
-            None => return,
-        };
-        let mut marshal = SampleMarshal::new(
-            sample.keyexpr.to_owned(),
-            ByteBuf::new(),
-            crate::liveliness::liveliness_kind_of(sample.kind),
-        );
-        marshal.bind();
-        let sample_ptr = marshal.as_loaned();
-        // SAFETY + panic discipline identical to `make_subscriber_callback`:
-        // the marshal outlives the call, the borrowed sample is valid only for
-        // its duration, and an unwind out of the C callback would tear down the
-        // drive thread, so it is caught here.
-        let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
-        let _ = crate::ffi::catch(|| unsafe {
-            call(sample_ptr, ctx);
-        });
-    }
+pub(crate) fn hand_liveliness(closure: &CClosure, sample: LivelinessSample<'_>) {
+    let call = match closure.call {
+        Some(f) => f,
+        None => return,
+    };
+    let mut marshal = SampleMarshal::new(
+        sample.keyexpr.to_owned(),
+        ByteBuf::new(),
+        crate::liveliness::liveliness_kind_of(sample.kind),
+    );
+    marshal.bind();
+    let sample_ptr = marshal.as_loaned();
+    // SAFETY + panic discipline identical to `make_subscriber_callback`:
+    // the marshal outlives the call, the borrowed sample is valid only for
+    // its duration, and an unwind out of the C callback would tear down the
+    // drive thread, so it is caught here.
+    let ctx = closure.context.0;
+    let _in_callback = crate::ffi::InCallback::enter();
+    let _ = crate::ffi::catch(|| unsafe {
+        call(sample_ptr, ctx);
+    });
 }
 
+/// Build the wz-side subscriber callback for ONE face from a shared C closure.
+///
+/// On each delivery it marshals the wz `SampleView` into a borrowed
+/// `z_loaned_sample_t` and invokes the C `call`. The marshal (and so the
+/// borrowed keyexpr / payload) is valid only for the duration of that call —
+/// pico's contract, which is why the C side must copy anything it keeps. The advanced subscriber,
+/// which runs its own sink, is what calls it (a plain subscriber hands the engine its closure whole,
+/// `subscriber_sink`).
+#[cfg(any(test, feature = "advanced"))]
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
-    move |view: &dyn SampleView| {
-        let call = match closure.call {
-            Some(f) => f,
-            None => return,
-        };
-        // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(view) };
-        // Bind AFTER the move out of `lent` — the marshal is at its final
-        // address only here. See `SampleMarshal::bind`.
-        marshal.bind();
-        let sample_ptr = marshal.as_loaned();
-        // SAFETY: `call` is the C callback; `marshal` outlives the call and the
-        // borrowed sample is valid only for its duration (pico contract).
-        // `context` travels with the drive dispatch. A panic unwinding OUT of
-        // the C callback across this `extern "C"` boundary is UB and would tear
-        // down the drive thread, so it is caught here — the drive loop survives
-        // a misbehaving callback.
-        let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
-        let _ = crate::ffi::catch(|| unsafe {
-            call(sample_ptr, ctx);
-        });
+    move |view: &dyn SampleView| hand_sample(&closure, view)
+}
+
+/// Hand `view` to the C callback of `closure`, marshalled into the borrowed `z_loaned_sample_t`
+/// it reads for the length of the call.
+fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
+    let call = match closure.call {
+        Some(f) => f,
+        None => return,
+    };
+    // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+    let mut marshal = unsafe { SampleMarshal::lent(view) };
+    // Bind AFTER the move out of `lent` — the marshal is at its final
+    // address only here. See `SampleMarshal::bind`.
+    marshal.bind();
+    let sample_ptr = marshal.as_loaned();
+    // SAFETY: `call` is the C callback; `marshal` outlives the call and the
+    // borrowed sample is valid only for its duration (pico contract).
+    // `context` travels with the drive dispatch. A panic unwinding OUT of
+    // the C callback across this `extern "C"` boundary is UB and would tear
+    // down the drive thread, so it is caught here — the drive loop survives
+    // a misbehaving callback.
+    let ctx = closure.context.0;
+    let _in_callback = crate::ffi::InCallback::enter();
+    let _ = crate::ffi::catch(|| unsafe {
+        call(sample_ptr, ctx);
+    });
+}
+
+/// A C subscriber's closure as the engine holds it: the closure moved into one allocation at the
+/// declaration, its address the context of a raw callback ([`SubscriberSink::raw`]). The engine
+/// calls it through a shared borrow, from any thread and from inside itself, as zenoh-pico calls a
+/// subscription's callback with no lock held (`session/subscription.c`,
+/// `_z_trigger_subscriptions_impl`); it lets go of it once, after its last call, which drops the
+/// closure: its C `drop(context)` runs and its latch opens.
+fn subscriber_sink(closure: CClosure) -> SubscriberSink {
+    /// # Safety
+    /// `context` is the closure `subscriber_sink` moved into its allocation, not yet dropped.
+    unsafe fn call(context: *mut c_void, view: &dyn SampleView) {
+        // SAFETY: the caller's contract.
+        let closure = unsafe { &*context.cast::<CClosure>().cast_const() };
+        hand_sample(closure, view);
     }
+    /// # Safety
+    /// As `call`'s, and nothing calls it again.
+    unsafe fn release(context: *mut c_void) {
+        // SAFETY: the caller's contract: the allocation is `subscriber_sink`'s, given back once.
+        drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
+    }
+    let context = Box::into_raw(Box::new(closure)).cast::<c_void>();
+    // SAFETY: `call` reads the closure behind `context` through a shared borrow, which a C
+    // closure admits from any thread and from inside itself (pico calls it so, and `CClosure` is
+    // `Sync` for this plane); `release` gives the allocation back once, which the engine does
+    // after the last call.
+    unsafe { SubscriberSink::raw(call, context, Some(release)) }
 }
 
 /// pico `z_timestamp_t` (`protocol/core.h:116-120`), 32 B measured:
@@ -1213,6 +1236,11 @@ pub(crate) struct PlainPublisher {
     /// key, which retracts the declaration AFTER the publisher itself is gone —
     /// upstream's order.
     key: DeclaredKeyexpr,
+    /// The key as every put and delete of this publisher names it on the wire, made once at
+    /// declare: the declaration's id and the rest of the key are fixed for as long as `key` holds
+    /// the declaration. After the filter, as `key` is, so the declaration it keeps is retracted
+    /// after the filter's Interest.
+    wire: WireKey,
     /// R311y559 — the `eid` half of the global id `z_publisher_id` reports,
     /// allocated ONCE at declare from the session's entity counter. See
     /// `SharedSession::next_entity_id` for why it is allocated rather than
@@ -1355,10 +1383,12 @@ impl PlainPublisher {
         // R2962 — the filter is created AFTER the key, because its Interest names
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
+        let wire = key.wire(Arc::as_ref(&session.engine));
         let filter = WriteFilter::declare(
             session,
             FilterPlane::Subscribers,
             &key,
+            &wire,
             declared.counts_local(),
         )?;
         let plain = declared
@@ -1371,6 +1401,7 @@ impl PlainPublisher {
             shared: session.engine.clone(),
             filter,
             key,
+            wire,
             declared,
             plain,
         })
@@ -1425,12 +1456,13 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
-        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
-        publish_code(
-            self.shared
-                .publish_on_wire_all(self.key.literal(), &wire, payload, &opts),
-        )
+        publish_code(self.shared.publish_on_wire_all(
+            self.key.literal(),
+            &self.wire,
+            payload,
+            &opts,
+        ))
     }
 
     /// The `eid` half of the global id `z_publisher_id` reports.
@@ -1702,6 +1734,52 @@ pub(crate) unsafe fn take_moved_bytes(
     } else {
         Ok(Some(crate::bytes::unbox_bytes(handle as *mut ByteBuf)))
     }
+}
+
+/// A moved payload as a call that only reads it holds it, for the length of that call: the
+/// marshal's own payload read where it lies, or the caller's, taken out of its place.
+pub(crate) enum MovedBytes<'a> {
+    /// A BORROW of a delivered sample's payload, which its marshal holds past the call.
+    Lent(&'a ByteBuf),
+    /// The caller's payload, consumed: its storage goes back when this is dropped.
+    Owned(ByteBuf),
+}
+
+impl core::ops::Deref for MovedBytes<'_> {
+    type Target = ByteBuf;
+    fn deref(&self) -> &ByteBuf {
+        match self {
+            Self::Lent(buf) => buf,
+            Self::Owned(buf) => buf,
+        }
+    }
+}
+
+/// Take a moved payload for a call that reads it and keeps nothing of it (a put), nulling the
+/// source: `None` for a null one. Unlike [`take_moved_bytes`], a BORROW is not cloned: the call
+/// reads the bytes where the marshal that lent them holds them, which it outlives, so a put of a
+/// delivered sample's payload copies nothing and cannot be refused for want of room.
+///
+/// Every arm nulls the source, as [`take_moved_bytes`] does.
+///
+/// # Safety
+/// As [`take_moved_bytes`].
+#[inline(never)]
+pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Option<MovedBytes<'a>> {
+    if payload.is_null() {
+        return None;
+    }
+    let handle = (*payload)._this.handle;
+    if handle.is_null() {
+        return None;
+    }
+    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
+    (*payload)._this = z_owned_bytes_t::null_value();
+    Some(if borrowed {
+        MovedBytes::Lent(&*(handle as *const ByteBuf))
+    } else {
+        MovedBytes::Owned(crate::bytes::unbox_bytes(handle as *mut ByteBuf))
+    })
 }
 
 /// Consume a moved payload without reading it, nulling the source: what an option whose bytes the
@@ -1981,6 +2059,47 @@ mod put_options_tests {
             );
             assert_eq!(rc, Z_ERR_NULL, "no payload");
             assert!(attachment._this.handle.is_null(), "the attachment is spent");
+        }
+    }
+
+    /// A put reads the payload it is moved where it lies: a borrow of a delivered sample's payload
+    /// is read in the bytes its marshal holds and not copied, a payload of the caller's own is
+    /// taken out of its place, a null one is none, and each leaves the caller's slot spent.
+    #[test]
+    fn a_put_reads_its_moved_payload_where_it_lies() {
+        use super::{read_moved_bytes, MovedBytes};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::bytes::ByteBuf;
+        let lent_bytes = *b"lent";
+        // SAFETY: `lent_bytes` outlives `held`, and every pointer handed over is null or points
+        // at a live value of its type that outlives the call.
+        unsafe {
+            let held = ByteBuf::lent(&lent_bytes);
+            let mut lent = z_moved_bytes_t {
+                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+            };
+            match read_moved_bytes(&mut lent) {
+                Some(MovedBytes::Lent(buf)) => {
+                    assert_eq!(buf.as_slice().as_ptr(), lent_bytes.as_ptr(), "not copied");
+                }
+                _ => panic!("a borrow is read where its marshal holds it"),
+            }
+            assert!(lent._this.handle.is_null(), "the borrow is spent");
+
+            let mut owned = z_owned_bytes_t::null_value();
+            let copied = crate::bytes::z_bytes_copy_from_buf(&mut owned, b"own".as_ptr(), 3);
+            assert_eq!(copied, crate::result::Z_OK);
+            let mut moved = z_moved_bytes_t { _this: owned };
+            let taken = read_moved_bytes(&mut moved).expect("an owned payload is taken");
+            assert!(matches!(taken, MovedBytes::Owned(_)));
+            assert_eq!(taken.as_slice(), &b"own"[..]);
+            assert!(moved._this.handle.is_null(), "the payload is spent");
+
+            assert!(read_moved_bytes(core::ptr::null_mut()).is_none());
+            let mut empty = z_moved_bytes_t {
+                _this: z_owned_bytes_t::null_value(),
+            };
+            assert!(read_moved_bytes(&mut empty).is_none());
         }
     }
 
@@ -2505,10 +2624,8 @@ pub unsafe extern "C" fn z_put(
 ) -> ZResult {
     guarded(|| {
         let resolved = session_put_options(options);
-        let buf = match take_moved_bytes(payload) {
-            Ok(Some(buf)) => buf,
-            Ok(None) => return Z_ERR_NULL,
-            Err(no_room) => return no_room.code(),
+        let Some(buf) = read_moved_bytes(payload) else {
+            return Z_ERR_NULL;
         };
         session_publish(zs, keyexpr, &buf, &resolved)
     })
@@ -2696,10 +2813,8 @@ pub unsafe extern "C" fn z_publisher_put(
     guarded(|| {
         // Consume the moved payload first (pico consume-on-all-paths contract):
         // dropped + source nulled even if the publisher handle is invalid.
-        let buf = match take_moved_bytes(payload) {
-            Ok(Some(b)) => b,
-            Ok(None) => return Z_ERR_NULL,
-            Err(no_room) => return no_room.code(),
+        let Some(buf) = read_moved_bytes(payload) else {
+            return Z_ERR_NULL;
         };
         let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
             Some(s) => s,
@@ -2982,7 +3097,10 @@ unsafe fn declare_subscriber_with(
     // key the announce went out on. A background subscriber's entry keeps that declaration
     // alive through `wire`'s anchor, so the id it names stays declared as long as it can
     // retract.
-    let retraction = key.retraction_naming(&PicoSession::of(state));
+    let retraction = key.retraction_naming_in(
+        crate::write_filter::session_mode(state),
+        Arc::as_ref(&engine),
+    );
     let released = cclosure.release_latch();
     let released = if owned {
         Some(released)
@@ -2991,19 +3109,17 @@ unsafe fn declare_subscriber_with(
         state.keep_background(released);
         None
     };
-    // A session that holds no more subscribers, its table at the limit it opened under or its
-    // declaration ids spent, refuses the subscriber as pico refuses an entity it cannot hold;
-    // the engine dropped the sink, so the closure's drop has run.
-    let closure = Arc::new(cclosure);
-    let Some(id) = engine.declare_subscriber_on_wire(
-        ke,
-        wire,
-        subscriber_origin(options),
-        retraction,
-        Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
-    ) else {
-        return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-    };
+    // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
+    // the closure's drop has run.
+    let id = engine
+        .declare_subscriber_on_wire(
+            ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            subscriber_sink(cclosure),
+        )
+        .map_err(|refused| crate::result::refusal_code(refused, crate::result::Door::Entity))?;
     Ok(match (slot, released) {
         (Some(slot), Some(released)) => Some((
             slot,

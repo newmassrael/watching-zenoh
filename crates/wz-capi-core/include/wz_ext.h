@@ -1606,6 +1606,29 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * a call that steps the session on the program's thread: the program sends
  * and pulls, the read task does the rest. */
 
+/* ================================================ callbacks
+ *
+ * No door of wz's own: this section states how the cooperative engine calls
+ * a program's subscriber callbacks (docs/c-abi-architecture.md, section 3,
+ * L3). A callback is called as zenoh-pico calls it: with no lock of the
+ * library held, on the thread that delivers (the read task, or the thread
+ * whose zp_read or put reached it), so it may run on two threads at once and
+ * may be called again from inside itself:
+ *
+ *   a put        made inside a subscriber's callback that reaches that same
+ *                subscriber calls the callback again from inside itself,
+ *                before the put returns, at any depth, as zenoh-pico's
+ *                recursion does; every other subscriber it reaches is
+ *                handed it inside the put as well.
+ *   a liveliness subscriber declared with history is handed the tokens the
+ *                session already knows inside the declaration, on the
+ *                declaring thread, one at a time with no lock held, before
+ *                its peers are asked for the rest, as zenoh-pico's is.
+ *
+ * The library lets go of a callback once, after its last call has returned:
+ * then its drop runs, and z_undeclare_subscriber returns after it, as
+ * zenoh-pico's undeclare does. */
+
 /* ================================================ the program's transport
  *
  * A transport the program supplies: a program with a network stack of its

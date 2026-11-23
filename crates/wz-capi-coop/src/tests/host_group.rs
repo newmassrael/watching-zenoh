@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_posix::links::PosixLinks;
@@ -113,12 +113,12 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(move || {
+            {
                 let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
                     into.lock().unwrap().push(sample.payload().to_vec());
                 })
-            }),
+            },
         )
         .expect("a session with ids left declares");
     eventually("a put of the first to reach the second", || {

@@ -333,24 +333,20 @@ fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
     acceptor.join().expect("acceptor thread panicked");
 }
 
-/// The invariant the fragmentation fix must not leave half-closed.
+/// A put past every ceiling is sent as zenoh-pico sends it, and the receiver's
+/// ceiling is what drops it.
 ///
-/// R311y484's finding was not "large puts are lost" — it was that `z_put`
-/// returned `Z_OK` for a put that never left the host, so a C caller could not
-/// tell a delivered put from a discarded one. Raising the reassembly cap moves
-/// that boundary; it does not remove it. Above the cap the chain is staged past
-/// the receiver's slot limit and dropped, so the same indistinguishability
-/// returns unless the sender refuses locally.
-///
-/// It CAN refuse locally, and only locally: a peer's cap is not observable, but
-/// the slot a wz receiver rejoins into is this build's own. So the contract
-/// asserted here is the locally decidable one — a put no wz receiver could ever
-/// reassemble must report an error rather than a success that silently goes
-/// nowhere. A peer's lower ceiling, pico's `FRAG_MAX_SIZE` among them, is that
-/// peer's: pico's own sender returns `Z_OK` for a chain its peer drops, and the
-/// test above holds the drop.
+/// R311y484 asked the sender to refuse a put no wz receiver could rejoin, since a
+/// peer's cap is not observable. Round 4617 took that bound away: the AP sender
+/// refuses no message for its size (`wz_runtime_tokio::reassembly::REASSEMBLY_CHAIN_CAP`
+/// is `usize::MAX`), as upstream's sender refuses none and as zenoh-pico's fragments
+/// a message of any size and returns `Z_OK` (`vendor/zenoh-pico/src/transport/common/tx.c`
+/// @ `// Message still doesn't fit in buffer, send as fragments`). Both engines behind
+/// this door now answer as pico does, so the contract is one: the put is `Z_OK`, the
+/// receiver here (this door, which rejoins no chain past pico's `FRAG_MAX_SIZE`)
+/// drops the chain, and the session goes on to carry the next put.
 #[test]
-fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
+fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver() {
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -452,9 +448,12 @@ fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
         "subscriber never declared"
     );
 
-    // Four MiB: four times the AP reassembly slot cap, so no same-profile peer
-    // can absorb the chain however well the sender fragments it.
-    const TOO_BIG: usize = 4 * 1024 * 1024;
+    // Twice this door's receiving ceiling (pico's FRAG_MAX_SIZE): a chain only the receiver's
+    // drop can answer for, and a payload every build of this door holds. The release form keeps
+    // payloads in the process pools' bounded area, which refuses a copy of megabytes with pico's
+    // _Z_ERR_SYSTEM_OUT_OF_MEMORY, as zenoh-pico on a small heap does: the size of the put is not
+    // what this test asks about, the sender's answer past the ceiling is.
+    const TOO_BIG: usize = 2 * CEILING;
     let payload = payload_of(TOO_BIG);
     let rc = unsafe {
         let mut ke: z_view_keyexpr_t = std::mem::zeroed();
@@ -484,11 +483,9 @@ fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
     }
     let arrived = delivered.lock().unwrap().contains_key(&TOO_BIG);
 
-    // A refusal must not cost the session. The refused send has already
-    // minted one Frame SN by the time its size is known (the encode is what
-    // reveals the size), so it leaves a 1-SN gap in that conduit's ring. If
-    // the peer's half-window check did not tolerate the gap, THIS put — an
-    // ordinary one, after the refusal — would never arrive.
+    // A dropped chain must not cost the session: the receiver discards the
+    // chain's fragments and the reliable conduit goes on, so THIS put, an
+    // ordinary one after the dropped chain, arrives.
     let after_payload = payload_of(AFTER);
     let mut recovered = false;
     for _ in 0..150 {
@@ -515,7 +512,7 @@ fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
                     std::ptr::null(),
                 ),
                 Z_OK,
-                "an ordinary put after a refused one was itself rejected"
+                "an ordinary put after a dropped chain was itself rejected"
             );
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -528,21 +525,16 @@ fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
     }
     acceptor.join().expect("acceptor thread panicked");
 
-    // Either outcome is acceptable on its own; the conjunction is the defect. The refusal is the
-    // tokio engine's own: its sender is bounded by the slot a peer of its profile reassembles in.
-    // The cooperative engine's sender, like zenoh-pico's, fragments a message of any size and
-    // returns `Z_OK` (`vendor/zenoh-pico/src/transport/common/tx.c` @
-    // `// Message still doesn't fit in buffer, send as fragments`), so a receiver that drops the
-    // chain (the first test above, where this crate is the receiver) is not told to its sender.
-    #[cfg(feature = "engine-tokio")]
-    assert!(
-        !(rc == Z_OK && !arrived),
-        "z_put returned Z_OK ({rc}) for a {TOO_BIG}-byte payload that was never \
-         delivered — the R311y484 silent-drop semantic survives above the \
-         reassembly cap, so a C caller still cannot tell delivered from discarded"
+    // The sender is zenoh-pico's on either engine: it fragments the chain and
+    // answers Z_OK; the drop is the receiver's ceiling, held by the test above.
+    assert_eq!(
+        rc, Z_OK,
+        "a put past every ceiling is sent as zenoh-pico sends it, and z_put answers Z_OK"
     );
-    #[cfg(not(feature = "engine-tokio"))]
-    let _ = (rc, arrived);
+    assert!(
+        !arrived,
+        "a {TOO_BIG}-byte chain was rejoined past this door's {CEILING}-byte receiving ceiling"
+    );
     assert!(
         recovered,
         "the session stopped delivering after a refused oversize put — the \

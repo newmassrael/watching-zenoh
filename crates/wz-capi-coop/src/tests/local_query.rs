@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, ReplyCallback,
+    FilterPlane, HeldQuery, QblId, QueryCallback, QueryHolder, Refusal, ReplyCallback,
     SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestForm;
@@ -29,7 +29,7 @@ use super::{open, until, CatchAll, Command, Engine, Router};
 /// What the queryable of `a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns`
 /// saw of the get it made from inside its callback: whether it was issued, whether it was still
 /// open with no reply when the get returned, and its leg.
-type InnerGet = Arc<Mutex<Option<(Option<usize>, bool, Arc<Mutex<Leg>>)>>>;
+type InnerGet = Arc<Mutex<Option<(Result<usize, Refusal>, bool, Arc<Mutex<Leg>>)>>>;
 
 /// What a queryable was shown of each get: its parameters, payload and attachment, and whether it
 /// had an encoding.
@@ -98,7 +98,7 @@ fn a_get_for_the_session_alone_is_answered_by_its_own_queryables_inside_the_call
         None,
         None,
     );
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     let leg = leg.lock().unwrap();
     assert!(
         leg.ended,
@@ -119,6 +119,74 @@ fn a_get_for_the_session_alone_is_answered_by_its_own_queryables_inside_the_call
         0,
         "CONTROL: a get for the session alone goes out on no link"
     );
+}
+
+/// An answer of the session's own queryable is handed to the get's callback by the thread that
+/// makes it, inside its reply: the queryable reads it handed when its reply returns. A get whose
+/// consolidation keeps the latest reply of a key until its end is handed that reply at the end,
+/// from what its entry held, once, before its callback is let go.
+#[test]
+fn an_own_answer_is_handed_inside_its_reply_and_a_held_one_at_the_end() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let inside = Arc::new(Mutex::new(Vec::new()));
+    let (count, seen) = (handed.clone(), inside.clone());
+    declare(
+        &engine,
+        "demo/lq/**",
+        Locality::Any,
+        move |_, query, out| {
+            out.reply_keyed(query.keyexpr(), b"own")
+                .expect("a reply on the query's own key");
+            seen.lock().unwrap().push(count.load(Ordering::SeqCst));
+        },
+    );
+    for (mode, handed_inside) in [(ConsolidationMode::None, 1), (ConsolidationMode::Latest, 0)] {
+        handed.store(0, Ordering::SeqCst);
+        inside.lock().unwrap().clear();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let issued = engine.get_on_wire(
+            "demo/lq/a",
+            &WireKey::literal(),
+            &get_for(Locality::SessionLocal).with_consolidation(mode),
+            None,
+            &mut || {
+                let count = handed.clone();
+                let gone = Dropped(ended.clone());
+                ReplyCallback::shared(move |reply: &dyn ReplyView| {
+                    let _ = &gone;
+                    if reply.kind() == ReplyKind::Put {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            },
+        );
+        assert_eq!(issued, Ok(1), "{mode:?}");
+        assert_eq!(
+            *inside.lock().unwrap(),
+            [handed_inside],
+            "{mode:?}: what the queryable read when its reply returned"
+        );
+        assert_eq!(
+            handed.load(Ordering::SeqCst),
+            1,
+            "{mode:?}: the answer is handed once"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            1,
+            "{mode:?}: the leg's callback is let go once, inside the get"
+        );
+    }
 }
 
 /// Run `body` on a thread of its own and wait at most five seconds for what it returns: a call
@@ -156,7 +224,7 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     );
     assert_eq!(
         issued,
-        Some(2),
+        Ok(2),
         "a leg to the peer and one to the session's own"
     );
     {
@@ -217,7 +285,7 @@ fn a_get_for_peers_alone_asks_no_queryable_of_the_session() {
         None,
         None,
     );
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     let leg = leg.lock().unwrap();
     assert!(leg.ended && leg.replies.is_empty(), "{:?}", leg.replies);
 }
@@ -293,12 +361,14 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
     let listen = |count_local: bool| {
         let log = Arc::new(Mutex::new(Vec::new()));
         let into = log.clone();
-        engine.declare_matching_listener(
-            plane,
-            "demo/lq/x",
-            Arc::new(move |matching| into.lock().unwrap().push(matching)),
-            count_local,
-        );
+        engine
+            .declare_matching_listener(
+                plane,
+                "demo/lq/x",
+                Arc::new(move |matching| into.lock().unwrap().push(matching)),
+                count_local,
+            )
+            .expect("a session with rows left declares");
         log
     };
     let counting = listen(true);
@@ -403,7 +473,7 @@ fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
         None,
         None,
     );
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     {
         let outer = outer.lock().unwrap();
         assert!(outer.ended, "the outer get ended inside its call");
@@ -417,7 +487,7 @@ fn a_get_made_inside_a_queryables_own_callback_is_answered_once_it_returns() {
         .unwrap()
         .take()
         .expect("the callback made its get");
-    assert_eq!(inner_issued, Some(1));
+    assert_eq!(inner_issued, Ok(1));
     assert!(
         open_inside,
         "CONTROL: inside the callback the inner get was asked and not answered"
@@ -462,7 +532,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
         None,
         None,
     );
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     assert!(
         kept.lock().unwrap().is_some() && !first.lock().unwrap().ended,
         "CONTROL: the kept query holds the one row"
@@ -472,18 +542,18 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
     let counting = minted.clone();
     let asking = engine.clone();
     let refused = within_five_seconds("the refused get", move || {
-        asking.get_held(
+        asking.get_on_wire(
             "demo/lq/b",
             &WireKey::literal(),
             &get_unconsolidated(),
             None,
             &mut || {
                 counting.fetch_add(1, Ordering::SeqCst);
-                Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+                ReplyCallback::shared(|_view: &dyn ReplyView| {})
             },
         )
     });
-    assert_eq!(refused, Err(NoRoomToHold));
+    assert_eq!(refused, Err(Refusal::TableFull));
     assert_eq!(minted.load(Ordering::SeqCst), 0, "no leg was minted");
     assert_eq!(asked.load(Ordering::SeqCst), 1, "no queryable was asked");
     let quiet = Instant::now() + Duration::from_millis(100);
@@ -506,7 +576,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
         None,
         None,
     );
-    assert_eq!(issued, Some(1), "the row given back holds the next");
+    assert_eq!(issued, Ok(1), "the row given back holds the next");
     assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
 
@@ -533,10 +603,10 @@ fn a_queryable_of_the_session_reads_what_its_own_get_carries() {
         .with_payload(b"v".to_vec())
         .with_attachment(b"a".to_vec());
     let (issued, _) = ask(&engine, "demo/lq/a", &carrying, None, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     let empty = get_for(Locality::SessionLocal).with_payload(Vec::new());
     let (issued, _) = ask(&engine, "demo/lq/b", &empty, None, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     assert_eq!(
         *shown.lock().unwrap(),
         [

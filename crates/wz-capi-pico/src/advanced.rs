@@ -1469,13 +1469,16 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         };
         let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
-        let Some(id) = engine.declare_liveliness_subscriber_on_wire(
+        let id = match engine.declare_liveliness_subscriber_on_wire(
             &ke,
             wire,
             history,
             crate::liveliness::sample_sink(cclosure),
-        ) else {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        ) {
+            Ok(id) => id,
+            Err(refused) => {
+                return crate::result::refusal_code(refused, crate::result::Door::Entity)
+            }
         };
         let placed = slot.fill(SubscriberState {
             shared: engine,

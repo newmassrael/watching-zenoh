@@ -34,9 +34,6 @@ pub fn publish_refusal(why: wz_capi_core::faces::FanoutError) -> ZResult {
         // profile, which drops a message behind a held conduit only after waiting for room and
         // reports no such drop, so this is the code the drop would be given if one were.
         wz_capi_core::faces::FanoutError::HeldConduit => Z_OK,
-        // Answered only by the cooperative engine, which a zenoh-c build does not run; the code a
-        // node gives for what it cannot carry now.
-        wz_capi_core::faces::FanoutError::LocalNoRoom => Z_EUNAVAILABLE,
     }
 }
 

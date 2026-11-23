@@ -43,12 +43,12 @@
 //! What IS reproduced, and is what a peer's mode changes on the wire: whether it
 //! asks at all (above), and that its subscriber and queryable retractions name
 //! the key they were held on, which a client's do not
-//! (`DeclaredKeyexpr::retraction_naming`).
+//! (`DeclaredKeyexpr::retraction_naming_in`).
 
 use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, WireKey};
+use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
@@ -57,7 +57,7 @@ use wz_session_core::WhatAmI;
 use crate::ffi::{LatchList, ReleaseLatch};
 use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::prelude::*;
-use crate::result::{ZResult, Z_ERR_SYSTEM_OUT_OF_MEMORY};
+use crate::result::{refusal_code, Door, ZResult};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
 
 /// This session's own role: pico's `zn->_mode`, kept in the handle at open
@@ -144,24 +144,26 @@ impl WriteFilter {
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
     ///
-    /// Refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as pico refuses an entity it cannot hold, when
-    /// the session holds no more: its table of the entity's filters is at the limit it opened
-    /// under, or it has no entity id left for the filter's Interest. Nothing was sent.
+    /// `wire` is `key` as the entity names it on the wire (`DeclaredKeyexpr::wire`): its own
+    /// declaration's id and the rest of the key, or the literal when nothing covers it. The
+    /// entity makes it once and keeps it for what it sends.
+    ///
+    /// Refused with the code pico's filter answers for the cause ([`Door::WriteFilter`]): the
+    /// session holds no more, its table of the entity's filters at the limit it opened under or
+    /// no entity id left for the filter's Interest, or the session is closed. Nothing was sent.
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
         key: &DeclaredKeyexpr,
+        wire: &WireKey,
         count_local: bool,
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
-        // The key goes on the wire as the entity's own declaration: its id and the rest of
-        // the key, or the literal when nothing covers it.
-        let wire = key.wire(Arc::as_ref(&shared));
-        let ask = interest_form(&shared, session.mode, key, &wire);
+        let ask = interest_form(&shared, session.mode, key, wire);
         let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, keyexpr.as_str(), &wire, ask, count_local)
-            .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+            .declare_write_filter(plane, keyexpr.as_str(), wire, ask, count_local)
+            .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok(Self {
             shared,
             id,
@@ -178,20 +180,23 @@ impl WriteFilter {
     /// each time that changes. The listener is retracted with the filter, or before it by
     /// its id. The engine is handed back with the id, for a handle that retracts it. `released`
     /// is the latch of the closure behind `sink`, which the filter's drop waits on.
+    ///
+    /// A listener the engine refuses is answered by its cause, with `sink` let go of: the filter
+    /// keeps neither its id nor its latch, so its drop retracts and waits on nothing for it.
     pub(crate) fn declare_matching_listener(
         &self,
         sink: MatchingSink,
         released: Arc<ReleaseLatch>,
-    ) -> (Arc<Engine>, MatchId) {
+    ) -> Result<(Arc<Engine>, MatchId), Refusal> {
         let id = self.shared.declare_matching_listener(
             self.plane,
             self.keyexpr.as_str(),
             sink,
             self.count_local,
-        );
+        )?;
         self.listeners.lock().push(id);
         self.released.keep(released);
-        (self.shared.clone(), id)
+        Ok((self.shared.clone(), id))
     }
 
     /// pico `_z_write_filter_active`: `true` when nothing has said it matches,

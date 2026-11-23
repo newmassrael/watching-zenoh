@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, WireKey,
+    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -144,18 +144,12 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
     engine
-        .declare_subscriber_on_wire(
-            pattern,
-            wire,
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.keyexpr().to_owned());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(pattern, wire, Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.keyexpr().to_owned());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }
@@ -303,15 +297,15 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
         &mut || {
             let end = End(ended.clone());
             let into = replies.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 into.lock()
                     .unwrap()
                     .push((view.keyexpr().to_owned(), view.payload().to_vec()));
-            }) as ReplyCallback
+            })
         },
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
     eventually("the leg to end", || *ended.lock().unwrap() == 1);
     assert_eq!(
         *asked.lock().unwrap(),
@@ -503,12 +497,12 @@ fn a_reply_under_the_declared_form_names_its_key_whole() {
 fn the_session_declares_no_key_expression_under_an_id_of_the_dictionary() {
     let held = Arc::new(KeyIds::new([(1, "lab/one"), (2, "lab/two")]).expect("valid"));
     let (with, _) = listener(Some(held), KeyWireForm::Shared);
-    assert_eq!(with.acquire_keyexpr("lab/x"), Some(3));
-    assert_eq!(with.acquire_keyexpr("lab/y"), Some(4));
+    assert_eq!(with.acquire_keyexpr("lab/x"), Ok(3));
+    assert_eq!(with.acquire_keyexpr("lab/y"), Ok(4));
     let (without, _) = listener(None, KeyWireForm::Declared);
     assert_eq!(
         without.acquire_keyexpr("lab/x"),
-        Some(1),
+        Ok(1),
         "CONTROL: without a dictionary the first id is 1"
     );
 }
@@ -632,10 +626,7 @@ fn a_write_filters_interest_on_a_declared_link_names_the_declaration() {
 fn tokens_by(engine: &Engine, declared: ExprId) {
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
-    let sink: wz_capi_port::LivelinessSink = Arc::new(|| {
-        Box::new(|_: LivelinessSample<'_>| {})
-            as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
-    });
+    let sink = wz_capi_port::LivelinessSink::shared(|_: LivelinessSample<'_>| {});
     engine
         .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
         .expect("the engine has liveliness");
@@ -658,9 +649,9 @@ fn alive_by(engine: &Engine, declared: ExprId) {
         &WireKey::aliased(declared, None),
         5_000,
         None,
-        &mut || Box::new(|_: &dyn ReplyView| {}) as ReplyCallback,
+        &mut || ReplyCallback::shared(|_: &dyn ReplyView| {}),
     );
-    assert_eq!(issued, Some(1), "one leg for the one face");
+    assert_eq!(issued, Ok(1), "one leg for the one face");
 }
 
 #[cfg(feature = "liveliness-get")]

@@ -21,8 +21,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use wz_capi_port::{
-    QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, SubId, SubscriberSink, Ticker,
-    WireKey,
+    QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubId,
+    SubscriberSink, Ticker, WireKey,
 };
 use wz_session_core::group_membership::{
     decode_member, decode_net_event, encode_member, encode_net_event, GroupNetEvent, Member,
@@ -96,7 +96,7 @@ impl NodeCopy {
             .engine
             .get_on_wire(&key, &WireKey::literal(), &options, None, &mut || {
                 let copy = Arc::clone(&copy);
-                Box::new(move |reply: &dyn ReplyView| {
+                ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     if let Ok(member) = decode_member(reply.payload()) {
                         copy.table().insert(member.clone(), copy.engine.now_ms());
                         copy.agg.apply(copy.via, GroupEvent::Join(member));
@@ -177,17 +177,14 @@ impl NodeGroup {
             .map_err(|_| NodeGroupError::Refused("the join could not be announced"))?;
 
         let heard = Arc::clone(&copy);
-        let sink: SubscriberSink = Arc::new(move || {
-            let heard = Arc::clone(&heard);
-            Box::new(move |sample: &dyn SampleView| {
-                if let Ok(event) = decode_net_event(sample.payload()) {
-                    heard.heard(event);
-                }
-            })
+        let sink = SubscriberSink::shared(move |sample: &dyn SampleView| {
+            if let Ok(event) = decode_net_event(sample.payload()) {
+                heard.heard(event);
+            }
         });
         let subscriber = engine
             .declare_subscriber_on_wire(&event_key, WireKey::literal(), Locality::Any, None, sink)
-            .ok_or(NodeGroupError::Refused("the event subscriber was refused"))?;
+            .map_err(|_| NodeGroupError::Refused("the event subscriber was refused"))?;
 
         // The member's own record, served from its own key to whoever asks.
         let record = encode_member(&member);
@@ -201,7 +198,7 @@ impl NodeGroup {
                 let _ = out.reply_keyed(&served, &record);
             }) as QueryCallback
         });
-        let Some(queryable) = engine.declare_queryable_on_wire(
+        let Ok(queryable) = engine.declare_queryable_on_wire(
             &record_key,
             WireKey::literal(),
             true,
@@ -245,6 +242,7 @@ impl NodeGroup {
                         true
                     }),
                 )
+                .ok()
             })
             .flatten();
         held.watchdog = Some(
@@ -256,7 +254,7 @@ impl NodeGroup {
                     true
                 }),
             )
-            .ok_or(NodeGroupError::Refused("the watchdog could not be started"))?,
+            .map_err(|_| NodeGroupError::Refused("the watchdog could not be started"))?,
         );
 
         Ok(Self {

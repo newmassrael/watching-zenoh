@@ -79,6 +79,32 @@ P9. **Measured budgets per area.** The size ledger of section 1 is a gate: each 
 ratchet against zenoh-pico's same area, so a change that grows an area is refused where it grows,
 not only in the total.
 
+P10. **Typed outcomes, no sentinels.** Every operation that can be refused returns
+`Result<Handle, Refusal>` at every layer boundary (L3 to the port, the port to L4). A handle is a
+generation-checked slot index whose index part is `NonZero`, so `Option<Handle>` costs nothing
+and no value of the handle type means "refused". `Refusal` names the cause the caller can act on
+(`TableFull`, `KeyTooLong`, `NoEntityId`, `Closed`, `NotBuilt`); each preset ABI maps it to its
+own codes in ONE table owned by its façade (zenoh-pico: `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for the
+first three, `_Z_ERR_SESSION_CLOSED` for `Closed`). Measured why: a matching listener the
+cooperative engine refused came back as id 0, which the AP engine hands out as a live id, so the
+door could not tell a refusal from a listener and answered `Z_OK` for one that would never be
+called.
+
+P11. **A callback's lifetime is a property of its row.** A row holds its callback in an
+`Fn`-shaped form (a C `(call, context, drop)` triple, or a shared Rust `Fn`), so a call is a
+shared borrow and reentrance is sound, as zenoh-pico's is. Undeclaring a row returns after the
+last running call of it has returned and its `drop` has run (zenoh-pico holds the entity's lock
+across the call and clears the closure under it). The row, not each entity's door, carries that
+protocol, so no entity can lack it. Measured why: the matching listener was the one entity whose
+door did not wait, and zenoh-pico's own test of drop-on-undeclare found it.
+
+P12. **zenoh-pico's programs are the behavioural specification.** Its API tests and examples run
+on the release library in the environment its own CI gives them (a network namespace per
+program, `lo` with multicast on). A program is judged only where it passes on zenoh-pico in that
+same run (the control). A wz failure where the control passes is a defect of wz whatever its
+cause. A program that fails on zenoh-pico itself by its construction is listed with that reason
+and its feature is measured by a sibling program; it is never retried until it passes.
+
 ## 3. The layers
 
 ```
@@ -105,7 +131,11 @@ not only in the total.
   pending queries and replies, interests. Routing/matching is a function over these tables. The
   callback of a local entity is stored in the entity's row (a C function pointer and context, or
   a Rust closure in a pool row); delivery calls it from the row, holding the row pinned, with no
-  intermediate lane and no copy.
+  intermediate lane and no copy. A callback is a `Fn`, called through a shared borrow: a C
+  closure's function, context and drop held as they are, a Rust closure an `Arc<dyn Fn + Send +
+  Sync>` as upstream zenoh's. So it is called with no lock held, from any thread and from inside
+  itself, as zenoh-pico calls it (a put a callback makes on its own subscriber's key reaches it
+  again at once; `wz_ext.h`, "callbacks"), and it is let go of once, after its last call.
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the
@@ -185,7 +215,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-206) and holds the register's lint cells (379) to its ratchet, which a paid row
+given (TD-206) and holds the register's lint cells (376) to its ratchet, which a paid row
 lowers in its own commit. For the lints a text read decides (`unwrap_used`, `expect_used` and the
 panicking macros) it also holds each row to its module's sites, both ways; indexing and arithmetic
 are held by the build's clippy alone.
@@ -359,7 +389,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-151 | `wz-session-core` | `wire_id` | `arithmetic_side_effects` | 1 | open |
 | TD-152 | `wz-session-core` | `wire_noise` | `arithmetic_side_effects` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
-| TD-154 | `wz-capi-coop` | `lane` | `indexing_slicing`, `arithmetic_side_effects` | 76 | open |
 | TD-155 | `wz-capi-pico` | `os` | `indexing_slicing`, `arithmetic_side_effects` | 59 | in flight |
 | TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
 | TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |

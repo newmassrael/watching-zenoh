@@ -119,10 +119,8 @@ pub mod arena;
 mod engine;
 #[cfg(feature = "group-host")]
 pub mod host_group;
-// What the session hands its subscribers' callbacks after its lock, in a ring of its arena.
-// Totality debt TD-154 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-pub mod lane;
+// What the session hands its callbacks after its lock: one table a round, read where the records lie.
+pub mod round;
 #[cfg(feature = "scout")]
 pub mod scout;
 #[cfg(feature = "scout-datagram")]

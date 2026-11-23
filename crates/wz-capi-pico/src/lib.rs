@@ -573,6 +573,10 @@ pub mod redeclare;
 // Totality debt TD-172 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod encoding;
+// zenoh-pico's reading of an endpoint's text, for the cooperative engine's open and the link a
+// group is reported by.
+#[cfg(any(not(feature = "engine-tokio"), feature = "connectivity"))]
+mod endpoint;
 pub mod entity;
 #[cfg(feature = "event-ring")]
 pub mod event_log;

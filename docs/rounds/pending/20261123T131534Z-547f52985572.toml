@@ -1,0 +1,23 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+- The coop engine delivers through one round table: the delivery lane is removed, and a lent datagram's tokens and replies are held pending in their rows.
+- Every refusal of the port's doors is typed by its cause (declarations, write filters, gets, matching listeners, face watches, JOIN on a closed session) and answered with the code zenoh-pico's own door answers.
+- A callback is handed over as one Fn and owned by its row; a subscriber's callback is entered at depth 1 on a put.
+- zenoh-pico's own programs judge the release form: the control is built as pico is right about RX_CACHE (pico PR 1243), each program gets its own network.
+'''
+changes = '''
+- capi-coop: one round table, lane removed; held replies and tokens off the lane; a lost face's token retractions owed, never dropped; door operations out of line.
+- capi-port and capi-pico: typed refusals with pico's codes; one Fn per callback; a unicast endpoint read over its own text with no heap; a put's moved payload read where it lies.
+- session-core and runtime-coop: unicast receive state in UnicastRx; one observer type; task table in one block; liveliness get room answered.
+- gates and tests: unicast receive path counts as a leg of their own; pico upstream control corrected for RX_CACHE; oversize put held at twice the ceiling.
+'''
+verification = '''
+- Integration branch int10 on the fleet: fmt, session-core 1314, runtime-coop 148, capi-coop 213, capi-pico 268 and release 261, no-heap-after-open, capi-core 222, capi-c 782, tokio, ext-pubsub, mcu, gates, upstream programs and size all pass.
+- zenoh lib 195/196 in the full run; the one admin GET test passes 10/10 alone (load timing, carried).
+- Size ledger pico-client-coop-nostd: total 345,588 B = 2.03x zenoh-pico; codec 1.05x, language 1.00x, keyexpr 0.87x.
+'''
+carry = '''
+- The admin GET test of wz-zenoh fails under a loaded full run and passes alone: find its timing dependency.
+- Release-form heap at open is 288-376 KB a process against zenoh-pico's 16 KB, outside the coop arena (26 KB client, 59 KB peer): measure by phase and pay.
+- Remaining structural phases: one table set for every entity kind, per-session rx/tx pools, process pool limits at the pico preset.
+'''

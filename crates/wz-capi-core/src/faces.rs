@@ -85,7 +85,7 @@ use crate::gossip::GossipPolicy;
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
-use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 #[cfg(feature = "group")]
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
@@ -158,9 +158,49 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, SubscriberSink, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId,
+    StatementNotHonoured, SubId, TokenId, WireKey,
 };
+
+/// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
+/// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
+/// [`face_liveliness_sink`].
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+
+/// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
+
+/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
+pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
+}
+
+/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
+pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: LivelinessSample<'_>| sink.call(sample))
+    })
+}
+
+/// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
+/// each face's session registers a callback of its own. A port's callback
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+pub type SubscriberSink =
+    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
+/// through a shared borrow, and the sink is let go of with the last of them, after its last call.
+pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> SubscriberSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: &dyn SampleView| sink.call(sample))
+    })
+}
 
 /// Mints one queryable callback per face.
 ///
@@ -5340,7 +5380,7 @@ impl SharedSession {
         timeout_ms: u32,
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
-        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+        leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> usize {
         let opts =
             crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
@@ -6760,9 +6800,9 @@ impl SharedSession {
 
     /// Start a C declaration watch of `plane`: a listener on every face the registry holds now,
     /// and on every face that comes up later ([`Self::face_up`]), each handing what its peer
-    /// declares to `sink`. The port's [`DeclWatchRefused`] when this build hears no declaration
-    /// of `plane` or the session is closed; nothing is kept then, and `sink` is dropped outside
-    /// the lock.
+    /// declares to `sink`. Refused when this build hears no declaration of `plane`
+    /// ([`wz_capi_port::Refusal::NotBuilt`]) or the session is closed ([`wz_capi_port::Refusal::Closed`]); nothing is kept
+    /// then, and `sink` is dropped outside the lock.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -6771,16 +6811,16 @@ impl SharedSession {
         &self,
         plane: DeclPlane,
         sink: DeclWatchSink,
-    ) -> Result<DeclWatchId, DeclWatchRefused> {
+    ) -> Result<DeclWatchId, wz_capi_port::Refusal> {
         if !hears_declarations_of(plane) {
-            return Err(DeclWatchRefused::PlaneNotBuilt);
+            return Err(wz_capi_port::Refusal::NotBuilt);
         }
         let mut guard = self.lock();
         // Read under the lock, so a close that has already let go of every declaration
         // (`clear_declarations`) is not given one to hold.
         if self.is_closed() {
             drop(guard);
-            return Err(DeclWatchRefused::SessionClosed);
+            return Err(wz_capi_port::Refusal::Closed);
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;
@@ -7390,6 +7430,115 @@ mod matching_aggregate_tests {
             "and retracting one leaves the other's state alone"
         );
         assert!(!shared.has_router_peer(), "no face, so no router peer");
+    }
+
+    /// Through the engine port a write filter is refused by its cause: for want of an entity id,
+    /// and on a closed session, which the registry alone would still number a filter on.
+    #[test]
+    fn the_port_refuses_a_write_filter_by_its_cause() {
+        use wz_capi_port::{Refusal, SessionEngine};
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let declare = |shared: &SharedSession| {
+            SessionEngine::declare_write_filter(
+                shared,
+                FilterPlane::Subscribers,
+                "wz/wf/port",
+                &WireKey::literal(),
+                None,
+                false,
+            )
+        };
+        assert!(
+            declare(&shared).is_ok(),
+            "CONTROL: an open session with ids left declares"
+        );
+        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(declare(&shared), Err(Refusal::Closed));
+    }
+
+    /// Through the engine port a declaration is refused by its cause: for want of an entity id,
+    /// and on a closed session, where the registry alone would still make it.
+    #[test]
+    fn the_port_refuses_a_declaration_by_its_cause() {
+        use wz_capi_port::{Refusal, SessionEngine};
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let declare = |shared: &SharedSession| {
+            SessionEngine::declare_subscriber_on_wire(
+                shared,
+                "wz/decl/port",
+                WireKey::literal(),
+                wz_session_core::locality::Locality::Any,
+                None,
+                wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {}),
+            )
+        };
+        assert!(
+            declare(&shared).is_ok(),
+            "CONTROL: an open session with ids left declares"
+        );
+        shared.lock().next_entity_id = u64::from(u32::MAX) + 1;
+        assert_eq!(declare(&shared), Err(Refusal::NoEntityId));
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(declare(&shared), Err(Refusal::Closed));
+        assert_eq!(
+            SessionEngine::acquire_keyexpr(&shared, "wz/decl/key"),
+            Err(Refusal::Closed)
+        );
+        assert_eq!(
+            SessionEngine::watch_faces(&shared, Arc::new(|_kind, _face| {})),
+            Err(Refusal::Closed),
+            "a closed session refuses to watch its faces"
+        );
+        #[cfg(feature = "multicast-transport")]
+        assert_eq!(
+            SessionEngine::send_join_on_groups(&shared),
+            Err(Refusal::Closed)
+        );
+    }
+
+    /// Through the engine port a get asked of a closed session is refused as closed and mints no
+    /// leg, where one asked of an open session with no face reaches nobody.
+    #[cfg(feature = "query")]
+    #[test]
+    fn the_port_refuses_a_get_on_a_closed_session() {
+        use wz_capi_port::{Refusal, SessionEngine};
+        use wz_session_core::query_options::QueryOptions;
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let minted = std::cell::Cell::new(0usize);
+        let ask = |shared: &SharedSession| {
+            SessionEngine::get_on_wire(
+                shared,
+                "wz/get/port",
+                &WireKey::literal(),
+                &QueryOptions::get()
+                    .with_allowed_destination(wz_session_core::locality::Locality::Remote),
+                None,
+                &mut || -> wz_capi_port::ReplyCallback {
+                    minted.set(minted.get() + 1);
+                    wz_capi_port::ReplyCallback::shared(
+                        |_view: &dyn wz_session_core::reply_sink::ReplyView| {},
+                    )
+                },
+            )
+        };
+        assert_eq!(ask(&shared), Ok(0), "CONTROL: an open session with no face");
+        shared
+            .closed_latch()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(ask(&shared), Err(Refusal::Closed));
+        assert_eq!(minted.get(), 0, "no leg was minted");
     }
 
     /// The session numbers every declaration from one `u32` space, upstream's `EntityId`: it
@@ -10155,7 +10304,7 @@ mod face_up_order_tests {
         let asked = |links: LinkRestriction| {
             let own = Arc::new(AtomicUsize::new(0));
             let counted = own.clone();
-            let mut mint = move || -> wz_capi_port::ReplyCallback {
+            let mut mint = move || -> ReplyCallback {
                 let counted = counted.clone();
                 Box::new(move |_view: &dyn ReplyView| {
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -10211,8 +10360,7 @@ mod face_up_order_tests {
         let engine = shared.engine_ref();
 
         let asked = |links: LinkRestriction| {
-            let mut mint =
-                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            let mut mint = || wz_capi_port::ReplyCallback::shared(|_view: &dyn ReplyView| {});
             SessionEngine::liveliness_get_on_link_set(
                 engine,
                 "wz/link/live",
@@ -10225,18 +10373,16 @@ mod face_up_order_tests {
         };
         assert_eq!(
             asked(LinkRestriction::only([1]).expect("one slot")),
-            Ok(Some(1)),
+            Ok(1),
             "a set is honoured: the one link it names is asked"
         );
         assert_eq!(
             asked(LinkRestriction::Any),
-            Ok(Some(2)),
+            Ok(2),
             "no set: every link is asked"
         );
 
-        let sink: SubscriberSink = Arc::new(|| {
-            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
-        });
+        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let limited = SessionEngine::declare_subscriber_on_link_set(
             engine,
             "wz/link/sub",
@@ -10247,7 +10393,7 @@ mod face_up_order_tests {
             sink,
         );
         assert!(
-            matches!(limited, Ok(Some(_))),
+            limited.is_ok(),
             "a subscriber limited to a link is declared, not refused: {limited:?}"
         );
     }

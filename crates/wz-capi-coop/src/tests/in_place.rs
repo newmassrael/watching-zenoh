@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{SessionEngine, WireKey};
+use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
@@ -20,20 +20,16 @@ fn a_push_read_in_place_reaches_the_subscriber() {
     let engine = open(&router);
     let got = Arc::new(Mutex::new(Vec::new()));
     let into = got.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
+    engine
+        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
             let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
                 into.lock()
                     .unwrap()
                     .push((sample.keyexpr().to_owned(), sample.payload().to_vec()));
             })
-        }),
-    );
+        })
+        .expect("the session declares the subscriber");
     until(&engine, "the router to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
@@ -56,7 +52,7 @@ fn a_reply_read_in_place_answers_its_get() {
     let engine = open(&router);
     settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
     let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
-    assert_eq!(issued, Some(1), "one leg: the link's peer");
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
     until(&engine, "the leg to end", || leg.lock().unwrap().ended);
     assert_eq!(
         leg.lock().unwrap().replies,

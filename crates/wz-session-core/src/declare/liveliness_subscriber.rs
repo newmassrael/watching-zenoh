@@ -595,6 +595,23 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberRegistry<C, P> {
         self.table.replay_known_tokens(&self.peer, interest_id)
     }
 
+    /// [`LivelinessSubscriberTable::register_unreplayed`].
+    pub fn register_unreplayed(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        history: bool,
+        sink: C,
+    ) -> Result<bool, RegisterError> {
+        self.table
+            .register_unreplayed(interest_id, keyexpr, history, sink)
+    }
+
+    /// [`LivelinessSubscriberTable::next_known_token`] for this registry's peer.
+    pub fn next_known_token(&self, interest_id: u64, after: Option<u64>) -> Option<(u64, &str)> {
+        self.table.next_known_token(&self.peer, interest_id, after)
+    }
+
     /// [`LivelinessSubscriberTable::dispatch_messages`] for this registry's peer.
     #[cfg(feature = "alloc")]
     pub fn dispatch_messages<'a>(
@@ -735,6 +752,49 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         history: bool,
         sink: C,
     ) -> Result<bool, RegisterError> {
+        if !self.insert_slot(interest_id, keyexpr, history, sink)? {
+            return Ok(false);
+        }
+        // R311y790 — a history subscriber is owed the tokens THIS session
+        // already knows before the peer's CURRENT reply adds any. Both
+        // upstreams do the replay inside their register function
+        // (zenoh-pico `_z_register_liveliness_subscriber` calls
+        // `_z_liveliness_subscription_trigger_history` between the register
+        // and the Interest emit, `vendor/zenoh-pico/src/net/liveliness.c`
+        // @ `_z_liveliness_subscription_trigger_history(_Z_RC_IN_VAL(zn)`; zenoh runs
+        // it before `send_interest`, `zenoh/src/api/session.rs`
+        // @ `let known_tokens = if history {`), and so
+        // does this — folding it in is what makes both wz declare paths
+        // (literal and aliased) correct with one rule instead of two
+        // call-site copies that can drift.
+        if history {
+            self.replay_known_tokens(peer, interest_id);
+        }
+        Ok(true)
+    }
+
+    /// [`Self::register`] with no replay: a subscriber with `history` is marked so, and is handed
+    /// the tokens this session already knows by its caller, one at a time
+    /// ([`Self::next_known_token`]), as an engine that calls its callbacks with no lock held
+    /// hands them.
+    pub fn register_unreplayed(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        history: bool,
+        sink: C,
+    ) -> Result<bool, RegisterError> {
+        self.insert_slot(interest_id, keyexpr, history, sink)
+    }
+
+    /// Hold a slot for subscriber `interest_id` on `keyexpr`: `false` for an id held already.
+    fn insert_slot(
+        &mut self,
+        interest_id: u64,
+        keyexpr: &str,
+        history: bool,
+        sink: C,
+    ) -> Result<bool, RegisterError> {
         // Duplicate check by linear scan (the slot table is a `BoundedVec`
         // now, not a keyed map). Fresh ids come from
         // `alloc_next_interest_id`, so a collision is a programming error.
@@ -760,20 +820,6 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 history_complete: false,
             })
             .map_err(|_| RegisterError::TableFull)?;
-        // R311y790 — a history subscriber is owed the tokens THIS session
-        // already knows before the peer's CURRENT reply adds any. Both
-        // upstreams do the replay inside their register function
-        // (zenoh-pico `_z_register_liveliness_subscriber` calls
-        // `_z_liveliness_subscription_trigger_history` between the register
-        // and the Interest emit, `src/net/liveliness.c:196-209`; zenoh runs
-        // it before `send_interest`, `zenoh/src/api/session.rs`
-        // @ `let known_tokens = if history {`), and so
-        // does this — folding it in is what makes both wz declare paths
-        // (literal and aliased) correct with one rule instead of two
-        // call-site copies that can drift.
-        if history {
-            self.replay_known_tokens(peer, interest_id);
-        }
         Ok(true)
     }
 
@@ -1207,10 +1253,26 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         &mut self,
         peer: &mut PeerTokens<Q>,
     ) -> usize {
+        self.flush_peer_tokens_on_link_loss_while(peer, &mut || true)
+            .0
+    }
+
+    /// [`Self::flush_peer_tokens_on_link_loss`] for a caller whose subscribers take a bounded
+    /// number of samples at a time: before each token `room` says whether its `Delete` can be
+    /// taken now, and the tokens left when it says no stay in `peer` for a later call, in the
+    /// same order. How many were flushed, and whether none is left.
+    pub fn flush_peer_tokens_on_link_loss_while<Q: Storage>(
+        &mut self,
+        peer: &mut PeerTokens<Q>,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool) {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
             while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
+                if !room() {
+                    return (flushed, false);
+                }
                 let Some(keyexpr) = peer.table.unbind(id) else {
                     break;
                 };
@@ -1225,12 +1287,12 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
                 );
                 flushed += 1;
             }
-            flushed
+            (flushed, true)
         }
         #[cfg(not(feature = "storage-profile"))]
         {
-            let _ = peer;
-            0
+            let _ = (peer, room);
+            (0, true)
         }
     }
 
@@ -1281,62 +1343,67 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         peer: &PeerTokens<Q>,
         interest_id: u64,
     ) -> usize {
+        // S9a — replayed in ascending token id, one at a time, with nothing collected: each round
+        // finds the lowest matching id above the last one fired.
+        let mut replayed = 0usize;
+        let mut after: Option<u64> = None;
+        while let Some((token_id, keyexpr)) = self.next_known_token(peer, interest_id, after) {
+            let Some(slot) = self.slots.iter_mut().find(|s| s.interest_id == interest_id) else {
+                break;
+            };
+            slot.sink.on_sample(LivelinessSample {
+                kind: LivelinessSampleKind::Put,
+                keyexpr,
+                token_id,
+            });
+            replayed += 1;
+            after = Some(token_id);
+        }
+        replayed
+    }
+
+    /// The token of `peer` subscriber `interest_id` is owed next by its history: the one of the
+    /// lowest id above `after` (any, for `None`) whose keyexpr intersects the subscriber's
+    /// pattern. `None` once there is none, for an id no slot holds, and on a backing with no peer
+    /// token table. The scan is over at most `caps::MAX_REMOTE_DECLS` rows.
+    pub fn next_known_token<'p, Q: Storage>(
+        &self,
+        peer: &'p PeerTokens<Q>,
+        interest_id: u64,
+        after: Option<u64>,
+    ) -> Option<(u64, &'p str)> {
         #[cfg(feature = "storage-profile")]
         {
-            let slots = &mut self.slots;
             let peer_token_table = &peer.table;
             if !peer_token_table.is_bound() {
-                return 0;
+                return None;
             }
-            let slot = match slots.iter_mut().find(|s| s.interest_id == interest_id) {
-                Some(s) => s,
-                None => return 0,
-            };
-            // S9a — replayed in ascending token id, one at a time, with nothing
-            // collected: each round finds the lowest matching id above the last
-            // one fired. The scan is over at most `caps::MAX_REMOTE_DECLS` rows.
-            let mut replayed = 0usize;
-            let mut after: Option<u64> = None;
-            loop {
-                // R2662 (open-debt item 763) — INTERSECTION. A TOKEN's keyexpr
-                // may itself be a pattern: `local_token.rs` @ `pub fn register`
-                // constrains only the id, the byte length and the table
-                // capacity, and upstream's `declare_token` takes a
-                // `TryIntoKeyExpr` with no wildcard refusal either. Reading the
-                // token keyexpr as a LITERAL key would mean a subscriber on
-                // `demo/a` never saw a token declared on `demo/*`.
-                // On the fixed backing an over-deep TOKEN keyexpr is skipped
-                // rather than intersected truncated: the matcher applies the
-                // chunk bound itself, the same refusal `fan_to_matching_slots`
-                // gets from it.
-                let mut next: Option<(u64, &str)> = None;
-                for (token_id, keyexpr) in peer_token_table.entries() {
-                    if after.is_some_and(|last| token_id <= last)
-                        || next.is_some_and(|(lowest, _)| token_id >= lowest)
-                    {
-                        continue;
-                    }
-                    if keyexpr_intersects(&slot.pattern, keyexpr.as_ref()) {
-                        next = Some((token_id, keyexpr.as_ref()));
-                    }
+            let slot = self.slots.iter().find(|s| s.interest_id == interest_id)?;
+            // R2662 (open-debt item 763) — INTERSECTION. A TOKEN's keyexpr may itself be a
+            // pattern: `local_token.rs` @ `pub fn register` constrains only the id, the byte
+            // length and the table capacity, and upstream's `declare_token` takes a
+            // `TryIntoKeyExpr` with no wildcard refusal either. Reading the token keyexpr as a
+            // LITERAL key would mean a subscriber on `demo/a` never saw a token declared on
+            // `demo/*`. On the fixed backing an over-deep TOKEN keyexpr is skipped rather than
+            // intersected truncated: the matcher applies the chunk bound itself, the same refusal
+            // `fan_to_matching_slots` gets from it.
+            let mut next: Option<(u64, &'p str)> = None;
+            for (token_id, keyexpr) in peer_token_table.entries() {
+                if after.is_some_and(|last| token_id <= last)
+                    || next.is_some_and(|(lowest, _)| token_id >= lowest)
+                {
+                    continue;
                 }
-                let Some((token_id, keyexpr)) = next else {
-                    break;
-                };
-                slot.sink.on_sample(LivelinessSample {
-                    kind: LivelinessSampleKind::Put,
-                    keyexpr,
-                    token_id,
-                });
-                replayed += 1;
-                after = Some(token_id);
+                if keyexpr_intersects(&slot.pattern, keyexpr.as_ref()) {
+                    next = Some((token_id, keyexpr.as_ref()));
+                }
             }
-            replayed
+            next
         }
         #[cfg(not(feature = "storage-profile"))]
         {
-            let _ = (peer, interest_id);
-            0
+            let _ = (peer, interest_id, after);
+            None
         }
     }
 
@@ -2179,6 +2246,47 @@ mod tests {
         );
     }
 
+    /// A subscriber registered without its replay is handed nothing at its registration, and the
+    /// tokens it is owed are read one at a time, in ascending id, each found after the one before
+    /// it: what an engine that calls its callbacks with no lock held walks, so no token it is owed
+    /// is left out however many there are.
+    #[test]
+    fn an_unreplayed_subscribers_tokens_are_read_one_at_a_time() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        for (id, ke) in [(9u64, "liveliness/c"), (7, "liveliness/a"), (8, "other/b")] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        assert!(reg
+            .register_unreplayed(1, "liveliness/*", true, make_subscriber(sink.clone()))
+            .unwrap());
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "nothing is handed at the registration"
+        );
+        let mut walked = Vec::new();
+        let mut after = None;
+        while let Some((id, key)) = reg.next_known_token(1, after) {
+            walked.push((id, key.to_string()));
+            after = Some(id);
+        }
+        assert_eq!(
+            walked,
+            [
+                (7, "liveliness/a".to_string()),
+                (9, "liveliness/c".to_string())
+            ]
+        );
+        assert_eq!(
+            reg.next_known_token(2, None),
+            None,
+            "CONTROL: an id no subscriber holds is owed nothing"
+        );
+    }
+
     /// R311y790 + R311y769 COMPOSE: after the local replay, the peer's own
     /// CURRENT reply for the same token id fires nothing, because
     /// `dispatch_declare` drops a `DeclToken` whose id the table already
@@ -2257,6 +2365,53 @@ mod tests {
             "the table is emptied, so a re-declare after reopen is a fresh Put \
              rather than a second one for a token the app was never told died"
         );
+    }
+
+    /// A link loss retracted while `room` allows stops where it says no: the
+    /// tokens left stay in the table, and a later call retracts them in the
+    /// same order, so no Delete is lost to a caller that had no room for it.
+    #[test]
+    fn link_loss_flushed_while_there_is_room_leaves_the_rest_for_later() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        for (id, ke) in [
+            (7u64, "liveliness/a"),
+            (3, "liveliness/b"),
+            (9, "liveliness/c"),
+        ] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(ke))),
+                &HashMap::new(),
+            );
+        }
+        sink.lock().unwrap().clear();
+        let mut allowed = 1usize;
+        let mut once = || {
+            let fits = allowed > 0;
+            allowed = allowed.saturating_sub(1);
+            fits
+        };
+        assert_eq!(
+            reg.table
+                .flush_peer_tokens_on_link_loss_while(&mut reg.peer, &mut once),
+            (1, false),
+            "one Delete had room, the rest wait"
+        );
+        assert_eq!(reg.peer_token_count(), 2, "the rest stay in the table");
+        assert_eq!(
+            reg.table
+                .flush_peer_tokens_on_link_loss_while(&mut reg.peer, &mut || true),
+            (2, true)
+        );
+        let names: Vec<String> = sink.lock().unwrap().iter().map(|c| c.1.clone()).collect();
+        assert_eq!(
+            names,
+            ["liveliness/b", "liveliness/a", "liveliness/c"],
+            "the same order as one flush"
+        );
+        assert_eq!(reg.peer_token_count(), 0);
     }
 
     /// The negative arm: a flush with nothing registered is a no-op that fires

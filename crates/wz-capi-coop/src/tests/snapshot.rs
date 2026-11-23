@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
-use wz_capi_port::{ReplyCallback, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use super::{open, until, CatchAll, Command, Engine, Router};
@@ -40,21 +40,21 @@ fn ask(
     timeout_ms: u32,
     fan: Option<&CancellableFan>,
     registration: Option<Arc<Registration>>,
-) -> (Option<usize>, Arc<Mutex<Leg>>) {
+) -> (Result<usize, Refusal>, Arc<Mutex<Leg>>) {
     let leg = Arc::new(Mutex::new(Leg::default()));
     let seen = leg.clone();
     let issued =
         engine.liveliness_get_on_wire(keyexpr, &WireKey::literal(), timeout_ms, fan, &mut || {
             let ends = Ends(seen.clone());
             let registration = registration.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &registration;
                 ends.0.lock().unwrap().replies.push((
                     view.kind(),
                     view.keyexpr().to_owned(),
                     view.payload().to_vec(),
                 ));
-            }) as ReplyCallback
+            })
         });
     (issued, leg)
 }
@@ -86,7 +86,7 @@ fn a_snapshot_lists_the_tokens_alive_and_ends_with_its_final() {
         router.seen(|s| s.held == 3)
     });
     let (issued, leg) = ask(&engine, "demo/snap/**", 0, None, None);
-    assert_eq!(issued, Some(1), "one leg: the link's peer");
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
     {
         let leg = leg.lock().unwrap();
         assert!(
@@ -106,6 +106,22 @@ fn a_snapshot_lists_the_tokens_alive_and_ends_with_its_final() {
     );
 }
 
+/// A snapshot asked of a closed session is refused as closed and mints no leg: it is not answered
+/// as one that reached nobody.
+#[test]
+fn a_snapshot_on_a_closed_session_is_refused_as_closed() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    SessionDrive::close(&*engine);
+    let (issued, leg) = ask(&engine, "demo/snap/**", 0, None, None);
+    assert_eq!(issued, Err(Refusal::Closed));
+    let leg = leg.lock().unwrap();
+    assert!(
+        leg.replies.is_empty() && !leg.ended,
+        "no leg was minted, so none ended"
+    );
+}
+
 /// A snapshot of a key nothing is alive on ends with the DeclFinal alone: no reply, no timeout.
 #[test]
 fn a_snapshot_of_nothing_alive_ends_with_the_final_alone() {
@@ -116,7 +132,7 @@ fn a_snapshot_of_nothing_alive_ends_with_the_final_alone() {
         router.seen(|s| s.held == 1)
     });
     let (issued, leg) = ask(&engine, "demo/nothing/**", 0, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     until(&engine, "the snapshot to end", || leg.lock().unwrap().ended);
     assert!(leg.lock().unwrap().replies.is_empty());
 }
@@ -135,7 +151,7 @@ fn a_snapshot_nobody_answers_ends_at_its_deadline() {
     let before = router.seen(|s| s.interests);
     let asked = Instant::now();
     let (issued, leg) = ask(&engine, "demo/snap/a", 300, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     while asked.elapsed() < Duration::from_millis(150) {
         let _ = SessionDrive::read(&*engine, false);
     }
@@ -169,10 +185,10 @@ fn a_snapshot_asks_no_face_once_the_interest_ids_are_spent() {
         router.seen(|s| s.settled)
     });
     let (issued, _open_leg) = ask(&engine, "demo/snap/a", 0, None, None);
-    assert_eq!(issued, Some(1), "CONTROL: one leg while ids remain");
+    assert_eq!(issued, Ok(1), "CONTROL: one leg while ids remain");
     engine.spend_interest_ids();
     let (issued, leg) = ask(&engine, "demo/snap/b", 0, None, None);
-    assert_eq!(issued, Some(0), "no face is asked once the ids are spent");
+    assert_eq!(issued, Ok(0), "no face is asked once the ids are spent");
     assert!(leg.lock().unwrap().replies.is_empty());
 }
 
@@ -197,7 +213,7 @@ fn a_cancelled_snapshot_ends_without_a_step() {
         Some(registration.clone()),
     );
     drop(registration);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     assert!(
         !leg.lock().unwrap().ended,
         "CONTROL: open before the cancel"
@@ -221,7 +237,7 @@ fn a_snapshot_ends_with_its_link() {
     });
     let before = router.seen(|s| s.interests);
     let (issued, leg) = ask(&engine, "demo/snap/a", 0, None, None);
-    assert_eq!(issued, Some(1));
+    assert_eq!(issued, Ok(1));
     until(&engine, "the Interest to reach the router", || {
         router.seen(|s| s.interests) == before + 1
     });

@@ -241,6 +241,12 @@ netns_sandbox_exec() {
 # witness that needs the route states that premise itself, so a refusal is said
 # on stderr and the command still runs.
 _netns_sandbox_host_side() {
+    # zenoh-pico's own CI turns multicast on for the loopback before its tests
+    # (vendor/zenoh-pico/.github/workflows/integration.yaml @ `ip link set lo multicast on`):
+    # its peer-to-peer cases meet on a group bound to `lo`. A fresh namespace's `lo` has
+    # the flag off, so the sandbox gives it the flag the programs are written against.
+    ip link set lo multicast on 2>/dev/null \
+        || echo "netns sandbox: lo takes no multicast flag; a program that meets on a group over lo will say so" >&2
     if ip link add wzhost0 type dummy 2>/dev/null \
         && ip link set wzhost0 multicast on 2>/dev/null \
         && ip addr add 10.250.255.1/24 dev wzhost0 2>/dev/null \

@@ -38,7 +38,7 @@ use wz_capi_port::cancellation::CancellationToken;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::WireKey;
 use wz_capi_port::{LivelinessSink, TokenId};
-use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
+use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
 use crate::ffi::{guard_val, guarded};
@@ -48,7 +48,7 @@ use crate::pubsub::{
     z_moved_closure_sample_t, z_owned_closure_sample_t, z_owned_subscriber_t, CClosure,
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
+use crate::result::{refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
@@ -134,14 +134,14 @@ impl TokenState {
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
-        let Some(id) = session.engine.declare_liveliness_token_on_wire(
-            keyexpr,
-            key.wire(Arc::as_ref(&session.engine)),
-            Some(key.retraction_key(Arc::as_ref(&session.engine))),
-        ) else {
-            // The session holds no more tokens: its table is full or its ids are spent.
-            return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
+        let id = session
+            .engine
+            .declare_liveliness_token_on_wire(
+                keyexpr,
+                key.wire(Arc::as_ref(&session.engine)),
+                Some(key.retraction_key(Arc::as_ref(&session.engine))),
+            )
+            .map_err(|refused| refusal_code(refused, Door::Token))?;
         Ok(Self {
             shared: session.engine.clone(),
             id,
@@ -371,12 +371,15 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         };
         let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
-        let Some(id) =
-            engine.declare_liveliness_subscriber_on_wire(&ke, wire, history, sample_sink(cclosure))
-        else {
-            // The session holds no more liveliness subscribers: its table is full or its ids are
-            // spent. The sink was dropped with the refusal.
-            return Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        let id = match engine.declare_liveliness_subscriber_on_wire(
+            &ke,
+            wire,
+            history,
+            sample_sink(cclosure),
+        ) {
+            Ok(id) => id,
+            // The sink was dropped with the refusal.
+            Err(refused) => return refusal_code(refused, Door::Entity),
         };
         let state = slot.fill(SubscriberState {
             shared: engine,
@@ -591,14 +594,30 @@ pub unsafe extern "C" fn z_liveliness_get(
     })
 }
 
-/// The factory an engine mints a liveliness subscriber's callbacks with, over the C closure.
-///
-/// R311y498 — the ABI shim mints the callback; the engine only calls the factory (once per face).
-/// The `Arc<CClosure>` lives in the factory, so the C `drop(context)` still fires when the last
-/// one is released.
+/// A C liveliness subscriber's closure as the engine holds it, as a subscriber's is
+/// (`pubsub::subscriber_sink`): moved into one allocation at the declaration, its address the
+/// context of a raw callback, called through a shared borrow from any thread and from inside
+/// itself, and let go of once, after its last call, which runs its C `drop(context)` and opens its
+/// latch.
 pub(crate) fn sample_sink(cclosure: CClosure) -> LivelinessSink {
-    let closure = Arc::new(cclosure);
-    Arc::new(move || Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>)
+    /// # Safety
+    /// `context` is the closure `sample_sink` moved into its allocation, not yet dropped.
+    unsafe fn call(context: *mut c_void, sample: LivelinessSample<'_>) {
+        // SAFETY: the caller's contract.
+        let closure = unsafe { &*context.cast::<CClosure>().cast_const() };
+        crate::pubsub::hand_liveliness(closure, sample);
+    }
+    /// # Safety
+    /// As `call`'s, and nothing calls it again.
+    unsafe fn release(context: *mut c_void) {
+        // SAFETY: the caller's contract: the allocation is `sample_sink`'s, given back once.
+        drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
+    }
+    let context = Box::into_raw(Box::new(cclosure)).cast::<c_void>();
+    // SAFETY: as `pubsub::subscriber_sink`'s: `call` reads the closure through a shared borrow,
+    // which a C closure admits from any thread and from inside itself, and `release` gives the
+    // allocation back once, after the last call.
+    unsafe { LivelinessSink::raw(call, context, Some(release)) }
 }
 
 /// The pico sample kind for a wz liveliness event.
@@ -671,8 +690,8 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
             history,
             sample_sink(cclosure),
         ) {
-            Some(_) => Z_OK,
-            None => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            Ok(_) => Z_OK,
+            Err(refused) => refusal_code(refused, Door::Entity),
         }
     })
 }

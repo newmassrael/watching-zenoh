@@ -42,7 +42,7 @@
 //!   `PICO_UNICAST_BATCH_BYTES` under the build's; these are the rows lent when the session opens,
 //!   first;
 //! - the session's delivery lane (`DELIVERY_LANE_BYTES`, under the build's), the bytes of what
-//!   it hands its subscribers' callbacks after its lock (`crate::lane`), lent next;
+//!   it hands its subscribers' callbacks after its lock (`crate::round`), lent next;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`LENT_CHAINS` of `wz_runtime_coop::reassembly_rx`, one for each
 //!   reliability a peer has a chain open in), each buffer claimed when a chain's first fragment
@@ -108,11 +108,11 @@ use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
-use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{EntryBytes, SubscriberRow};
+use crate::engine::{EntryBytes, LegSink, SubscriberRow};
 use crate::CoopConfig;
 
 /// One part of what an arena holds: `count` items of `entry_bytes` each.
@@ -235,7 +235,7 @@ impl GetTables {
 }
 
 /// One face's table of pending gets, as the arena lends it.
-type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Lent>;
+type FaceGets = Requesters<ConsolidatingSink<LegSink>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -275,7 +275,7 @@ pub struct ArenaPlan {
     links: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
-    /// The bytes of the session's delivery lane (`crate::lane`).
+    /// The bytes of the session's round of deliveries (`crate::round`).
     lane_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
@@ -465,7 +465,7 @@ impl ArenaPlan {
             "ended legs",
             "MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS",
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
-            core::mem::size_of::<u64>(),
+            core::mem::size_of::<crate::engine::Ended>(),
         )?;
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
         // peers write by their own choice lies in pools the faces share, one area each.

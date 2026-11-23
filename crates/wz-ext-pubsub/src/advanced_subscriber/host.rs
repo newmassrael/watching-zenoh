@@ -37,7 +37,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
 use wz_capi_port::{
-    LivelinessSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId, WireKey,
+    LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker, TokenId,
+    WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
@@ -61,9 +62,6 @@ use super::state::{Miss, MissHandlers, RecoveryRequest, SampleMissListener, Stat
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
-/// One callback a subscription's sink mints: it reads each sample the subscription delivers.
-type SampleCallback = Box<dyn FnMut(&dyn SampleView) + Send>;
-
 /// Why declaring an advanced subscriber on an engine failed.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -81,6 +79,21 @@ pub enum HostError {
         /// Which knob: `"max_samples"` or `"max_age"`.
         knob: &'static str,
     },
+    /// The engine refused a declaration the subscriber is made of, for this cause.
+    Declined(Refusal),
+}
+
+impl HostError {
+    /// The engine's refusal of `what`, one of the declarations a subscriber is made of: a spent
+    /// id space and a plane this build does not hold keep the names they had, and any other
+    /// cause is carried as the engine gave it.
+    fn of(what: &'static str) -> impl FnOnce(Refusal) -> Self {
+        move |refused| match refused {
+            Refusal::NoEntityId => Self::IdsExhausted,
+            Refusal::NotBuilt => Self::Refused(what),
+            other => Self::Declined(other),
+        }
+    }
 }
 
 impl core::fmt::Display for HostError {
@@ -91,6 +104,9 @@ impl core::fmt::Display for HostError {
                 f.write_str("the session has handed out every 32-bit declaration id")
             }
             Self::HistoryBoundZero { knob } => write!(f, "history {knob} must not be zero"),
+            Self::Declined(refused) => {
+                write!(f, "the engine refused an advanced subscriber: {refused}")
+            }
         }
     }
 }
@@ -323,20 +339,18 @@ impl EngineSubscriber {
         // The live subscription.
         let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(&base_keyexpr));
         let live_shared = Arc::clone(&shared);
-        let live_sink: SubscriberSink = Arc::new(move || -> SampleCallback {
-            let shared = Arc::clone(&live_shared);
-            Box::new(move |view: &dyn SampleView| {
-                if shared.is_closing() {
-                    return;
-                }
-                let now = shared.now_ms();
-                let request = shared.lock().handle_live(view, now);
-                // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback
-                // answer re-enters the state.
-                if let Some(request) = request {
-                    issue_recovery_query(&shared, request);
-                }
-            })
+        let live_sink = SubscriberSink::shared(move |view: &dyn SampleView| {
+            let shared = &live_shared;
+            if shared.is_closing() {
+                return;
+            }
+            let now = shared.now_ms();
+            let request = shared.lock().handle_live(view, now);
+            // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback answer
+            // re-enters the state.
+            if let Some(request) = request {
+                issue_recovery_query(shared, request);
+            }
         });
         let subscriber = declare_subscription(
             engine,
@@ -368,7 +382,7 @@ impl EngineSubscriber {
                             true
                         }),
                     )
-                    .ok_or(HostError::Refused("the engine runs no periodic jobs"))?,
+                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
                 )
             }
             None => None,
@@ -392,7 +406,7 @@ impl EngineSubscriber {
                             true
                         }),
                     )
-                    .ok_or(HostError::Refused("the engine runs no periodic jobs"))?,
+                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
                 )
             }
             None => None,
@@ -413,23 +427,13 @@ impl EngineSubscriber {
                 .map(|h| (h.sample_depth, h.max_age))
                 .unwrap_or((None, None));
             let lp_shared = Arc::clone(&shared);
-            let sink: LivelinessSink = Arc::new(
-                move || -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send> {
-                    let shared = Arc::clone(&lp_shared);
-                    Box::new(move |sample: LivelinessSample<'_>| {
-                        if shared.is_closing() {
-                            return;
-                        }
-                        on_late_publisher_detected(
-                            &shared,
-                            sample.kind,
-                            sample.keyexpr,
-                            depth,
-                            age,
-                        );
-                    })
-                },
-            );
+            let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
+                let shared = &lp_shared;
+                if shared.is_closing() {
+                    return;
+                }
+                on_late_publisher_detected(shared, sample.kind, sample.keyexpr, depth, age);
+            });
             Some(declare_liveliness_subscription(
                 engine, &keyexpr, &form, true, sink,
             )?)
@@ -444,27 +448,25 @@ impl EngineSubscriber {
             if crate::advanced_ke::adv_ke_is_outbound_safe(&keyexpr) {
                 let form = form_of(forms.as_ref(), |f| f.heartbeat(&keyexpr));
                 let hb_shared = Arc::clone(&shared);
-                let sink: SubscriberSink = Arc::new(move || -> SampleCallback {
-                    let shared = Arc::clone(&hb_shared);
-                    Box::new(move |view: &dyn SampleView| {
-                        if shared.is_closing() || view.kind() != SampleKind::Put {
-                            return;
-                        }
-                        // Sequenced only: a heartbeat's payload IS a sequence number.
-                        let Some(AdvPublisherSource::Sequenced { zid, eid }) =
-                            parse_heartbeat_source(view.keyexpr())
-                        else {
-                            return;
-                        };
-                        let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
-                            return;
-                        };
-                        let now = shared.now_ms();
-                        let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
-                        if let Some(request) = request {
-                            issue_recovery_query(&shared, request);
-                        }
-                    })
+                let sink = SubscriberSink::shared(move |view: &dyn SampleView| {
+                    let shared = &hb_shared;
+                    if shared.is_closing() || view.kind() != SampleKind::Put {
+                        return;
+                    }
+                    // Sequenced only: a heartbeat's payload IS a sequence number.
+                    let Some(AdvPublisherSource::Sequenced { zid, eid }) =
+                        parse_heartbeat_source(view.keyexpr())
+                    else {
+                        return;
+                    };
+                    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
+                        return;
+                    };
+                    let now = shared.now_ms();
+                    let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
+                    if let Some(request) = request {
+                        issue_recovery_query(shared, request);
+                    }
                 });
                 Some(declare_subscription(
                     engine,
@@ -612,7 +614,7 @@ fn declare_subscription(
             form.retraction().cloned(),
             sink,
         )
-        .ok_or(HostError::IdsExhausted)?;
+        .map_err(HostError::of("the engine has no subscribers"))?;
     Ok(Held {
         entity: Subscription {
             engine: Arc::clone(engine),
@@ -633,7 +635,7 @@ fn declare_liveliness_subscription(
 ) -> Result<Held<Subscription>, HostError> {
     let id = engine
         .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
-        .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
+        .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Held {
         entity: Subscription {
             engine: Arc::clone(engine),
@@ -672,7 +674,7 @@ fn declare_detection_token(
     });
     let token = engine
         .declare_liveliness_token_on_wire(&ke, wire_of(&form), retraction)
-        .ok_or(HostError::Refused("the engine has no liveliness plane"))?;
+        .map_err(HostError::of("the engine has no liveliness plane"))?;
     Ok(Some(Held {
         entity: Token {
             engine: Arc::clone(engine),
@@ -723,7 +725,7 @@ fn issue_get(
     });
     let mut leg = || -> ReplyCallback {
         let end = Arc::clone(&end);
-        Box::new(move |reply: &dyn ReplyView| {
+        ReplyCallback::shared(move |reply: &dyn ReplyView| {
             let shared = &end.shared;
             if shared.is_closing() {
                 return;
