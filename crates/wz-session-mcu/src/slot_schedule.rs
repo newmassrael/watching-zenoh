@@ -74,29 +74,33 @@ impl<const N: usize> Schedule<N> {
         items: &[T],
         mut send: impl FnMut(usize, &T) -> Outcome,
     ) -> Option<u64> {
-        let count = items.len().min(N);
         if !self.armed {
-            self.due[..count].fill(now_ms);
+            self.due
+                .iter_mut()
+                .take(items.len())
+                .for_each(|due| *due = now_ms);
             self.armed = true;
         }
+        // A deadline past the clock's range saturates: that item is not due again.
         let mut earliest: Option<u64> = None;
-        for (at, item) in items.iter().take(count).enumerate() {
-            if now_ms >= self.due[at] {
-                self.due[at] = match send(at, item) {
-                    Outcome::Retry => now_ms + RETRY_MS,
+        for (at, (due, item)) in self.due.iter_mut().zip(items).enumerate() {
+            if now_ms >= *due {
+                *due = match send(at, item) {
+                    Outcome::Retry => now_ms.saturating_add(RETRY_MS),
                     Outcome::Sent | Outcome::Refused => {
                         let period = u64::from(item.period_ms().max(1));
-                        let next = self.due[at] + period;
+                        let next = due.saturating_add(period);
                         // A loop that was late sends once and counts again from here.
                         if next > now_ms {
                             next
                         } else {
-                            now_ms + period
+                            now_ms.saturating_add(period)
                         }
                     }
                 };
             }
-            earliest = Some(earliest.map_or(self.due[at], |e| e.min(self.due[at])));
+            let due = *due;
+            earliest = Some(earliest.map_or(due, |e| e.min(due)));
         }
         earliest
     }

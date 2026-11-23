@@ -164,8 +164,6 @@ pub mod slot_plane;
 ))]
 pub mod slot_group;
 // When a querier's gets are due, and the outcome of a send that a publisher's puts share.
-// Totality debt TD-214 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_schedule;
 // A querier of the client node: a query asked every period, whose latest reply the node keeps.
