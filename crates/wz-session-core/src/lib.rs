@@ -1170,12 +1170,6 @@ pub mod json;
 // outer `///` doc: a module with both has its inner `//!` doc's links resolved
 // from this scope, where `DocOut`, `JsonOut`, `CborOut` and `cbor` are not.
 #[cfg(feature = "alloc")]
-// Totality debt TD-007 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod doc_out;
 
 /// R311y842 — the READ direction of [`json`]: a hand-rolled JSON5 reader, so
