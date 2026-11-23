@@ -1429,7 +1429,29 @@ impl KeptChain for Vec<ExtEntryOwned> {
 impl KeptChain for InPlaceExtChain {
     fn keep<'a>(
         mid: u8,
-        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+        mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+    ) -> Result<Self, InboundParseError> {
+        Self::fold(mid, &mut walked)
+    }
+}
+
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "storage-profile",
+    any(
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+impl InPlaceExtChain {
+    /// The fold of [`KeptChain::keep`], over the walk as a trait object: each message's header
+    /// document has a walk type of its own (the Frame's, the Fragment's), and the fold is
+    /// compiled once for all of them. A header's chain is a few entries at most, so a call through
+    /// the table per entry costs nothing a receive can see.
+    #[inline(never)]
+    fn fold<'a>(
+        mid: u8,
+        walked: &mut dyn Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
     ) -> Result<Self, InboundParseError> {
         #[cfg(feature = "session-unicast")]
         let carrier = crate::ext_admit::ExtCarrier::Transport(mid);
