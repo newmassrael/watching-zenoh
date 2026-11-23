@@ -198,7 +198,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // count the runtime reports is the number of peers a put reached, which
         // a filter that held the sample back makes 0 — a put with no recipient,
         // and `Z_OK`.
-        match publisher.publish(payload, &pico_publish(options)) {
+        match publisher.publish(payload, pico_publish(options)) {
             code if code == Z_OK => Ok(payload.len()),
             // Dropped behind a held conduit: the same drop, so the advanced put answers it as
             // the plain one does.
@@ -220,7 +220,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             // Through the beacon publisher, as pico's heartbeat task does, so
             // the beacon is held back while nothing subscribes to it.
             Some(publisher) => {
-                let _ = publisher.publish(payload, &options);
+                let _ = publisher.publish(payload, options);
             }
             // An on-demand beacon from a publisher that declared none: on the
             // key itself.

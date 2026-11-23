@@ -1314,10 +1314,10 @@ impl PublisherQos {
     }
 
     /// `opts` as this publisher sends it: its QoS on top of whatever the call
-    /// carried, and its encoding when the call carried none.
-    fn apply(&self, opts: &PublishOptions) -> PublishOptions {
+    /// carried, and its encoding when the call carried none. Taken by value, so the call's
+    /// attachment and encoding move into what is sent and are not copied.
+    fn apply(&self, opts: PublishOptions) -> PublishOptions {
         let mut out = opts
-            .clone()
             .with_priority(self.priority)
             .with_congestion_control(self.congestion_control)
             .with_express(self.is_express)
@@ -1366,7 +1366,7 @@ impl PlainPublisher {
             declared.counts_local(),
         )?;
         let plain = declared
-            .apply(&put_options())
+            .apply(put_options())
             .plain_put_params()
             .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
@@ -1392,7 +1392,7 @@ impl PlainPublisher {
             return Z_ERR_SESSION_CLOSED;
         }
         let Some((params, mapping)) = &self.plain else {
-            return self.publish(payload, &put_options());
+            return self.publish(payload, put_options());
         };
         match self
             .filter
@@ -1402,7 +1402,7 @@ impl PlainPublisher {
             FilteredPut::Sent(sent) => publish_code(sent),
             // Nothing was sent, and the put is wanted: the filter said so, or the session holds
             // a multicast group the filter does not hold the put back from.
-            FilteredPut::NotPlain => self.publish_filtered(payload, &put_options()),
+            FilteredPut::NotPlain => self.publish_filtered(payload, put_options()),
         }
     }
 
@@ -1414,7 +1414,7 @@ impl PlainPublisher {
     /// `!_z_write_filter_active(&pub->_filter)`). A session that holds a multicast group
     /// sends whatever the filter says, as upstream's multicast transport does
     /// ([`WriteFilter::holds_back`]).
-    pub(crate) fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+    pub(crate) fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
@@ -1428,7 +1428,7 @@ impl PlainPublisher {
     }
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
-    fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+    fn publish_filtered(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
         publish_code(
@@ -1484,7 +1484,7 @@ impl PublisherState {
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
-    fn publish(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
+    fn publish(&self, payload: &[u8], opts: PublishOptions) -> ZResult {
         self.core.publish(payload, opts)
     }
 
@@ -1899,6 +1899,48 @@ mod put_options_tests {
                 "the delete's own priority is read"
             );
         }
+    }
+
+    /// A publisher's QoS is laid over what the call carries; the call's attachment and encoding are
+    /// kept as they came, and the publisher's encoding fills in only where the call names none.
+    #[test]
+    fn a_publishers_qos_is_laid_over_the_options_the_call_moves_in() {
+        use super::{put_options, PublisherQos};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::EncodingHint;
+        let declared = PublisherQos {
+            encoding: Some(EncodingHint {
+                packed_id: 2,
+                schema: None,
+            }),
+            reliability: Reliability::BestEffort,
+            ..PublisherQos::pico_default()
+        };
+        let call = put_options()
+            .with_attachment(alloc::vec![7, 8])
+            .with_encoding(EncodingHint {
+                packed_id: 4,
+                schema: None,
+            });
+        let sent = declared.apply(call);
+        assert_eq!(sent.attachment.as_deref(), Some(&[7u8, 8][..]));
+        assert_eq!(
+            sent.encoding.as_ref().map(|encoding| encoding.packed_id),
+            Some(4),
+            "the call's encoding is kept"
+        );
+        assert_eq!(
+            sent.reliability,
+            Reliability::BestEffort,
+            "the publisher's QoS is laid over the call's"
+        );
+        let bare = declared.apply(put_options());
+        assert_eq!(
+            bare.encoding.as_ref().map(|encoding| encoding.packed_id),
+            Some(2),
+            "the publisher's encoding fills the gap"
+        );
+        assert_eq!(bare.attachment, None);
     }
 
     /// A session's put consumes its payload and its options' moved attachment on every path, as
@@ -2524,7 +2566,7 @@ pub unsafe extern "C" fn z_publisher_delete(
                 opts = opts.with_source_info(si);
             }
         }
-        state.publish(&[], &opts)
+        state.publish(&[], opts)
     })
 }
 
@@ -2674,7 +2716,7 @@ pub unsafe extern "C" fn z_publisher_put(
         // timestamp, because all three were being thrown away here. A link is
         // not a pass, and this is what the difference looked like.
         match publisher_put_options(options) {
-            Some(opts) => state.publish(&buf, &opts),
+            Some(opts) => state.publish(&buf, opts),
             None => state.publish_plain(&buf),
         }
     })
