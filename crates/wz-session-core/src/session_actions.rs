@@ -30,8 +30,6 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-#[cfg(feature = "alloc")]
-use hashbrown::HashMap;
 // AtomicU64 portability: the `no_std` (MCU) profile pulls `portable-atomic`
 // (critical-section emulated AtomicU64 for thumbv6m et al.); the host / alloc
 // profile uses the native `core::sync::atomic::AtomicU64`. The session_glue
@@ -180,8 +178,8 @@ use crate::namespace::NamespaceIngress;
 ))]
 use crate::reliability::Reliability;
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
-// R311y739 — this bundle owns `outbound_mappings`, so it IS the `M=0` id space
-// an inbound resolver consults.
+// R311y739 — this bundle answers for the session's own declarations (`own_keyexprs`), so it IS
+// the `M=0` id space an inbound resolver consults.
 use crate::send_declare_error::SendDeclareError;
 use crate::send_wire_error::SendWireError;
 use crate::session_fsm_unicast::SessionFsmUnicastActions as SessionFsmUnicastActionsTrait;
@@ -2202,24 +2200,18 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R2920 — one lock PER CONDUIT (`tx_mutex` was one for the session):
     /// see [`BatchTx`] for why a conduit's lock is all its sender needs.
     pub tx_conduits: TxConduits<R>,
-    /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
-    /// `_z_session_t._local_resources` slot: every time
-    /// `Self::send_declare_keyexpr` emits a `Declare(DeclKexpr)`
-    /// the (mapping_id, suffix) pair is recorded here so a later
-    /// `crate::session::Session::publish_aliased_auto` (or the
-    /// loopback branch of a metadata-rich aliased publish) can
-    /// resolve the literal form without the caller asserting it
-    /// out-of-band. `Self::send_undeclare_kexpr` removes the
-    /// entry so the resolver returns `None` for retracted ids.
+    /// The key expressions this node declared, by the id it gave each (zenoh-pico's
+    /// `_z_session_t._local_resources`): what a later aliased publish, a loopback delivery and
+    /// a received `M=0` alias resolve against. Either this link keeps them, recorded as
+    /// `Self::send_declare_keyexpr` sends each and forgotten as `Self::send_undeclare_kexpr`
+    /// retracts it, or the session keeps one table for all its links and this link reads it
+    /// through the handle the session installed (`Self::install_session_keyexprs`).
     ///
-    /// `Mutex<HashMap>` chosen over RwLock because table writes
-    /// happen on the session-setup path (rare) and reads happen on
-    /// the publish hot path (frequent but short-lived under a
-    /// single-key lookup); the contended-write penalty of RwLock
-    /// would dwarf the read parallelism gain at the expected
-    /// access pattern.
+    /// A mutex rather than a read-write lock: it is written when a key is declared (rare) and
+    /// read one id at a time on the publish path, where a read-write lock's write penalty would
+    /// outweigh the read parallelism it buys.
     #[cfg(feature = "alloc")]
-    pub outbound_mappings: R::Mutex<HashMap<crate::wire_id::ExprId, String>>,
+    own_keyexprs: R::Mutex<crate::declared_keyexprs::LinkKeyexprs>,
     /// What this link knows of the key ids every node of the deployment shares
     /// (`shared-key-ids`), installed by the engine that opened the link
     /// ([`Self::install_link_keys`]): the dictionary, the link's key-wire form and the key form of
@@ -3767,17 +3759,13 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // segregation lets a partial runtime sink (the multicast reply loop)
 // implement only `ResponseSink` without being forced to satisfy the
 // liveliness concerns.
-// R311y739 — the outbound mapping table IS our id space, so the actions bundle
-// that owns it is the thing an inbound resolver should be handed. Declaring it
-// through the trait (rather than copying the table into the registry) keeps ONE
-// copy of the fact: `send_declare_keyexpr` inserts and `send_undeclare_kexpr`
-// removes, and a resolution one microsecond later sees both.
+// R311y739 — the session's own declarations are our id space, and this bundle answers for them
+// (`own_keyexprs`), so it is the thing an inbound resolver is handed. Declaring it through the
+// trait rather than copying the table into the registry keeps ONE copy of the fact: a
+// declaration and its retraction are seen by the next resolution.
 //
-// A pure delegation to the existing R234 read side. The pairing matters more
-// than the body: `resolve_outbound_mapping` was already the publish path's
-// answer to "what did I alias id N to", and this makes the RECEIVE path ask the
-// same question of the same table — before R311y739 the receive path could not
-// ask it at all, so a peer naming our id was answered `None` and dropped.
+// The publish path's answer to "what did I alias id N to" (`resolve_outbound_mapping`) and the
+// receive path's are the same question asked of the same table.
 impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R, T> {
     #[cfg(feature = "alloc")]
     fn resolve_own_mapping(&self, id: crate::wire_id::ExprId) -> Option<String> {
@@ -3793,8 +3781,8 @@ impl<R: SessionRuntime, T: TimeSource> OwnMappingSpace for SessionLinkActions<R,
         id: crate::wire_id::ExprId,
         out: &mut crate::wireexpr_resolve::KeyexprBuf,
     ) -> Option<Result<(), crate::bounded::CapacityFull<()>>> {
-        R::with_mutex_mut(&self.outbound_mappings, |table| {
-            table.get(&id).map(|literal| out.push_str(literal))
+        R::with_mutex_mut(&self.own_keyexprs, |keys| {
+            keys.space().append_own_mapping(id, out)
         })
     }
 
@@ -4334,7 +4322,7 @@ impl LinkSeed {
 /// mutex slot is staged via `R::new_mutex` so the lwIP MCU profile composes
 /// the same bundle against `critical_section::Mutex`; the tokio wrapper is a
 /// thin `R = TokioRuntime` shim. The `None::<…>` / `Vec::<…>::new()` /
-/// `HashMap::<…>::new()` arg annotations are mandatory: `R::Mutex<T>` is a
+/// `Type::default()` arg annotations are mandatory: `R::Mutex<T>` is a
 /// GAT projection (non-injective), so the element type cannot be inferred
 /// back from the struct field type — it must be spelled at the `new_mutex`
 /// argument.
@@ -4593,7 +4581,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_sync_bits: AtomicU8::new(0),
                 tx_conduits: TxConduits::new(),
                 #[cfg(feature = "alloc")]
-                outbound_mappings: R::new_mutex(HashMap::<crate::wire_id::ExprId, String>::new()),
+                own_keyexprs: R::new_mutex(crate::declared_keyexprs::LinkKeyexprs::default()),
                 #[cfg(feature = "shared-key-ids")]
                 // Upstream's form until the engine that opened the link says otherwise.
                 link_keys: R::new_mutex(crate::shared_key_ids::LinkKeys::new(
@@ -9340,7 +9328,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (passed through unchanged by the decorator, id != 0) resolves under the
     /// namespace at the peer instead of leaking to the bare keyexpr; and the
     /// reconnect declaration replay ([`Self::replay_one`]). The cache and the
-    /// local `outbound_mappings` keep the BARE keyexpr — transparent namespace
+    /// local `own_keyexprs` keep the BARE keyexpr — transparent namespace
     /// (bare to the app + local loopback, namespaced on the wire, the zenoh
     /// model). No-op when no namespace is installed.
     #[cfg(all(
@@ -12610,7 +12598,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// That table is the right one and the only right one: an `M=0` alias in a
     /// message we are SENDING names OUR id space, which is exactly what
-    /// `outbound_mappings` holds
+    /// `own_keyexprs` holds
     /// ([`Self::resolve_outbound_mapping`]). So an outbound admin-space publish
     /// classifies as admin whether it went out literal or aliased — the accuracy
     /// the inbound side cannot have, because the peer's space lives on the face.
@@ -14373,15 +14361,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.declare_keyexpr_recorded(mapping_id, suffix, || {
                 self.emit_declare_keyexpr(mapping_id, suffix)
             })?;
-            // R234 — record the (mapping_id, suffix) pair in the
-            // outbound table so later `publish_aliased_auto` calls
-            // can resolve the literal without caller assertion.
-            // Insertion happens AFTER the wire send so a driver-side
-            // panic does not leave a table entry that the peer never
-            // saw. Mirrors zenoh-pico's `_z_register_resource` which
-            // executes on the local-side declaration emit path.
-            R::with_mutex_mut(&self.outbound_mappings, |table| {
-                table.insert(mapping_id, suffix.to_string());
+            // Recorded after the send, so the table never holds a declaration the peer was not
+            // sent (zenoh-pico's `_z_register_resource` on the declaration's emit path). A link
+            // whose session keeps the table records nothing: the session does.
+            R::with_mutex_mut(&self.own_keyexprs, |keys| {
+                keys.sent_declaration(mapping_id, suffix)
             });
             Ok(())
         }
@@ -14460,7 +14444,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // arm). The peer registers `id -> <ns>/<suffix>`, so a later aliased
         // Push/Request (which the decorator passes through unchanged, id != 0)
         // resolves UNDER the namespace at the peer instead of leaking to the
-        // bare keyexpr; the local `outbound_mappings` in the send keeps the BARE
+        // bare keyexpr; the local `own_keyexprs` in the send keeps the BARE
         // suffix for loopback resolution (transparent namespace, the zenoh
         // model). The reconnect replay re-applies the same via `replay_one`.
         #[cfg(feature = "routing-namespace")]
@@ -15330,7 +15314,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// MEMORY anchor (same sweep as R311o send_undeclare_token). Body
     /// cfg-gated on `all(declare-keyexpr, declare-undeclare)`; silent
     /// no-op when either feature is off (() return — no error channel,
-    /// the outbound_mappings table prune is also gated so a feature-off
+    /// the own-keyexpr table prune is also gated so a feature-off
     /// build never populated the table to begin with).
     pub fn send_undeclare_kexpr(&self, mapping_id: crate::wire_id::ExprId) {
         #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
@@ -15350,15 +15334,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 let _ = self
                     .dispatch_declare(build_undeclare_kexpr(mapping_id), /*reliable=*/ true);
             });
-            // R234 — drop the (mapping_id, suffix) pair so subsequent
-            // `publish_aliased_auto` calls return `None` on this id and
-            // the caller knows the alias is stale. Idempotent: removing
-            // an absent id is a no-op. Mirrors zenoh-pico's
-            // `_z_unregister_resource` invoked on the local-side
-            // undeclare emit path.
-            R::with_mutex_mut(&self.outbound_mappings, |table| {
-                table.remove(&mapping_id);
-            });
+            // A later resolution of this id answers `None`, so the caller knows the alias is
+            // stale; forgetting an id not held changes nothing (zenoh-pico's
+            // `_z_unregister_resource` on the undeclaration's emit path).
+            R::with_mutex_mut(&self.own_keyexprs, |keys| keys.sent_retraction(mapping_id));
         }
         #[cfg(not(all(feature = "declare-keyexpr", feature = "declare-undeclare")))]
         let _ = mapping_id;
@@ -15377,10 +15356,34 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_get_resource_by_id` on the publish path.
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
-        R::with_mutex_mut(&self.outbound_mappings, |table| {
-            table.get(&mapping_id).cloned()
+        R::with_mutex_mut(&self.own_keyexprs, |keys| {
+            keys.space().resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
+    }
+
+    /// Read the key expressions this link's session declared from the session's own table,
+    /// through `space`, and keep none on the link: what it declares from here on is recorded by
+    /// the session, which tells every link it has the same declarations under the same ids. A
+    /// session of several links installs it before the link carries anything; what the link had
+    /// kept until then is let go of.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    pub fn install_session_keyexprs(&self, space: crate::wireexpr_resolve::SharedOwnMappingSpace) {
+        R::with_mutex_mut(&self.own_keyexprs, |keys| {
+            *keys = crate::declared_keyexprs::LinkKeyexprs::Session(space)
+        });
+    }
+
+    /// `f` over the table of this node's declarations the link keeps, for a reader that names
+    /// it as the sender's half of a message this node sends
+    /// ([`MappingSpaces::as_sent`](crate::wireexpr_resolve::MappingSpaces::as_sent)); `None`,
+    /// with `f` not run, when the session keeps the table and the link holds none to lend.
+    #[cfg(feature = "alloc")]
+    pub fn with_held_keyexprs<X>(
+        &self,
+        f: impl FnOnce(&crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>) -> X,
+    ) -> Option<X> {
+        R::with_mutex_mut(&self.own_keyexprs, |keys| keys.held().map(f))
     }
 
     /// Hand this link what it knows of the key ids every node of the deployment shares: the
@@ -17341,7 +17344,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// whatever the OpenSyn carries).
     ///
     /// Preserved (session-scoped): the declaration cache (the replay
-    /// source), `outbound_mappings`, every `next_outbound_*` id
+    /// source), `own_keyexprs`, every `next_outbound_*` id
     /// allocator (handles hold issued ids across the reconnect), the
     /// ext-chain staging slots (outbound configuration, not peer
     /// state), and the action trace (cumulative diagnostics).

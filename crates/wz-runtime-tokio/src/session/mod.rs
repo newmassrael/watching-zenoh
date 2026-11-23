@@ -1558,9 +1558,8 @@ fn leave_aggregated_subscriber(
 /// Replies are sent from inside the observer's own lock (its pending replies flush there), so
 /// this must not take that lock, which `Session::acl_admits_on` does to read the peer's alias
 /// table. A reply's key is the one the queryable (or the declaration answered) wrote: a
-/// literal, or an id of OUR space
-/// (`outbound_mappings`, its own mutex), and never the peer's, so the peer's table is not
-/// needed and an empty one stands in for it. A key that still does not resolve is denied, as
+/// literal, or an id of OUR space (the link's own declarations, behind their own mutex), and
+/// never the peer's, so the peer's table is not needed and an empty one stands in for it. A key that still does not resolve is denied, as
 /// everywhere in the chain.
 #[cfg(feature = "access-acl")]
 fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
@@ -1573,12 +1572,16 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
     }
     let no_peer: hashbrown::HashMap<wz_session_core::wire_id::ExprId, String> =
         hashbrown::HashMap::new();
-    let keyexpr = R::with_mutex_mut(&actions.outbound_mappings, |ours| {
-        crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
-            msg,
-            wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &no_peer),
-        )
-    });
+    // The tokio engine's links keep their own declarations, so the table is always lent; a key
+    // with no table to resolve it against is denied as one that does not resolve.
+    let keyexpr = actions
+        .with_held_keyexprs(|ours| {
+            crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
+                msg,
+                wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &no_peer),
+            )
+        })
+        .flatten();
     let ctx = SessionAclContext { actions, keyexpr };
     R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
 }
@@ -2517,14 +2520,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         spaces.with_own_space(&**actions),
                     )
                 }
-                crate::interceptor::InterceptorFlow::Egress => {
-                    R::with_mutex_mut(&actions.outbound_mappings, |ours| {
+                crate::interceptor::InterceptorFlow::Egress => actions
+                    .with_held_keyexprs(|ours| {
                         crate::interceptor::keyexpr::resolve_governed_keyexpr_in(
                             msg,
                             wz_session_core::wireexpr_resolve::MappingSpaces::as_sent(ours, &peer),
                         )
                     })
-                }
+                    .flatten(),
             }
         })
     }
@@ -4122,7 +4125,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         //
         // Installed HERE rather than left to the application for the same reason
         // R236 moved the zid install here: the fact is already authoritative at
-        // construction — the actions bundle owns `outbound_mappings` and this
+        // construction — the actions bundle answers for our declarations and this
         // ctor is holding it — so making the application ask for it would only
         // create a way to forget. Unconditional: an empty table simply resolves
         // nothing, which is the same answer as no install, and the table fills

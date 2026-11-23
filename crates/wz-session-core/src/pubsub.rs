@@ -459,8 +459,8 @@ struct PeerNaming<P: Storage = Profile> {
     keys: P::Keys,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
-    /// the table itself lives on `SessionActions::outbound_mappings`, written by
-    /// `send_declare_keyexpr` and pruned by `send_undeclare_kexpr`, and this
+    /// the table itself is the session's own declarations (`crate::declared_keyexprs`),
+    /// kept by the link that sends them or by the session for all its links, and this
     /// handle reads it through
     /// [`OwnMappingSpace::resolve_own_mapping`](crate::wireexpr_resolve::OwnMappingSpace::resolve_own_mapping). A
     /// mirrored `HashMap` here would go stale on the first undeclare.

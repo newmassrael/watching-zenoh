@@ -39,8 +39,8 @@ pub const fn declared_expr_id(wire: u64) -> ExprId {
 /// A peer's table is a session's generic id map (`crate::id_map::IdMap`, a
 /// plain `HashMap` on the heap profile), which every kind of declared id shares
 /// and which keys by 64 bits; an `ExprId` enters it widened, losing nothing.
-/// Our own table (`SessionLinkActions::outbound_mappings`) holds only ids we
-/// allocate and keys by `ExprId` itself.
+/// Our own table (`crate::declared_keyexprs::DeclaredKeyexprs`) holds only ids we
+/// allocate; it shares the id map, so it keys by the `ExprId` widened the same way.
 pub const fn peer_key(id: ExprId) -> u64 {
     id as u64
 }

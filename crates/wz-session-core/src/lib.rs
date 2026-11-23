@@ -1411,6 +1411,11 @@ pub mod lent_request;
 #[cfg(feature = "storage-profile")]
 pub mod wireexpr_resolve;
 
+/// The key expressions a session declared, by the id it gave each: the session's own id space,
+/// kept once, by the link that declares them or by the session for all its links.
+#[cfg(feature = "storage-profile")]
+pub mod declared_keyexprs;
+
 // R311di-14+ — application-layer remote-declaration registries
 // (liveliness / subscriber / queryable / liveliness_subscriber).
 //

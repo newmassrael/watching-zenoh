@@ -978,10 +978,10 @@ keyexpr-prefix = []
 # wz-runtime-tokio side forwards here so the gated action arms compile
 # consistently workspace-wide.
 #
-# `declare-keyexpr` also implies `alloc`: the aliases a node declares are held in a
-# `HashMap<u64, String>` (`SessionCore::outbound_mappings`, the id space an `M=0`
-# reference names), and the per-session slot profile has no such table yet, so a
-# build that declares keyexprs takes the heap profile's.
+# `declare-keyexpr` also implies `alloc`: the aliases a node declares are held in the
+# session's own table of them (`declared_keyexprs`, the id space an `M=0` reference
+# names), which the per-session slot profile does not hold yet, so a build that declares
+# keyexprs takes the heap profile's.
 declare-keyexpr = ["codec-declare", "alloc"]
 declare-token = ["codec-declare", "rx-control"]
 declare-final = ["codec-declare"]

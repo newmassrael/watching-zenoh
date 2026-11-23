@@ -45,8 +45,8 @@
 //! What the refusal cost while it was the only answer: a zenoh peer PREFERS the
 //! id we declared and stamps it `Mapping::Receiver`, so every session that
 //! called `send_declare_keyexpr` started losing the peer's aliased traffic on
-//! the next message. The table was already being written
-//! (`SessionActions::outbound_mappings`); only the plumbing to the registries
+//! the next message. The table was already being written (the session's own
+//! declarations, `crate::declared_keyexprs`); only the plumbing to the registries
 //! was missing.
 
 #[cfg(feature = "alloc")]
@@ -183,9 +183,9 @@ pub fn resolve_wireexpr<S: WireexprStorage>(
 /// OUR id space — the one an `M=0` (`Mapping::Receiver`) Wireexpr names.
 ///
 /// A trait rather than a second `HashMap` parameter because the space already
-/// EXISTS behind a lock somewhere else: `SessionActions::outbound_mappings` is
-/// written by `send_declare_keyexpr` and read one id at a time through
-/// `resolve_outbound_mapping`. Handing that surface over directly keeps ONE
+/// EXISTS behind a lock somewhere else: the session's own declarations
+/// (`crate::declared_keyexprs`) are written as each is sent and read one id at a
+/// time through `resolve_outbound_mapping`. Handing that surface over directly keeps ONE
 /// copy of the fact — a second table shadowing it is the dual-write shape this
 /// workspace has repeatedly found diverging, and it would go stale the moment
 /// `send_undeclare_kexpr` pruned the original.
@@ -337,7 +337,7 @@ enum PeerSpaceRepr<'a> {
     /// Our own table standing in the sender's half, for a message this node sends
     /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate.
     #[cfg(feature = "alloc")]
-    Ours(&'a HashMap<crate::wire_id::ExprId, String>),
+    Ours(&'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>),
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
     /// The lent policy's bounded table, whose rows hold their keys in the session's key arena.
@@ -374,7 +374,7 @@ impl<'a> PeerSpace<'a> {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Ours(map) => map.get(&id).map(String::as_str),
+            PeerSpaceRepr::Ours(table) => table.literal(id),
             PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
             PeerSpaceRepr::LentTable(table) => table.find(key).map(|text| text.as_str()),
         }
@@ -398,7 +398,7 @@ impl<'a> PeerSpaceView<'a> {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Map(map) => map.len(),
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Ours(map) => map.len(),
+            PeerSpaceRepr::Ours(table) => table.len(),
             PeerSpaceRepr::Table(table) => table.count(),
             PeerSpaceRepr::LentTable(table) => table.count(),
         }
@@ -490,7 +490,7 @@ impl<'a> MappingSpaces<'a> {
     /// declared (`theirs`), the reverse of a message received.
     #[cfg(feature = "alloc")]
     pub fn as_sent(
-        ours: &'a HashMap<crate::wire_id::ExprId, String>,
+        ours: &'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>,
         theirs: &'a dyn OwnMappingSpace,
     ) -> Self {
         Self {
@@ -1326,7 +1326,9 @@ mod mapping_bit_tests {
     /// the ids we declared, `M=0` the ones the peer did.
     #[test]
     fn a_sent_message_reads_its_mapping_bits_from_the_senders_side() {
-        let ours = own_space();
+        let mut ours =
+            crate::declared_keyexprs::DeclaredKeyexprs::<crate::bounded::Heap>::default();
+        assert!(ours.record(7, "ours/space/temp").is_ok());
         let mut theirs: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
         theirs.insert(7, "theirs/space/temp".to_string());
         let spaces = MappingSpaces::as_sent(&ours, &theirs);
