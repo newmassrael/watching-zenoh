@@ -617,6 +617,45 @@ fn the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could() {
     );
 }
 
+/// A pool or a span names its rows by `u16`: a count past `MAX_POOL_ROWS` refuses the open by the
+/// limit that set it, the session's for a pool of many faces and the face's for a span of one,
+/// and a count at it is lent.
+#[test]
+fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
+    use crate::arena::kind_rows;
+    use wz_session_core::row_pool::MAX_POOL_ROWS;
+    let over = |limit| {
+        Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: MAX_POOL_ROWS + 1,
+                ceiling: MAX_POOL_ROWS,
+            },
+        })
+    };
+    let (face, session) = ("MAX_REMOTE_DECLS", "SESSION_MAX_REMOTE_DECLS");
+    assert_eq!(
+        kind_rows(2, (face, MAX_POOL_ROWS), (session, MAX_POOL_ROWS + 1)),
+        over(session),
+        "the session's limit sets a pool of two faces"
+    );
+    assert_eq!(
+        kind_rows(1, (face, MAX_POOL_ROWS + 1), (session, usize::MAX)),
+        over(face),
+        "the face's bound sets a span of one"
+    );
+    assert_eq!(
+        kind_rows(3, (face, 16), (session, MAX_POOL_ROWS)),
+        Ok(48),
+        "under both"
+    );
+    assert_eq!(
+        kind_rows(3, (face, MAX_POOL_ROWS), (session, MAX_POOL_ROWS)),
+        Ok(MAX_POOL_ROWS),
+        "at the most a u16 names"
+    );
+}
+
 /// The session is lent one table of reassembly buffers its links share, a buffer for each chain
 /// one peer stages at once however many links the session may hold, each as long as the
 /// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a

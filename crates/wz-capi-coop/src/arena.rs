@@ -29,7 +29,9 @@
 //!   limit and what the faces could hold at the bound of each peer (`MAX_PEER_KEYEXPR_ALIASES`,
 //!   `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row the place of its key in the key
 //!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
-//!   takes each from its heap as it comes;
+//!   takes each from its heap as it comes. A session of one face shares with no one: its tables
+//!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
+//!   link and no pool state;
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -99,9 +101,10 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerPoolRows, PeerPools, PeerRows, PeerTables};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
+use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::sink::BoxedSink;
 use wz_session_core::slot_observer::{RequesterRows, Requesters};
 
@@ -455,24 +458,26 @@ impl ArenaPlan {
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
         );
+        // Each kind one area: a pool the faces share, or for a session of one face a span of its
+        // tables' own (`pool_rows`).
         let pools = plan.peers.pools;
         plan.put(
             "peer alias pool",
             "SESSION_MAX_PEER_KEYEXPR_ALIASES",
             1,
-            PeerPools::alias_bytes(pools.aliases).ok_or(ArenaRefused::TooLarge)?,
+            pools.alias_bytes().ok_or(ArenaRefused::TooLarge)?,
         );
         plan.put(
             "peer declaration pools",
             "SESSION_MAX_REMOTE_DECLS",
             1,
-            PeerPools::decl_bytes(pools.remote_decls).ok_or(ArenaRefused::TooLarge)?,
+            pools.decl_bytes().ok_or(ArenaRefused::TooLarge)?,
         );
         plan.put(
             "peer interest pool",
             "SESSION_MAX_INBOUND_SUB_INTERESTS",
             1,
-            PeerPools::interest_bytes(pools.interests).ok_or(ArenaRefused::TooLarge)?,
+            pools.interest_bytes().ok_or(ArenaRefused::TooLarge)?,
         );
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
@@ -682,42 +687,98 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
     })
 }
 
-/// The rows of each pool of what the peers of a session of `faces` faces write, under `limits`: the
-/// session's value of the pool's limit under the build's, and no more than the faces could hold
-/// together, each at the bound of one peer the session resolved. So a session of one face lends
-/// what one face's tables held, and one of many lends what its limit says the faces hold together.
-/// Refused when a limit is over the build's value.
+/// The rows of each kind of what the peers of a session of `faces` faces write, under `limits`.
+///
+/// A session of many faces lends a pool of each kind the faces share: the session's value of the
+/// kind's limit under the build's, and no more than the faces could hold together, each at the
+/// bound of one peer the session resolved. A session of one face has no one to share with: its
+/// tables take spans of their own of that face's bounds, with no link and no pool state, as many
+/// rows as its inline tables held (and fewer where the session's limit is lower).
+///
+/// A pool or a span names its rows by `u16`, so a count past [`MAX_POOL_ROWS`] refuses the open
+/// by the limit that set it: the session's limit for a pool, the face's for a span. Refused too
+/// when a limit is over the build's value.
 fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
-    let shared = |each: usize, session: usize| each.saturating_mul(faces).min(session);
+    let shared = faces > 1;
+    let kind = |face, session| kind_rows(faces, face, session);
     Ok(PeerPoolRows {
-        aliases: shared(
-            lent::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
+        aliases: kind(
+            (
                 "MAX_PEER_KEYEXPR_ALIASES",
-                limits.max_peer_keyexpr_aliases(),
-            )?,
-            lent::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
+                lent::<{ caps::MAX_PEER_KEYEXPR_ALIASES }>(
+                    "MAX_PEER_KEYEXPR_ALIASES",
+                    limits.max_peer_keyexpr_aliases(),
+                )?,
+            ),
+            (
                 "SESSION_MAX_PEER_KEYEXPR_ALIASES",
-                limits.session_max_peer_keyexpr_aliases(),
-            )?,
-        ),
-        remote_decls: shared(
-            lent::<{ caps::MAX_REMOTE_DECLS }>("MAX_REMOTE_DECLS", limits.max_remote_decls())?,
-            lent::<{ caps::SESSION_MAX_REMOTE_DECLS }>(
+                lent::<{ caps::SESSION_MAX_PEER_KEYEXPR_ALIASES }>(
+                    "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+                    limits.session_max_peer_keyexpr_aliases(),
+                )?,
+            ),
+        )?,
+        remote_decls: kind(
+            (
+                "MAX_REMOTE_DECLS",
+                lent::<{ caps::MAX_REMOTE_DECLS }>("MAX_REMOTE_DECLS", limits.max_remote_decls())?,
+            ),
+            (
                 "SESSION_MAX_REMOTE_DECLS",
-                limits.session_max_remote_decls(),
-            )?,
-        ),
-        interests: shared(
-            lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
+                lent::<{ caps::SESSION_MAX_REMOTE_DECLS }>(
+                    "SESSION_MAX_REMOTE_DECLS",
+                    limits.session_max_remote_decls(),
+                )?,
+            ),
+        )?,
+        interests: kind(
+            (
                 "MAX_INBOUND_SUB_INTERESTS",
-                limits.max_inbound_sub_interests(),
-            )?,
-            lent::<{ caps::SESSION_MAX_INBOUND_SUB_INTERESTS }>(
+                lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
+                    "MAX_INBOUND_SUB_INTERESTS",
+                    limits.max_inbound_sub_interests(),
+                )?,
+            ),
+            (
                 "SESSION_MAX_INBOUND_SUB_INTERESTS",
-                limits.session_max_inbound_sub_interests(),
-            )?,
-        ),
+                lent::<{ caps::SESSION_MAX_INBOUND_SUB_INTERESTS }>(
+                    "SESSION_MAX_INBOUND_SUB_INTERESTS",
+                    limits.session_max_inbound_sub_interests(),
+                )?,
+            ),
+        )?,
+        shared,
     })
+}
+
+/// The rows of one kind of what the peers of a session of `faces` faces write: the fewer of the
+/// session's limit and the faces' bounds together, `face` and `session` each a limit's id and the
+/// value the open resolved of it. Refused, by the id of the limit that set the count, past the
+/// most rows a pool or a span names ([`MAX_POOL_ROWS`]): a session's limit for a session of many
+/// faces, the face's for one of one face, unless the session's is the lower.
+pub(crate) fn kind_rows(
+    faces: usize,
+    face: (&'static str, usize),
+    session: (&'static str, usize),
+) -> Result<usize, ArenaRefused> {
+    let all = face.1.saturating_mul(faces);
+    let (limit, rows) = if session.1 < all {
+        session
+    } else if faces > 1 {
+        (session.0, all)
+    } else {
+        face
+    };
+    if rows > MAX_POOL_ROWS {
+        return Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: rows,
+                ceiling: MAX_POOL_ROWS,
+            },
+        });
+    }
+    Ok(rows)
 }
 
 /// The rows of each table of what one face's peer is owed, under `limits`.

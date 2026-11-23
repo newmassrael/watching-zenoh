@@ -343,6 +343,9 @@ impl Registry {
     ) -> Result<Self, LendRefused> {
         let app = App::lent(arena, keys, rows, limits)?;
         let pools = PeerPools::lent(arena, peers.pools)?;
+        // One face's own spans are handed to that face's tables alone, so a plan that lends them
+        // lends one set.
+        debug_assert!(pools.is_shared() || peers.tables <= 1);
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));
@@ -519,7 +522,10 @@ impl Registry {
             .position(|(place, held)| held.at != place)
             .unwrap_or(self.held.len());
         if at == self.sets.len() {
-            push_rowless(&mut self.sets, self.keys, self.pools, &self.limits);
+            // A face past the plan shares the pools of a session of many faces; one face's own
+            // spans are its tables' alone, so a face past it holds what its peer writes in nothing.
+            let shared = self.pools.is_shared().then_some(self.pools);
+            push_rowless(&mut self.sets, self.keys, shared, &self.limits);
         }
         self.held.insert(at, HeldSet { at, id });
     }
@@ -911,13 +917,13 @@ impl Registry {
 /// Write a set of no rows at the end of `sets`, in the storage the vector keeps it in, held to
 /// `limits`, its peer's keys kept in `keys`, the session's key arena, and what its peer writes in
 /// `pools`, the session's, and hand it back: a set is never a value of its own in this frame. No
-/// set is without the key arena and the pools, whatever its rows (a lent one, or one of no rows for
-/// a face past the plan): a table of the lent policy handed none would drop every declaration of
-/// its peer.
+/// set is without the key arena, whatever its rows (a lent one, or one of no rows for a face past
+/// the plan). A set handed no pools, a face past a session of one face whose own spans are the dial
+/// face's, drops and counts every declaration of its peer.
 fn push_rowless<'s>(
     sets: &'s mut Vec<FaceTables>,
     keys: KeySpace,
-    pools: PeerPools,
+    pools: Option<PeerPools>,
     limits: &SessionLimits,
 ) -> &'s mut FaceTables {
     sets.reserve(1);
@@ -931,7 +937,9 @@ fn push_rowless<'s>(
     }
     let set = &mut sets[at];
     set.peer.keep_keys_in(LentKeys::from(keys));
-    set.peer.keep_rows_in(pools);
+    if let Some(pools) = pools {
+        set.peer.keep_rows_in(pools);
+    }
     set
 }
 
@@ -947,7 +955,7 @@ fn lend_set(
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, keys, pools, limits).lend(arena, keys, pools, gets, peer, limits)
+    push_rowless(sets, keys, Some(pools), limits).lend(arena, keys, pools, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -980,12 +988,13 @@ mod tests {
                 aliases: 16,
                 remote_decls: 16,
                 interests: 16,
+                shared: faces > 1,
             },
         )
     }
 
     /// A registry whose arena lends the tables of `faces` faces, one row of each table, and the
-    /// pools `pools` states.
+    /// pools `pools` states, which a registry of more than one face shares.
     fn held_with(faces: usize, pools: PeerPoolRows) -> Held {
         let mut arena =
             SessionArena::of_bytes(1 << 20, &AllocatorMemory).expect("the host has the memory");
@@ -1293,10 +1302,12 @@ mod tests {
         };
         // The pools are lent from an arena of their own, so the two arenas compared hold the sets'
         // rows alone.
+        // Shared: the set lent by value and the one lent in place both take rows of them.
         let pool_rows = PeerPoolRows {
             aliases: 1,
             remote_decls: 1,
             interests: 1,
+            shared: true,
         };
         let mut pool_arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
@@ -1484,6 +1495,7 @@ mod tests {
                 aliases: 1,
                 remote_decls: 16,
                 interests: 1,
+                shared: true,
             },
         );
         let faces: Vec<FaceId> = core::iter::once(DIAL_FACE)
@@ -1501,7 +1513,7 @@ mod tests {
                 declare_on(&mut held.registry, *id, sub, &format!("demo/{id}/{sub}"));
             }
         }
-        let pools = held.registry.pools.counts();
+        let pools = held.registry.pools.counts().expect("shared pools");
         assert_eq!((pools.subscribers.used, pools.subscribers.refused), (16, 0));
         for id in &faces {
             assert_eq!(subscribers_of(&held.registry, *id), (2, 0), "face {id}");
@@ -1512,7 +1524,15 @@ mod tests {
             (2, 1),
             "the declaration past the pool is refused and counted by its face"
         );
-        assert_eq!(held.registry.pools.counts().subscribers.refused, 1);
+        assert_eq!(
+            held.registry
+                .pools
+                .counts()
+                .expect("shared pools")
+                .subscribers
+                .refused,
+            1
+        );
         for id in faces.iter().filter(|id| **id != faces[2]) {
             assert_eq!(
                 subscribers_of(&held.registry, *id),
@@ -1543,6 +1563,7 @@ mod tests {
                 aliases: 1,
                 remote_decls: 6,
                 interests: 1,
+                shared: true,
             },
         );
         held.registry.add_face(5);
@@ -1553,13 +1574,23 @@ mod tests {
             }
         }
         assert_eq!(
-            held.registry.pools.counts().subscribers.used,
+            held.registry
+                .pools
+                .counts()
+                .expect("shared pools")
+                .subscribers
+                .used,
             6,
             "CONTROL: the pool is full"
         );
         held.registry.remove_face(5);
         assert_eq!(
-            held.registry.pools.counts().subscribers.used,
+            held.registry
+                .pools
+                .counts()
+                .expect("shared pools")
+                .subscribers
+                .used,
             3,
             "face 5's three rows went back, and only those"
         );
@@ -1576,11 +1607,69 @@ mod tests {
         );
         held.registry.remove_accepted_faces();
         assert_eq!(
-            held.registry.pools.counts().subscribers.used,
+            held.registry
+                .pools
+                .counts()
+                .expect("shared pools")
+                .subscribers
+                .used,
             1,
             "the dial role's row alone is held"
         );
-        assert_eq!(held.registry.pools.counts().subscribers.refused, 0);
+        assert_eq!(
+            held.registry
+                .pools
+                .counts()
+                .expect("shared pools")
+                .subscribers
+                .refused,
+            0
+        );
+    }
+
+    /// A session of one face keeps what its peer writes in spans of its tables' own, which no
+    /// pool counts: the dial face's peer is held to its spans' rows, the declaration past them
+    /// refused and counted by its table; a face past the plan is handed none of those spans, so
+    /// its peer's declaration is refused and counted by its own table and the dial face keeps
+    /// every row.
+    #[test]
+    fn a_session_of_one_face_keeps_its_peers_rows_in_spans_of_its_own() {
+        if wz_session_core::caps::MAX_REMOTE_DECLS < 3 {
+            // A face's table of fewer rows refuses the third declaration by itself.
+            return;
+        }
+        let mut held = held_with(
+            1,
+            PeerPoolRows {
+                aliases: 1,
+                remote_decls: 2,
+                interests: 1,
+                shared: false,
+            },
+        );
+        assert!(!held.registry.pools.is_shared());
+        assert_eq!(held.registry.pools.counts(), None, "no pool to count");
+        for sub in 1..=3 {
+            declare_on(
+                &mut held.registry,
+                DIAL_FACE,
+                sub,
+                &format!("demo/dial/{sub}"),
+            );
+        }
+        assert_eq!(
+            subscribers_of(&held.registry, DIAL_FACE),
+            (2, 1),
+            "the spans' two rows held, the third refused and counted"
+        );
+        held.registry.add_face(5);
+        assert!(!in_a_lent_set(&held, 5), "CONTROL: past the plan");
+        declare_on(&mut held.registry, 5, 1, "demo/past/1");
+        assert_eq!(subscribers_of(&held.registry, 5), (0, 1));
+        assert_eq!(subscribers_of(&held.registry, DIAL_FACE), (2, 1));
+        assert!(held
+            .registry
+            .peers_declare(FilterPlane::Subscribers, "demo/dial/2"));
     }
 
     /// A walk over the faces reads the sets the faces hold and no other: of the sixteen sets the
