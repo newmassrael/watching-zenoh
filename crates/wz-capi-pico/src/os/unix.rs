@@ -123,9 +123,10 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
     };
     let secs = wide(instant.tv_sec).saturating_sub(wide(epoch.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
-    if nsec_div != 0 {
-        let nsecs = wide(instant.tv_nsec).saturating_sub(wide(epoch.tv_nsec));
-        elapsed = elapsed.saturating_add(nsecs / nsec_div);
+    // The seconds unit has no divisor: it drops the sub-second part.
+    let nsecs = wide(instant.tv_nsec).saturating_sub(wide(epoch.tv_nsec));
+    if let Some(part) = nsecs.checked_div(nsec_div) {
+        elapsed = elapsed.saturating_add(part);
     }
     if elapsed > 0 {
         c_ulong::try_from(elapsed).unwrap_or(c_ulong::MAX)
@@ -196,9 +197,10 @@ pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
     let now = wall_now();
     let secs = wide(now.tv_sec).saturating_sub(wide(time.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
-    if usec_div != 0 {
-        let usecs = wide(now.tv_usec).saturating_sub(wide(time.tv_usec));
-        elapsed = elapsed.saturating_add(usecs / usec_div);
+    // The seconds unit has no divisor: it drops the sub-second part.
+    let usecs = wide(now.tv_usec).saturating_sub(wide(time.tv_usec));
+    if let Some(part) = usecs.checked_div(usec_div) {
+        elapsed = elapsed.saturating_add(part);
     }
     // The wrapping cast IS the contract here. Truncating the 64-bit result to a 32-bit host's
     // `unsigned long` gives what pico's 32-bit `long` arithmetic wraps to.
