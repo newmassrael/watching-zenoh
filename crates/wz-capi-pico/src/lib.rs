@@ -756,8 +756,6 @@ pub mod sync;
 // Totality debt TD-199 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::arithmetic_side_effects)]
 pub mod time_base;
-// Totality debt TD-192 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod whatami;
 mod write_filter;
 // Totality debt TD-161 (docs/c-abi-architecture.md section 7).
