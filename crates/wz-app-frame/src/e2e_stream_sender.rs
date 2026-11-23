@@ -43,7 +43,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::e2e_frame::{build, feed, write_be, BuildError, Values};
+use crate::e2e_frame::{build, crc_over, feed, write_be, BuildError, Values};
 use crate::e2e_profile::{Cover, Profile};
 
 /// What a stream does after the frame that carried the largest counter value.
@@ -107,6 +107,13 @@ pub enum SendError {
         /// How many the sender has.
         streams: usize,
     },
+    /// The buffer a frame is written into is shorter than the frame.
+    Capacity {
+        /// The frame's bytes.
+        need: usize,
+        /// The buffer's.
+        have: usize,
+    },
     /// The stream sent its largest value and does not wrap.
     Spent {
         /// The stream.
@@ -134,6 +141,10 @@ impl core::fmt::Display for SendError {
                 f,
                 "stream {stream} is not one of the sender's {streams} streams"
             ),
+            Self::Capacity { need, have } => write!(
+                f,
+                "the frame is {need} bytes and the buffer it is written into holds {have}"
+            ),
             Self::Spent { stream, max } => write!(
                 f,
                 "stream {stream} has sent its largest counter value, {max}, and this sender \
@@ -159,6 +170,17 @@ struct Cached {
     register: u64,
 }
 
+/// A frame the sender wrote into a buffer the caller holds: how many of its bytes the frame is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// The frame's bytes, from the start of the buffer.
+    pub len: usize,
+    /// The counter it carries.
+    pub counter: u64,
+    /// Whether it was built from the stream's cache.
+    pub from_cache: bool,
+}
+
 /// A frame the sender built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Protected {
@@ -174,7 +196,9 @@ pub struct Protected {
 #[derive(Debug, Clone)]
 pub struct StreamSender {
     profile: Profile,
-    values: Values,
+    /// The header every frame starts from, made when the sender is: each field written from the
+    /// values, the counter, the length and the CRC written again for each frame.
+    header: Vec<u8>,
     counter_field: usize,
     max: u64,
     rollover: Rollover,
@@ -214,8 +238,9 @@ impl StreamSender {
                 max,
             });
         }
-        let trial = values.clone().whole(&field.name, 0);
-        build(&profile, &trial, &[]).map_err(SendError::Build)?;
+        let header = build(&profile, &values.whole(&field.name, 0), &[])
+            .map_err(SendError::Build)?
+            .bytes;
         let prefix = profile
             .crc()
             .cover
@@ -230,7 +255,7 @@ impl StreamSender {
             .collect();
         Ok(Self {
             profile,
-            values,
+            header,
             counter_field,
             max,
             rollover: options.rollover,
@@ -281,73 +306,144 @@ impl StreamSender {
     }
 
     /// Protect `payload` on `stream`: the frame, with the stream's counter, and
-    /// the counter moved on. A refusal consumes no counter value.
+    /// the counter moved on. A refusal consumes no counter value. [`Self::protect_into`] into a
+    /// buffer made here.
     pub fn protect(&mut self, stream: usize, payload: &[u8]) -> Result<Protected, SendError> {
+        let mut bytes = alloc::vec![0u8; self.frame_bytes(payload.len())];
+        let written = self.protect_into(stream, payload, &mut bytes)?;
+        Ok(Protected {
+            bytes,
+            counter: written.counter,
+            from_cache: written.from_cache,
+        })
+    }
+
+    /// Protect `payload` on `stream` into `out`, from its start: the frame, with the stream's
+    /// counter, and the counter moved on. Nothing is allocated: the header is the one the sender
+    /// made when it was made, and a frame the cache keeps is kept in the buffer it was kept in
+    /// before. A buffer shorter than the frame is refused, and a refusal of any kind consumes no
+    /// counter value.
+    pub fn protect_into(
+        &mut self,
+        stream: usize,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<Written, SendError> {
         let Some(counter) = self.stream(stream)?.next else {
             return Err(SendError::Spent {
                 stream,
                 max: self.max,
             });
         };
-        let header = self.profile.header_bytes();
+        let len = self.frame_bytes(payload.len());
+        let have = out.len();
+        let Some(out) = out.get_mut(..len) else {
+            return Err(SendError::Capacity { need: len, have });
+        };
+        let header = self.header.len();
         let hit = self.streams[stream]
             .cached
             .as_ref()
             .filter(|c| c.frame[header..] == *payload);
-        let (bytes, from_cache) = match hit {
-            Some(cached) => (self.rebuild_cached(cached, counter), true),
-            None => (self.full(stream, counter, payload)?, false),
+        let from_cache = match hit {
+            Some(cached) => {
+                out.copy_from_slice(&cached.frame);
+                self.finish_cached(out, cached.register, counter);
+                true
+            }
+            None => {
+                self.full(stream, counter, payload, out)?;
+                false
+            }
         };
         self.streams[stream].next = self.after(counter);
-        Ok(Protected {
-            bytes,
+        Ok(Written {
+            len,
             counter,
             from_cache,
         })
     }
 
-    /// The frame for `payload` with `counter` by the full computation, kept in
-    /// the stream's cache when the cache is on.
-    fn full(&mut self, stream: usize, counter: u64, payload: &[u8]) -> Result<Vec<u8>, SendError> {
-        let name = &self.profile.fields()[self.counter_field].name;
-        let values = self.values.clone().whole(name, counter);
-        let built = build(&self.profile, &values, payload).map_err(SendError::Build)?;
+    /// The frame for `payload` with `counter` by the full computation, written into `out` (the
+    /// frame's length) and kept in the stream's cache when the cache is on. The same frame
+    /// [`build`] makes: every field but the counter, the length and the CRC is the header's.
+    fn full(
+        &mut self,
+        stream: usize,
+        counter: u64,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), SendError> {
+        let fields = self.profile.fields();
+        let length_field = &fields[self.profile.length().field];
+        let length = self.profile.length_for(payload.len());
+        if length > length_field.max_value() {
+            return Err(SendError::Build(BuildError::PayloadTooLong {
+                payload_bytes: payload.len(),
+                length,
+                field: length_field.name.clone(),
+                field_bytes: length_field.bytes,
+                max: length_field.max_value(),
+            }));
+        }
+        let header = self.header.len();
+        out[..header].copy_from_slice(&self.header);
+        out[header..].copy_from_slice(payload);
+        let write = |out: &mut [u8], index: usize, raw: u64| {
+            let field = &fields[index];
+            write_be(&mut out[field.offset..field.offset + field.bytes], raw);
+        };
+        write(out, self.profile.length().field, length ^ length_field.xor);
+        let counter_field = &fields[self.counter_field];
+        write(out, self.counter_field, counter ^ counter_field.xor);
+        // As `build` writes it: the CRC field holds its `xor` while the CRC is computed.
+        let crc_at = self.profile.crc().field;
+        write(out, crc_at, fields[crc_at].xor);
+        let crc = crc_over(&self.profile, out);
+        write(out, crc_at, crc);
         if self.crc_cache {
             let mut digest = self.profile.crc().engine.start();
             for &item in &self.profile.crc().cover[..self.prefix] {
-                feed(&self.profile, &mut digest, item, &built.bytes);
+                feed(&self.profile, &mut digest, item, out);
             }
             let register = digest.register();
-            self.streams[stream].cached = Some(Cached {
-                frame: built.bytes.clone(),
-                register,
-            });
+            let kept = &mut self.streams[stream].cached;
+            if let Some(cached) = kept {
+                // The buffer the stream kept is written again, so a payload of the size it held
+                // before takes no allocation.
+                cached.frame.clear();
+                cached.frame.extend_from_slice(out);
+                cached.register = register;
+            } else {
+                *kept = Some(Cached {
+                    frame: out.to_vec(),
+                    register,
+                });
+            }
         }
-        Ok(built.bytes)
+        Ok(())
     }
 
-    /// The frame for the cached payload with `counter`: the kept frame with the
-    /// counter written in, its CRC resumed from the kept register.
-    fn rebuild_cached(&self, cached: &Cached, counter: u64) -> Vec<u8> {
+    /// The kept frame, already in `out`, with `counter` written in and its CRC: the kept register
+    /// fed the covered pieces from the counter on.
+    fn finish_cached(&self, out: &mut [u8], register: u64, counter: u64) {
         let fields = self.profile.fields();
-        let mut bytes = cached.frame.clone();
         let field = &fields[self.counter_field];
         write_be(
-            &mut bytes[field.offset..field.offset + field.bytes],
+            &mut out[field.offset..field.offset + field.bytes],
             counter ^ field.xor,
         );
         let crc = self.profile.crc();
-        let mut digest = crc.engine.resume(cached.register);
+        let mut digest = crc.engine.resume(register);
         for &item in &crc.cover[self.prefix..] {
-            feed(&self.profile, &mut digest, item, &bytes);
+            feed(&self.profile, &mut digest, item, out);
         }
         let value = digest.finish();
         let crc_field = &fields[crc.field];
         write_be(
-            &mut bytes[crc_field.offset..crc_field.offset + crc_field.bytes],
+            &mut out[crc_field.offset..crc_field.offset + crc_field.bytes],
             value,
         );
-        bytes
     }
 
     /// The value after `sent`, which a frame has just carried.
