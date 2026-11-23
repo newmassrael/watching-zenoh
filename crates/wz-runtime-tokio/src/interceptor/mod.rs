@@ -24,7 +24,7 @@
 //!
 //! Unlike the pure policy ENGINE ([`wz_access_control`], zenoh's
 //! `authorization.rs`), this seam and the [`access_control`] enforcer adapter
-//! reference the codec [`NetworkMessage`] types, so they stay in the runtime
+//! reference the codec [`MessageRef`] types, so they stay in the runtime
 //! crate — exactly as zenoh keeps `access_control.rs` (which matches on
 //! `NetworkBodyMut`) separate from the message-type-free `authorization.rs`.
 //!
@@ -74,7 +74,7 @@ pub use wz_access_control::{
 
 use wz_routing_graph::Zid;
 use wz_session_core::link::LinkSubject;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::MessageRef;
 
 #[cfg(feature = "access-acl")]
 use self::access_control::AclInterceptor;
@@ -113,7 +113,7 @@ pub trait InterceptorContext {
     /// keyexpr resolution. `None` when the message carries no keyexpr, or an
     /// aliased id the peer never declared on this face (the message would drop
     /// in routing anyway), in which case an enforcer admits.
-    fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String>;
+    fn full_keyexpr(&self, msg: MessageRef<'_>) -> Option<String>;
 
     /// R311y453 — the LINK-derived subject of the face this message arrived on:
     /// its protocol and the NICs it sits on, for the `link_protocols` /
@@ -227,7 +227,7 @@ impl<'a> GroupContext<'a> {
     /// table at the point it is judged (the dispatcher has already turned a member's declared
     /// aliases into literals, and a session sends literals), so a key that does not resolve is
     /// `None`, which the chain denies for a governed message, as everywhere in it.
-    pub(crate) fn of_message(link: &'a LinkSubject, msg: &NetworkMessage) -> Self {
+    pub(crate) fn of_message(link: &'a LinkSubject, msg: MessageRef<'_>) -> Self {
         let no_aliases = hashbrown::HashMap::new();
         let keyexpr = keyexpr::resolve_governed_keyexpr_in(
             msg,
@@ -254,7 +254,7 @@ impl InterceptorContext for GroupContext<'_> {
     }
 
     // Resolved at construction; one message per context, so the argument is ignored.
-    fn full_keyexpr(&self, _msg: &NetworkMessage) -> Option<String> {
+    fn full_keyexpr(&self, _msg: MessageRef<'_>) -> Option<String> {
         self.keyexpr.clone()
     }
 }
@@ -352,7 +352,7 @@ pub trait Interceptor: Send + Sync {
     fn kind(&self) -> InterceptorKind;
 
     /// Whether to admit `msg`, given the per-message `ctx`.
-    fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool;
+    fn intercept(&self, ctx: &dyn InterceptorContext, msg: MessageRef<'_>) -> bool;
 
     /// R311y508 (`routing-interceptor-hotreload`) — precompute whatever this
     /// interceptor can derive from a keyexpr ALONE for the given `subject`, so
@@ -406,7 +406,7 @@ pub trait Interceptor: Send + Sync {
     fn intercept_cached(
         &self,
         ctx: &dyn InterceptorContext,
-        msg: &NetworkMessage,
+        msg: MessageRef<'_>,
         _cache: Option<&(dyn Any + Send + Sync)>,
     ) -> bool {
         self.intercept(ctx, msg)
@@ -436,7 +436,7 @@ pub trait Interceptor: Send + Sync {
     fn overwrite_qos(
         &self,
         _ctx: &dyn InterceptorContext,
-        _msg: &NetworkMessage,
+        _msg: MessageRef<'_>,
         qos: wz_session_core::sample::QosLevel,
         _reliable: bool,
     ) -> wz_session_core::sample::QosLevel {
@@ -543,7 +543,7 @@ impl InterceptorChain {
     pub fn admit_cached(
         &self,
         ctx: &dyn InterceptorContext,
-        msg: &NetworkMessage,
+        msg: MessageRef<'_>,
         cache: Option<&InterceptorKeyexprCache>,
     ) -> InterceptorVerdict {
         let slots = cache.filter(|c| {
@@ -592,7 +592,7 @@ impl InterceptorChain {
     pub fn overwritten_qos(
         &self,
         ctx: &dyn InterceptorContext,
-        msg: &NetworkMessage,
+        msg: MessageRef<'_>,
         reliable: bool,
     ) -> Option<wz_session_core::sample::QosLevel> {
         if !self.rewrites_qos {
@@ -616,7 +616,7 @@ impl InterceptorChain {
     /// that the answer says which one, which is what lets `transport-stats`
     /// charge upstream's separate downsampler / low-pass drop counters instead
     /// of one collapsed total.
-    pub fn admit(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> InterceptorVerdict {
+    pub fn admit(&self, ctx: &dyn InterceptorContext, msg: MessageRef<'_>) -> InterceptorVerdict {
         for i in &self.interceptors {
             if !i.intercept(ctx, msg) {
                 return InterceptorVerdict::Drop(i.kind());

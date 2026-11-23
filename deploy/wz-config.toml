@@ -4014,13 +4014,18 @@ The most bytes one link of a transport the program supplies queues in either
 direction: what the program handed in and the session has not read, and what a
 session that cannot wait handed over and the program has not taken. Past it the
 program's bytes are refused with nothing taken, and the program is told when the
-session has read the queue down to half. Read only by a build with the
-app-transport capability.
+session has read the queue down to half. The link takes storage of the bound
+when it opens, and a call that hands in more than the bound at once is refused.
+Read only by a build with the app-transport capability.
 '''
 
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: a transport the program supplies is a wz capability."
+
+[limit.pico_preset]
+value = 2050
+reason = "zenoh-pico reads a link into one buffer of one batch and queues nothing in front of it (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`). The preset holds one batch of the preset's PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES (2,048) with the two bytes of a stream's length before it: the most the session reads of a link at once and the most a writer that cannot wait hands over. A link's storage, taken at its open, is that and one datagram's head and locator."
 
 [[limit]]
 id = "EVENT_RING_SLOTS"

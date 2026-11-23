@@ -25,9 +25,11 @@ use alloc::boxed::Box;
 #[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
 
+use core::task::Waker;
+
 use crate::app_link_table::{
-    AppLinkKind, AppLinkTable, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
-    ProgramSend,
+    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, LinkInterest,
+    ProgramEvent, ProgramOpen, ProgramSend,
 };
 use crate::limit_binding::Quota;
 #[cfg(target_has_atomic = "ptr")]
@@ -88,24 +90,31 @@ impl AppTransport {
     }
 
     /// Do what a table method asked for, with the lock let go: the program's close of each link
-    /// named, the drained links told to the program, then the wakes.
+    /// due, the drained links told to the program, then the wakes, each taken from the table in
+    /// turn ([`AppLinkTable::next_due`]), so nothing is collected to do it. What a close's report
+    /// makes due is done in the same turn.
     pub fn perform(&self, effects: Effects) {
-        let Effects {
-            close,
-            drained,
-            wake,
-        } = effects;
-        for link in close {
-            self.port.close(link);
-            let done = self.with(|table| table.close_done(link));
-            self.perform(done);
+        if effects.is_empty() {
+            return;
         }
-        for link in drained {
-            self.port.drained(link);
+        while let Some(due) = self.with(AppLinkTable::next_due) {
+            match due {
+                Due::Close(link) => {
+                    self.port.close(link);
+                    // What the report makes due is the table's, and this loop takes it.
+                    let _ = self.with(|table| table.close_done(link));
+                }
+                Due::Drained(link) => self.port.drained(link),
+                Due::Wake(waker) => waker.wake(),
+            }
         }
-        for waker in wake {
-            waker.wake();
-        }
+    }
+
+    /// Whether what `interest` asks of `link` is there now, under the table's lock alone and never
+    /// the session's: [`AppLinkTable::wait_link`], whose waker is woken by the call of the program's
+    /// that brings it, outside the lock ([`Self::perform`]). A stale `link` answers `true` at once.
+    pub fn wait_link(&self, link: LinkHandle, interest: LinkInterest, waker: &Waker) -> bool {
+        self.with(|table| table.wait_link(link, interest, waker))
     }
 
     /// How many links the transport holds.
@@ -183,6 +192,14 @@ impl SessionTransport {
             transport,
             queue: limits.app_link_queue_bytes(),
         }
+    }
+
+    /// Take now, in the transport's table, the rows of the session's `links` links, each with the
+    /// storage of the session's bound ([`AppLinkTable::provision`]): a link the session opens or
+    /// the program accepts later then allocates nothing.
+    pub fn provision(&self, links: usize) {
+        let queue = self.queue;
+        self.transport.with(|table| table.provision(links, queue));
     }
 
     /// [`AppTransport::begin_open`] of a link held to the session's bound.

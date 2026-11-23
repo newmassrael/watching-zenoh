@@ -35,12 +35,12 @@ use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
-use wz_session_core::declare_build::{
-    build_declare_kexpr, build_group_announcement, build_group_retraction, build_undeclare_kexpr,
-};
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::interest_build::{build_interest_exact, build_interest_final, InterestKinds};
+use wz_session_core::interest_build::InterestKinds;
+use wz_session_core::lent_control::{
+    interest_exact, interest_final, kexpr_declaration, undeclare_kexpr_declaration,
+};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
@@ -50,9 +50,11 @@ use wz_session_core::multicast_params::{MulticastOutcome, MulticastParams};
 use wz_session_core::multicast_reply_sink::{
     asks_for_declarations, GroupKeyexprAnswers, MulticastReplyEnqueue, MulticastReplySink,
 };
-use wz_session_core::multicast_tx::MulticastTxItem;
+use wz_session_core::multicast_tx::{
+    multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
+    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded, MulticastTxItem,
+};
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::push_build;
 use wz_session_core::qos::Priority;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
@@ -455,6 +457,14 @@ impl GroupFace {
         outcome
     }
 
+    /// [`Self::push`] of a message written from its parts, lent for the call: nothing of it is
+    /// built on the heap.
+    fn push_lent(&self, message: &MulticastTxEncoded<'_>) -> PushOutcome {
+        let outcome = self.tx.push_encoded(message, self);
+        self.write_staged();
+        outcome
+    }
+
     /// Write what the group's stage holds on the group's socket, on this thread, until the stage
     /// is empty or the socket has no room; what it refuses is offered again first at the next
     /// write, the face's or the task's. Whatever the session puts on the stage outside the group's
@@ -741,7 +751,7 @@ impl GroupFace {
     /// Tell the group of `entity`, which the session declared, as the group's declarations say
     /// (the port's rules: `GroupDeclarations::announced_id`, `key`, `retraction_key`, the tokio
     /// engine's groups' too), the `Declare` built by the session core's builder
-    /// (`build_group_announcement`) and pushed onto the group's stage. What a later retraction
+    /// (`multicast_tx_group_announcement`, written from its parts) and pushed onto the group's stage. What a later retraction
     /// names is kept when the group is told retractions. Best effort, as a put on the group is:
     /// a key past the codec's bound is announced nowhere, and a group whose session ended is told
     /// nothing.
@@ -753,13 +763,12 @@ impl GroupFace {
         let Some(id) = told.announced_id(entity.what, entity.entity, entity.allowed_origin) else {
             return;
         };
-        if let Ok(declare) =
-            build_group_announcement(entity.what, id, told.key(entity.keyexpr, entity.wire))
-        {
-            self.push(MulticastTxItem::Declare {
-                declare: alloc::boxed::Box::new(declare),
-            });
-        }
+        let _ = multicast_tx_group_announcement(
+            entity.what,
+            id,
+            told.key(entity.keyexpr, entity.wire),
+            |message| self.push_lent(message),
+        );
         if told.retracts() {
             let key = told.retraction_key(entity.keyexpr, entity.wire, entity.retraction);
             self.announced.borrow_mut().push(Announced {
@@ -773,7 +782,7 @@ impl GroupFace {
     }
 
     /// Tell the group that the entity `entity` it was told of is retracted
-    /// (`build_group_retraction`); an entity it was not told of, or a group that is told no
+    /// (`multicast_tx_group_retraction`); an entity it was not told of, or a group that is told no
     /// retraction, is told nothing.
     pub(super) fn retract(&self, entity: EntityId) {
         let announced = {
@@ -791,11 +800,9 @@ impl GroupFace {
             mapping_id: announced.mapping_id,
             suffix: announced.suffix.as_deref(),
         };
-        if let Ok(declare) = build_group_retraction(announced.what, announced.id, key) {
-            self.push(MulticastTxItem::Declare {
-                declare: alloc::boxed::Box::new(declare),
-            });
-        }
+        let _ = multicast_tx_group_retraction(announced.what, announced.id, key, |message| {
+            self.push_lent(message)
+        });
     }
 
     /// Ask the group for its members' liveliness tokens on the key of the liveliness subscriber
@@ -816,16 +823,14 @@ impl GroupFace {
             return;
         }
         let key = told.key(keyexpr, wire);
-        if let Ok(interest) = build_interest_exact(
+        if let Ok(interest) = interest_exact(
             u64::from(id),
             InterestKinds::TOKENS,
             history,
             /*future=*/ true,
             Some((key.mapping_id, key.suffix)),
         ) {
-            self.push(MulticastTxItem::Interest {
-                interest: alloc::boxed::Box::new(interest),
-            });
+            multicast_tx_interest(&interest, |message| self.push_lent(message));
         }
     }
 
@@ -837,8 +842,8 @@ impl GroupFace {
         if self.has_ended() || !self.join.declarations.asks_for_liveliness() {
             return;
         }
-        self.push(MulticastTxItem::Interest {
-            interest: alloc::boxed::Box::new(build_interest_final(u64::from(id))),
+        multicast_tx_interest(&interest_final(u64::from(id)), |message| {
+            self.push_lent(message)
         });
     }
 
@@ -849,11 +854,9 @@ impl GroupFace {
         if id == 0 || self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        if let Ok(declare) = build_declare_kexpr(id, keyexpr) {
+        if let Ok(declaration) = kexpr_declaration(id, keyexpr) {
             self.keyexprs.borrow_mut().declared(id, keyexpr);
-            self.push(MulticastTxItem::Declare {
-                declare: alloc::boxed::Box::new(declare),
-            });
+            multicast_tx_declaration(&declaration, |message| self.push_lent(message));
         }
     }
 
@@ -863,8 +866,8 @@ impl GroupFace {
             return;
         }
         self.keyexprs.borrow_mut().retracted(id);
-        self.push(MulticastTxItem::Declare {
-            declare: alloc::boxed::Box::new(build_undeclare_kexpr(id)),
+        multicast_tx_declaration(&undeclare_kexpr_declaration(id), |message| {
+            self.push_lent(message)
         });
     }
 
@@ -879,16 +882,14 @@ impl GroupFace {
     /// (`vendor/zenoh-pico/src/session/interest.c` @
     /// `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`).
     pub(super) fn ask_keyexprs(&self, interest_id: u64) {
-        if let Ok(interest) = build_interest_exact(
+        if let Ok(interest) = interest_exact(
             interest_id,
             InterestKinds::KEYEXPRS,
             /*current=*/ true,
             /*future=*/ false,
             None,
         ) {
-            self.push(MulticastTxItem::Interest {
-                interest: alloc::boxed::Box::new(interest),
-            });
+            multicast_tx_interest(&interest, |message| self.push_lent(message));
         }
     }
 
@@ -916,16 +917,14 @@ impl GroupFace {
             FilterPlane::Queryables { .. } => InterestKinds::QUERYABLES,
         };
         let key = told.key(keyexpr, wire);
-        if let Ok(interest) = build_interest_exact(
+        if let Ok(interest) = interest_exact(
             interest_id,
             kinds,
             /*current=*/ true,
             /*future=*/ false,
             Some((key.mapping_id, key.suffix)),
         ) {
-            self.push(MulticastTxItem::Interest {
-                interest: alloc::boxed::Box::new(interest),
-            });
+            multicast_tx_interest(&interest, |message| self.push_lent(message));
             self.filters.borrow_mut().push((filter, interest_id));
         }
     }
@@ -938,17 +937,18 @@ impl GroupFace {
             at.map(|at| filters.remove(at).1)
         };
         if let (Some(interest_id), false) = (asked, self.has_ended()) {
-            self.push(MulticastTxItem::Interest {
-                interest: alloc::boxed::Box::new(build_interest_final(interest_id)),
+            multicast_tx_interest(&interest_final(interest_id), |message| {
+                self.push_lent(message)
             });
         }
     }
 
     /// Put a publication on the group, naming its key by the declaration the group was told when
     /// it is told the session's keyexprs (`GroupDeclarations::declares_keyexprs`), and in full
-    /// otherwise, as a group whose session tells it its entities, or less, is. Built by the session
-    /// core's Push builders, as a link's is, framed with the sequence number of its channel as it
-    /// is pushed onto the group's stage, and written by this call ([`Self::push`]). A group whose
+    /// otherwise, as a group whose session tells it its entities, or less, is. Written from its parts
+    /// by the session core's publication writer, as a link's is, framed with the sequence number of
+    /// its channel as it is pushed onto the group's stage, and written by this call
+    /// ([`Self::push_lent`]). A group whose
     /// session ended is sent nothing.
     pub(super) fn publish(&self, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         if self.has_ended() {
@@ -957,29 +957,23 @@ impl GroupFace {
         // A group told the session's keyexprs is sent the key by its declaration, as the tokio
         // engine's group is; any other by its literal.
         let key = self.join.declarations.key(put.keyexpr, put.wire);
-        let push = match (put.kind, key.mapping_id) {
-            (SampleKind::Put, 0) => {
-                push_build::build_push_literal_with_meta(put.keyexpr, put.payload, put.meta)
-            }
-            (SampleKind::Del, 0) => {
-                push_build::build_push_del_literal_with_meta(put.keyexpr, put.meta)
-            }
-            (SampleKind::Put, mapping_id) => push_build::build_push_aliased_with_meta(
-                mapping_id,
-                key.suffix,
-                put.payload,
-                put.meta,
-            ),
-            (SampleKind::Del, mapping_id) => {
-                push_build::build_push_del_aliased_with_meta(mapping_id, key.suffix, put.meta)
-            }
-        }
+        // Written from its parts, the bytes of the owned Push the builders would make; a key, a
+        // payload or a field past its bound is refused as the builders refuse it.
+        let suffix = match key.mapping_id {
+            0 => Some(put.keyexpr),
+            _ => key.suffix,
+        };
+        multicast_tx_publication(
+            key.mapping_id,
+            suffix,
+            put.kind,
+            put.payload,
+            put.meta,
+            put.reliable,
+            put.priority,
+            |message| self.push_lent(message),
+        )
         .map_err(|_| FanoutError::ExceedsCapacity)?;
-        self.push(MulticastTxItem::Push {
-            push: alloc::boxed::Box::new(push),
-            reliable: put.reliable,
-            priority: put.priority,
-        });
         Ok(0)
     }
 }
@@ -1027,14 +1021,10 @@ where
             // What is queued below, and what the dispatch queues, leaves after the JOIN the
             // group's next step sends: a step sends its beacon before what is queued.
             join_ask.ask();
-            let answers = {
-                let mut keyexprs = keyexprs.borrow_mut();
-                keyexprs.asked(&event);
-                keyexprs.take_answers()
-            };
-            for item in answers {
-                tx.enqueue(item);
-            }
+            // A reply is put on the stage without waiting, so the answers go as they are taken.
+            let mut keyexprs = keyexprs.borrow_mut();
+            keyexprs.asked(&event);
+            keyexprs.take_answers(|reply| tx.enqueue_reply(reply));
         }
         inner(event);
     }

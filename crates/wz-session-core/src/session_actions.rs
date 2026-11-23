@@ -3214,6 +3214,21 @@ enum DispatchStage {
     ReservedChain,
 }
 
+/// The storage a retraction written from its parts writes its `ext_keyexpr` body into: the body's
+/// header, an id of at most ten VLE bytes, and a suffix up to the longest keyexpr the build names
+/// (`MAX_KEYEXPR_BYTES`). A key past it is retracted by its id alone, as the owned retraction
+/// falls back when its key does not encode.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "declare-undeclare",
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token"
+    )
+))]
+const NAMED_KEY_BODY_BYTES: usize = 11 + crate::caps::MAX_KEYEXPR_BYTES;
+
 /// A declaration written from its parts, as the arguments of the writer of
 /// [`crate::lent_control`] that makes it: every one a session with no allocator sends, and every
 /// one a lend-only session (`tx-lend-only`) sends, where an owned `DeclareOwned` would be built
@@ -3721,7 +3736,7 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
     )
 ))]
 pub type ReplyEgressGate =
-    alloc::boxed::Box<dyn Fn(&crate::network_message::NetworkMessage) -> bool + Send + Sync>;
+    alloc::boxed::Box<dyn Fn(crate::network_message::MessageRef<'_>) -> bool + Send + Sync>;
 
 /// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
 /// needs to decide between one frame and a fragment chain, and to route
@@ -8674,7 +8689,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::admit_peer_remote_bound`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRef`).
+    /// message lies (`crate::inbound::ExtChainRead`).
     pub fn admit_peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
         &self,
         extensions: impl IntoIterator<Item = E>,
@@ -8878,7 +8893,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::admit_peer_region`] over the entries a chain yields, held or read where its
-    /// message lies (`crate::inbound::ExtChainRef`).
+    /// message lies (`crate::inbound::ExtChainRead`).
     pub fn admit_peer_region_in<E: crate::ext_view::ExtEntryView>(
         &self,
         extensions: impl IntoIterator<Item = E>,
@@ -10377,13 +10392,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// destructuring, a returned tuple) is one more such slot in the frame of the dispatch that
     /// inlines it.
     fn observe_inbound(&self, frame: &InboundFrame) {
-        self.observe_control(&frame.control_facts());
+        self.observe_control(&frame.control_facts().unchained());
     }
 
     /// What the link records about one received transport message, whichever read it: the
     /// handshake facts it carries and the RX-activity stamp. Total: a message read is always
     /// taken, so it cannot fail.
-    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_>) {
+    pub(crate) fn observe_control(&self, facts: &crate::inbound::ControlFacts<'_, ()>) {
         // Under `handshake-stray-message = ignore` an Init or Open that reaches an established
         // session belongs to an establishment that is over: it records no handshake fact and is
         // no sign of the peer's life, so it neither overwrites what the session negotiated nor
@@ -14498,8 +14513,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// `None`, with nothing sent, where the owned message is what goes out
     /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]): a session that rewrites the keys it
-    /// originates, a build whose network counters classify a message by its owned form, and
-    /// metadata that starts a timestamp stack.
+    /// originates, and a build whose network counters classify a message by its owned form.
     #[cfg(all(
         feature = "codec-push",
         feature = "alloc",
@@ -14528,10 +14542,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "transport-stats"))]
         {
             if self.rewrites_originated_keys() {
-                return None;
-            }
-            #[cfg(feature = "pubsub-ts-stack")]
-            if meta.ts_stack.is_some() {
                 return None;
             }
             #[cfg(feature = "pubsub-qos")]
@@ -15629,22 +15639,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // governs, still ends the peer's Interest. A build with no egress gate
         // (`reply-egress-gate`) asks nothing.
         #[cfg(feature = "reply-egress-gate")]
-        let declare = if self
+        if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
+            && !self.reply_gate_admits(crate::network_message::MessageRef::Declare(&declare))
         {
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
-                return;
-            }
-            match message {
-                crate::network_message::NetworkMessage::Declare(declare) => *declare,
-                _ => return,
-            }
-        } else {
-            declare
-        };
+            return;
+        }
         // §5.21 routing-namespace — the answer to an interest is a `Declare` like any other
         // the node makes, and upstream's decorator gives it the prefix whatever the interest id
         // (`handle_declare_egress` reads none). This dispatch is below the egress arm, so it is
@@ -15690,9 +15691,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let Some(declare) = owned() else {
                 return;
             };
-            let message =
-                crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(declare));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(crate::network_message::MessageRef::Declare(&declare)) {
                 return;
             }
         }
@@ -16124,10 +16123,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A lend-only session writes the retraction from its parts.
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareSubscriber {
                     id: subscriber_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16155,10 +16155,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-token"
         )
     ))]
-    fn named_key_body(key: Option<(crate::wire_id::ExprId, &str)>) -> Option<Vec<u8>> {
-        key.map(|(mapping_id, suffix)| {
-            crate::declare_ext_keyexpr::ext_wireexpr_body(mapping_id, suffix)
-        })
+    fn named_key_body<'b>(
+        key: Option<(crate::wire_id::ExprId, &str)>,
+        buf: &'b mut [u8; NAMED_KEY_BODY_BYTES],
+    ) -> Option<&'b [u8]> {
+        let (mapping_id, suffix) = key?;
+        let len = crate::declare_ext_keyexpr::ext_wireexpr_body_into(mapping_id, suffix, buf)?;
+        buf.get(..len)
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
@@ -16203,10 +16206,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_queryable_recorded(queryable_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareQueryable {
                     id: queryable_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -16270,10 +16274,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = self.retract_token_recorded(token_id, || {
             #[cfg(feature = "tx-lend-only")]
             {
-                let body = Self::named_key_body(key);
+                let mut buf = [0u8; NAMED_KEY_BODY_BYTES];
+                let body = Self::named_key_body(key, &mut buf);
                 let _ = self.dispatch_declare_lent(&LentDeclaration::UndeclareToken {
                     id: token_id,
-                    key: body.as_deref(),
+                    key: body,
                 });
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -17216,15 +17221,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             {
                 return Some(response);
             }
-            let message =
-                crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-            if !self.reply_gate_admits(&message) {
+            if !self.reply_gate_admits(crate::network_message::MessageRef::Response(&response)) {
                 return None;
             }
-            match message {
-                crate::network_message::NetworkMessage::Response(response) => Some(*response),
-                _ => None,
-            }
+            Some(response)
         }
         // A build with no egress gate admits every reply.
         #[cfg(not(feature = "reply-egress-gate"))]
@@ -17282,9 +17282,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "declare-subscriber"
         )
     ))]
-    fn reply_gate_admits(&self, message: &crate::network_message::NetworkMessage) -> bool {
+    fn reply_gate_admits(&self, reply: crate::network_message::MessageRef<'_>) -> bool {
         R::with_mutex_mut(&self.egress_reply_gate, |slot| {
-            slot.as_ref().map_or(true, |gate| gate(message))
+            slot.as_ref().map_or(true, |gate| gate(reply))
         })
     }
 

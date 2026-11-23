@@ -104,7 +104,7 @@ pub fn peer_remote_bound(extensions: &[ExtEntryOwned]) -> Result<Option<Bound>, 
 }
 
 /// [`peer_remote_bound`] over the entries a chain yields, held or read where its message lies
-/// (`crate::inbound::ExtChainRef`).
+/// (`crate::inbound::ExtChainRead`).
 pub fn peer_remote_bound_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<Bound>, InvalidBound> {

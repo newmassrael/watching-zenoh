@@ -418,9 +418,13 @@ impl AppListener {
         let transport = &self.guard.transport;
         let listener = self.guard.handle;
         let (handle, remote) = poll_fn(|cx| {
-            let next = transport.with(|table| table.next_accepted(listener, Some(cx.waker())));
+            let next = transport.with(|table| {
+                table.next_accepted(listener, Some(cx.waker()), |handle, remote| {
+                    (handle, String::from(remote))
+                })
+            });
             match next {
-                AcceptRead::Accepted(handle, remote) => Poll::Ready(Ok((handle, remote))),
+                AcceptRead::Accepted(accepted) => Poll::Ready(Ok(accepted)),
                 AcceptRead::Empty => Poll::Pending,
                 AcceptRead::End => Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
@@ -459,7 +463,7 @@ fn poll_datagram(guard: &AppLinkGuard, cx: &mut Context<'_>) -> Poll<Option<Rece
     let transport = &guard.transport;
     let handle = guard.handle;
     let (read, drained) = transport.with(|table| {
-        let read = table.read_datagram(handle, Some(cx.waker()));
+        let read = table.read_datagram(handle, Some(cx.waker()), |datagram| datagram.to_received());
         (read, table.take_drained())
     });
     transport.perform(drained);

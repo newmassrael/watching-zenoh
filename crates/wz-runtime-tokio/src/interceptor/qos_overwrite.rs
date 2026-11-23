@@ -54,7 +54,7 @@ use wz_session_core::declare_ext_qos::{
 use wz_session_core::ext_view::query_value_payload_len;
 use wz_session_core::keyexpr_match::keyexpr_includes;
 use wz_session_core::link::{InterceptorLink, LinkSubject};
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::{MessageRef, NetworkMessage};
 use wz_session_core::put_payload::payload_len as put_payload_len;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::sample::QosLevel;
@@ -257,9 +257,9 @@ impl QosOverwriteInterceptor {
 
 /// The kind of `msg` as a rule sees it, and the size of the payload a `payload_size` range is
 /// tested against; `None` for a message no rule can govern.
-fn classify(msg: &NetworkMessage) -> Option<(QosOverwriteMessage, u64)> {
+fn classify(msg: MessageRef<'_>) -> Option<(QosOverwriteMessage, u64)> {
     match msg {
-        NetworkMessage::Push(push) => match &push.body {
+        MessageRef::Push(push) => match &push.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => {
                 Some((QosOverwriteMessage::Put, put_payload_len(put) as u64))
             }
@@ -268,7 +268,7 @@ fn classify(msg: &NetworkMessage) -> Option<(QosOverwriteMessage, u64)> {
         },
         // Every Request is a query to upstream (its `RequestBody` has the one arm); one that
         // carries a value is measured by it.
-        NetworkMessage::Request(request) => {
+        MessageRef::Request(request) => {
             let size = match &request.body {
                 RequestOwnedVariant::CodecZenohQuery(query) => query
                     .extensions
@@ -283,10 +283,10 @@ fn classify(msg: &NetworkMessage) -> Option<(QosOverwriteMessage, u64)> {
 }
 
 /// The QoS `msg` carries, or `None` for a message that carries none a rule may set.
-pub fn message_qos(msg: &NetworkMessage) -> Option<QosLevel> {
+pub fn message_qos(msg: MessageRef<'_>) -> Option<QosLevel> {
     match msg {
-        NetworkMessage::Push(push) => Some(read_push_qos(push)),
-        NetworkMessage::Request(request) => Some(read_request_qos(request)),
+        MessageRef::Push(push) => Some(read_push_qos(push)),
+        MessageRef::Request(request) => Some(read_request_qos(request)),
         _ => None,
     }
 }
@@ -320,7 +320,7 @@ impl Interceptor for QosOverwriteInterceptor {
     }
 
     // This interceptor never drops: it admits everything and rewrites through `overwrite_qos`.
-    fn intercept(&self, _ctx: &dyn InterceptorContext, _msg: &NetworkMessage) -> bool {
+    fn intercept(&self, _ctx: &dyn InterceptorContext, _msg: MessageRef<'_>) -> bool {
         true
     }
 
@@ -331,7 +331,7 @@ impl Interceptor for QosOverwriteInterceptor {
     fn overwrite_qos(
         &self,
         ctx: &dyn InterceptorContext,
-        msg: &NetworkMessage,
+        msg: MessageRef<'_>,
         qos: QosLevel,
         reliable: bool,
     ) -> QosLevel {
@@ -395,7 +395,7 @@ mod tests {
         fn subject(&self) -> Option<Zid> {
             self.zid
         }
-        fn full_keyexpr(&self, _msg: &NetworkMessage) -> Option<String> {
+        fn full_keyexpr(&self, _msg: MessageRef<'_>) -> Option<String> {
             self.key.clone()
         }
         fn link_subject(&self) -> Option<&LinkSubject> {
@@ -448,8 +448,8 @@ mod tests {
             .expect("the rules apply to ingress");
         chain.overwrite_qos(
             face,
-            msg,
-            message_qos(msg).expect("a Push carries qos"),
+            msg.view(),
+            message_qos(msg.view()).expect("a Push carries qos"),
             reliable,
         )
     }
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(qos.priority(), Priority::RealTime);
         apply_qos(&mut query, qos).expect("within the bound");
         assert_eq!(
-            message_qos(&query),
+            message_qos(query.view()),
             Some(qos),
             "the Request carries the rewritten QoS"
         );
@@ -718,7 +718,7 @@ mod tests {
             wz_session_core::declare_build::build_declare_queryable(0, 0, Some("a/q"))
                 .expect("build declare"),
         ));
-        assert!(message_qos(&declare).is_none());
+        assert!(message_qos(declare.view()).is_none());
         assert!(clone_for_rewrite(&declare).is_none());
         assert!(clone_for_rewrite(&put("a/x", b"x")).is_some());
     }
@@ -753,7 +753,11 @@ mod tests {
         assert_eq!(chain_len(&msg), Some(8), "the chain holds eight entries");
         assert_eq!(apply_qos(&mut msg, qos), Ok(()));
         assert_eq!(chain_len(&msg), Some(9), "the eight entries and the QoS");
-        assert_eq!(message_qos(&msg), Some(qos), "and the QoS is the rule's");
+        assert_eq!(
+            message_qos(msg.view()),
+            Some(qos),
+            "and the QoS is the rule's"
+        );
     }
 
     /// The control of the test above, which would pass as well if every rewrite added an entry: a
@@ -768,13 +772,13 @@ mod tests {
         assert_eq!(chain_len(&msg), Some(8), "the chain holds eight entries");
         assert_eq!(apply_qos(&mut msg, second), Ok(()));
         assert_eq!(chain_len(&msg), Some(8));
-        assert_eq!(message_qos(&msg), Some(second));
+        assert_eq!(message_qos(msg.view()), Some(second));
     }
 
     #[test]
     fn it_admits_everything() {
         let rules = vec![rule(&["**"], &[QosOverwriteMessage::Put], real_time())];
         let chain = QosOverwriteInterceptor::for_flow(&rules, InterceptorFlow::Ingress).unwrap();
-        assert!(chain.intercept(&Face::keyed("a/x"), &put("a/x", b"x")));
+        assert!(chain.intercept(&Face::keyed("a/x"), put("a/x", b"x").view()));
     }
 }

@@ -745,14 +745,16 @@ config WZ_LIMIT_E2E_SUPERVISED_STREAMS
 
 config WZ_LIMIT_APP_LINK_QUEUE_BYTES
 	int "APP_LINK_QUEUE_BYTES"
+	default 2050 if WZ_LIMITS_ZENOH_PICO
 	default 262144
 	help
 	  The most bytes one link of a transport the program supplies queues in either
 	  direction: what the program handed in and the session has not read, and what a
 	  session that cannot wait handed over and the program has not taken. Past it the
 	  program's bytes are refused with nothing taken, and the program is told when the
-	  session has read the queue down to half. Read only by a build with the
-	  app-transport capability.
+	  session has read the queue down to half. The link takes storage of the bound
+	  when it opens, and a call that hands in more than the bound at once is refused.
+	  Read only by a build with the app-transport capability.
 
 config WZ_LIMIT_EVENT_RING_SLOTS
 	int "EVENT_RING_SLOTS"
