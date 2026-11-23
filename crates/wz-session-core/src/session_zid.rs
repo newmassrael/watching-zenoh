@@ -80,13 +80,17 @@ impl SessionZid {
         if !nonzero {
             return Err(ZidError::AllZero { len: src.len() });
         }
-        // At most `ZID_MAX` bytes, checked above: the copy walks both together.
+        // At most `ZID_MAX` bytes, checked above. The array is rebuilt by value, the
+        // bytes pushed in from the last, so the zid's first byte ends up first and
+        // the bytes past it stay zero: no index and no mutable borrow in a const fn.
         let mut bytes = [0u8; ZID_MAX];
-        let (mut into, mut from): (&mut [u8], &[u8]) = (&mut bytes, src);
-        while let ([slot, into_rest @ ..], [byte, from_rest @ ..]) = (into, from) {
-            *slot = *byte;
-            into = into_rest;
-            from = from_rest;
+        let mut rest = src;
+        while let [head @ .., last] = rest {
+            let [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, _] = bytes;
+            bytes = [
+                *last, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14,
+            ];
+            rest = head;
         }
         Ok(Self {
             bytes,
