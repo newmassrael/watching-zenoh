@@ -195,8 +195,6 @@ pub mod row_pool;
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.
-// Totality debt TD-133 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod byte_cells;
 
 /// R311gb (Track 2 no-alloc gating) — deploy-declared capacity
