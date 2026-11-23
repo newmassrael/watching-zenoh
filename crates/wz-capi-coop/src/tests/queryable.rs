@@ -171,3 +171,62 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
         "three Finals for the three queries held, none for the refused one"
     );
 }
+
+/// Held to one Final, a session answers query after query, each staging a reply into the one stage
+/// its open lent, and after the last answer the stage is free and no answer found none: answering
+/// lends nothing past the stages and keeps none. A kept query answered later takes and gives back
+/// the stage too. The CONTROL is each reply reaching the router.
+#[test]
+fn queries_answered_past_the_stages_leave_every_stage_free() {
+    let limits = super::entity_tables::lowered(|l| l.select_max_pending_finals(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = super::entity_tables::open_under(&router, limits);
+    assert_eq!(engine.answer_stages(), (1, 0), "the open lent one stage");
+    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::default();
+    let slot = kept.clone();
+    declare(&engine, "demo/s/**", move |holder, query, out| {
+        out.reply_keyed(query.keyexpr(), b"staged")
+            .expect("a reply on the query's own key");
+        if query.keyexpr() == "demo/s/kept" {
+            *slot.lock().unwrap() = Some(holder.hold_query(query));
+        }
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    for (rid, key) in [
+        (1, "demo/s/a"),
+        (2, "demo/s/b"),
+        (3, "demo/s/c"),
+        (4, "demo/s/d"),
+    ] {
+        let answered = router.seen(|s| s.answers.len());
+        router.send(Command::Query(rid, key));
+        until(&engine, "the reply and the final", || {
+            router.seen(|s| s.answers.len()) >= answered + 2
+        });
+    }
+    assert_eq!(
+        engine.answer_stages(),
+        (1, 0),
+        "every answer gave the stage back, and none found it held"
+    );
+    router.send(Command::Query(5, "demo/s/kept"));
+    until(&engine, "the callback to keep the query", || {
+        kept.lock().unwrap().is_some()
+    });
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    held.reply(&mut |out| {
+        out.reply_keyed("demo/s/kept", b"later")
+            .expect("a reply on the query's own key");
+    });
+    assert_eq!(
+        engine.answer_stages(),
+        (1, 0),
+        "the kept query's answer gave the stage back"
+    );
+    drop(held);
+    until(&engine, "the kept query's final", || {
+        router.seen(|s| s.answers.len()) >= 4 * 2 + 3
+    });
+}

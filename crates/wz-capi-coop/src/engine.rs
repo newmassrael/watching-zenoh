@@ -119,7 +119,7 @@ use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
-    query::{CoopHolder, QueryPlane},
+    query::{AnswerStages, CoopHolder, QueryPlane},
     wz_capi_port::{QblId, QueryCallback, QueryableSink},
     wz_session_core::query::QueryableId,
     wz_session_core::query_sink::{BoxedQuerySink, QueryView},
@@ -3358,6 +3358,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plan.peers(),
         )
         .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?;
+        // The stages its queries are answered into, one for each it holds for its callbacks.
+        #[cfg(feature = "queryable")]
+        let answers = {
+            let (count, replies, bytes) = plan.answer_stages();
+            AnswerStages::lent(arena.arena_mut(), count, replies, bytes)
+                .map_err(|lend| OpenError::Arena(ArenaRefused::Lend(lend)))?
+        };
         // The ends of the session's legs wait in rows the plan counts for them.
         #[cfg(feature = "query")]
         let ended = EndedLegs::over(
@@ -3428,7 +3435,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "queryable")]
             queryables,
             #[cfg(feature = "queryable")]
-            plane: Arc::new(QueryPlane::holding(plan.held_queries())),
+            plane: Arc::new(QueryPlane::holding(plan.held_queries(), answers)),
             #[cfg(feature = "query")]
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
@@ -4127,7 +4134,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
                 _ => None,
             });
-        let mut replies = ReplyStage::held_to(self.reply_bounds);
+        let mut replies = self.plane.answer_stage(self.reply_bounds);
         if let Some(callback) = callback {
             let _answering =
                 query::Answering::enter(self as *const Self as usize, generation, query.rid());
@@ -4140,11 +4147,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.keyexpr(),
                 query.parameters(),
                 query.qos(),
-                &mut replies,
+                &mut *replies,
             );
             (lock(&callback))(query, &mut responder);
         }
-        self.answer(generation, query.rid(), replies, true);
+        self.answer(generation, query.rid(), &*replies, true);
     }
 
     /// A build with no queryable is handed no query.
@@ -4565,7 +4572,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         &self,
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
-        replies: ReplyStage,
+        replies: &ReplyStage<Lent>,
         release: bool,
     ) {
         let Some(core) = self.live() else {
@@ -4576,7 +4583,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if generation == query::LOCAL_QUERY {
             let mut registry = core.0.registry.borrow_mut();
             let gets = &mut registry.local;
-            for reply in replies {
+            for reply in replies.iter() {
                 gets.replies.deliver_local_reply(&reply.into());
             }
             if release && lock(&self.plane.holds).release(generation, rid).is_some() {
@@ -4589,7 +4596,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         let route = core.0.answer_route(generation);
         if let Some(route) = route {
-            for reply in replies {
+            for reply in replies.iter() {
                 if let Ok(response) = reply.into_response() {
                     route.send_response(response);
                 }
@@ -4831,7 +4838,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             qos,
         };
         let query = opts.loopback_query();
-        let mut staged = ReplyStage::held_to(self.reply_bounds);
+        let mut staged = self.plane.answer_stage(self.reply_bounds);
         let mut registry = core.registry.borrow_mut();
         self.plane.asking_locally(|| {
             registry.app.queryables.local_query_with_value(
@@ -4839,11 +4846,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 keyexpr,
                 &query,
                 None,
-                &mut staged,
+                &mut *staged,
             )
         });
         let gets = &mut registry.local;
-        for reply in staged {
+        for reply in staged.iter() {
             gets.replies.deliver_local_reply(&reply.into());
         }
         lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
@@ -6694,6 +6701,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.get_mut().0.end_links();
+        // The stages the queries were answered into lie in the arena, which the session's state
+        // gives back as it is dropped, after this.
+        #[cfg(feature = "queryable")]
+        self.plane.let_go_of_stages();
     }
 }
 
