@@ -137,7 +137,7 @@ impl FaceTables {
         &mut self,
         arena: &mut Arena,
         keys: KeySpace,
-        pools: PeerPools,
+        pools: &mut PeerPools,
         gets: RequesterRows,
         peer: PeerRows,
         limits: &SessionLimits,
@@ -342,7 +342,7 @@ impl Registry {
         peers: FacePeers,
     ) -> Result<Self, LendRefused> {
         let app = App::lent(arena, keys, rows, limits)?;
-        let pools = PeerPools::lent(arena, peers.pools)?;
+        let mut pools = PeerPools::lent(arena, peers.pools)?;
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
         // lends one set.
         debug_assert!(pools.is_shared() || peers.tables <= 1);
@@ -350,7 +350,9 @@ impl Registry {
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));
         let mut held = Vec::with_capacity(sets.capacity());
-        lend_set(&mut sets, arena, keys, pools, gets.rows, peers.rows, limits)?;
+        lend_set(
+            &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+        )?;
         held.push(HeldSet {
             at: 0,
             id: DIAL_FACE,
@@ -358,7 +360,9 @@ impl Registry {
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
         for _ in 1..peers.tables {
-            lend_set(&mut sets, arena, keys, pools, gets.rows, peers.rows, limits)?;
+            lend_set(
+                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
+            )?;
         }
         Ok(Self {
             app,
@@ -523,9 +527,9 @@ impl Registry {
             .unwrap_or(self.held.len());
         if at == self.sets.len() {
             // A face past the plan shares the pools of a session of many faces; one face's own
-            // spans are its tables' alone, so a face past it holds what its peer writes in nothing.
-            let shared = self.pools.is_shared().then_some(self.pools);
-            push_rowless(&mut self.sets, self.keys, shared, &self.limits);
+            // spans went to the dial face's tables, so a face past it is handed nothing and holds
+            // what its peer writes in nothing.
+            push_rowless(&mut self.sets, self.keys, &mut self.pools, &self.limits);
         }
         self.held.insert(at, HeldSet { at, id });
     }
@@ -916,14 +920,14 @@ impl Registry {
 
 /// Write a set of no rows at the end of `sets`, in the storage the vector keeps it in, held to
 /// `limits`, its peer's keys kept in `keys`, the session's key arena, and what its peer writes in
-/// `pools`, the session's, and hand it back: a set is never a value of its own in this frame. No
-/// set is without the key arena, whatever its rows (a lent one, or one of no rows for a face past
-/// the plan). A set handed no pools, a face past a session of one face whose own spans are the dial
-/// face's, drops and counts every declaration of its peer.
+/// the rows `pools`, the session's, hands it, and hand it back: a set is never a value of its own
+/// in this frame. No set is without the key arena, whatever its rows (a lent one, or one of no rows
+/// for a face past the plan). A set `pools` hands nothing, a face past a session of one face whose
+/// own spans went to the dial face, drops and counts every declaration of its peer.
 fn push_rowless<'s>(
     sets: &'s mut Vec<FaceTables>,
     keys: KeySpace,
-    pools: Option<PeerPools>,
+    pools: &mut PeerPools,
     limits: &SessionLimits,
 ) -> &'s mut FaceTables {
     sets.reserve(1);
@@ -937,9 +941,7 @@ fn push_rowless<'s>(
     }
     let set = &mut sets[at];
     set.peer.keep_keys_in(LentKeys::from(keys));
-    if let Some(pools) = pools {
-        set.peer.keep_rows_in(pools);
-    }
+    set.peer.keep_rows_in(pools);
     set
 }
 
@@ -950,12 +952,12 @@ fn lend_set(
     sets: &mut Vec<FaceTables>,
     arena: &mut Arena,
     keys: KeySpace,
-    pools: PeerPools,
+    pools: &mut PeerPools,
     gets: RequesterRows,
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, keys, Some(pools), limits).lend(arena, keys, pools, gets, peer, limits)
+    push_rowless(sets, keys, pools, limits).lend(arena, keys, pools, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -1311,7 +1313,7 @@ mod tests {
         };
         let mut pool_arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let pools =
+        let mut pools =
             PeerPools::lent(pool_arena.arena_mut(), pool_rows).expect("the arena has the pools");
         let mut by_value_arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
@@ -1325,7 +1327,7 @@ mod tests {
             by_value_arena.arena_mut(),
             by_value_keys,
             peer,
-            pools,
+            &mut pools,
             &limits,
         )
         .expect("rows");
@@ -1340,7 +1342,7 @@ mod tests {
             &mut sets,
             arena.arena_mut(),
             keys,
-            pools,
+            &mut pools,
             gets,
             peer,
             &limits,

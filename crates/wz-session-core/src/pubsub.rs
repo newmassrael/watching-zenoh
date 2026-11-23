@@ -3044,12 +3044,11 @@ impl SubscriberPeer<Lent> {
     /// Lend an empty side its staging (`staged` rows) from `arena`, where it lies: what
     /// [`Self::lent`] makes, without the side being a value of its own. Refused as `lent` is.
     ///
-    /// The key arena and the pool of interests the side was handed stay its own: lending rows
-    /// before or after it was handed them keeps the interests' keys and rows in them.
+    /// The key arena and the rows of interests the side was handed stay its own: lending its
+    /// staging before or after it was handed them keeps the interests' keys and rows in them.
     #[cfg(feature = "declare-subscriber")]
     pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
-        let pool = self.interests.rows.space().map(InterestRows);
-        self.interests = InterestSide::lent(arena, staged, self.interests.keys, pool)?;
+        self.interests.staged = arena.lend(staged)?;
         Ok(())
     }
 
@@ -3081,11 +3080,14 @@ impl SubscriberPeer<Lent> {
         self.naming.aliases.keep_rows_in(space);
     }
 
-    /// Keep the interests the peer asks from here on in rows of `rows`, the session's: a pool the
-    /// faces share, or a span of this side's own; the interests held elsewhere are forgotten first.
+    /// Keep the interests the peer asks from here on in rows `rows` hands out, the session's: a
+    /// pool the faces share, or a span of this side's own if no table took it before; the
+    /// interests held elsewhere are forgotten first. Rows with nothing left to hand change nothing.
     #[cfg(feature = "declare-subscriber")]
-    pub fn keep_interest_rows_in(&mut self, rows: InterestRows) {
-        self.interests.rows.keep_rows_in(rows.0);
+    pub fn keep_interest_rows_in(&mut self, rows: &mut InterestRows) {
+        if let Some(space) = rows.0.hand_out() {
+            self.interests.rows.keep_rows_in(space);
+        }
     }
 }
 
@@ -3568,77 +3570,52 @@ impl<P: Storage> Default for InterestSide<P> {
 
 #[cfg(feature = "declare-subscriber")]
 impl InterestSide<Lent> {
-    /// No interest registered, nothing staged, `staged` rows of the answers staged back lent from
-    /// `arena`, the interests' keys kept in `keys` and their rows in `rows`, the session's pool,
-    /// if the side was handed one.
-    fn lent(
-        arena: &mut Arena,
-        staged: usize,
-        keys: LentKeys,
-        rows: Option<InterestRows>,
-    ) -> Result<Self, LendRefused> {
-        let mut side = Self {
-            rows: Default::default(),
-            staged: arena.lend(staged)?,
-            refusals: SubInterestRefusals::default(),
-            reconciled_epoch: 0,
-            keys,
-        };
-        if let Some(InterestRows(pool)) = rows {
-            side.rows.keep_rows_in(pool);
-        }
-        Ok(side)
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes: the staging's. `None` past the address space.
+    /// The bytes of an arena [`SubscriberPeer::lend_rows`] takes: the staging's. `None` past the
+    /// address space.
     const fn arena_bytes(staged: usize) -> Option<usize> {
         Arena::table_bytes::<SubInterestReply>(staged)
     }
 }
 
+/// The kind of row a peer's interests are kept in on the lent policy.
+#[cfg(feature = "declare-subscriber")]
+type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
+
 /// Where every face of a session keeps the interests its peer asks
 /// ([`SubscriberPeer::keep_interest_rows_in`]): a pool the faces of a session of many share, lent
 /// from its arena once, so a face holds the interests its peer asked and the session holds what its
 /// faces together asked, up to the pool's rows; or, for a session of one face, a span of that
-/// face's own. A handle: copies name the same rows.
+/// face's own, handed to the first side that asks and to no other.
 #[cfg(feature = "declare-subscriber")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InterestRows(crate::row_pool::RowSpace<crate::row_pool::Seq<InboundSubInterest<Lent>>>);
+#[derive(Debug)]
+pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
 
 #[cfg(feature = "declare-subscriber")]
 impl InterestRows {
     /// A pool of `rows` interests the faces share, lent from `arena`. Refused, taking nothing,
     /// past what is left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        arena.lend_pool(rows).map(Self)
+    pub fn lent_pool(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        let pool = arena.lend_pool(rows)?;
+        Ok(Self(crate::row_pool::RowSource::Pool(pool)))
     }
 
-    /// The bytes of an arena [`Self::lent`] takes for `rows` interests. `None` past the most rows
-    /// a pool names or the address space.
+    /// A span of one face's own of `rows` interests, lent from `arena`. Refused, taking nothing,
+    /// past what is left.
+    pub fn lent_own(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        let own = arena.lend_own(rows)?;
+        Ok(Self(crate::row_pool::RowSource::Own(Some(own))))
+    }
+
+    /// The bytes of an arena [`Self::lent_pool`] takes for `rows` interests. `None` past the most
+    /// rows a pool names or the address space.
     pub const fn pool_bytes(rows: usize) -> Option<usize> {
-        crate::row_pool::RowSpace::<crate::row_pool::Seq<InboundSubInterest<Lent>>>::pool_bytes(
-            rows,
-        )
+        crate::row_pool::RowSpace::<InterestKind>::pool_bytes(rows)
     }
 
     /// The bytes a span of one face's own of `rows` interests takes, not rounded to an arena's
     /// spans. `None` past the most rows a span names or the address space.
     pub const fn own_bytes(rows: usize) -> Option<usize> {
-        crate::row_pool::RowSpace::<crate::row_pool::Seq<InboundSubInterest<Lent>>>::own_bytes(rows)
-    }
-
-    /// The alignment a span of one face's own of interests starts on.
-    pub const fn item_align() -> usize {
-        crate::row_pool::RowSpace::<crate::row_pool::Seq<InboundSubInterest<Lent>>>::item_align()
-    }
-
-    /// A span of one face's own of `rows` interests at `at`.
-    ///
-    /// # Safety
-    /// As [`crate::row_pool::RowSpace::own_over`]'s.
-    pub(crate) unsafe fn own_over(at: core::ptr::NonNull<u8>, rows: usize) -> Self {
-        // SAFETY: the caller's contract.
-        Self(unsafe { crate::row_pool::RowSpace::own_over(at, rows) })
+        crate::row_pool::RowSpace::<InterestKind>::own_bytes(rows)
     }
 
     /// What a shared pool holds now; `None` for a span of one face's own.

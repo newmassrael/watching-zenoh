@@ -418,10 +418,16 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
     let keys = arena
         .lend_keys(1024)
         .expect("the arena is laid out for the key arena");
-    let pools =
+    let mut pools =
         PeerPools::lent(&mut arena, pool_rows).expect("the arena is laid out for the pools");
-    PeerTables::<Lent>::lent(&mut arena, keys, rows, pools, &SessionLimits::defaults())
-        .expect("the arena is laid out for the tables")
+    PeerTables::<Lent>::lent(
+        &mut arena,
+        keys,
+        rows,
+        &mut pools,
+        &SessionLimits::defaults(),
+    )
+    .expect("the arena is laid out for the tables")
 }
 
 /// A peer whose tables an arena lent is answered as one on the heap is: two replies and the Final

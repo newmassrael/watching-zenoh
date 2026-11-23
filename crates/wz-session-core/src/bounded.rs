@@ -1378,7 +1378,7 @@ impl Arena {
     }
 
     /// Lend a pool of `rows` rows of the kind `K`: the next span of the arena, its state first,
-    /// whose rows the tables of a session's faces share ([`RowSpace`](crate::row_pool::RowSpace)).
+    /// whose rows the tables of a session's faces share ([`RowPool`](crate::row_pool::RowPool)).
     /// Refused, taking nothing, past what is left or past the most rows a pool names.
     ///
     /// The pool's memory is this arena's: whoever owns the arena gives it back only once every
@@ -1386,33 +1386,19 @@ impl Arena {
     pub fn lend_pool<K: crate::row_pool::RowKind>(
         &mut self,
         rows: usize,
-    ) -> Result<crate::row_pool::RowSpace<K>, LendRefused> {
-        let asked = crate::row_pool::RowSpace::<K>::pool_bytes(rows);
-        let span = self.lend_span(asked)?;
-        // SAFETY: the span is the arena's next, aligned to `ARENA_ALIGN` and lent nothing before;
-        // `pool_bytes` answered, so `rows` is within what a pool names.
-        Ok(unsafe { crate::row_pool::RowSpace::pool_over(span, rows) })
+    ) -> Result<crate::row_pool::RowPool<K>, LendRefused> {
+        crate::row_pool::RowPool::lent(self, rows)
     }
 
     /// Lend a span of one table's own of `rows` rows of the kind `K`
     /// ([`RowSpace`](crate::row_pool::RowSpace)): the next span of the arena, the rows from its
-    /// start and no state. Refused, taking nothing, past what is left or past the most rows a span
-    /// names.
+    /// start and no state, for the one table it is moved into. Refused, taking nothing, past what
+    /// is left or past the most rows a span names.
     pub fn lend_own<K: crate::row_pool::RowKind>(
         &mut self,
         rows: usize,
     ) -> Result<crate::row_pool::RowSpace<K>, LendRefused> {
-        const {
-            assert!(
-                crate::row_pool::RowSpace::<K>::item_align() <= ARENA_ALIGN,
-                "a row asks for more alignment than an arena's spans start on"
-            )
-        };
-        let span = self.lend_span(crate::row_pool::RowSpace::<K>::own_bytes(rows))?;
-        // SAFETY: the span is the arena's next, aligned to `ARENA_ALIGN`, at least the item's
-        // alignment, and lent nothing before; `own_bytes` answered, so `rows` is within what a
-        // span names; it is handed to the one table the caller makes it for.
-        Ok(unsafe { crate::row_pool::RowSpace::own_over(span, rows) })
+        crate::row_pool::RowSpace::lent_own(self, rows)
     }
 
     /// The next span of the arena, of `bytes` bytes rounded up to [`ARENA_ALIGN`], for the caller

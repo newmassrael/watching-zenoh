@@ -283,11 +283,11 @@ impl<V, const N: usize> crate::pool_gauge::PoolGauge for PooledIdMap<V, N> {
 
 impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
     fn find(&self, id: u64) -> Option<&V> {
-        self.rows.iter().find(|(k, _)| *k == id).map(|(_, v)| v)
+        self.rows.get_id(id)
     }
 
     fn find_mut(&mut self, id: u64) -> Option<&mut V> {
-        self.rows.iter_mut().find(|(k, _)| *k == id).map(|(_, v)| v)
+        self.rows.get_id_mut(id)
     }
 
     fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>> {
@@ -613,36 +613,40 @@ mod tests {
         _bytes: [u8; crate::bounded::ARENA_ALIGN],
     }
 
-    /// An arena over memory the test process leaks for a shared pool of `rows` rows of `K`, and,
-    /// with `own`, a span of one table's own instead.
-    fn space_of<K: crate::row_pool::RowKind>(
-        rows: usize,
-        own: bool,
-    ) -> crate::row_pool::RowSpace<K> {
+    /// An arena over `bytes` bytes of memory the test process leaks, so it outlives every row.
+    fn arena_of(bytes: usize) -> crate::bounded::Arena {
         use crate::bounded::{Arena, ARENA_ALIGN};
-        use crate::row_pool::RowSpace;
-        let bytes = if own {
-            Arena::span(RowSpace::<K>::own_bytes(rows).expect("fits")).expect("fits")
-        } else {
-            RowSpace::<K>::pool_bytes(rows).expect("a test pool fits")
-        };
         let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
         let region: &'static mut [Block] =
             std::vec![Block { _bytes: [0; ARENA_ALIGN] }; blocks].leak();
         // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
         // leaked, so nothing else uses it and it outlives every row.
-        let mut arena =
-            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        if own {
-            arena.lend_own(rows).expect("the arena is the span")
-        } else {
-            arena.lend_pool(rows).expect("the arena is the pool's span")
-        }
+        unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) }
     }
 
-    /// A shared pool of `rows` rows of `K`.
-    fn pool_of<K: crate::row_pool::RowKind>(rows: usize) -> crate::row_pool::RowSpace<K> {
-        space_of(rows, false)
+    /// A shared pool of `rows` rows of `K`, lent from an arena of its own.
+    fn pool_of<K: crate::row_pool::RowKind>(rows: usize) -> crate::row_pool::RowPool<K> {
+        let bytes = crate::row_pool::RowSpace::<K>::pool_bytes(rows).expect("a test pool fits");
+        arena_of(bytes)
+            .lend_pool(rows)
+            .expect("the arena is the pool's span")
+    }
+
+    /// Where one table keeps `rows` rows of `K`: a shared pool's, or with `own` a span of the
+    /// table's own.
+    fn space_of<K: crate::row_pool::RowKind>(
+        rows: usize,
+        own: bool,
+    ) -> crate::row_pool::RowSpace<K> {
+        use crate::bounded::Arena;
+        use crate::row_pool::RowSpace;
+        if !own {
+            return pool_of::<K>(rows).space();
+        }
+        let bytes = Arena::span(RowSpace::<K>::own_bytes(rows).expect("fits")).expect("fits");
+        arena_of(bytes)
+            .lend_own(rows)
+            .expect("the arena is the span")
     }
 
     /// The aliases of a peer whose tables are lent keep their rows in the session's pool: one is
@@ -652,17 +656,13 @@ mod tests {
     fn lent_aliases_keep_their_rows_in_the_sessions_pool() {
         let pool = pool_of::<crate::row_pool::Seq<(u64, u64)>>(2);
         let mut aliases = DeclaredAliases::<crate::bounded::Lent>::default();
-        aliases.keep_rows_in(pool);
+        aliases.keep_rows_in(pool.space());
         aliases.insert(3, 1);
         aliases.insert(3, 2);
         assert_eq!(aliases.told_as(3), Some(2), "a repeat rebinds its row");
-        assert_eq!(
-            pool.counts().expect("shared").used,
-            1,
-            "in one row of the pool"
-        );
+        assert_eq!(pool.counts().used, 1, "in one row of the pool");
         assert_eq!(aliases.remove(3), Some(2));
-        assert_eq!(pool.counts().expect("shared").used, 0, "the row went back");
+        assert_eq!(pool.counts().used, 0, "the row went back");
     }
 
     /// A lent table refuses a NEW id as a fixed one of its capacity does, and as one whose pool
@@ -671,26 +671,22 @@ mod tests {
     fn a_pooled_table_refuses_past_its_bound_and_past_its_pool() {
         let pool = pool_of::<crate::row_pool::Keyed<u32>>(3);
         let mut table: PooledIdMap<u32, 2> = PooledIdMap::new();
-        table.keep_rows_in(pool);
+        table.keep_rows_in(pool.space());
         assert!(table.bind(1, 10).is_ok() && table.bind(2, 20).is_ok());
         assert_eq!(
             (table.bind(3, 30).err().map(|c| c.0), table.refusals()),
             (Some(30), 1),
             "the table's own bound"
         );
-        assert_eq!(
-            pool.counts().expect("shared").refused,
-            0,
-            "the pool had a row left"
-        );
+        assert_eq!(pool.counts().refused, 0, "the pool had a row left");
         let mut other: PooledIdMap<u32, 2> = PooledIdMap::new();
-        other.keep_rows_in(pool);
+        other.keep_rows_in(pool.space());
         assert!(other.bind(7, 70).is_ok(), "the pool's last row");
         assert_eq!(
             (
                 other.bind(8, 80).err().map(|c| c.0),
                 other.refusals(),
-                pool.counts().expect("shared").refused
+                pool.counts().refused
             ),
             (Some(80), 1, 1),
             "(value handed back, the table's count, the pool's count)"
@@ -710,11 +706,7 @@ mod tests {
         );
         table.reset();
         other.reset();
-        assert_eq!(
-            pool.counts().expect("shared").used,
-            0,
-            "a reset gives back every row"
-        );
+        assert_eq!(pool.counts().used, 0, "a reset gives back every row");
         assert_eq!(
             (table.refusals(), other.refusals()),
             (1, 1),
