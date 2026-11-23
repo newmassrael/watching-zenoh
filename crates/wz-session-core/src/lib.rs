@@ -2825,8 +2825,6 @@ pub mod replay_round {
 // gives them in, the sends it holds while it answers, and the `replay_serving` machine that says
 // when. Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "replay-cache")]
-// Totality debt TD-008 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_publisher;
 
 // The replay cache's subscriber: the publishers it asks, the queries in flight, the two deadlines
