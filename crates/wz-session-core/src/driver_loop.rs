@@ -28,8 +28,6 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::lease::{KeepAliveCheckOutcome, LeaseCheckOutcome};
 use crate::link::LostCause;
-#[cfg(feature = "alloc")]
-use crate::network_message::NetworkMessage;
 use crate::parse_error::InboundParseError;
 
 /// R76 — outcome of a single iteration of the production driver
@@ -68,7 +66,9 @@ pub enum DriverLoopOutcome {
     FramePayload {
         reliable: bool,
         sn: u64,
-        messages: Vec<NetworkMessage>,
+        /// The frame's records, owned; a list of no size that is always empty in the build that
+        /// lends every record ([`FrameRecords`]).
+        messages: FrameRecords,
         has_ext: bool,
         extensions: Vec<ExtEntryOwned>,
         /// R311y221 — the DELIVERED-frame priority band (the decoded ext_qos),
@@ -700,7 +700,7 @@ pub const OWNED_RECORDS: bool = !cfg!(all(
 
 /// The owned messages of a delivered batch, for a table that reads them: `messages` in a build
 /// whose tables take owned records ([`OWNED_RECORDS`]), and `None` in one that lends them all,
-/// whose batches carry none (a debug build stops at one that does).
+/// whose batches are lists of no size ([`FrameRecords`]).
 #[cfg(feature = "alloc")]
 #[inline(always)]
 pub fn owned_records(
@@ -716,6 +716,152 @@ pub fn owned_records(
         None
     }
 }
+
+/// The records a [`DriverLoopOutcome::FramePayload`] carries: the owned messages where the tables
+/// read them ([`OWNED_RECORDS`]), and, in the build that lends every record, a list of no size that
+/// is always empty, so an outcome dropped there (a handshake's, a refusal, an empty frame) links no
+/// drop of an owned message. A test build of this crate keeps the list, which its fixtures fill.
+/// `FrameRecords::new()` and [`frame_records`] are the spellings both forms share.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        test,
+        not(feature = "rx-lent-only"),
+        not(feature = "rx-lent-control"),
+        feature = "transport-stats",
+        feature = "routing-namespace",
+        feature = "multicast-declarations",
+        feature = "multicast-ingress-gate",
+        feature = "transport-compression",
+        all(feature = "session-multicast", not(feature = "session-unicast"))
+    )
+))]
+pub type FrameRecords = Vec<crate::network_message::NetworkMessage>;
+
+#[cfg(all(
+    feature = "alloc",
+    not(any(
+        test,
+        not(feature = "rx-lent-only"),
+        not(feature = "rx-lent-control"),
+        feature = "transport-stats",
+        feature = "routing-namespace",
+        feature = "multicast-declarations",
+        feature = "multicast-ingress-gate",
+        feature = "transport-compression",
+        all(feature = "session-multicast", not(feature = "session-unicast"))
+    ))
+))]
+pub use no_records::{frame_records, FrameRecords};
+
+/// [`FrameRecords`] of a batch a copying decode made: the batch itself, where the tables read owned
+/// records.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        test,
+        not(feature = "rx-lent-only"),
+        not(feature = "rx-lent-control"),
+        feature = "transport-stats",
+        feature = "routing-namespace",
+        feature = "multicast-declarations",
+        feature = "multicast-ingress-gate",
+        feature = "transport-compression",
+        all(feature = "session-multicast", not(feature = "session-unicast"))
+    )
+))]
+#[inline(always)]
+pub fn frame_records(messages: Vec<crate::network_message::NetworkMessage>) -> FrameRecords {
+    messages
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(any(
+        test,
+        not(feature = "rx-lent-only"),
+        not(feature = "rx-lent-control"),
+        feature = "transport-stats",
+        feature = "routing-namespace",
+        feature = "multicast-declarations",
+        feature = "multicast-ingress-gate",
+        feature = "transport-compression",
+        all(feature = "session-multicast", not(feature = "session-unicast"))
+    ))
+))]
+mod no_records {
+    use alloc::vec::Vec;
+
+    use crate::network_message::NetworkMessage;
+
+    /// The records of a batch in the build that lends every record: none. See the list form of
+    /// [`super::FrameRecords`].
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct FrameRecords;
+
+    impl FrameRecords {
+        /// The empty list, the only one there is.
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    // A table reads the list as a slice (`owned_records`, `iter`, `is_empty`) in either form;
+    // this one is always empty.
+    impl core::ops::Deref for FrameRecords {
+        type Target = [NetworkMessage];
+
+        fn deref(&self) -> &[NetworkMessage] {
+            Default::default()
+        }
+    }
+
+    impl core::ops::DerefMut for FrameRecords {
+        fn deref_mut(&mut self) -> &mut [NetworkMessage] {
+            Default::default()
+        }
+    }
+
+    impl<'a> IntoIterator for &'a FrameRecords {
+        type Item = &'a NetworkMessage;
+        type IntoIter = core::slice::Iter<'a, NetworkMessage>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.iter()
+        }
+    }
+
+    impl<'a> IntoIterator for &'a mut FrameRecords {
+        type Item = &'a mut NetworkMessage;
+        type IntoIter = core::slice::IterMut<'a, NetworkMessage>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.iter_mut()
+        }
+    }
+
+    /// [`FrameRecords`] of a batch a copying decode made. The receive of this build is in place and
+    /// lends every record, so only a decode that is not (the copying receive of a `Frame`, a
+    /// reassembled chain handed up as an owned `Fragment`, a group member's retractions taken as one
+    /// batch) makes one; its records go where the tables would leave them, unread, and a debug build
+    /// stops at one, as [`super::owned_records`] does.
+    #[inline(always)]
+    pub fn frame_records(messages: Vec<NetworkMessage>) -> FrameRecords {
+        debug_assert!(
+            messages.is_empty(),
+            "a build that lends every record decodes no owned one"
+        );
+        FrameRecords
+    }
+}
+
+// The list is the owned one exactly where the tables read owned records: a selector that drifts
+// from `OWNED_RECORDS` does not build.
+#[cfg(all(feature = "alloc", not(test)))]
+const _: () = assert!(
+    OWNED_RECORDS == (core::mem::size_of::<FrameRecords>() != 0),
+    "an outcome holds owned records exactly where the tables read them"
+);
 
 /// One record of an inbound `Frame` decoded where the frame lies, with the
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
@@ -1424,7 +1570,7 @@ pub(crate) fn walk_lent_payload(
         on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
             reliable,
             sn,
-            messages: alloc::vec::Vec::new(),
+            messages: FrameRecords::new(),
             has_ext: false,
             extensions: alloc::vec::Vec::new(),
             priority,
@@ -1511,7 +1657,7 @@ pub fn reassembled_chain_outcome(
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
             sn,
-            messages,
+            messages: frame_records(messages),
             has_ext: false,
             extensions: Vec::new(),
             priority,
@@ -1692,6 +1838,21 @@ mod reassembled_batch_tests {
             other => panic!("a literal push carries a Put, got {other:?}"),
         }
         push.wire()
+    }
+
+    /// A test build keeps the owned list, so a reassembled batch hands its one record on whole.
+    #[test]
+    fn a_reassembled_batch_keeps_its_records_where_the_outcome_holds_owned_ones() {
+        let priority = crate::qos::Priority::DEFAULT;
+        let outcome = reassembled_frame_outcome(true, 1, priority, &push_with_put_ext(0x03));
+        let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+            panic!("a batch that decodes is a frame's payload, got {outcome:?}");
+        };
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0],
+            crate::network_message::NetworkMessage::Push(_)
+        ));
     }
 
     #[test]

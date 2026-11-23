@@ -376,6 +376,60 @@ pub(crate) unsafe fn view_bytes<'a>(start: *const u8, len: usize) -> Option<&'a 
     Some(core::slice::from_raw_parts(start, len))
 }
 
+// ---------------------------------------------------------------------------
+// The bodies the owned families share.
+//
+// Every owned block the families below emit for is a handle in its first word and inert padding
+// after it, and its null value is all zero bits. So `take` and `drop` do the same thing for every
+// type but for the block's size and, in `drop`, the function that frees what the handle holds: one
+// body of each, out of line, and each export a call into it, where each type had a copy of its own.
+// ---------------------------------------------------------------------------
+
+/// Move the `size`-byte owned block at `src` into `dst` and leave `src` null (pico `z_*_take`).
+/// Either pointer null takes nothing.
+///
+/// # Safety
+/// Each pointer is null or points at an owned block of `size` bytes whose null value is all zero
+/// bits.
+#[inline(never)]
+pub(crate) unsafe fn take_block(dst: *mut u8, src: *mut u8, size: usize) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    core::ptr::copy(src, dst, size);
+    core::ptr::write_bytes(src, 0, size);
+}
+
+/// Drop the `size`-byte owned block at `obj` (pico `z_*_drop`): what its handle holds is freed
+/// with `free`, unless `borrowed` says the handle is a borrow (`HandleOwnership`), and the block
+/// is left null. Idempotent on a null pointer or a null handle. Guarded, because the object's
+/// `Drop` runs here.
+///
+/// # Safety
+/// `obj` is null or points at an owned block of `size` bytes whose null value is all zero bits
+/// and whose first word is null or a handle `free` takes.
+#[inline(never)]
+pub(crate) unsafe fn drop_block(
+    obj: *mut u8,
+    size: usize,
+    borrowed: bool,
+    free: unsafe fn(*mut c_void),
+) {
+    let _ = crate::ffi::guarded(|| {
+        if obj.is_null() {
+            return crate::result::Z_OK;
+        }
+        let handle = obj.cast::<Handle>().read();
+        if !handle.is_null() {
+            if !borrowed {
+                free(handle);
+            }
+            core::ptr::write_bytes(obj, 0, size);
+        }
+        crate::result::Z_OK
+    });
+}
+
 /// Emit the pico ownership 7-function core shared by every handle value type
 /// (`internal_null`, `internal_check`, `loan`, `loan_mut`, `move`, `take`,
 /// `drop`). This is the exact set pico's `_Z_OWNED_FUNCTIONS_NO_COPY_NO_MOVE`
@@ -431,32 +485,21 @@ macro_rules! impl_handle_ownership7 {
         /// (pico `z_*_take`).
         #[no_mangle]
         pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
-            if dst.is_null() || src.is_null() {
-                return;
-            }
-            (*dst).handle = (*src)._this.handle;
-            (*dst)._pad = (*src)._this._pad;
-            (*src)._this = <$Owned>::null_value();
+            $crate::abi::take_block(dst.cast(), src.cast(), ::core::mem::size_of::<$Owned>());
         }
 
         /// Drop the owned value (pico `z_*_drop`). Idempotent on a null
         /// handle, and a NO-OP on a BORROWED one (see `HandleOwnership`).
-        /// Guarded because the payload's `Drop` runs here.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
-            let _ = $crate::ffi::guarded(|| {
-                if obj.is_null() {
-                    return $crate::result::Z_OK;
-                }
-                let h = (*obj)._this.handle;
-                if !h.is_null() {
-                    if !$crate::abi::HandleOwnership::handle_is_borrowed(&(*obj)._this) {
-                        $free(h);
-                    }
-                    (*obj)._this = <$Owned>::null_value();
-                }
-                $crate::result::Z_OK
-            });
+            let borrowed =
+                !obj.is_null() && $crate::abi::HandleOwnership::handle_is_borrowed(&(*obj)._this);
+            $crate::abi::drop_block(
+                obj.cast(),
+                ::core::mem::size_of::<$Owned>(),
+                borrowed,
+                $free,
+            );
         }
     };
 }
@@ -619,28 +662,13 @@ macro_rules! impl_boxed_element {
         /// (pico `z_*_take`).
         #[no_mangle]
         pub unsafe extern "C" fn $take(dst: *mut $Owned, src: *mut $Moved) {
-            if dst.is_null() || src.is_null() {
-                return;
-            }
-            (*dst).handle = (*src)._this.handle;
-            (*dst)._pad = (*src)._this._pad;
-            (*src)._this = <$Owned>::null_value();
+            $crate::abi::take_block(dst.cast(), src.cast(), ::core::mem::size_of::<$Owned>());
         }
 
         /// Release the owned element (pico `z_*_drop`). Idempotent.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {
-            let _ = $crate::ffi::guarded(|| {
-                if obj.is_null() {
-                    return $crate::result::Z_OK;
-                }
-                let handle = (*obj)._this.handle;
-                if !handle.is_null() {
-                    $free(handle);
-                    (*obj)._this = <$Owned>::null_value();
-                }
-                $crate::result::Z_OK
-            });
+            $crate::abi::drop_block(obj.cast(), ::core::mem::size_of::<$Owned>(), false, $free);
         }
 
         /// Escape a borrowed marshal into an owned one
@@ -694,4 +722,129 @@ pub(crate) unsafe fn handle_ref<'a, S, T>(ptr: *const S) -> Option<&'a T> {
         return None;
     }
     Some(&*(handle as *const T))
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::prelude::*;
+
+    static FREED: AtomicUsize = AtomicUsize::new(0);
+
+    /// Frees a boxed word and counts it; only `drop_block_frees_once_and_leaves_the_block_null`
+    /// hands it a handle.
+    unsafe fn free_counted(handle: *mut c_void) {
+        drop(Box::from_raw(handle.cast::<u64>()));
+        FREED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Fails the test if it is called: a borrowed handle is never freed.
+    unsafe fn free_never(_handle: *mut c_void) {
+        panic!("a borrowed handle was freed");
+    }
+
+    fn block(handle: usize, pad: [usize; 3]) -> z_owned_config_t {
+        z_owned_config_t {
+            handle: handle as Handle,
+            _pad: pad.map(|word| word as Handle),
+        }
+    }
+
+    fn words(block: &z_owned_config_t) -> [usize; 4] {
+        [
+            block.handle as usize,
+            block._pad[0] as usize,
+            block._pad[1] as usize,
+            block._pad[2] as usize,
+        ]
+    }
+
+    const SIZE: usize = core::mem::size_of::<z_owned_config_t>();
+
+    /// A take moves every byte of the block, the padding too, and leaves the source null; a
+    /// null pointer on either side takes nothing.
+    #[test]
+    fn take_block_moves_the_whole_block_and_leaves_the_source_null() {
+        let mut src = block(0x10, [1, 2, 3]);
+        let mut dst = block(0, [0; 3]);
+        // SAFETY: two owned blocks of `SIZE` bytes whose null value is all zero bits.
+        unsafe {
+            take_block(
+                (&mut dst as *mut z_owned_config_t).cast(),
+                (&mut src as *mut z_owned_config_t).cast(),
+                SIZE,
+            )
+        };
+        assert_eq!(words(&dst), [0x10, 1, 2, 3]);
+        assert_eq!(words(&src), [0; 4]);
+
+        let mut kept = block(0x20, [4, 5, 6]);
+        // SAFETY: a null destination takes nothing.
+        unsafe {
+            take_block(
+                core::ptr::null_mut(),
+                (&mut kept as *mut z_owned_config_t).cast(),
+                SIZE,
+            )
+        };
+        assert_eq!(
+            words(&kept),
+            [0x20, 4, 5, 6],
+            "a null destination leaves the source"
+        );
+    }
+
+    /// A drop frees what the handle holds once and leaves the block null, so a second drop
+    /// frees nothing.
+    #[test]
+    fn drop_block_frees_once_and_leaves_the_block_null() {
+        let handle = Box::into_raw(Box::new(7u64)) as usize;
+        let mut obj = block(handle, [1, 2, 3]);
+        let at = (&mut obj as *mut z_owned_config_t).cast::<u8>();
+        // SAFETY: the block's handle is a boxed word `free_counted` takes, dropped once.
+        unsafe { drop_block(at, SIZE, false, free_counted) };
+        assert_eq!(FREED.load(Ordering::SeqCst), 1);
+        assert_eq!(words(&obj), [0; 4]);
+        // SAFETY: the block is null now, which a drop leaves alone.
+        unsafe { drop_block(at, SIZE, false, free_counted) };
+        assert_eq!(
+            FREED.load(Ordering::SeqCst),
+            1,
+            "a null block is not freed again"
+        );
+        // SAFETY: a null pointer is no block.
+        unsafe { drop_block(core::ptr::null_mut(), SIZE, false, free_counted) };
+    }
+
+    /// A borrowed handle is not freed, and the block is still left null.
+    #[test]
+    fn drop_block_leaves_a_borrowed_handle_unfreed() {
+        let mut obj = block(0x30, [HANDLE_BORROWED_TAG, 0, 0]);
+        // SAFETY: the handle is a borrow, which `free_never` would refuse.
+        unsafe {
+            drop_block(
+                (&mut obj as *mut z_owned_config_t).cast(),
+                SIZE,
+                true,
+                free_never,
+            )
+        };
+        assert_eq!(words(&obj), [0; 4]);
+    }
+
+    /// Through an export: a bytes value that borrows its handle (the shape a sample's payload
+    /// field holds) is dropped without being freed and left null.
+    #[test]
+    fn a_borrowed_bytes_value_is_dropped_without_a_free() {
+        let storage = [0u8; 8];
+        let mut bytes = z_owned_bytes_t::borrowed(storage.as_ptr().cast());
+        // SAFETY: a borrowed value, which the drop leaves to its owner.
+        unsafe {
+            assert!(crate::bytes::z_internal_bytes_check(&bytes));
+            crate::bytes::z_bytes_drop(crate::bytes::z_bytes_move(&mut bytes));
+            assert!(!crate::bytes::z_internal_bytes_check(&bytes));
+        }
+    }
 }

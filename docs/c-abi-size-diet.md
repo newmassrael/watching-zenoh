@@ -406,6 +406,10 @@ owned builders gone from both forms), `--scope 'source_info'` (R3-c),
 `--scope 'policy_document|limit_binding|policy_binding|config_policy'` (R3-e), and the export count
 the gate prints (441 and 442).
 
+For round 5 (section 9): `--scope 'drop_glue::<.*(NetworkMessage|DeclareIn|PushIn|MsgPutIn|DriverLoopOutcome)'`
+(R3-d), `--scope '_(take|drop)$|take_block|drop_block'` (R5-a), and `nm -C` for
+`decode_one_record::<alloc::vec::Vec` and `decide_unit_in` (next list item 1).
+
 ## 5. Round 2: where the no_std form's code goes, and what pico's build does not carry
 
 **Attribution (read and estimated).** The read of section 1, by crate: `wz_session_core` 167K,
@@ -462,7 +466,7 @@ written, and section 4's commands turn them into readings.
 | R3-a | a Put or Del with options written from its parts | both | -4K to -8K | landed |
 | R3-b | owned declarations and interests in the lend-only build | both | -3K to -6K | landed in round 4 (section 8) |
 | R3-c | `pubsub-source-info` only with `unstable-api` | both | -1K to -2K | landed |
-| R3-d | `FramePayload.messages` in the lend-only build | both | -1K to -3K | not done; selector corrected in section 8 |
+| R3-d | `FramePayload.messages` in the lend-only build | both | -1K to -3K | landed in round 5 (section 9) |
 | R3-e1 | the policy doors and the open's resolver as `config-policy` | both | -6K to -12K | landed |
 | R3-e2 | the digest door as `conformance-digest` | both | -0.1K to -0.3K | landed |
 
@@ -586,7 +590,7 @@ against zenoh-pico's 329,664 (about 1.32x, an estimate) before round 3's three l
 | id | change | form | estimate | status |
 |----|--------|------|---------:|--------|
 | R3-b | declarations, retractions, answers and interests from their parts in `tx-lend-only` | both | -2K to -6K net | landed |
-| R3-d | `FramePayload.messages` of no size | both | -1K to -3K | not done; the selector is `OWNED_RECORDS` (below) |
+| R3-d | `FramePayload.messages` of no size | both | -1K to -3K | landed in round 5 (section 9) |
 
 ### R3-b: a lend-only session writes its control messages from their parts (landed)
 
@@ -644,7 +648,7 @@ of a Declare and an Interest have none either. The check is `nm -C` of the no_st
 `footprint_attribution.py --scope 'DeclareWire|InterestWire|dispatch_(declare|interest)|build_(un)?declare|build_interest|drop_in_place<.*(Declare|Interest)'`
 between the two builds.
 
-### R3-d: why not, and the selector it needs
+### R3-d: the selector it needs (landed in round 5, section 9)
 
 The plan of section 6 made the list of no size under `rx-lent-only`. That selector is wrong: in a
 build with `rx-lent-only` the group plane still decodes owned batches into `FramePayload`
@@ -666,17 +670,149 @@ construction sites span four crates and have to be found by a build, not by read
 | # | what | status |
 |---|------|--------|
 | 1 | owned network-message dispatch | expected gone with R3-b (no caller in the preset); to be read with `nm` |
-| 2 | per-type ABI object families | not done: the bodies that are identical across types (`loan`, `move`, `null` of one size) are candidates for LLVM's function merging, which rustc runs by default; what differs per type is `drop` and `take`, so the gain is unknown until `nm -S` reads the `_drop` and `_take` sizes |
-| 3 | formatted panics | no_std: the panic handler ignores its `PanicInfo`, so the formatting closures are dead under fat LTO; the std form is where it pays |
+| 2 | per-type ABI object families | `take` and `drop` share one body each in round 5 (section 9); `loan`, `move` and `null` are left to LLVM's function merging |
+| 3 | formatted panics | corrected in round 5 (section 9): the formatters stay linked on the stable toolchain whatever the handler does |
 | 4 | `alloc` growth paths | the no-heap work's |
 | 5 | owned declarations and interests | landed (R3-b) |
 | 6 | owned-profile codec instances | expected gone with R3-b; to be read with `nm` |
-| 7 | one-face registry | not done: `CoopEngine::attach_face` lets a client build hold more than its dial face, so a one-face form is a capability decision, not a cut |
+| 7 | one-face registry | not done: `CoopEngine::attach_face` lets a client build hold more than its dial face, so a one-face form is a capability decision, not a cut; the registry's file is the key storage work's in round 5 |
 | 8 | outbound key mappings | the key storage work's |
-| 9 | `FramePayload.messages` | not done (above) |
-| 10 | per-limit setters | to be read with `--scope 'limit_binding|policy_binding'` after R3-e |
+| 9 | `FramePayload.messages` | landed in round 5 (section 9) |
+| 10 | per-limit setters | read in round 5: only `policy_document` and the C library's `config_policy` read the tables, so they leave with R3-e |
 
 **New estimate** (labelled, not measured): round 3 -11K to -22K and round 4 -2K to -6K on about
 435K give about 407K to 422K against 329,664, 1.23x to 1.28x. The 1.0x goal still needs -77K to
 -92K, and the code volume the next round reads first is the session core's send side and tables
 and `wz_capi_coop`.
+
+
+## 9. Round 5: the outcome's records of no size, one ownership body, and the next list
+
+Nothing of round 5 was built or measured when this was written. The starting figure is the
+brief's: `pico-client-coop-nostd` 458,109 against zenoh-pico's 329,664 (1.39x, the same linker,
+both arms packed and without unwind tables) before round 4, whose estimate is -2K to -6K. The
+module figures below are **read** from the one no_std library on this host
+(`capi-nostd/libwz_capi_pico.so` of 2026-11-23 00:52, `.text` 440,709, linked by mold), whose
+tree is older than rounds 3 to 5 (it still links `policy_document`, `dispatch_declare` and
+the owned projection of a lent Push), so they say where to look, not what this branch links.
+
+| id | change | form | estimate | status |
+|----|--------|------|---------:|--------|
+| R3-d | `FramePayload.messages` of no size where no table reads an owned record | both | -0.5K to -6K | landed |
+| R5-a | one `take` and one `drop` body for every owned family of the ABI | both | -0.5K to -1.5K | landed |
+| section 7 #3 | formatted panics | no_std | 0 on the stable toolchain | corrected (below) |
+| section 7 #10 | per-limit setters | both | (in R3-e) | read: no reader outside `config-policy` |
+| key twice | a local declaration's key in the engine's record and in the table | both | -1K to -3K, plus a key's bytes per declaration | not done (below) |
+
+### R3-d: the records an outcome carries (landed)
+
+`refactor(session-core): Hold no owned batch where every record is lent`.
+`driver_loop::FrameRecords` is the type of `FramePayload.messages`: `Vec<NetworkMessage>` where
+`OWNED_RECORDS` is `true`, and a unit struct where it is `false` (the C library's build), which
+reads as an empty slice (`Deref`, `DerefMut`, `IntoIterator` for a reference) so every reader
+(`owned_records`, `iter`, `is_empty`, `for`) compiles unchanged in both. The selector is the
+negation of `OWNED_RECORDS`'s own predicate, plus `test`, so this crate's unit tests keep the
+list their fixtures fill; a const assertion holds the two together outside tests. An empty
+batch is `FrameRecords::new()` (`walk_lent_payload`, `walk_records_in_place`); a batch a copying
+decode made goes through `frame_records` (the copying `Frame` arm of `decide_unit_in`, the lean
+lowlatency unit, `reassembled_chain_outcome`, `take_member_retractions`), which in the build of no
+size keeps nothing and stops a debug build at a batch that is not empty, as `owned_records` did.
+`multicast_rx`'s owned frame and fragment arms needed no change: a build with
+`session-multicast` and `OWNED_RECORDS` false has `session-unicast` and the group's lending
+predicate, so they are not compiled there.
+
+What leaves: the drop of an owned message reached through any `DriverLoopOutcome` dropped where
+its variant is not known (a handshake's outcome, a refusal, an empty frame). The old reading has
+5,760 bytes of owned-message drop glue (`DeclareIn` 2,256, `PushIn` 832, `MsgPutIn` 800,
+`NetworkMessage` 800, `DriverLoopOutcome` 320, the rest extension chains and frame heads). What can keep it:
+a copying decode that is still reached. In the old reading the session task reaches
+`decide_unit_in` (through `read_unit_in`) and `ReassemblyDispatcher::finish` reaches
+`reassembled_chain_outcome`; in this branch an in-place receive without `transport-compression`
+reaches neither (`report_outcome_in_place` and `dispatch_parked_in_place` call no copying path),
+which `nm` of a current build confirms or refutes (section 4, next list item 1).
+
+Held by `in_place::an_outcome_holds_a_batch_of_no_size_where_the_tables_take_no_owned_record`
+(`wz-capi-coop`, run with `--features query,rx-lent-only` for the form of no size and without
+it for the list) and `reassembled_batch_tests::a_reassembled_batch_keeps_its_records_where_the_outcome_holds_owned_ones`.
+
+### R5-a: one ownership body (landed)
+
+`refactor(capi-pico): Share one take and one drop body across owned types`. Every owned block the
+three families of `abi.rs` emit for (`impl_handle_ownership7`, `impl_value_ownership`,
+`impl_boxed_element`) is a handle in its first word and padding after it, and its null value is
+all zero bits (read for each of the twelve types). `take` and `drop` therefore differ only in
+the block's size and the function that frees the handle: `abi::take_block` and `abi::drop_block`
+hold the bodies, out of line, and each export calls them with `size_of` of its type and its free
+function (the borrowed bytes form still decides in its own export, `HandleOwnership`). In the
+client case eight types use the families (config, bytes, encoding, the bytes writer, the
+serializer, the sample, the publisher and the subscriber). `null`, `check`, `loan`, `loan_mut` and
+`move` are a store or a cast each, which LLVM's function merging folds where they are equal.
+Held by `abi::tests` (a take moves every byte and leaves the source null, a null side takes
+nothing; a drop frees once and leaves the block null; a borrowed handle is not freed; a borrowed
+bytes value through `z_bytes_drop`).
+
+### Formatted panics: a correction of section 7 #3
+
+Section 8 said the formatting is dead under fat LTO because the panic handler ignores its
+`PanicInfo`. The old reading says otherwise: `core`'s own panics (`panic_bounds_check`,
+`slice_error_fail`, the asserts of `Vec::remove` and `split_off`, `handle_alloc_error`) build an
+`fmt::Arguments` that names `u64::fmt` and `usize::fmt`, and a function named there is referenced
+whatever the handler does with it, so `Formatter::pad_integral` (1,280), `str::count::do_count_chars`
+(1,472), `slice_error_fail_rt` (896) and the integer formatters stay. They are prebuilt `core`'s;
+on the stable toolchain they leave only with `panic_immediate_abort` (the nightly way of T7).
+What wz's own code adds per panic site is a location (T5), not the formatter.
+
+### Per-limit setters: read
+
+`SESSION_LIMITS`, `RUNTIME_LIMITS` and `POLICIES` (whose entries hold the `select_at` and
+`held_at` of every limit and policy) are read by `policy_document` and by the C library's
+`config_policy` only; with `config-policy` off neither is linked, so the tables and their setters
+are not either. The old reading's `limit_binding` 6,768, `policy_binding` 1,536 and
+`policy_document` 4,944 are what R3-e's estimate counts.
+
+### The local declaration's key stored twice: not done
+
+A declaration the client makes keeps its key in the engine's record (the registry's entry, which
+the link-loss flush and the reconcile read) and in the application table that matches it. The
+lighter form is one key block both name. The key storage work is moving every keyed row of those
+tables onto the session's key arena in this round (`engine/registry.rs`, `pubsub.rs`,
+`key_arena.rs` and the declare tables are its files), so the cut is made on top of it: the
+registry's entry takes the `KeyRef` the table already holds, and the text is stored once.
+
+### Where the code is (read, old library)
+
+Function sizes are the distance to the next symbol, grouped by the path prefix of the demangled
+name. By crate: `wz_session_core` 170,432, `wz_capi_coop` 59,440, the exported `z_*` functions
+50,368, `core` 34,720, `wz_codecs` 34,352, `wz_runtime_coop` 20,608, `alloc` 19,504,
+`wz_capi_pico` 17,296, `sce_rust_runtime` 13,776, `wz_runtime_posix` 5,152, `hashbrown` and
+`foldhash` 4,912. By module, the largest: `wz_capi_coop::engine` 59,440, `session_actions` 26,624,
+`network_message` 25,408 (of which `decode_one_record::<Vec<NetworkMessage>>` 23,392),
+`slot_observer` 17,552 (`dispatch_event_among` 15,744), `core` drop glue 17,344 (`FaceTables`
+3,136), `wz_codecs::msg_put` 15,344, `pubsub` 12,336, `inbound` 11,312, `keyexpr_match` 10,656,
+`alloc::rc` 8,560, `sce_rust_runtime::helpers` 7,296, `drive` 6,800, `push_build` 6,560.
+
+How the call graph was read: the library calls its own functions through GOT slots
+(`call *slot(%rip)`), so `objdump -d` names the slot, not the callee. Each slot is filled by an
+`R_X86_64_RELATIVE` relocation (`readelf -rW`) whose addend is the callee's address; mapping
+slots to addends gives the callers of a function, and walking them up gives its root (the
+session task `CoopLocalSet::spawn_local`, an export, or a vtable entry).
+
+### The next list, with lighter forms
+
+| # | what | where (old reading) | lighter form | estimate |
+|---|------|---------------------|--------------|---------:|
+| 1 | the owned decode of a batch | `decode_one_record::<Vec<_>>` 23,392, `parse_batch`, `MsgPutIn::try_into_owned_in` 4,128, `ext_admission` 1,200, `read_plain_puts` 3,584, `decide_unit_in` 3,984 | first `nm`: an in-place receive without compression should reach none of it in this branch; if one is still named, walk its GOT callers to the root and compile that copying arm only where `OWNED_RECORDS` | -20K to -35K if still linked, 0 if not |
+| 2 | the application fan offering every record to every plane | `SlotObserverOf::dispatch_event_among` 15,744, `SubscriberTable::dispatch_push` 5,024 | route a lent record by its kind first (a Push to the subscribers, a Declare to the remote tables, an Interest to the answers, a Response to the pending gets), one out-of-line call per kind | -3K to -6K |
+| 3 | the address parser | `core::net::parser` 3,008, `dial::socket_addr_v4` 1,200 | wz's own reader of the dotted IPv4 and RFC 5952 IPv6 forms `TextOut` writes (T4's inverse), held to `FromStr` by a test as T4's writer is held to `Display` | -2K to -4K |
+| 4 | the registry's teardown | `Rc<RefCell<Registry>>::drop_slow` 3,344, `FaceTables` drop 3,136, `flush_declarations_on_link_loss` 2,816 | rows of the session's arena dropped by one loop (with the key storage work) | -2K to -4K |
+| 5 | the put doors | `z_put` 2,448, `z_publisher_put` 2,592 | one body over a common view of the two option structs | -1.5K to -2.5K |
+| 6 | the config door | `zp_config_insert` 3,328 | a table of (key, setter) read by one loop | -1K to -2K |
+| 7 | the key expression matcher | `keyexpr_match` 10,656, `keyexpr_canon` 4,032 | read whether `includes_dp`, `walk` and `chunk_intersects` share their chunk walk; pico has one intersect and one include | -1K to -3K |
+| 8 | the handshake and OAM decode | `parse_init` 1,440, `parse_open` 1,264, `decode_oam` 1,264 | a client build decodes the acks only, and an OAM no table reads is skipped by its length | -1K to -2.5K |
+| 9 | the outbound key mappings | `hashbrown` and `foldhash` 4,912 | the key storage work's table of `MAX_DECLARED_KEYEXPRS` rows (section 7 #8) | -3K to -5K |
+| 10 | `core`'s formatters | 5K to 7K | `panic_immediate_abort` (nightly, T7's way), the owner's decision | -5K to -7K |
+
+Together -40K to -71K if item 1 is still linked, -20K to -36K if it is not. With rounds 4 and 5
+(-3K to -13.5K) on 458,109 that is about 374K to 435K against 329,664 (1.13x to 1.32x): the 1.0x
+goal still needs the session core's send side and the engine's own size read from a build of
+this branch, in that order.
