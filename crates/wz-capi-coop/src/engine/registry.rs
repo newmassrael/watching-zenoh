@@ -50,7 +50,7 @@ use wz_session_core::slot_observer::{
 use wz_session_core::wireexpr_resolve::SharedOwnMappingSpace;
 
 use super::{LegSink, SubscriberRow};
-use crate::arena::{FacePeers, GetTables};
+use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
 use wz_capi_port::FilterPlane;
 use wz_session_core::locality::Locality;
 use wz_session_core::slot_observer::RequesterRows;
@@ -180,13 +180,12 @@ impl FaceTables {
     }
 }
 
-/// The most sets of face tables a session holds: one for each face the build admits besides the
-/// dial role's, the dial role's, and one for each group a session's tasks can hold.
-const MAX_SETS: usize = wz_session_core::caps::MAX_FACES + 1 + wz_session_core::caps::MAX_TASKS;
-
 /// The bytes of one set of face tables, a row of the arena's table of them
 /// (`crate::arena::ArenaPlan`).
 pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
+
+/// The bytes of one entry of the index of held sets, a row of the arena's table of them.
+pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<HeldSet>();
 
 /// A face past the sets the open lent: the session refuses it as one past `max_faces`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,13 +333,13 @@ pub(super) struct Registry {
     /// and always held by it, then the faces to come. A face past them is refused
     /// ([`FacesFull`]), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
-    sets: BoundedVec<FaceTables, MAX_SETS, Lent>,
+    sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     /// The sets faces hold, each with its face, in the order of `sets`, which is the order of the
     /// faces: the dial role's face first. Every walk over the faces and every lookup of one reads
     /// this and the held sets alone; the open lends a set for each face the config admits, most of
     /// them free at any time. Its room is reserved at the open for every set the open lent, so a
     /// face coming or going moves entries within it.
-    held: Vec<HeldSet>,
+    held: BoundedVec<HeldSet, MAX_FACE_SETS, Lent>,
     /// The tokens of faces that went before each was retracted, in the order the faces went: each
     /// the token table the face's set held, its rows still in the session's pool, the set given
     /// back as the face went. Lent at the open, a row for each row of the session's token pool,
@@ -413,14 +412,18 @@ impl Registry {
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = arena.lend(peers.tables.max(1))?;
-        let mut held = Vec::with_capacity(peers.tables.max(1));
+        let mut held: BoundedVec<HeldSet, MAX_FACE_SETS, Lent> = arena.lend(peers.tables.max(1))?;
         lend_set(
             &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
         )?;
         held.push(HeldSet {
             at: 0,
             id: DIAL_FACE,
-        });
+        })
+        .map_err(|_| LendRefused::OverCeiling {
+            rows: 1,
+            ceiling: 0,
+        })?;
         #[cfg(feature = "local-queryable")]
         let local = Gets::lent(arena, keys, gets.rows, limits)?;
         for _ in 1..peers.tables {
@@ -590,7 +593,11 @@ impl Registry {
             .iter()
             .position(|held| held.at > at)
             .unwrap_or(self.held.len());
-        self.held.insert(place, HeldSet { at, id });
+        // The index has a row for each set, and the set at `at` is free, so a row is left.
+        self.held.push(HeldSet { at, id }).map_err(|_| FacesFull)?;
+        if let Some(after) = self.held.get_mut(place..) {
+            after.rotate_right(1);
+        }
         Ok(())
     }
 
@@ -691,7 +698,7 @@ impl Registry {
         let Self {
             app, sets, held, ..
         } = self;
-        let held = held.as_slice();
+        let held: &[HeldSet] = &held[..];
         let place = held.iter().position(|face| face.id == id)?;
         let at = held[place].at;
         let (before, rest) = sets.split_at_mut(at);
@@ -1081,7 +1088,7 @@ impl Registry {
 /// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
 /// `sets` holds every row it was lent.
 fn push_rowless<'s>(
-    sets: &'s mut BoundedVec<FaceTables, MAX_SETS, Lent>,
+    sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     keys: KeySpace,
     pools: &mut PeerPools,
     limits: &SessionLimits,
@@ -1101,7 +1108,7 @@ fn push_rowless<'s>(
 /// `arena`, the peer's keys kept in `keys` and what it writes in `pools`, held to `limits`. A
 /// refused set stays in `sets`, whole, and goes with it.
 fn lend_set(
-    sets: &mut BoundedVec<FaceTables, MAX_SETS, Lent>,
+    sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
     arena: &mut Arena,
     keys: KeySpace,
     pools: &mut PeerPools,

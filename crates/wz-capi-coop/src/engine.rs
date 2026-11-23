@@ -158,10 +158,10 @@ mod queued;
 use queued::{MatchFlips, Queued};
 
 mod registry;
-pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, Registry, DIAL_FACE};
+pub(crate) use registry::{FACE_SET_BYTES, HELD_SET_BYTES};
 
 mod replay;
 use replay::{Kind, Replay, TurnEnd};

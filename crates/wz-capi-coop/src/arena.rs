@@ -113,7 +113,9 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
-use crate::engine::{CoopTables, EntryBytes, LegSink, SubscriberRow, FACE_SET_BYTES};
+use crate::engine::{
+    CoopTables, EntryBytes, LegSink, SubscriberRow, FACE_SET_BYTES, HELD_SET_BYTES,
+};
 use crate::round::{RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
 use crate::CoopConfig;
 
@@ -147,7 +149,7 @@ impl ArenaRow {
 
 /// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
 /// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 34;
+pub const ARENA_ROWS: usize = 35;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -532,6 +534,13 @@ impl ArenaPlan {
             "MAX_FACES + 1",
             plan.peers.tables.max(1),
             FACE_SET_BYTES,
+        )?;
+        // Which face holds which set, a row for each set.
+        plan.put(
+            "held faces",
+            "MAX_FACES + 1",
+            plan.peers.tables.max(1),
+            HELD_SET_BYTES,
         )?;
         plan.put(
             "peer tables",
@@ -1010,13 +1019,28 @@ fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
+/// The most faces a session's plan counts ([`faces_of`]), and so the most sets of face tables
+/// its arena lends: the dial role's, each face the build admits besides it (`MAX_FACES`), and in
+/// a build that joins groups one for each group the session's task cells hold (`MAX_TASKS`).
+pub(crate) const MAX_FACE_SETS: usize = 1 + caps::MAX_FACES + GROUP_FACES;
+
+/// The groups a session's plan counts at most: as many as its task cells hold in a build that
+/// joins groups, none in one that does not.
+const GROUP_FACES: usize = if cfg!(feature = "group") {
+    caps::MAX_TASKS
+} else {
+    0
+};
+
 /// The faces a session `config` opens may hold at once: the dial role's, as many besides as
 /// `max_faces` admits, a link still in its handshake among them, and one for each group it joins.
+/// A group past the task cells has no task to join it on, and the open refuses it at its join
+/// (`OpenError::NoTask`), as a build without `group` refuses any by name, so neither is counted.
 /// `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
     1usize
         .checked_add(config.max_faces)?
-        .checked_add(config.groups.len())
+        .checked_add(config.groups.len().min(GROUP_FACES))
 }
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as

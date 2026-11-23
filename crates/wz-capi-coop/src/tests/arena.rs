@@ -370,6 +370,59 @@ fn a_snapshot_batch_over_the_builds_refuses_the_plan() {
     );
 }
 
+/// The plan counts the faces a config can open with and no more, all within the sets the arena
+/// lends (`MAX_FACE_SETS`): as many as the build admits besides the dial role's, and in a build
+/// that joins groups one for each group the task cells hold. A config told to join more groups than
+/// that, whose open is refused at the join past them, still lays out, so it is refused there as it
+/// was; a build without `group` counts no group, as it refuses any by name.
+#[test]
+fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
+    use crate::arena::{admitted_faces, MAX_FACE_SETS};
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    let join = GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    };
+    let most = admitted_faces(&SessionLimits::defaults()).expect("the build's limits");
+    let groups = if cfg!(feature = "group") {
+        caps::MAX_TASKS
+    } else {
+        0
+    };
+    for asked in [groups, groups + 2] {
+        let plan = ArenaPlan::of(
+            &CoopConfig {
+                max_faces: most,
+                groups: vec![join.clone(); asked],
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        )
+        .expect("lays an arena out");
+        assert_eq!(
+            plan.peers().tables,
+            1 + most + groups,
+            "{asked} groups asked"
+        );
+        assert!(plan.peers().tables <= MAX_FACE_SETS);
+        assert_eq!(row(&plan, "face tables").count, plan.peers().tables);
+        assert_eq!(row(&plan, "held faces").count, plan.peers().tables);
+    }
+}
+
 /// The tokens of faces that went before each was retracted are owed apart from the sets those
 /// faces gave back, a table of them lent at the open with a row for each row of the session's token
 /// pool: a face owes apart only while its tokens hold a row of the pool, so the faces owing at
@@ -1552,7 +1605,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         );
         let count = if LINK_PARTS.contains(&theirs.part) {
             ours.count * (1 + faces + handshakes)
-        } else if theirs.part == "peer tables" || theirs.part == "face tables" {
+        } else if ["peer tables", "face tables", "held faces"].contains(&theirs.part) {
             ours.count * (1 + faces)
         } else if FACE_PARTS.contains(&theirs.part) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
