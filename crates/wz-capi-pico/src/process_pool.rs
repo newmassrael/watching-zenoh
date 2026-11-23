@@ -675,6 +675,9 @@ pub(crate) struct Pools {
     bytes: usize,
     origin: Origin,
     pools: [Pool; KINDS],
+    /// Where each kind's pool ends, from `base`: the pools lie one after another, so the pool a
+    /// place lies in is the first that ends past it.
+    ends: [usize; KINDS],
     counts: [ClassCount; CLASSES + 1],
     blocks: Blocks,
 }
@@ -693,18 +696,21 @@ impl Pools {
             fresh: 0,
             free: None,
         }; KINDS];
+        let mut ends = [0; KINDS];
         let mut at = 0;
-        for (kind, pool) in pools.iter_mut().enumerate() {
+        for (kind, (pool, end)) in pools.iter_mut().zip(ends.iter_mut()).enumerate() {
             pool.size = plan.sizes[kind];
             pool.start = at;
             pool.slots = plan.slots[kind];
             at += pool.slots * pool.size;
+            *end = at;
         }
         Self {
             base,
             bytes: at,
             origin,
             pools,
+            ends,
             counts: [ClassCount::default(); CLASSES + 1],
             blocks: Blocks::lay(base, at, plan.area),
         }
@@ -756,11 +762,9 @@ impl Pools {
         if at >= self.bytes {
             return false;
         }
-        let Some(pool) = self
-            .pools
-            .iter_mut()
-            .find(|pool| at < pool.start + pool.slots * pool.size)
-        else {
+        // The first pool that ends past the place, a pool of no slots ending where it starts.
+        let kind = self.ends.partition_point(|&end| end <= at);
+        let Some(pool) = self.pools.get_mut(kind) else {
             return false;
         };
         debug_assert_eq!(
@@ -1326,6 +1330,39 @@ mod tests {
         assert_eq!(pools.take(Kind::Bytes, 16), Some(payload));
         assert!(pools.give_back(payload));
         assert_eq!(pools.held(), 0);
+    }
+
+    /// A place goes back to the pool it lies in, found by where the pools end: past a pool of no
+    /// slots, to the next one. Turned red by a search that stops at the empty pool or the one
+    /// before it.
+    #[test]
+    fn a_place_goes_back_to_the_pool_it_lies_in_past_an_empty_one() {
+        let mut memory = Memory([0; 512]);
+        let plan = plan_of(&[
+            (Kind::Publisher, 2, 16),
+            (Kind::Subscriber, 0, 16),
+            (Kind::Bytes, 1, 64),
+        ]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).expect("an array");
+        // SAFETY: the memory is aligned, long enough and used by nothing else.
+        let mut pools = unsafe { Pools::over(base, &plan, Origin::Program) };
+        let last_publisher = {
+            let _first = pools.take(Kind::Publisher, 16).expect("a free slot");
+            pools.take(Kind::Publisher, 16).expect("a free slot")
+        };
+        let payload = pools.take(Kind::Bytes, 64).expect("the one payload slot");
+        assert!(
+            pools.give_back(payload),
+            "the payload's place is the pools'"
+        );
+        assert_eq!(
+            pools.take(Kind::Bytes, 64),
+            Some(payload),
+            "it went back to its own pool, past the empty one"
+        );
+        assert!(pools.give_back(last_publisher));
+        assert_eq!(pools.take(Kind::Publisher, 16), Some(last_publisher));
+        assert_eq!(pools.take(Kind::Subscriber, 16), None, "no slot of its own");
     }
 
     /// The slots of a pool lie inside the memory, apart and aligned; a full pool refuses and
