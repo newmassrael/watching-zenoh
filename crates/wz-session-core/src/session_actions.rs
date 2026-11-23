@@ -5467,6 +5467,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // past this message while the pool has no other free: the frame leaves now with this
             // message alone, as the window's flush would send it, and the next link that asks
             // for a slot finds one.
+            #[cfg(feature = "session-unicast-accept")]
             if !link.link_driver().tx_slot_spare() {
                 self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
                 batch.stage.count = 0;

@@ -50,9 +50,11 @@ use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait,
-    TxSlot, TxSlotGrant, DEFAULT_LINK_MTU,
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
+    DEFAULT_LINK_MTU,
 };
+#[cfg(feature = "session-unicast-accept")]
+use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
@@ -509,7 +511,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
             Err(e) => self.rx_error.set(Some(e)),
         }
         // A wait that left no datagram for the next receive leaves the buffer to its pool.
-        if self.stash.get().is_none() && self.kept.get().is_none() {
+        if B::POOLED && self.stash.get().is_none() && self.kept.get().is_none() {
             buf.idle();
         }
     }
@@ -559,27 +561,22 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
-        // The slot is held until the socket has the datagram, and given back after: a slot of a
-        // pool another link may be granted next.
-        let Some((from, end)) = self.tx.frame_prefixed(slot, start, len, &[]) else {
-            self.tx.release(slot);
-            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
-        };
-        // SAFETY: the session handed the slot over and the link holds it until the release below:
-        // nothing writes it while the socket reads it.
-        let outcome = self.send_datagram(unsafe { self.tx.held(slot, from, end) });
-        self.tx.release(slot);
-        outcome
+        match self.tx.take(slot, start, len) {
+            Some(frame) => self.send_datagram(frame),
+            None => LinkSendOutcome::Dropped(LinkDropCause::Oversize),
+        }
     }
 
     fn tx_slot_abort(&self, slot: TxSlot) {
         self.tx.release(slot);
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_spare(&self) -> bool {
         self.tx.spare()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_claimable(&self) -> bool {
         self.tx.claimable()
     }
@@ -587,6 +584,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
     // The socket takes a datagram whole and at once, so the link's room is its slots': a link of
     // a pool whose every slot another link holds is congested now, and does not wait under the
     // session's lock for the step that frees one.
+    #[cfg(feature = "session-unicast-accept")]
     fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
         if self.tx.claimable() {
             RoomAnswer::at_once(LinkRoom::Free)
@@ -709,6 +707,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
         self.stash.get().is_some() || self.kept.get().is_some() || self.socket.holds_datagram()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
         self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
     }

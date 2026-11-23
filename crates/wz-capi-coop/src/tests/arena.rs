@@ -101,6 +101,26 @@ fn open_dialling(
     )
 }
 
+/// The count of a link row of a pool of `pool` for `links` links: the pool's, at most the links,
+/// in a build that listens; one for each link in a build that only dials, whose links keep buffers
+/// of their own.
+fn pooled(pool: usize, links: usize) -> usize {
+    if cfg!(feature = "listen") {
+        pool.min(links)
+    } else {
+        links
+    }
+}
+
+/// How many links `plan` holds places for: its row of places in a build that listens, its
+/// transmit rows, one for each link, in a build that only dials.
+fn link_places(plan: &ArenaPlan) -> usize {
+    plan.rows()
+        .iter()
+        .find(|row| row.part == "link places")
+        .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
+}
+
 /// The row of `plan` named `part`.
 fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
     *plan
@@ -529,10 +549,10 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         "every face's peer tables are the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
-    assert_eq!(row(&listening, "link places").count, 3 + 2);
+    assert_eq!(link_places(&listening), 3 + 2);
     assert_eq!(
         row(&listening, "link receive buffers").count,
-        caps::RX_POOL_BUFFERS.min(3 + 2),
+        pooled(caps::RX_POOL_BUFFERS, 3 + 2),
         "the links share a pool of receive buffers"
     );
     assert_eq!(dial.gets().rows.queries, caps::MAX_PENDING_QUERIES);
@@ -564,8 +584,8 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
     assert!(!crate::arena::dials(&only) && crate::arena::dials(&dialling));
     let (only, dialling) = (plan(&only), plan(&dialling));
     let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(row(&only, "link places").count, 3 + 2);
-    assert_eq!(row(&dialling, "link places").count, 1 + 3 + 2);
+    assert_eq!(link_places(&only), 3 + 2);
+    assert_eq!(link_places(&dialling), 1 + 3 + 2);
     assert_eq!((only.peers().tables, only.gets().tables), (3, 3 + own));
     assert_eq!(
         (dialling.peers().tables, dialling.gets().tables),
@@ -922,14 +942,14 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         row(&plan, "link receive buffers").count,
-        caps::RX_POOL_BUFFERS.min(3),
+        pooled(caps::RX_POOL_BUFFERS, 3),
         "the links share a pool, of no more buffers than links"
     );
     assert_eq!(row(&plan, "link receive buffers").entry_bytes, batch);
-    assert_eq!(row(&plan, "link places").count, 3);
+    assert_eq!(link_places(&plan), 3);
     assert_eq!(
         row(&plan, "link transmit slots").count,
-        caps::TX_POOL_SLOTS.min(3),
+        pooled(caps::TX_POOL_SLOTS, 3),
         "the links share a pool of outbound slots, of no more than links"
     );
     assert_eq!(
@@ -1459,15 +1479,15 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     assert_eq!(row(&client, "link receive buffers").count, 1);
     assert_eq!(peer.peers().tables, faces);
     assert_eq!(peer.gets().tables, faces + own);
-    assert_eq!(row(&peer, "link places").count, faces + handshakes);
+    assert_eq!(link_places(&peer), faces + handshakes);
     assert_eq!(
         row(&peer, "link transmit slots").count,
-        preset("TX_POOL_SLOTS"),
+        pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
         "the peer's links share the preset's outbound pool"
     );
     assert_eq!(
         row(&peer, "link receive buffers").count,
-        preset("RX_POOL_BUFFERS"),
+        pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
         "the peer's links share the preset's pool"
     );
 
@@ -1519,9 +1539,9 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         // The peer listens and dials nothing: no link and no face of the dial role's. Its links
         // share the preset's pool of receive buffers, of which the client's one link takes one.
         let count = if RX_PARTS.contains(&theirs.part) {
-            preset("RX_POOL_BUFFERS").min(faces + handshakes)
+            pooled(preset("RX_POOL_BUFFERS"), faces + handshakes)
         } else if TX_PARTS.contains(&theirs.part) {
-            preset("TX_POOL_SLOTS").min(faces + handshakes)
+            pooled(preset("TX_POOL_SLOTS"), faces + handshakes)
         } else if LINK_PARTS.contains(&theirs.part) {
             ours.count * (faces + handshakes)
         } else if theirs.part == "peer tables" {

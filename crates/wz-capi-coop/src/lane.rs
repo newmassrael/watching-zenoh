@@ -3379,6 +3379,7 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.holds_input()
     }
 
+    #[cfg(feature = "listen")]
     fn waits_for_buffer(&self) -> bool {
         self.pump.waits_for_buffer()
     }
@@ -3390,6 +3391,7 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
     }
 
     // What the session owes the stack is written whatever the lane holds, as `owes_write` says.
+    #[cfg(feature = "listen")]
     fn write_owed_now(&self) {
         self.pump.write_owed_now()
     }

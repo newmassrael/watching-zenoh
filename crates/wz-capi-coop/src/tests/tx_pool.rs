@@ -4,8 +4,10 @@
 //! A session whose links share fewer outbound slots than they are (`TX_POOL_SLOTS`): a link whose
 //! stream has not finished a frame holds a slot, and while every slot is so held a publish to
 //! another link that may be dropped is dropped at once, and one that may not waits for a slot
-//! with nothing of the session held, and is sent, not lost, once the slow stream takes the rest.
+//! with nothing of the session held, woken by the slow link's room and not by a clock, and is
+//! sent, not lost, once the slow stream takes the rest.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -137,6 +139,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
         started.elapsed()
     );
 
+    let takes_before = publisher.takes.core.load(Ordering::Relaxed);
     let blocking = {
         let publisher = Arc::clone(&publisher);
         std::thread::spawn(move || {
@@ -152,6 +155,14 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     assert!(
         !blocking.is_finished(),
         "the blocking publish waits for a slot"
+    );
+    // It waits on the slow link's room, not on a clock: in 300 ms it takes the session once, to
+    // find no slot, and the read task a handful of times; a publish that looked every few
+    // milliseconds would take it scores of times.
+    let takes = publisher.takes.core.load(Ordering::Relaxed) - takes_before;
+    assert!(
+        takes <= 15,
+        "the session was taken {takes} times while the publish waited"
     );
     let asked = Instant::now();
     assert_eq!(

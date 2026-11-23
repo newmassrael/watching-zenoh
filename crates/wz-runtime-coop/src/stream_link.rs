@@ -908,7 +908,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
         // Nothing of the link's own is left in the buffer, no part of a batch and no batch kept:
         // a pooled buffer goes back for any link to read into. The facts of a part of a batch are
         // this link's (`held`, `spent`), so its buffer stays its own while one is there.
-        if start == held {
+        if B::POOLED && start == held {
             self.spent.set(0);
             self.held.set(0);
             buf.idle();
@@ -1236,10 +1236,12 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         self.tx.release(slot);
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_spare(&self) -> bool {
         self.tx.spare()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_claimable(&self) -> bool {
         self.tx.claimable()
     }
@@ -1313,6 +1315,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         self.batch_held()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
         self.rx_buf.try_borrow().is_ok_and(|buf| buf.starved())
     }
@@ -1321,6 +1324,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
         self.owes()
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         if self.owes() {
             self.write_owed();
@@ -1422,7 +1426,7 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
             ReadWaited::Quiet => {
                 // A read that brought nothing leaves a buffer that holds nothing of the link's
                 // own to its pool.
-                if self.held.get() == self.spent.get() {
+                if B::POOLED && self.held.get() == self.spent.get() {
                     self.rx_buf.borrow_mut().idle();
                 }
             }
@@ -1701,10 +1705,12 @@ mod tests {
     }
 
     /// A link that reads into a pool of receive buffers its session's links share.
+    #[cfg(feature = "session-unicast-accept")]
     type Pooled = StreamDriver<Pipe, crate::link_storage::PooledRx, Slots>;
 
     /// A pool of `buffers` receive buffers of 34 bytes, lent from an arena of its own that the test
     /// process leaks, as a session's arena lends its links' pool.
+    #[cfg(feature = "session-unicast-accept")]
     fn pool(buffers: usize) -> wz_session_core::byte_cells::LentByteCells {
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
 
@@ -1728,6 +1734,7 @@ mod tests {
             .expect("the arena holds the pool")
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn pooled(pool: wz_session_core::byte_cells::LentByteCells) -> Pooled {
         StreamDriver::over(
             Pipe::default(),
@@ -1741,6 +1748,7 @@ mod tests {
     /// of the other's, because a link keeps the buffer that holds its part of a batch and the
     /// other reads into another. Once both are handed over neither holds a buffer. Then byte by
     /// byte, alternating, the same holds at every step.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn two_stream_links_over_one_pool_each_keep_their_part_of_a_batch() {
         let pool = pool(2);
@@ -1776,7 +1784,10 @@ mod tests {
                 assert!(pool.in_use() <= 2);
             }
         }
-        assert_eq!(got, [vec![to_a[2..].to_vec()], vec![to_b[2..].to_vec()]]);
+        assert_eq!(
+            got,
+            [std::vec![to_a[2..].to_vec()], std::vec![to_b[2..].to_vec()]]
+        );
         assert_eq!(pool.in_use(), 0);
     }
 
@@ -1785,6 +1796,7 @@ mod tests {
     /// for a buffer; once the first batch is handed over the buffer is free, the other no longer
     /// waits, and its batch is read whole. A batch a link was asked to keep holds the buffer too,
     /// until it is lent again and let go.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_link_that_finds_the_pool_dry_reads_nothing_and_loses_nothing() {
         let pool = pool(1);
@@ -2371,6 +2383,7 @@ mod tests {
     }
 
     /// Links of a pool of `slots` outbound slots of 32 bytes with `places` places, and the tables.
+    #[cfg(feature = "session-unicast-accept")]
     fn pooled_tx_links(
         places: usize,
         slots: usize,
@@ -2414,6 +2427,7 @@ mod tests {
     }
 
     /// Hand `link` a frame of `bytes` in a slot it lends, the stream taking `takes` of it.
+    #[cfg(feature = "session-unicast-accept")]
     fn send_lent<T: TxStore + 'static>(
         link: &StreamDriver<Pipe, [u8; 34], T>,
         bytes: &[u8],
@@ -2442,6 +2456,7 @@ mod tests {
     /// own slots does, and writes nothing more until the stream has room: it does not wait. The other
     /// links go on meanwhile through the slots left, each frame written whole, and once the slow
     /// stream takes the rest the slot is back.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_slow_stream_keeps_its_slot_and_the_other_links_go_on() {
         let (tables, links) = pooled_tx_links(3, 2);
@@ -2477,6 +2492,7 @@ mod tests {
     /// finished is congested at once, whatever the message may wait, and waits on no stream: the
     /// step that frees the slot is the other link's. Once that link's stream takes the rest, the
     /// link has room and sends.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_link_that_finds_every_slot_held_is_congested_at_once_and_waits_for_none() {
         let (tables, links) = pooled_tx_links(2, 1);
@@ -2511,6 +2527,7 @@ mod tests {
     /// A link of a pool whose open batch frame would take the last free slot says so
     /// (`tx_slot_spare`), and one with a slot free besides, or with a slot for every link, says
     /// it may keep it.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_link_says_whether_the_slot_it_holds_leaves_one_spare() {
         let (tables, links) = pooled_tx_links(3, 2);

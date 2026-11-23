@@ -167,10 +167,12 @@ where
         either!(self, link => link.tx_slot_abort(slot))
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_spare(&self) -> bool {
         either!(self, link => link.tx_slot_spare())
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn tx_slot_claimable(&self) -> bool {
         either!(self, link => link.tx_slot_claimable())
     }
@@ -269,6 +271,7 @@ where
         either!(self, link => link.holds_input())
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn waits_for_buffer(&self) -> bool {
         either!(self, link => link.waits_for_buffer())
     }
@@ -277,6 +280,7 @@ where
         either!(self, link => link.owes_write())
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         either!(self, link => link.write_owed_now())
     }
