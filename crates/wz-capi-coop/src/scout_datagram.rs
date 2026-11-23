@@ -136,7 +136,11 @@ fn window<U, C>(
         let mut lost = false;
         while !window.resolved() {
             match socket.try_recv(buffer) {
-                Ok(Some((len, _from))) => window.datagram(&buffer[..len]),
+                Ok(Some((len, _from))) => {
+                    // Cut to the buffer, as the stack cuts a datagram longer than the read.
+                    let len = len.min(buffer.len());
+                    window.datagram(buffer.get(..len).unwrap_or_default())
+                }
                 Ok(None) => break,
                 Err(_) => {
                     lost = true;
