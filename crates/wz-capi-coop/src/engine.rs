@@ -89,6 +89,7 @@ use wz_runtime_coop::session_drive::{
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
+use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
@@ -416,7 +417,7 @@ fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
 /// one place that open decides them. The snapshot the ABI resolved and states in the config
 /// ([`CoopConfig::limits`]), its delivery lane long enough for what one record the session is
 /// handed can put in it (`lane::holding_a_read`).
-fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
+pub(crate) fn resolve_limits<E>(config: &CoopConfig<E>) -> SessionLimits {
     crate::lane::holding_a_read::<
         { caps::PICO_UNICAST_BATCH_BYTES },
         { caps::PICO_FRAG_MAX_BYTES },
@@ -444,12 +445,13 @@ impl EndpointRefusal {
     /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
     /// longer than that is kept up to the last whole character that fits.
     pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
-        let mut kept = LocatorText::new();
-        for c in endpoint.chars() {
-            if kept.push(c).is_err() {
-                break;
-            }
+        let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
+        while !endpoint.is_char_boundary(cut) {
+            cut = cut.saturating_sub(1);
         }
+        let mut kept = LocatorText::new();
+        // The cut is at most a row's length, so the text before it fits whole.
+        let _ = kept.push_str(endpoint.get(..cut).unwrap_or_default());
         Self {
             endpoint: kept,
             why,
@@ -1500,6 +1502,12 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// the tables of its faces read them through (`SessionKeyexprs`), so it is dropped here, before
     /// the arena its keys lie in.
     keyexprs: Rc<RefCell<KeyexprRows>>,
+    /// The session's id space as its links and its faces' tables read it, a weak handle on
+    /// `keyexprs`: one for the session, which each link it makes is handed a clone of.
+    own_space: SharedOwnMappingSpace,
+    /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
+    /// lent from the arena; none for a plan that laid out none.
+    gate_cells: Option<LentByteCells>,
     next_mapping: ExprId,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and
@@ -2094,6 +2102,50 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
     }
 }
 
+/// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
+/// session places in the link's cell of its table (`Core::gate_cells`): the delivery lane's, and
+/// with `listen` the admission's under it, which carries the clock.
+trait LinkGates {
+    /// The gates.
+    type Gate;
+}
+
+impl<C: ClockSource + 'static> LinkGates for C {
+    #[cfg(feature = "listen")]
+    type Gate = LaneGate<AdmissionGate<CellRc<dyn SessionDatagramLink>, C>>;
+    #[cfg(not(feature = "listen"))]
+    type Gate = LaneGate<CellRc<dyn SessionDatagramLink>>;
+}
+
+/// The gates of a link of a session on the clock `C` ([`LinkGates`]).
+type LinkGate<C> = <C as LinkGates>::Gate;
+
+/// The arena a session over `links` opens `config` with: the rows its limits size, a cell for
+/// each link's driver as large as the largest the links open, and a cell for each link's gates.
+/// The one plan an open reserves by.
+pub(crate) fn arena_plan<C: ClockSource + 'static, E: EndpointList>(
+    links: &impl SessionLinks,
+    config: &CoopConfig<E>,
+) -> Result<ArenaPlan, ArenaRefused> {
+    ArenaPlan::of(config, &resolve_limits(config)).and_then(|plan| {
+        plan.holding_cells(links.link_cell_bytes(), CellRc::<LinkGate<C>>::cell_bytes())
+    })
+}
+
+/// The session's id space over `keyexprs`, as its links and its faces' tables read it: a weak
+/// handle, so the table goes with the session whatever holds the space.
+fn session_space(keyexprs: &Rc<RefCell<KeyexprRows>>) -> SharedOwnMappingSpace {
+    let space = SessionKeyexprs(Rc::downgrade(keyexprs));
+    #[cfg(target_has_atomic = "ptr")]
+    {
+        Arc::new(space)
+    }
+    #[cfg(not(target_has_atomic = "ptr"))]
+    {
+        Rc::new(space)
+    }
+}
+
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
 /// link's gates, the place the session lends its one reassembly Router in and `FaceDispatch`.
 /// What each cell the open reserves for a link holds, so a link's session is never refused a cell
@@ -2366,16 +2418,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The session's id space, read from its one table of declarations by the link (what it
         // sends names a key by its id) and by the tables of the face it serves (what the peer
         // sends may name one): installed whenever a link is made, a redialled face's included.
-        let keyexprs = SessionKeyexprs(Rc::downgrade(&self.keyexprs));
         #[cfg(target_has_atomic = "ptr")]
-        let own_space: SharedOwnMappingSpace = Arc::new(keyexprs);
-        #[cfg(not(target_has_atomic = "ptr"))]
-        let own_space: SharedOwnMappingSpace = Rc::new(keyexprs);
-        #[cfg(target_has_atomic = "ptr")]
-        actions.install_session_keyexprs(Arc::clone(&own_space));
+        actions.install_session_keyexprs(Arc::clone(&self.own_space));
         self.registry
             .borrow_mut()
-            .install_own_mapping_space(face, own_space);
+            .install_own_mapping_space(face, self.own_space.clone());
         // The answer the face's session gives a query of its peer whose key it cannot resolve:
         // the session's policy, stated for each link the face is opened over.
         self.registry
@@ -2424,18 +2471,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(feature = "listen")]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link = CellRc::boxed(unsafe {
+        let gate: LinkGate<C> = unsafe {
             LaneGate::new(
                 AdmissionGate::new(pump, actions.clone(), admitted.clone()),
                 self.lane.clone(),
                 room,
             )
-        })
-        .into_link();
+        };
         #[cfg(not(feature = "listen"))]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link =
-            CellRc::boxed(unsafe { LaneGate::new(pump, self.lane.clone(), room) }).into_link();
+        let gate: LinkGate<C> = unsafe { LaneGate::new(pump, self.lane.clone(), room) };
+        // The gates go in the link's cell of the session's table, as the link's driver goes in
+        // one of the stack's: a link past the cells is refused as one past the buffers is.
+        let link = match &self.gate_cells {
+            Some(cells) => CellRc::place(cells, gate).map_err(|_| {
+                OpenError::Unreachable(EndpointRefusal::new(
+                    self.endpoint_text(endpoint),
+                    Refusal::Link(LinkOpenError::Exhausted),
+                ))
+            })?,
+            None => CellRc::boxed(gate),
+        }
+        .into_link();
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -3595,11 +3652,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let plan = ArenaPlan::of(&config, &resolve_limits(&config))
+        let plan = arena_plan::<C, _>(&links, &config)
             .and_then(|plan| plan.holding(&held))
             .map_err(OpenError::Arena)?;
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
+        let (link_cells, gate_cells) = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
+        if let Some(cells) = link_cells {
+            links.lend_cells(cells);
+        }
         let (lane_area, lane_bytes) = arena.lend_lane(&plan).map_err(OpenError::Arena)?;
         let reassembly = arena.lend_reassembly(&plan).map_err(OpenError::Arena)?;
         let router = session_reassembly(&policy, SessionChains::over(&reassembly, LENT_CHAINS));
@@ -3694,6 +3755,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .saturating_add(config.listen.count())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
+        let keyexprs = Rc::new(RefCell::new(keyexprs));
         let core = Core {
             local,
             endpoints,
@@ -3729,7 +3791,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             wire_zid: wire,
             entities,
             keys,
-            keyexprs: Rc::new(RefCell::new(keyexprs)),
+            own_space: session_space(&keyexprs),
+            keyexprs,
+            gate_cells,
             next_mapping: 1,
             #[cfg(feature = "shared-key-ids")]
             key_ids: key_ids.at_open.ids,
@@ -7474,7 +7538,7 @@ mod clock_moves_tests {
     #[test]
     fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
         let (moves, word) = word();
-        let wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
+        let mut wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
         // The wait stays on the thread that made it, as a session's read does (its lent receive
         // lease is no value of another thread's); the word comes from another, as a program's does.
         let telling = std::thread::spawn(move || {
@@ -7483,7 +7547,7 @@ mod clock_moves_tests {
             moves.moved.notify_all();
         });
         let started = Instant::now();
-        wait.wait();
+        wait.wait(|ms| std::thread::sleep(Duration::from_millis(u64::from(ms))));
         let took = started.elapsed();
         telling.join().expect("the thread that tells the word");
         assert!(

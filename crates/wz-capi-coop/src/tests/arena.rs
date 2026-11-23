@@ -173,9 +173,17 @@ fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
 fn an_open_reserves_the_arena_its_plan_lays_out() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let plan = ArenaPlan::of(&super::config(&router), &SessionLimits::defaults())
-        .expect("the build's limits lay an arena out");
+    let plan = host_plan(&super::config(&router)).expect("the build's limits lay an arena out");
     assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
+}
+
+/// The arena an open of `config` over the host's links the tests open with reserves, as the
+/// engine plans it: its links' cells and their gates' included.
+fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
+    crate::engine::arena_plan::<PosixClock, _>(
+        &PosixLinks::new(super::LOOPBACK, PosixTcpDial),
+        config,
+    )
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
@@ -185,11 +193,8 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
     let probe = Probe::bind();
-    let plan = ArenaPlan::of(
-        &dialling(&probe, SessionLimits::defaults()),
-        &SessionLimits::defaults(),
-    )
-    .expect("the build's limits lay an arena out");
+    let plan = host_plan(&dialling(&probe, SessionLimits::defaults()))
+        .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     let refused = open_dialling(&probe, SessionLimits::defaults(), &NoMemory).err();
     assert_eq!(
@@ -1588,4 +1593,64 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             .reserved_bytes(),
         "a peer at the preset reserves less than a listener at the build's defaults"
     );
+}
+
+/// What a listener's open reserves when it is opened at the build's own limits and at the pico
+/// preset's, its links' cells included, as the engine plans it: the measure of the default each
+/// ABI opens under (the pico ABI at its preset, zenoh-c and the Rust API at the build's). Read
+/// with `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints the arena a listener reserves at each default"]
+fn print_the_arena_a_listener_reserves_at_each_default() {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    for (name, limits) in [
+        ("build defaults", SessionLimits::defaults()),
+        ("pico preset", pico_preset_limits()),
+    ] {
+        let config = CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            max_faces: admitted_faces(&limits).expect("the limits admit their own faces"),
+            accept_pending: admitted_handshakes(&limits)
+                .expect("the limits admit their own handshakes"),
+            limits,
+            ..client_config()
+        };
+        let plan = host_plan(&config).expect("the limits lay an arena out");
+        std::println!(
+            "{name}: {} faces, {} pending: {} B",
+            config.max_faces,
+            config.accept_pending,
+            plan.reserved_bytes().unwrap_or(usize::MAX)
+        );
+        for row in plan.rows() {
+            std::println!(
+                "  {:<40} {:>6} x {:>7} = {:>9} B",
+                row.part,
+                row.count,
+                row.entry_bytes,
+                row.bytes().unwrap_or(usize::MAX)
+            );
+        }
+    }
+}
+
+/// A plan with every row of the build, the links' cells, their gates', the ABI's handle and its
+/// places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the groups' counts
+/// are the rows the plan puts, in whichever build. A group that puts a row it does not count, or
+/// counts one it does not put, turns this red.
+#[test]
+fn a_plan_with_every_row_holds_exactly_arena_rows() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = EntityKind::ALL
+        .into_iter()
+        .fold(HeldPlaces::handle(place), |held, kind| {
+            held.with_entity(kind, place)
+        });
+    let plan = ArenaPlan::of(&client_config(), &SessionLimits::defaults())
+        .and_then(|plan| plan.holding_cells(64, 64))
+        .and_then(|plan| plan.holding(&held))
+        .expect("the build's limits lay an arena out");
+    assert_eq!(plan.rows().len(), crate::arena::ARENA_ROWS);
 }

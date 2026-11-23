@@ -2614,6 +2614,8 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+#[cfg(all(feature = "app-transport", feature = "listen"))]
+mod app_listen;
 mod arena;
 mod closure_drops;
 mod congestion;
