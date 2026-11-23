@@ -3389,6 +3389,11 @@ impl<P: SessionDatagramLink> SessionDatagramLink for LaneGate<P> {
         self.pump.owes_write()
     }
 
+    // What the session owes the stack is written whatever the lane holds, as `owes_write` says.
+    fn write_owed_now(&self) {
+        self.pump.write_owed_now()
+    }
+
     /// The rest of a datagram already read is held back with the link's next one while the lane
     /// has not the room of a record. A batch lying in the datagram does not hold the rest back:
     /// it lies where the rest does, and the records after it join it.

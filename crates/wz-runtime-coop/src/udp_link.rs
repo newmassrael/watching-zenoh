@@ -580,6 +580,10 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
         self.tx.spare()
     }
 
+    fn tx_slot_claimable(&self) -> bool {
+        self.tx.claimable()
+    }
+
     // The socket takes a datagram whole and at once, so the link's room is its slots': a link of
     // a pool whose every slot another link holds is congested now, and does not wait under the
     // session's lock for the step that frees one.

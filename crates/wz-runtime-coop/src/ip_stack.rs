@@ -171,6 +171,10 @@ where
         either!(self, link => link.tx_slot_spare())
     }
 
+    fn tx_slot_claimable(&self) -> bool {
+        either!(self, link => link.tx_slot_claimable())
+    }
+
     fn open_blocking(&self) {
         either!(self, link => link.open_blocking())
     }
@@ -271,6 +275,10 @@ where
 
     fn owes_write(&self) -> bool {
         either!(self, link => link.owes_write())
+    }
+
+    fn write_owed_now(&self) {
+        either!(self, link => link.write_owed_now())
     }
 
     fn takes_input(&self) -> bool {

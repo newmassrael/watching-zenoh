@@ -202,6 +202,12 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// Write what the link owes its stack, as far as the stack takes it now, without waiting: what
+    /// [`Self::service`] writes before it waits. A publish that finds every slot of its session's
+    /// pool held asks it of every link, so a link whose stack has room by now gives its slot back
+    /// without a step of its own. The provided form owes nothing.
+    fn write_owed_now(&self) {}
+
     /// Whether the session may be handed input now. A link whose owner holds its input back (the
     /// delivery lane of a session that cannot take another message) answers `false`, and the loop
     /// then dispatches nothing this step: no datagram, and not the rest of one already read, so
@@ -636,6 +642,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn owes_write(&self) -> bool {
         (**self).owes_write()
+    }
+
+    fn write_owed_now(&self) {
+        (**self).write_owed_now()
     }
 
     fn takes_input(&self) -> bool {

@@ -3643,6 +3643,32 @@ enum Dispatched {
     Chain,
 }
 
+/// What a send that does not wait for a slot did
+/// ([`SessionLinkActions::try_send_plain_put_qos`]).
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probed {
+    /// The message was handed to the link, or dropped by a rule that is not congestion.
+    Sent,
+    /// Its link had no room for it now: nothing was sent, and the message is still the caller's.
+    NoRoom,
+    /// The message is a chain of fragments, which a send that may not wait does not begin:
+    /// nothing was sent, and the caller sends it as its own send.
+    Chain,
+}
+
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+impl Probed {
+    fn of(sent: Dispatched) -> Self {
+        match sent {
+            Dispatched::Sent => Self::Sent,
+            Dispatched::NoRoom => Self::NoRoom,
+            #[cfg(feature = "transport-fragmentation")]
+            Dispatched::Chain => Self::Chain,
+        }
+    }
+}
+
 /// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`]: a trait
 /// object, so the dispatch (some 7 KB on a host, 1.3 KB on the slot profile) is one copy and not
 /// one per kind of message sent, at the cost of one call through a pointer per message.
@@ -4832,6 +4858,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// holds it (behind `R::Shared`, or as its own field under `session-slot`):
     /// for the places that compare it by address or hand it on, where `&*self.link`
     /// would name one of the two forms.
+    /// Whether this session's link would lend a slot now as far as its pool goes
+    /// ([`BoxedLinkDriver::tx_slot_claimable`](crate::link::BoxedLinkDriver::tx_slot_claimable)).
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    fn tx_slot_claimable(&self) -> bool {
+        self.own_link().link_driver().tx_slot_claimable()
+    }
+
     #[allow(dead_code)]
     fn own_link(&self) -> &LinkState<R> {
         &self.link
@@ -14319,8 +14352,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// every session that has none.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn send_plain_put_qos(
+    fn send_plain_put_at(
         &self,
+        stage: DispatchStage,
         mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         value: &[u8],
@@ -14328,7 +14362,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         express: bool,
         priority: Priority,
-    ) -> Option<Result<(), SendWireError>> {
+    ) -> Option<Result<Dispatched, SendWireError>> {
         if self.rewrites_originated_keys() {
             return None;
         }
@@ -14359,29 +14393,99 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
         // below refuses it with the same error, which the dispatch reports.
         let size = crate::lent_push::plain_put_len(mapping_id, suffix, value, qos);
-        let sent = self
-            .dispatch_network_message_at(
-                DispatchStage::Fresh,
-                priority,
-                reliable,
-                qos,
-                size,
-                class,
-                as_encoder(&|sink| {
-                    crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
-                }),
-            )
-            .map(|_| ());
-        if let Err(error) = sent {
-            return Some(Err(error));
-        }
+        let sent = self.dispatch_network_message_at(
+            stage,
+            priority,
+            reliable,
+            qos,
+            size,
+            class,
+            as_encoder(&|sink| {
+                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            }),
+        );
+        let sent = match sent {
+            Ok(sent) => sent,
+            Err(error) => return Some(Err(error)),
+        };
         #[cfg(feature = "transport-batching")]
         if express {
             self.flush_express(priority);
         }
         #[cfg(not(feature = "transport-batching"))]
         let _ = express;
-        Some(Ok(()))
+        Some(Ok(sent))
+    }
+
+    /// The caller's own send of a plain `Put` (`send_plain_put_at`, above, says what it writes):
+    /// the congestion control waits for room as the session's queue profile says.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_plain_put_qos(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        value: &[u8],
+        qos: Option<crate::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_plain_put_at(
+            DispatchStage::Fresh,
+            mapping_id,
+            suffix,
+            value,
+            qos,
+            reliable,
+            express,
+            priority,
+        )
+        .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
+    /// it now leaves it unsent and the caller's ([`Probed::NoRoom`]), to be sent again once one
+    /// is free, with nothing counted as dropped and nothing closed. A want of room the link's own
+    /// stack answers is waited for as the caller's own send waits.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_send_plain_put_qos(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        value: &[u8],
+        qos: Option<crate::sample::QosLevel>,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<Probed, SendWireError>> {
+        let probed = self.send_plain_put_at(
+            DispatchStage::Probe,
+            mapping_id,
+            suffix,
+            value,
+            qos,
+            reliable,
+            express,
+            priority,
+        );
+        // No room for a reason the link's own stack answers is the caller's own send, which waits
+        // for that stack as the queue profile says; only a pool with no slot is left the caller's.
+        let probed = match probed {
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
+                DispatchStage::Fresh,
+                mapping_id,
+                suffix,
+                value,
+                qos,
+                reliable,
+                express,
+                priority,
+            ),
+            other => other,
+        };
+        probed.map(|sent| sent.map(Probed::of))
     }
 
     /// A Put or a Del with the metadata its publisher gave it, written from the caller's own key,
@@ -14401,8 +14505,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-tx-lend"
     ))]
     #[allow(clippy::too_many_arguments)]
-    pub fn send_publication_qos(
+    fn send_publication_at(
         &self,
+        stage: DispatchStage,
         mapping_id: crate::wire_id::ExprId,
         suffix: Option<&str>,
         kind: crate::sample::SampleKind,
@@ -14411,11 +14516,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         express: bool,
         priority: Priority,
-    ) -> Option<Result<(), SendWireError>> {
+    ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
             let _ = (
-                mapping_id, suffix, kind, value, meta, reliable, express, priority,
+                stage, mapping_id, suffix, kind, value, meta, reliable, express, priority,
             );
             None
         }
@@ -14440,28 +14545,108 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A publication the writer refuses counts as zero, and the dispatch's own run of the
             // writer refuses it with the same error, which it reports.
             let size = crate::tx_buf::encoded_len(encode);
-            let sent = self
-                .dispatch_network_message_at(
-                    DispatchStage::Fresh,
-                    priority,
-                    reliable,
-                    qos,
-                    size,
-                    crate::stats::NetworkStatsClass::unread(),
-                    encode,
-                )
-                .map(|_| ());
-            if let Err(error) = sent {
-                return Some(Err(error));
-            }
+            let sent = self.dispatch_network_message_at(
+                stage,
+                priority,
+                reliable,
+                qos,
+                size,
+                crate::stats::NetworkStatsClass::unread(),
+                encode,
+            );
+            let sent = match sent {
+                Ok(sent) => sent,
+                Err(error) => return Some(Err(error)),
+            };
             #[cfg(feature = "transport-batching")]
             if express {
                 self.flush_express(priority);
             }
             #[cfg(not(feature = "transport-batching"))]
             let _ = express;
-            Some(Ok(()))
+            Some(Ok(sent))
         }
+    }
+
+    /// The caller's own send of a publication (`send_publication_at`, above, says what it
+    /// writes).
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        feature = "transport-tx-lend"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_publication_qos(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        kind: crate::sample::SampleKind,
+        value: &[u8],
+        meta: &crate::metadata::PushMetadata,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_publication_at(
+            DispatchStage::Fresh,
+            mapping_id,
+            suffix,
+            kind,
+            value,
+            meta,
+            reliable,
+            express,
+            priority,
+        )
+        .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_publication_qos`] that waits for nothing, as
+    /// [`Self::try_send_plain_put_qos`] is.
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "alloc",
+        feature = "transport-tx-lend"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_send_publication_qos(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        kind: crate::sample::SampleKind,
+        value: &[u8],
+        meta: &crate::metadata::PushMetadata,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Option<Result<Probed, SendWireError>> {
+        let probed = self.send_publication_at(
+            DispatchStage::Probe,
+            mapping_id,
+            suffix,
+            kind,
+            value,
+            meta,
+            reliable,
+            express,
+            priority,
+        );
+        // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
+        let probed = match probed {
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
+                DispatchStage::Fresh,
+                mapping_id,
+                suffix,
+                kind,
+                value,
+                meta,
+                reliable,
+                express,
+                priority,
+            ),
+            other => other,
+        };
+        probed.map(|sent| sent.map(Probed::of))
     }
 
     /// R311y215 — the express (priority-carrying) twin of

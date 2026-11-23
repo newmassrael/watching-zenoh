@@ -610,6 +610,12 @@ impl ArenaPlan {
         Ok(())
     }
 
+    /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
+    /// that a link may find every slot held.
+    pub fn tx_pool_short(&self) -> bool {
+        self.tx_slots < self.links
+    }
+
     /// How many rows each table of the engine's record of the session's declarations is lent.
     pub fn entities(&self) -> EntityRows {
         self.entities

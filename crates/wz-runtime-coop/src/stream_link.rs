@@ -1240,6 +1240,10 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         self.tx.spare()
     }
 
+    fn tx_slot_claimable(&self) -> bool {
+        self.tx.claimable()
+    }
+
     fn open_blocking(&self) {}
 
     // The session's Close frame has been handed over; the stream ends behind it, and the peer
@@ -1315,6 +1319,12 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
 
     fn owes_write(&self) -> bool {
         self.owes()
+    }
+
+    fn write_owed_now(&self) {
+        if self.owes() {
+            self.write_owed();
+        }
     }
 
     // A batch lies in the link's own receive buffer until the link moves what follows it to the
