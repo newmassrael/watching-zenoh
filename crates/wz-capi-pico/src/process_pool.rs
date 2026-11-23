@@ -1405,6 +1405,107 @@ mod tests {
         assert_eq!(pools.held(), 0);
     }
 
+    /// What each kind's slots hold and what they leave unused, printed for reading: each kind's
+    /// object size, its slot as the size classes give it, the slots the build's plan lays and the
+    /// bytes left in them; and what a slot of the object's own size, rounded to a slot's alignment,
+    /// would leave. Run with `cargo test -p wz-capi-pico --lib slot_bytes_each_kind_leaves --
+    /// --ignored --nocapture`, under the environment of the build to read.
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn the_slot_bytes_each_kind_leaves() {
+        let plan = BUILT_PLAN.expect("the build's counts make pools");
+        let (mut laid, mut left, mut left_exact) = (0usize, 0usize, 0usize);
+        let mut row = |name: &str, kind: Kind, size: usize| {
+            let count = plan.slots[kind as usize];
+            let slot = plan.sizes[kind as usize];
+            let exact = size.next_multiple_of(SLOT_ALIGN);
+            let unused = slot.saturating_sub(size).saturating_mul(count);
+            let unused_exact = exact.saturating_sub(size).saturating_mul(count);
+            laid += slot.saturating_mul(count);
+            left += unused;
+            left_exact += unused_exact;
+            std::println!(
+                "slot-row: {name:<22} size_of={size:>6} slot_bytes={slot:>6} exact={exact:>6} \
+                 count={count:>4} unused={unused:>7} unused_exact={unused_exact:>7}"
+            );
+        };
+        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        row(
+            "session",
+            Kind::Session,
+            core::mem::size_of::<crate::session::PicoSessionHandle>(),
+        );
+        row(
+            "publisher",
+            Kind::Publisher,
+            core::mem::size_of::<crate::pubsub::PublisherState>(),
+        );
+        row(
+            "subscriber",
+            Kind::Subscriber,
+            core::mem::size_of::<crate::pubsub::SubscriberState>(),
+        );
+        #[cfg(feature = "queryable")]
+        row(
+            "queryable",
+            Kind::Queryable,
+            core::mem::size_of::<crate::query::QueryableState>(),
+        );
+        #[cfg(feature = "liveliness")]
+        {
+            row(
+                "liveliness_token",
+                Kind::LivelinessToken,
+                core::mem::size_of::<crate::liveliness::TokenState>(),
+            );
+            row(
+                "liveliness_subscriber",
+                Kind::LivelinessSubscriber,
+                core::mem::size_of::<crate::pubsub::SubscriberState>(),
+            );
+        }
+        row(
+            "sample",
+            Kind::Sample,
+            core::mem::size_of::<crate::pubsub::SampleMarshal>(),
+        );
+        #[cfg(feature = "query")]
+        row(
+            "reply",
+            Kind::Reply,
+            core::mem::size_of::<crate::get::ReplyMarshal>(),
+        );
+        #[cfg(feature = "queryable")]
+        row(
+            "query",
+            Kind::Query,
+            core::mem::size_of::<crate::query::QueryMarshal>(),
+        );
+        row(
+            "bytes",
+            Kind::Bytes,
+            core::mem::size_of::<crate::bytes::ByteBuf>(),
+        );
+        row(
+            "config",
+            Kind::Config,
+            core::mem::size_of::<crate::config::ConfigState>(),
+        );
+        #[cfg(any(feature = "scout", feature = "scout-mcu"))]
+        row(
+            "hello",
+            Kind::Hello,
+            core::mem::size_of::<crate::scout::KeptHello>(),
+        );
+        let marks = Blocks::marks_bytes(plan.area);
+        std::println!(
+            "slot-total: slots={laid} unused={left} unused_exact={left_exact} area={} marks={marks} \
+             reserved={:?}",
+            plan.area,
+            plan.bytes()
+        );
+    }
+
     /// The plan the library was compiled with is the one the build's counts make when worked out
     /// as a program runs: making the planning `const` changed where it is evaluated, not what.
     #[test]
