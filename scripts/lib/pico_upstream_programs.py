@@ -271,14 +271,14 @@ class Proc:
 @dataclass(frozen=True)
 class Scenario:
     """The subject, built against the library under test; its peer, always zenoh-pico's own build;
-    which of them starts first; the lines that must be printed, by role (`subject` or `peer`), as
-    regular expressions over the output with its line ends made LF; whether a router is started;
-    how many times the second process may be started; how long one start of it may take before it is
+    which of a pair starts first (`subject`, or None for the peer; a lone subject names none); the
+    lines that must be printed, by role (`subject` or `peer`), as regular expressions over the
+    output with its line ends made LF; whether a router is started; how many times the second process may be started; how long one start of it may take before it is
     started again; and the bound of the whole scenario."""
 
     subject: Proc
     peer: Proc | None = None
-    first: str = "peer"
+    first: str | None = None
     witnesses: tuple[tuple[str, str], ...] = ()
     router: bool = True
     attempts: int = 1
@@ -533,6 +533,37 @@ def selected(host: str, sets: list[str] | None, only: list[str] | None) -> list[
     return out
 
 
+def scenario_findings(sc: Scenario) -> list[str]:
+    """Where one scenario disagrees with the program table or with itself."""
+    findings = []
+    procs = [sc.subject] + ([sc.peer] if sc.peer is not None else [])
+    roles = {"subject"} | ({"peer"} if sc.peer is not None else set())
+    for proc in procs:
+        if proc.program not in PROGRAMS:
+            findings.append(f"{sc.id}: {proc.program} is not a program of the table")
+        elif PROGRAMS[proc.program].set != PROGRAMS[sc.subject.program].set:
+            findings.append(f"{sc.id}: its peer {proc.program} is of another set than its subject")
+        if (ROUTER in proc.args) and not sc.router:
+            findings.append(f"{sc.id}: {proc.program} is handed a router the scenario does not start")
+    if sc.first is not None and sc.first not in ("subject", "peer"):
+        findings.append(f"{sc.id}: starts with a {sc.first}, which is neither its subject nor its peer")
+    elif sc.first is not None and sc.peer is None:
+        findings.append(f"{sc.id}: orders a pair it does not have (it has no peer, and starts with the {sc.first})")
+    for role, pattern in sc.witnesses:
+        if role not in roles:
+            findings.append(f"{sc.id}: a witness of a {role} it does not have")
+        try:
+            re.compile(pattern)
+        except re.error as err:
+            findings.append(f"{sc.id}: witness /{pattern}/ is no regular expression ({err})")
+    if not sc.witnesses and not any(proc.ends for proc in procs):
+        findings.append(f"{sc.id}: nothing in it ends and nothing is witnessed, so it would pass having shown "
+                        "nothing")
+    if sc.attempts < 1:
+        findings.append(f"{sc.id}: attempts below one")
+    return findings
+
+
 def table_findings(pico: pathlib.Path) -> list[str]:
     """Where the program table and the scenarios disagree with the vendored tree or with each
     other."""
@@ -549,29 +580,7 @@ def table_findings(pico: pathlib.Path) -> list[str]:
     subjects: dict[str, int] = {}
     for sc in SCENARIOS:
         subjects[sc.subject.program] = subjects.get(sc.subject.program, 0) + 1
-        roles = {"subject"} | ({"peer"} if sc.peer is not None else set())
-        for proc in [sc.subject] + ([sc.peer] if sc.peer is not None else []):
-            if proc.program not in PROGRAMS:
-                findings.append(f"{sc.id}: {proc.program} is not a program of the table")
-            elif PROGRAMS[proc.program].set != PROGRAMS[sc.subject.program].set:
-                findings.append(f"{sc.id}: its peer {proc.program} is of another set than its subject")
-            if (ROUTER in proc.args) and not sc.router:
-                findings.append(f"{sc.id}: {proc.program} is handed a router the scenario does not start")
-        if sc.first not in roles:
-            findings.append(f"{sc.id}: starts with a {sc.first} it does not have")
-        for role, pattern in sc.witnesses:
-            if role not in roles:
-                findings.append(f"{sc.id}: a witness of a {role} it does not have")
-            try:
-                re.compile(pattern)
-            except re.error as err:
-                findings.append(f"{sc.id}: witness /{pattern}/ is no regular expression ({err})")
-        procs = [sc.subject] + ([sc.peer] if sc.peer is not None else [])
-        if not sc.witnesses and not any(proc.ends for proc in procs):
-            findings.append(f"{sc.id}: nothing in it ends and nothing is witnessed, so it would pass having shown "
-                            "nothing")
-        if sc.attempts < 1:
-            findings.append(f"{sc.id}: attempts below one")
+        findings += scenario_findings(sc)
     for path in sorted(PROGRAMS):
         if subjects.get(path, 0) != 1:
             findings.append(f"{path} is the subject of {subjects.get(path, 0)} scenarios, not one")
@@ -1197,6 +1206,18 @@ def selftest() -> int:
     good = [Record("peer", sc.peer, None, " >> [Queryable handler] Received Query 'demo/example/**'\n"),
             Record("subject", sc.subject, 0, ">> Received PUT ('demo/example/zenoh-pico-queryable': 'x')\n")]
     expect("the peer first unless the scenario says the subject", [r for r, _ in order_of(sc)] == ["peer", "subject"])
+    expect("a pair that says the subject starts with it",
+           [r for r, _ in order_of(Scenario(sc.subject, sc.peer, first="subject"))] == ["subject", "peer"])
+    lone = Scenario(Proc("examples/unix/c11/z_info.c", E), witnesses=(("subject", ROUTER_ID),))
+    expect("a lone subject that names no first holds and starts alone",
+           scenario_findings(lone) == [] and [r for r, _ in order_of(lone)] == ["subject"], scenario_findings(lone))
+    expect("a lone subject that names a first orders a pair it does not have",
+           any("orders a pair it does not have" in f
+               for f in scenario_findings(Scenario(lone.subject, first="peer", witnesses=lone.witnesses))))
+    expect("a first that is neither role is a finding",
+           any("neither its subject nor its peer" in f for f in scenario_findings(Scenario(sc.subject, sc.peer,
+                                                                                            first="router"))))
+    expect("a pair as the table writes it holds", scenario_findings(sc) == [], scenario_findings(sc))
     expect("a pair that ended as it should with every witness passes", judge(sc, good, 1.0) == [],
            judge(sc, good, 1.0))
 
