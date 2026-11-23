@@ -472,10 +472,6 @@ fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine>
     Arc::<Engine>::downgrade(shared)
 }
 
-/// The longest text a join or a concatenation reads to canonize: a key of the bound on each side
-/// of the separator. What it is held to is its canonical form, which a key of this ABI keeps.
-const JOINED_BYTES: usize = 2 * wz_session_core::caps::MAX_KEYEXPR_BYTES + 1;
-
 /// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
 /// the first `*`, the whole key when there is none, empty when the key opens wild.
 ///
@@ -1161,7 +1157,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
                 Err(_) => return Z_ERR_INVALID,
             }
         };
-        store_joined(key, left, &[head, tail])
+        store_joined(key, left, &[head.as_bytes(), tail.as_bytes()])
     })
 }
 
@@ -1179,12 +1175,11 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
 }
 
 /// The body `z_keyexpr_concat` and `z_keyexpr_join` share, out of line so neither export holds a
-/// copy of it: `parts` written one after the other into a buffer of two keys of the bound and their
-/// separator, canonized over themselves, and stored in `key` keeping `left`'s declaration
-/// ([`extended_from`]). The bound every key of this build is held to is held to the form, so a
-/// long text whose form is short is a key and a form past it is refused with `Z_EINVAL`; a text
-/// the buffer cannot hold, which only a concatenation's own bytes can make, is refused the same.
-/// The join takes no allocation of its own.
+/// copy of it: the text `parts` make, read in order where each lies, canonized into a buffer of
+/// the bound and stored in `key` keeping `left`'s declaration ([`extended_from`]). The bound every
+/// key of this build is held to is held to the form and not to the text, as pico keeps only the
+/// form: a long text whose form is short is a key, and a form past the bound is refused with
+/// `Z_EINVAL`. The join takes no allocation and no copy of its text.
 ///
 /// # Safety
 /// `key` must be valid and writable; `left` must be null or a live loaned keyexpr.
@@ -1192,37 +1187,20 @@ unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> Decla
 unsafe fn store_joined(
     key: *mut z_owned_keyexpr_t,
     left: *const z_loaned_keyexpr_t,
-    parts: &[&str],
+    parts: &[&[u8]],
 ) -> ZResult {
-    let mut buf = [0u8; JOINED_BYTES];
-    let mut used = 0usize;
-    for part in parts {
-        let Some(room) = used
-            .checked_add(part.len())
-            .and_then(|end| buf.get_mut(used..end))
-        else {
-            return Z_EINVAL;
-        };
-        room.copy_from_slice(part.as_bytes());
-        used += part.len();
-    }
-    // Canonized over the text it is read from, so the form takes no buffer of its own, and held
-    // to the bound once it is written: a long text whose form is short is a key.
-    let Some(text) = buf.get_mut(..used) else {
-        return Z_EINVAL;
-    };
-    let written = match wz_session_core::keyexpr_canon::canonize_in_place(
-        text,
+    let mut form = [0u8; wz_session_core::caps::MAX_KEYEXPR_BYTES];
+    let written = match wz_session_core::keyexpr_canon::canonize_parts_into(
+        parts,
+        &mut form,
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     ) {
         Ok(written) => written,
+        Err(KeyexprCanonError::ExceedsCapacity) => return Z_EINVAL,
         Err(_) => return Z_ERR_INVALID,
     };
-    if written > wz_session_core::caps::MAX_KEYEXPR_BYTES {
-        return Z_EINVAL;
-    }
-    // Whole `str` values written one after the other, and their form, are UTF-8.
-    let Some(canon) = buf
+    // The parts are whole `str` values, and the form of UTF-8 is UTF-8.
+    let Some(canon) = form
         .get(..written)
         .and_then(|bytes| core::str::from_utf8(bytes).ok())
     else {
@@ -1251,7 +1229,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
         let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
             return Z_ERR_NULL;
         };
-        store_joined(key, left, &[l, "/", r])
+        store_joined(key, left, &[l.as_bytes(), b"/".as_slice(), r.as_bytes()])
     })
 }
 
@@ -1864,6 +1842,24 @@ mod bound_tests {
             assert_eq!(made.len(), MAX_KEYEXPR_BYTES - 10 + 2);
             assert!(made.ends_with("/*"), "the lone `$*` chunk is canonized");
             z_keyexpr_drop(z_keyexpr_move(&mut concat));
+
+            // A suffix longer than two keys of the bound is read where it lies, whatever its
+            // length: only its form is held to the bound.
+            let (rc, mut short) = owned("a");
+            assert_eq!(rc, Z_OK);
+            let longer = "/**".repeat(3 * MAX_KEYEXPR_BYTES);
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut concat,
+                    z_keyexpr_loan(&short),
+                    longer.as_ptr() as *const c_char,
+                    longer.len(),
+                ),
+                Z_OK
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&concat)), Some("a/**"));
+            z_keyexpr_drop(z_keyexpr_move(&mut concat));
+            z_keyexpr_drop(z_keyexpr_move(&mut short));
 
             let (rc, mut full) = owned(&key_of(MAX_KEYEXPR_BYTES - 1));
             assert_eq!(rc, Z_OK);
