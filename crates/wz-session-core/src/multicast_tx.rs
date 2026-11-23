@@ -1829,7 +1829,7 @@ where
                     if span.drop_marker {
                         return PushOutcome::Congested;
                     }
-                    emitted += 1;
+                    emitted = emitted.saturating_add(1);
                     deadline.next_fragment();
                 }
                 return PushOutcome::Pushed;
