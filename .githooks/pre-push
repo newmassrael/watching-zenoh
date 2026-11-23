@@ -1540,6 +1540,10 @@ round_fed_gates=(
     "verify_plan.py --selftest"
     "coverage_floor_gate.py --selftest"
     "coverage_floor_gate.py --declared"
+    # The runner of zenoh-pico's own programs on the release library (Layers L22, L23 of the
+    # release proof). Round-fed: its scenario table is held against the vendored tree's programs
+    # and the release ledger's rows. Its selftest reads both, with no build and no zenohd.
+    "pico_upstream_programs.py --selftest"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to
