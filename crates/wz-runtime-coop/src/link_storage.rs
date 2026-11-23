@@ -112,7 +112,7 @@ impl TxStore for HeapTx {
             .as_ptr()
             .cast::<u8>()
             .cast_mut()
-            .wrapping_add(slot * self.slot_len)
+            .wrapping_add(slot.saturating_mul(self.slot_len))
     }
 }
 
@@ -143,7 +143,10 @@ impl TxStore for SlottedTx {
     }
 
     fn slot_base(&self, slot: usize) -> *mut u8 {
-        self.buf.raw().0.wrapping_add(slot * self.slot_len)
+        self.buf
+            .raw()
+            .0
+            .wrapping_add(slot.saturating_mul(self.slot_len))
     }
 }
 
@@ -383,7 +386,7 @@ impl<T: TxStore> TxLender<T> {
         let end = end.min(capacity);
         let from = from.min(end);
         // SAFETY: `from .. end` is within the slot, and the caller holds it (see above).
-        unsafe { core::slice::from_raw_parts(base.add(from), end - from) }
+        unsafe { core::slice::from_raw_parts(base.add(from), end.saturating_sub(from)) }
     }
 
     /// [`Self::take`], with `prefix` written into the headroom just in front of the frame, and the
@@ -406,7 +409,10 @@ impl<T: TxStore> TxLender<T> {
         // them; the prefix is written into the headroom, which the session left untouched.
         unsafe {
             core::ptr::copy_nonoverlapping(prefix.as_ptr(), base.add(from), prefix.len());
-            Some(core::slice::from_raw_parts(base.add(from), end - from))
+            Some(core::slice::from_raw_parts(
+                base.add(from),
+                end.saturating_sub(from),
+            ))
         }
     }
 }
