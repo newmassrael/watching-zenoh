@@ -255,7 +255,7 @@ pub fn service_bound(share_ppm: u32, wait_ms: u32, quantum_units: u32, model: Co
 /// every `T / LEASE_EXPIRE_FACTOR`, so one that is a further `2T/3` late has spent the interval it
 /// was owed and the one before it; the next is the last the peer will wait for.
 pub const fn keepalive_lateness_limit_ms(lease_ms: u64) -> u64 {
-    lease_ms - lease_ms / LEASE_EXPIRE_FACTOR
+    lease_ms.saturating_sub(lease_ms / LEASE_EXPIRE_FACTOR)
 }
 
 /// The width of one lateness window, in milliseconds.
@@ -297,7 +297,7 @@ impl LatenessWindows {
 
     /// The window `now_ms` falls in, plus one, so that zero stays "empty".
     const fn tag(now_ms: u64) -> u64 {
-        now_ms / LATENESS_WINDOW_MS + 1
+        (now_ms / LATENESS_WINDOW_MS).saturating_add(1)
     }
 
     /// Record that a timer was served `late_ms` after its time, at `now_ms`.
@@ -305,7 +305,9 @@ impl LatenessWindows {
         self.since_start_ms = self.since_start_ms.max(late_ms);
         let tag = Self::tag(now_ms);
         // `tag % LATENESS_WINDOWS` is below the array's length by construction.
-        let slot = &mut self.slots[(tag % LATENESS_WINDOWS as u64) as usize];
+        let Some(slot) = self.slots.get_mut((tag % LATENESS_WINDOWS as u64) as usize) else {
+            return;
+        };
         if slot.0 == tag {
             slot.1 = slot.1.max(late_ms);
         } else {
@@ -328,7 +330,9 @@ impl LatenessWindows {
         let tag = Self::tag(now_ms);
         self.slots
             .iter()
-            .filter(|slot| slot.0 != 0 && slot.0 <= tag && tag - slot.0 < LATENESS_WINDOWS as u64)
+            .filter(|slot| {
+                slot.0 != 0 && slot.0 <= tag && tag.saturating_sub(slot.0) < LATENESS_WINDOWS as u64
+            })
             .map(|slot| slot.1)
             .max()
             .unwrap_or(0)
@@ -497,8 +501,11 @@ impl AdmissionControl {
         lease_ms: u64,
     ) -> AdmissionStep {
         let stamp = now_ms.saturating_add(1);
-        self.seen[self.next] = (stamp, bound);
-        self.next = (self.next + 1) % CONTROL_SLOTS;
+        if let Some(seen) = self.seen.get_mut(self.next) {
+            *seen = (stamp, bound);
+        }
+        // Below `CONTROL_SLOTS`, so the step does not wrap.
+        self.next = self.next.wrapping_add(1) % CONTROL_SLOTS;
         let target = self
             .seen
             .iter()

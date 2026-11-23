@@ -853,8 +853,6 @@ pub mod datagram_peer;
 ///
 /// UNCONDITIONAL for [`datagram_peer`]'s reason: integers only, no codec feature
 /// and no `alloc`, so every profile computes the same number from the same inputs.
-// Totality debt TD-062 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod capacity;
 
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
