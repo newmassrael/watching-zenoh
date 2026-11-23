@@ -141,7 +141,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     }
 
     /// Borrow the declared options.
-    pub fn options(&self) -> &PublishOptions {
+    pub fn options(&self) -> &PublishOptions<'static> {
         &self.options
     }
 
@@ -197,7 +197,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
     /// The declared options with the stamp of `time` and this node set, or the refusal of a
     /// publisher that does not stamp.
     #[cfg(feature = "pubsub-timestamp")]
-    fn stamped_options(&self, time: u64) -> Result<PublishOptions, StampedPutError> {
+    fn stamped_options(&self, time: u64) -> Result<PublishOptions<'static>, StampedPutError> {
         if !self.stamps {
             return Err(StampedPutError::NotStamping);
         }
@@ -538,7 +538,7 @@ impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
     }
 
     /// Borrow the declared options.
-    pub fn options(&self) -> &PublishOptions {
+    pub fn options(&self) -> &PublishOptions<'static> {
         &self.options
     }
 

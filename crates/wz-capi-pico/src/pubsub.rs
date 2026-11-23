@@ -1792,10 +1792,10 @@ pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> O
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
-unsafe fn publisher_put_options(
+unsafe fn publisher_put_options<'a>(
     options: *const z_publisher_put_options_t,
-    attachment: &mut Option<MovedBytes<'static>>,
-) -> Option<PublishOptions<'_>> {
+    attachment: &'a mut Option<MovedBytes<'static>>,
+) -> Option<PublishOptions<'a>> {
     if options.is_null() {
         return None;
     }
@@ -2475,10 +2475,10 @@ pub(crate) unsafe fn source_info_hint_of(
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
-unsafe fn session_put_options(
+unsafe fn session_put_options<'a>(
     options: *const z_put_options_t,
-    attachment: &mut Option<MovedBytes<'static>>,
-) -> PublishOptions<'_> {
+    attachment: &'a mut Option<MovedBytes<'static>>,
+) -> PublishOptions<'a> {
     let opts = put_options();
     if options.is_null() {
         return opts;
@@ -2548,7 +2548,7 @@ impl StatedQos {
     /// `opts` with the stated QoS and destination. One body for both session doors, out of line
     /// so that neither holds a copy of the five setters and the moves of the options between them.
     #[inline(never)]
-    fn apply(self, opts: PublishOptions) -> PublishOptions {
+    fn apply(self, opts: PublishOptions<'_>) -> PublishOptions<'_> {
         opts.with_priority(crate::qos::priority_from_pico(self.priority))
             .with_congestion_control(push_congestion_from_pico(self.congestion_control))
             .with_express(self.is_express)

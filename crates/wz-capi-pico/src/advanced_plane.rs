@@ -83,7 +83,7 @@ impl PicoPlane {
 /// the composite's own `Any` regardless would deliver in-process where the plain
 /// publisher it wraps does not. A publish through a publisher then takes that
 /// publisher's own destination ([`crate::pubsub::PublisherQos`]).
-fn pico_publish(options: PublishOptions) -> PublishOptions {
+fn pico_publish(options: PublishOptions<'_>) -> PublishOptions<'_> {
     options
         .with_reliability(Reliability::Reliable)
         .with_locality(crate::locality::default_locality!("local-subscriber"))
