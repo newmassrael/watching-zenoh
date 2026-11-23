@@ -265,6 +265,8 @@ pub struct ObserverAppRef<'a> {
 pub struct ObserverFace<'a> {
     /// The peer's key aliases and the interests it asked.
     pub subscribers: &'a mut crate::pubsub::SubscriberPeer,
+    /// What the peer's queries are judged by.
+    pub queries: &'a mut crate::query::QueryPeer,
     /// The subscribers the peer declared.
     #[cfg(feature = "declare-subscriber")]
     pub remote_subscribers: &'a mut crate::declare::subscriber::RemoteSubscriberPeer,
@@ -287,6 +289,8 @@ pub struct ObserverFace<'a> {
 pub struct ObserverFaceRef<'a> {
     /// The peer's key aliases and the interests it asked.
     pub subscribers: &'a crate::pubsub::SubscriberPeer,
+    /// What the peer's queries are judged by.
+    pub queries: &'a crate::query::QueryPeer,
     /// The subscribers the peer declared.
     #[cfg(feature = "declare-subscriber")]
     pub remote_subscribers: &'a crate::declare::subscriber::RemoteSubscriberPeer,
@@ -459,6 +463,7 @@ impl ApplicationLayerObserver {
             },
             ObserverFace {
                 subscribers: &mut peers.subscribers,
+                queries: &mut peers.queries,
                 #[cfg(feature = "declare-subscriber")]
                 remote_subscribers: &mut peers.remote_subscribers,
                 #[cfg(feature = "declare-queryable")]
@@ -499,6 +504,7 @@ impl ApplicationLayerObserver {
             },
             ObserverFaceRef {
                 subscribers: &peers.subscribers,
+                queries: &peers.queries,
                 #[cfg(feature = "declare-subscriber")]
                 remote_subscribers: &peers.remote_subscribers,
                 #[cfg(feature = "declare-queryable")]
@@ -630,10 +636,10 @@ impl ApplicationLayerObserver {
 
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
     /// the snapshot that session holds. An observer may serve more than one session (a unicast
-    /// session and the group it also joins), so the session says it before every dispatch, as
-    /// the slot profile's observer (`SlotObserverOf::set_unanswerable_final`) is told it.
+    /// session and the group it also joins), so the session says it before every dispatch, into
+    /// the observer's one face ([`crate::query::QueryPeer::set_unanswerable_final`]).
     pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        self.app.set_unanswerable_final(value);
+        self.peers.queries.set_unanswerable_final(value);
     }
 
     /// Phase 1 — fan an [`IterationEvent`] into every table, through the slot observer's fan

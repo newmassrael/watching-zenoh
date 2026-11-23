@@ -1965,7 +1965,7 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
     type Sink = F::Queryable;
 
     #[cfg(feature = "storage-profile")]
-    fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
+    fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool {
         any_local_queryable(&self.queryables, query_keyexpr, require_complete)
     }
 
@@ -1980,7 +1980,7 @@ impl<F: RowCallbacks, P: Storage> crate::query::LocalQueryables for SessionTable
         stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
     }
 
-    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching_queryables<D: FnMut(&mut Self::Sink)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: KeyFacts,

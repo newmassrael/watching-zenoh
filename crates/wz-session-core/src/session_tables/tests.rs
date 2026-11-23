@@ -1069,7 +1069,6 @@ fn a_peers_subscriber_interest_is_answered_out_of_the_tables() {
 fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     use crate::query::LocalQueryables;
     use crate::query_mode::QueryTarget;
-    // The table set is the session's subscribers too, whose trait names the same verbs.
     let mut tables = Tables::new();
     for (key, origin, complete, callback) in [
         ("q/a", Locality::Any, false, 1),
@@ -1083,8 +1082,7 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     }
     let fire = |tables: &mut Tables, remote: bool, target: Option<QueryTarget>| {
         let mut asked = Vec::new();
-        let fired = LocalQueryables::fire_matching(
-            tables,
+        let fired = tables.fire_matching_queryables(
             "q/a",
             KeyFacts::of("q/a"),
             remote,
@@ -1099,11 +1097,7 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     assert_eq!(fire(&mut tables, false, None), [1, 3]);
     #[cfg(feature = "storage-profile")]
     {
-        assert!(LocalQueryables::has_local_matching(&tables, "q/a", false));
-        assert!(!LocalQueryables::has_local_matching(
-            &tables,
-            "elsewhere",
-            false
-        ));
+        assert!(tables.has_local_queryable("q/a", false));
+        assert!(!tables.has_local_queryable("elsewhere", false));
     }
 }

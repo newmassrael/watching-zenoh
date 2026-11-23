@@ -1981,11 +1981,6 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             self.plane
                 .arriving
                 .store(self.generation, Ordering::Release);
-            // The application's queryables serve every face, so this face's session states its
-            // own answer to a query it cannot resolve before its frame is dispatched.
-            registry
-                .app
-                .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
             // A query by an id of the shared dictionary is kept, so its replies mirror its key
             // form.
             #[cfg(feature = "shared-key-ids")]
@@ -2018,11 +2013,6 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             registry.dispatch_push(face, event, actions);
             return;
         }
-        // The application's tables serve every face: this face's session states its own answer
-        // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
-        registry
-            .app
-            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         registry.dispatch(face, event, actions);
         #[cfg(any(
             feature = "remote-declaration-watch",
@@ -2309,6 +2299,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.registry
             .borrow_mut()
             .install_own_mapping_space(face, own_space);
+        // The answer the face's session gives a query of its peer whose key it cannot resolve:
+        // the session's policy, stated for each link the face is opened over.
+        self.registry
+            .borrow_mut()
+            .set_unanswerable_final(face, actions.params.policy.query_unanswerable_final());
         // The key ids every node shares, on both sides of the link before it carries anything:
         // the link's actions, with the key-wire form stated for the endpoint it was dialled to or
         // taken on, so what is sent over it names its keys in that form, and the face's tables,
@@ -2843,8 +2838,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         for join in self.config.groups.clone() {
             let id = self.next_face;
             // The tables first: the group's task dispatches to them from its first step. They are
-            // the face's for as long as the session holds the group, across its joins.
+            // the face's for as long as the session holds the group, across its joins, and answer
+            // a query whose key they cannot resolve by the session's policy.
             self.registry.borrow_mut().add_face(id);
+            self.registry
+                .borrow_mut()
+                .set_unanswerable_final(id, self.policy.query_unanswerable_final());
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
             if let Some(ids) = &self.key_ids {
@@ -2896,13 +2895,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         #[cfg(feature = "queryable")]
-        let dispatch = group::dispatch(
-            self.registry.clone(),
-            id,
-            self.policy,
-            self.plane.clone(),
-            generation,
-        );
+        let dispatch = group::dispatch(self.registry.clone(), id, self.plane.clone(), generation);
         #[cfg(not(feature = "queryable"))]
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the delivery lane has the room

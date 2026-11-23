@@ -1341,7 +1341,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     ///   `peer_keyexpr_table` (the shared mapping populated by the
     ///   subscriber side's `absorb_declare` from inbound
     ///   `Declare(DeclKexpr)`). The composition rule mirrors
-    ///   [`crate::query::QueryableRegistry::dispatch_request`]:
+    ///   [`crate::query::QueryPeer::dispatch_request`]:
     ///   `id == 0` → suffix verbatim; `id != 0` → `table[id]` +
     ///   optional suffix. Un-resolvable mapping ids drop the
     ///   dispatch silently rather than firing on a partial keyexpr.
@@ -1895,7 +1895,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// Convenience adapter that pulls the `FramePayload.messages` out
     /// of an `IterationEvent::Poll(DriverLoopOutcome::FramePayload)`
     /// surface and forwards to [`Self::dispatch_messages`]. Mirror
-    /// of [`crate::query::QueryableRegistry::dispatch_iteration_event`]
+    /// of [`crate::query::QueryPeer::dispatch_iteration_event`]
     /// for the z_get-side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
     ///

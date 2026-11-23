@@ -1127,7 +1127,6 @@ pub(super) struct GroupPut<'a> {
 pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
-    policy: SessionPolicy,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
@@ -1136,9 +1135,6 @@ pub(super) fn dispatch(
     move |event, replies| {
         let mut registry = registry.borrow_mut();
         plane.arriving.store(generation, Ordering::Release);
-        registry
-            .app
-            .set_unanswerable_final(policy.query_unanswerable_final());
         registry.dispatch_event(face, event);
         registry.flush_pending_replies(face, replies);
         for (rid, qos) in registry.take_pending_final_rids(face) {

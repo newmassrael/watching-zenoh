@@ -841,7 +841,7 @@ pub trait LocalQueryables {
     /// under the querier's `require_complete`
     /// ([`QueryableRegistry::has_local_matching`] says which count).
     #[cfg(feature = "storage-profile")]
-    fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool;
+    fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool;
 
     /// Stage the interest-response chain a peer's QUERYABLE `Interest` is owed
     /// ([`QueryableRegistry::respond_to_queryable_interest`]): how many `Declared` items.
@@ -859,7 +859,7 @@ pub trait LocalQueryables {
     /// query's `target`, in the table's order: how many.
     ///
     /// [`KeyFacts`]: crate::keyexpr_match::KeyFacts
-    fn fire_matching<D: FnMut(&mut Self::Sink)>(
+    fn fire_matching_queryables<D: FnMut(&mut Self::Sink)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -875,7 +875,7 @@ impl<C, P: Storage> LocalQueryables for QueryableRegistry<C, P> {
     type Sink = C;
 
     #[cfg(feature = "storage-profile")]
-    fn has_local_matching(&self, query_keyexpr: &str, require_complete: bool) -> bool {
+    fn has_local_queryable(&self, query_keyexpr: &str, require_complete: bool) -> bool {
         any_local_queryable(&self.queryables, query_keyexpr, require_complete)
     }
 
@@ -890,7 +890,7 @@ impl<C, P: Storage> LocalQueryables for QueryableRegistry<C, P> {
         stage_queryable_interest(&self.queryables, interest_id, pattern, aggregate, staged)
     }
 
-    fn fire_matching<D: FnMut(&mut C)>(
+    fn fire_matching_queryables<D: FnMut(&mut C)>(
         &mut self,
         keyexpr: &str,
         keyexpr_facts: crate::keyexpr_match::KeyFacts,
@@ -1346,13 +1346,13 @@ impl QueryReply {
 /// dispatch loop advances to the next matched queryable, so user
 /// closures cannot retain the borrow.
 ///
-/// R311dx — `codec-request`-gated: only `QueryableRegistry::fire_matching_queryables`
+/// R311dx — `codec-request`-gated: only `fire_query`
 /// constructs a `QueryResponder`, so it shares the registry's gate.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub struct QueryResponder<'a> {
     rid: crate::wire_id::RequestId,
     /// The query's keyexpr. Borrowed when the responder is built over the
-    /// keyexpr the dispatch already holds (`QueryableRegistry::fire_projection`),
+    /// keyexpr the dispatch already holds (`QueryPeer::fire_projection`),
     /// so a matched queryable that stages nothing costs the heap nothing for it;
     /// owned when a caller hands one in ([`Self::new`]). A staged reply owns its
     /// copy either way.
@@ -2418,34 +2418,6 @@ pub struct QueryableRegistry<C, P: Storage = Profile> {
     /// that it can stand one past `u32::MAX`, which is how the registry knows
     /// every id has been handed out.
     next_id: u64,
-    /// The zid the key of the link this registry's session is on proved, when it proved one
-    /// (decision D12): handed to every matched queryable as [`QueryView::requester`]. Set by the
-    /// session before it dispatches, since the registry is the session's and so is the link.
-    requester: Option<[u8; 16]>,
-    /// The most bytes of selector parameters (`QUERY_PARAMETERS_MAX_BYTES`) a query from a peer
-    /// may carry for a queryable to run it: what the creator of the registry resolved
-    /// ([`Self::limit_query_sizes_to`]), the build's value until it does.
-    max_parameters: crate::limits::QueryParametersMaxBytesHeld,
-    /// The most bytes of attachment (`QUERY_ATTACHMENT_MAX_BYTES`) a query from a peer may
-    /// carry for a queryable to run it, held as `max_parameters` is.
-    max_attachment: crate::limits::QueryAttachmentMaxBytesHeld,
-    /// How many queries from a peer were not run because their parameters or their attachment
-    /// were longer than the bound the registry is held to ([`Self::query_size_bounds`]).
-    /// Saturating: a counter that wrapped would hide the refusals it exists to show.
-    oversize_refused: u32,
-    /// The session's `query-unanswerable-final` value, which the session states before every
-    /// dispatch ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
-    /// resolve is owed a Final. Held in no byte where the build's domain is one value, which is
-    /// then the value; a registry no session stated one to answers by the build's default.
-    unanswerable_final: UnanswerableFinalHeld,
-    /// transport-shm -- the receive side of shared memory for the VALUE of a
-    /// query: the same state a push and a reply have (the negotiated capability,
-    /// the resolver, the means of acknowledging the peer's slices, the drop
-    /// counters, the un-swap). Upstream un-swaps the value of a query as it does
-    /// a push's, before routing it. The session keeps it in step with the other
-    /// registries'.
-    #[cfg(feature = "transport-shm")]
-    shm: crate::extshm::ShmReceiveState,
 }
 
 impl<C, P: Storage> Default for QueryableRegistry<C, P> {
@@ -2456,13 +2428,6 @@ impl<C, P: Storage> Default for QueryableRegistry<C, P> {
             key_quota: Default::default(),
             keys: Default::default(),
             next_id: 1,
-            requester: None,
-            max_parameters: Default::default(),
-            max_attachment: Default::default(),
-            oversize_refused: 0,
-            unanswerable_final: UnanswerableFinalHeld::default(),
-            #[cfg(feature = "transport-shm")]
-            shm: crate::extshm::ShmReceiveState::default(),
         }
     }
 }
@@ -2474,23 +2439,68 @@ type UnanswerableFinalHeld = crate::policy_binding::Bound<
     { <crate::policy::QueryUnanswerableFinal as crate::policy_binding::PolicyValue>::HELD },
 >;
 
-impl<C, P: Storage> QueryableRegistry<C, P> {
-    /// The bytes one queryable takes in the table's storage: its pattern's text with it where the
-    /// storage policy keeps the text in the row, and its sink as the table holds it.
-    pub const ROW_BYTES: usize = core::mem::size_of::<Queryable<C, P>>();
+/// The side of the query plane the asking peer owns: who its link proved it to be, the answer its
+/// session gives a query it cannot resolve, the bounds its queries are held to and how many they
+/// refused, and the shared-memory receive state of their values. One per face
+/// (`PeerTables::queries`), so each is stated once for its link and never restated around a
+/// dispatch; the queryables a query reaches are the session's ([`LocalQueryables`]), handed to
+/// each dispatch.
+pub struct QueryPeer {
+    /// The zid the key of this face's link proved, when it proved one
+    /// (decision D12): handed to every matched queryable as [`QueryView::requester`].
+    requester: Option<[u8; 16]>,
+    /// The most bytes of selector parameters (`QUERY_PARAMETERS_MAX_BYTES`) a query from a peer
+    /// may carry for a queryable to run it: what the creator of the session resolved
+    /// ([`Self::limit_query_sizes_to`]), the build's value until it does.
+    max_parameters: crate::limits::QueryParametersMaxBytesHeld,
+    /// The most bytes of attachment (`QUERY_ATTACHMENT_MAX_BYTES`) a query from a peer may
+    /// carry for a queryable to run it, held as `max_parameters` is.
+    max_attachment: crate::limits::QueryAttachmentMaxBytesHeld,
+    /// How many queries from a peer were not run because their parameters or their attachment
+    /// were longer than the bound the face is held to ([`Self::query_size_bounds`]).
+    /// Saturating: a counter that wrapped would hide the refusals it exists to show.
+    oversize_refused: u32,
+    /// The session's `query-unanswerable-final` value, which the session states for the face
+    /// ([`Self::set_unanswerable_final`]): with `empty-final` a query whose key does not
+    /// resolve is owed a Final. Held in no byte where the build's domain is one value, which is
+    /// then the value; a face no session stated one to answers by the build's default.
+    unanswerable_final: UnanswerableFinalHeld,
+    /// transport-shm -- the receive side of shared memory for the VALUE of a
+    /// query: the same state a push and a reply have (the negotiated capability,
+    /// the resolver, the means of acknowledging the peer's slices, the drop
+    /// counters, the un-swap). Upstream un-swaps the value of a query as it does
+    /// a push's, before routing it. The session keeps it in step with the other
+    /// registries'.
+    #[cfg(feature = "transport-shm")]
+    shm: crate::extshm::ShmReceiveState,
+}
 
-    /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
-    /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
-    /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
-    pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
-        self.quota = quota;
+impl Default for QueryPeer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QueryPeer {
+    /// A face that has stated nothing: no requester proved, the build's bounds and its answer to
+    /// an unresolved key. `const`, so a session slot that holds one can be a `static`.
+    pub const fn new() -> Self {
+        Self {
+            requester: None,
+            max_parameters: crate::limit_binding::Limited::build_default(),
+            max_attachment: crate::limit_binding::Limited::build_default(),
+            oversize_refused: 0,
+            unanswerable_final: UnanswerableFinalHeld::build_default(),
+            #[cfg(feature = "transport-shm")]
+            shm: crate::extshm::ShmReceiveState::new(),
+        }
     }
 
-    /// Hold the queries from a peer to the sizes the registry's creator resolved: a query whose
+    /// Hold the queries from a peer to the sizes the session's creator resolved: a query whose
     /// selector parameters are longer than `parameters` admits (`QUERY_PARAMETERS_MAX_BYTES`),
     /// or whose attachment is longer than `attachment` admits (`QUERY_ATTACHMENT_MAX_BYTES`),
     /// reaches no queryable, is counted ([`Self::oversize_refusals`]) and is still owed its
-    /// final. A query of the registry's own session is not held to them.
+    /// final. A query of the face's own session is not held to them.
     pub fn limit_query_sizes_to(
         &mut self,
         parameters: crate::limits::QueryParametersMaxBytesHeld,
@@ -2501,19 +2511,12 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
     }
 
     /// The most bytes of selector parameters and of attachment a query from a peer may carry
-    /// for a queryable of this registry to run it ([`Self::limit_query_sizes_to`]), in that
+    /// for a queryable of this face to run it ([`Self::limit_query_sizes_to`]), in that
     /// order.
     pub const fn query_size_bounds(
         &self,
     ) -> (crate::limit_binding::Quota, crate::limit_binding::Quota) {
         (self.max_parameters.get(), self.max_attachment.get())
-    }
-
-    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a queryable whose
-    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as
-    /// a fixed row that cannot hold it refuses it, and the queryables already in are kept.
-    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
-        self.key_quota = quota;
     }
 
     /// How many queries from a peer were refused for their size: not run by any queryable, and
@@ -2548,6 +2551,72 @@ impl<C, P: Storage> QueryableRegistry<C, P> {
             self.unanswerable_final.get(),
             crate::policy::QueryUnanswerableFinal::EmptyFinal
         )
+    }
+
+    /// transport-shm -- install the resolver the shared-memory slices of a query's
+    /// value are read through. Shared with the other registries by the session,
+    /// so a query's value is read by the same resolver a push is. Without one a
+    /// query whose value names a segment is dropped, counted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver_shared(
+        &mut self,
+        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.shm.set_resolver(resolver);
+    }
+
+    /// transport-shm -- restamp the LIVE negotiated capability of the session
+    /// feeding this face, per dispatch iteration, as the other registries' is:
+    /// see [`crate::extshm::ShmReceiveState::set_negotiated`] for why it is
+    /// restamped and never snapshotted.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
+        self.shm.set_negotiated(negotiated);
+    }
+
+    /// transport-shm -- install or withdraw the means of acknowledging the peer's
+    /// shared-memory slices. Shared with the other registries: the counters the
+    /// peer named are the peer's, whichever message a slice arrives in.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_handoff_shared(
+        &mut self,
+        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
+    ) {
+        self.shm.set_handoff(handoff);
+    }
+
+    /// transport-shm -- queries dropped because a slice of their value did not
+    /// resolve.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unresolved_drops(&self) -> u64 {
+        self.shm.unresolved_drops()
+    }
+
+    /// transport-shm -- queries dropped because a value naming a segment arrived
+    /// on a session that never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_drops(&self) -> u64 {
+        self.shm.unnegotiated_drops()
+    }
+}
+
+impl<C, P: Storage> QueryableRegistry<C, P> {
+    /// The bytes one queryable takes in the table's storage: its pattern's text with it where the
+    /// storage policy keeps the text in the row, and its sink as the table holds it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<Queryable<C, P>>();
+
+    /// Hold the registry to the `MAX_QUERYABLES` its creator resolved: a registration that would
+    /// leave more queryables than `quota` admits is refused ([`RegisterError::TableFull`]), and
+    /// the queryables already in are kept, as a lowered soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxQueryablesHeld) {
+        self.quota = quota;
+    }
+
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a queryable whose
+    /// pattern is longer than `quota` admits is refused ([`RegisterError::KeyexprTooLong`]), as
+    /// a fixed row that cannot hold it refuses it, and the queryables already in are kept.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
     }
 }
 
@@ -2590,52 +2659,6 @@ impl<C> QueryableRegistry<C, Lent> {
 }
 
 impl<C, P: Storage> QueryableRegistry<C, P> {
-    /// transport-shm -- install the resolver the shared-memory slices of a query's
-    /// value are read through. Shared with the other registries by the session,
-    /// so a query's value is read by the same resolver a push is. Without one a
-    /// query whose value names a segment is dropped, counted.
-    #[cfg(feature = "transport-shm")]
-    pub fn set_shm_resolver_shared(
-        &mut self,
-        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
-    ) {
-        self.shm.set_resolver(resolver);
-    }
-
-    /// transport-shm -- restamp the LIVE negotiated capability of the session
-    /// feeding this registry, per dispatch iteration, as the other registries' is:
-    /// see [`crate::extshm::ShmReceiveState::set_negotiated`] for why it is
-    /// restamped and never snapshotted.
-    #[cfg(feature = "transport-shm")]
-    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
-        self.shm.set_negotiated(negotiated);
-    }
-
-    /// transport-shm -- install or withdraw the means of acknowledging the peer's
-    /// shared-memory slices. Shared with the other registries: the counters the
-    /// peer named are the peer's, whichever message a slice arrives in.
-    #[cfg(feature = "transport-shm")]
-    pub fn set_shm_handoff_shared(
-        &mut self,
-        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
-    ) {
-        self.shm.set_handoff(handoff);
-    }
-
-    /// transport-shm -- queries dropped because a slice of their value did not
-    /// resolve.
-    #[cfg(feature = "transport-shm")]
-    pub fn shm_unresolved_drops(&self) -> u64 {
-        self.shm.unresolved_drops()
-    }
-
-    /// transport-shm -- queries dropped because a value naming a segment arrived
-    /// on a session that never negotiated shared memory.
-    #[cfg(feature = "transport-shm")]
-    pub fn shm_unnegotiated_drops(&self) -> u64 {
-        self.shm.unnegotiated_drops()
-    }
-
     /// R311gb-3b — register an explicit [`QuerySink`] for a keyexpr
     /// pattern. The seam-native registration entry point: works on
     /// every profile (`C = BoxedQuerySink` heap closure on AP, a
@@ -2859,7 +2882,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// queryables). Borrow-driven (no owned `Query` materialization,
     /// no per-match `QueryResponder` accumulator), so it is the MCU
     /// no-heap dispatch path; the AP wire path
-    /// (`fire_matching_queryables`)
+    /// (`fire_query`)
     /// shares the same per-queryable match SSOT
     /// (`Queryable::matches`) but builds a fresh `QueryResponder`
     /// per match to stage owned `QueryReply` records for the wire.
@@ -2890,7 +2913,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     }
 }
 
-/// R311y337 — what [`QueryableRegistry::dispatch_request`] did with one inbound
+/// R311y337 — what [`QueryPeer::dispatch_request`] did with one inbound
 /// Request. Two facts, deliberately separate, because the caller's Final
 /// obligation keys on the FIRST and not the second.
 ///
@@ -2937,9 +2960,9 @@ pub struct QueryEnvelope {
 /// What a queryable is shown of one inbound query beside its keyexpr: each
 /// field already under the feature gate that decides whether a queryable may
 /// see it. Built from the owned query
-/// (`QueryableRegistry::fire_matching_queryables`) or from a Request read where
+/// (`fire_query`) or from a Request read where
 /// its frame lies (`dispatch_request_in_place`), and fired by one body
-/// (`QueryableRegistry::fire_projection`).
+/// (`QueryPeer::fire_projection`).
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 struct QueryProjection<'q> {
     /// The selector parameters.
@@ -3008,7 +3031,7 @@ pub struct DispatchOutcome {
     /// resolve (an id the peer never declared to it, or no key at all). Such a query is not
     /// dispatched, and the node owes it a Final only when its
     /// `query-unanswerable-final` policy is `empty-final`
-    /// ([`QueryableRegistry::set_unanswerable_final`]).
+    /// ([`QueryPeer::set_unanswerable_final`]).
     pub unresolved: bool,
 }
 
@@ -3056,202 +3079,6 @@ impl DispatchOutcome {
 // `dispatch_borrowed`) stays un-gated.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
-    /// Route an inbound `Request` through the queryable table.
-    ///
-    /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
-    ///   (i.e. MsgPut / MsgDel / Default arms) are no-ops here. The
-    ///   AP MVP responder path only handles Query bodies; the other
-    ///   arms are accepted by the inbound parser for wire-shape
-    ///   completeness but have no application-visible side effect in
-    ///   the queryable surface.
-    /// - The Request keyexpr is resolved through `peer_keyexpr_table`
-    ///   (the shared mapping populated by the subscriber side's
-    ///   `absorb_declare` from inbound `Declare(DeclKexpr)`). The
-    ///   composition rule mirrors `dispatch_push`:
-    ///   * `id == 0`                    → keyexpr = suffix or empty
-    ///   * `id != 0`, suffix = None     → keyexpr = `table[id]`
-    ///   * `id != 0`, suffix = Some(s)  → keyexpr = `table[id]` + s
-    ///
-    ///   Un-resolvable mapping ids (peer hasn't declared the id yet,
-    ///   or the declaration arrived through a path the table has not
-    ///   yet absorbed) drop the dispatch silently rather than firing
-    ///   on a partial keyexpr.
-    /// - Each matched queryable fires once, in registration order.
-    ///   The callback's `&mut QueryResponder` pushes outbound
-    ///   replies into `replies`; the caller drains `replies` after
-    ///   `dispatch_request` returns and encodes each into a
-    ///   Response frame on the wire (R121j-5c).
-    ///
-    /// R311dx — `codec-request`-gated: the `&RequestOwned` parameter
-    /// type lives in the `codec-request` codec_group, so a
-    /// `codec-request`-OFF subset elides this entry point entirely
-    /// (wire-data-helper exemption to R311g1 signature stability,
-    /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
-    /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
-    #[cfg(feature = "alloc")]
-    pub fn dispatch_request<'a, S: Storage>(
-        &mut self,
-        request: &RequestOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
-        replies: &mut ReplyStage<S>,
-    ) -> DispatchOutcome {
-        let peer_keyexpr_table = peer_keyexpr_table.into();
-        // Only the Query body arm triggers application-visible
-        // dispatch — see scope note above. zenoh's wire entry never enters its
-        // Query arm for these bodies either (session.rs:2771).
-        let query = match &request.body {
-            RequestOwnedVariant::CodecZenohQuery(q) => q,
-            _ => return DispatchOutcome::NOT_DISPATCHED,
-        };
-
-        // R3044 -- the value of a query that arrived as a list of slices after a
-        // shared-memory marker is read and acknowledged FIRST, before the query is
-        // routed, as upstream's transport does for every message that carries a
-        // payload (`io/zenoh-transport/src/unicast/universal/rx.rs` @
-        // `map_zmsg_to_shmbuf(`). Two things follow from the order. A query that
-        // routing then refuses has still arrived, so its slices are already given
-        // back and acknowledged when the keyexpr below fails to resolve. And a
-        // value that cannot be read drops the WHOLE query, with no Final, which is
-        // what upstream does when mapping fails: the requester is not told
-        // anything it could act on, and no queryable sees a query whose value is
-        // a descriptor.
-        #[cfg(feature = "transport-shm")]
-        let unswapped_value = {
-            let band = crate::declare_ext_qos::read_request_qos(request)
-                .priority()
-                .wire_byte() as usize;
-            match self.unswap_query_value(query, band) {
-                Ok(value) => value,
-                Err(()) => return DispatchOutcome::NOT_DISPATCHED,
-            }
-        };
-        #[cfg(not(feature = "transport-shm"))]
-        let unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)> = None;
-
-        // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
-        // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
-        // None -> drop, covering the empty form + an undeclared id).
-        // zenoh's twin exit: `Err(err) => error!("Received Query for unknown
-        // key_expr")` returns before `handle_query`, so no Final is owed.
-        //
-        // S9b — resolved into a buffer on this frame ([`KeyexprBuf`]) and not into a
-        // `String`: the keyexpr is lent from the request when one string IS it (an
-        // `id == 0` reference, or the peer's literal for an id with no suffix), which
-        // costs nothing, and composed in the buffer otherwise. On the fixed backing
-        // the buffer is [`caps::MAX_KEYEXPR_BYTES`]; a keyexpr composed past it is
-        // still ROUTED, resolved into a `String` as this path always did (the lent
-        // path's documented fallback: such a query is delivered, not dropped), and
-        // that one case is the only one that allocates.
-        let mut composed = KeyexprBuf::new();
-        let long;
-        let resolved: &str =
-            match resolve_wireexpr_into(&request.keyexpr.body, peer_keyexpr_table, &mut composed) {
-                Ok(Some(r)) => r,
-                Ok(None) => return DispatchOutcome::UNRESOLVED,
-                Err(KeyexprPastBound) => {
-                    long = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table) {
-                        Some(r) => r,
-                        None => return DispatchOutcome::UNRESOLVED,
-                    };
-                    &long
-                }
-            };
-
-        // zenoh session.rs:2430 — the completeness filter reads the query's
-        // `ext_target`. Absent / BestMatching / All -> None or All (every
-        // matching queryable fires); `AllComplete` -> only complete queryables.
-        // Read off the SAME wire Request the dispatch already holds, so no
-        // signature change: the target rides the Request envelope, not the
-        // Query body.
-        let target = crate::request_routing_context::read_request_target(request);
-
-        // R223 — every Request reaching dispatch_request has been
-        // parsed off the wire, so the inner fan-out treats this as a
-        // remote-origin dispatch. R238 — the same fan-out logic is
-        // shared with [`Self::local_query`] (is_remote=false) so the
-        // pattern-match / responder-build / callback-fire body lives
-        // in [`Self::fire_matching_queryables`] once. The "deferred
-        // self-publish loopback" carry note prior to R238 lands here:
-        // the helper switch is the textbook resolution.
-        //
-        // R311y337 — past this point the query HAS been routed (wz's equivalent
-        // of zenoh entering `handle_query`), so the requester is owed a Final
-        // even if `matched` comes back 0.
-        // R2594 — the query's QoS, off the same envelope as its target. Every
-        // reply a matched queryable stages inherits it (upstream: `msg.ext_qos`
-        // into `QueryInner::qos`, then into each reply builder).
-        let qos = crate::declare_ext_qos::read_request_qos(request);
-        let envelope = QueryEnvelope {
-            rid: request.rid,
-            target,
-            qos,
-        };
-        // The timestamp stack the Request carries: the nodes it crossed recorded on it.
-        #[cfg(feature = "pubsub-ts-stack")]
-        let ts_stack =
-            crate::ts_stack::read_ts_stack(request.extensions.entries().unwrap_or(&[]).iter());
-        let projection = Self::project_owned_query(
-            query,
-            unswapped_value,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack.as_ref(),
-        );
-        let matched = self.fire_matching_queryables(
-            envelope, resolved, projection, replies, /* is_remote = */ true,
-        );
-        DispatchOutcome::routed(matched)
-    }
-
-    /// The value of `query` when it arrived as a list of slices after a
-    /// shared-memory marker: every slice read through the resolver and
-    /// acknowledged at `band`, and the bytes returned with the value's encoding.
-    ///
-    /// `Ok(None)` is a query whose value is not that shape (no value, or the
-    /// plain one, which the fan-out reads off the chain borrowed). `Err(())` is a
-    /// value that could not be read, counted by the receive state, and the caller
-    /// drops the whole query.
-    #[cfg(feature = "transport-shm")]
-    #[cfg(feature = "alloc")]
-    fn unswap_query_value(
-        &mut self,
-        query: &QueryOwned,
-        band: usize,
-    ) -> Result<Option<(crate::sample::EncodingHint, crate::link::RxBytes)>, ()> {
-        use crate::ext_view::ExtEntryView;
-        use sce_forge_runtime::codec::SceList;
-        use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
-        let Some(exts) = crate::held_list::HeldList::entries(&query.extensions) else {
-            return Ok(None);
-        };
-        for ext in exts {
-            if ExtEntryView::eid(ext) != crate::ext_header::body_eid::QUERY_VALUE {
-                continue;
-            }
-            let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
-                continue;
-            };
-            let wz_codecs::query_value_zbuf::QueryValueZbufAfterShm::AfterShm {
-                encoding,
-                slices,
-                ..
-            } = &value.after_shm
-            else {
-                continue;
-            };
-            // The encoding precedes the slices on the wire, in the same codec the
-            // plain shape's leading bytes are read with.
-            let encoding = crate::sample::EncodingHint::from_codec(encoding);
-            return match self
-                .shm
-                .unswap_slices(SceList::as_slice(slices.inner()), band)
-            {
-                Some(bytes) => Ok(Some((encoding, bytes))),
-                None => Err(()),
-            };
-        }
-        Ok(None)
-    }
-
     /// R238 — in-process query loopback mirror of
     /// [`crate::pubsub::SubscriberTable::local_publish`]. Fans the
     /// `(rid, keyexpr, query)` triple into every matching queryable
@@ -3263,7 +3090,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// queryables' replies without a wire round-trip.
     ///
     /// Caller precondition: `keyexpr` is the already-resolved literal
-    /// form. Unlike [`Self::dispatch_request`], this method does NOT
+    /// form. Unlike [`QueryPeer::dispatch_request`], this method does NOT
     /// consult the peer keyexpr table — the loopback path bypasses
     /// the peer's DECLARE alias table because the caller is local.
     /// If the application uses outbound aliasing
@@ -3340,15 +3167,13 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
         replies: &mut ReplyStage<S>,
     ) -> usize {
-        let projection = Self::project_owned_query(
+        let projection = project_owned_query(
             query,
             value,
             #[cfg(feature = "pubsub-ts-stack")]
             None,
         );
-        self.fire_matching_queryables(
-            envelope, keyexpr, projection, replies, /* is_remote = */ false,
-        )
+        fire_query(self, None, envelope, keyexpr, projection, replies, false)
     }
 
     /// [`Self::local_query_with_value`] for a query that is instrumented: every matched queryable
@@ -3365,140 +3190,247 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
         ts_stack: Option<&crate::ts_stack::TsStack>,
         replies: &mut ReplyStage<S>,
     ) -> usize {
-        let projection = Self::project_owned_query(query, value, ts_stack);
-        self.fire_matching_queryables(
-            envelope, keyexpr, projection, replies, /* is_remote = */ false,
-        )
+        let projection = project_owned_query(query, value, ts_stack);
+        fire_query(self, None, envelope, keyexpr, projection, replies, false)
     }
+}
 
-    /// R238 — shared fan-out body for [`Self::dispatch_request`]
-    /// (is_remote=true) and [`Self::local_query`] (is_remote=false).
-    /// The locality predicate split happens here so the rest of the
-    /// pattern-match / responder-build / callback-fire path stays
-    /// identical across wire and loopback origins. Mirrors the R227
-    /// `SubscriberRegistry::fire_to_subscribers(sample, is_remote)`
-    /// internal split for the queryable side.
+/// The dispatch of what this face's peer asks: a Request routed through the session's queryables,
+/// its replies staged and the Final it owes recorded beside them.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+impl QueryPeer {
+    /// Route an inbound `Request` through the queryable table.
     ///
-    /// `keyexpr` is the already-resolved literal; the responder
-    /// echoes it back into each [`QueryReply::Reply::keyexpr_literal`]
-    /// so the requester sees the same literal regardless of whether
-    /// the dispatch came off the wire (alias-resolved through
-    /// `peer_keyexpr_table`) or in-process (caller-supplied literal).
+    /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
+    ///   (i.e. MsgPut / MsgDel / Default arms) are no-ops here. The
+    ///   AP MVP responder path only handles Query bodies; the other
+    ///   arms are accepted by the inbound parser for wire-shape
+    ///   completeness but have no application-visible side effect in
+    ///   the queryable surface.
+    /// - The Request keyexpr is resolved through `peer_keyexpr_table`
+    ///   (the shared mapping populated by the subscriber side's
+    ///   `absorb_declare` from inbound `Declare(DeclKexpr)`). The
+    ///   composition rule mirrors `dispatch_push`:
+    ///   * `id == 0`                    → keyexpr = suffix or empty
+    ///   * `id != 0`, suffix = None     → keyexpr = `table[id]`
+    ///   * `id != 0`, suffix = Some(s)  → keyexpr = `table[id]` + s
     ///
-    /// R311dx — the shared fan-out body for the two public entry
-    /// points; gate carried by the enclosing
-    /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
+    ///   Un-resolvable mapping ids (peer hasn't declared the id yet,
+    ///   or the declaration arrived through a path the table has not
+    ///   yet absorbed) drop the dispatch silently rather than firing
+    ///   on a partial keyexpr.
+    /// - Each matched queryable fires once, in registration order.
+    ///   The callback's `&mut QueryResponder` pushes outbound
+    ///   replies into `replies`; the caller drains `replies` after
+    ///   `dispatch_request` returns and encodes each into a
+    ///   Response frame on the wire (R121j-5c).
+    ///
+    /// R311dx — `codec-request`-gated: the `&RequestOwned` parameter
+    /// type lives in the `codec-request` codec_group, so a
+    /// `codec-request`-OFF subset elides this entry point entirely
+    /// (wire-data-helper exemption to R311g1 signature stability,
+    /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
+    /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
     #[cfg(feature = "alloc")]
-    fn fire_matching_queryables<S: Storage>(
+    pub fn dispatch_request<'a, L: LocalQueryables, S: Storage>(
         &mut self,
-        envelope: QueryEnvelope,
-        keyexpr: &str,
-        projection: QueryProjection<'_>,
+        queryables: &mut L,
+        request: &RequestOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         replies: &mut ReplyStage<S>,
-        is_remote: bool,
-    ) -> usize {
-        self.fire_projection(envelope, keyexpr, projection, replies, is_remote)
-    }
-
-    /// What a queryable is shown of the owned query `query`, read off it ONCE for every
-    /// queryable it is matched against; the fan-out is [`Self::fire_projection`]. `ts_stack` is
-    /// the timestamp stack the query arrived with: the Request's extension, or the stack of a
-    /// query of the session's own.
-    #[cfg(feature = "alloc")]
-    fn project_owned_query<'q>(
-        query: &'q QueryOwned,
-        unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
-        #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&'q crate::ts_stack::TsStack>,
-    ) -> QueryProjection<'q> {
-        // The projection inputs, extracted ONCE; the fan-out is
-        // `fire_projection`.
-        //
-        // R311gb-3b-cleanup — extract the projection inputs ONCE per
-        // matched queryable (the parameters byte slice and attachment
-        // view are stable across all matched handlers for a single
-        // inbound query); each match builds a `BorrowedQuery` from them.
-        // The keyexpr field re-borrows the
-        // dispatcher's `keyexpr` argument; the parameters field
-        // borrows directly from `Query.parameters`; the attachment
-        // view is extracted from the inbound extensions chain at R311v
-        // (`extract_query_attachment`).
-        // R311cj — query-selector-parameters gates the parameters
-        // slice projection. cfg-off: callback always observes None.
-        // R2844 — through the one projection the forwarder uses too.
-        let parameters_view = query_parameters(query);
-        let attachment_view = extract_query_attachment(query);
-        // R311 — querier source-info, decoded once per inbound query into
-        // this local; each matched queryable's `BorrowedQuery` lends it
-        // (`.as_ref()`), matching the attachment/parameters borrow shape.
-        let source_info_view = extract_query_source_info(query);
-        // R311y248 — querier VALUE ext, decoded once per inbound query into
-        // this local (owned encoding + borrowed payload); each matched
-        // queryable's `BorrowedQuery` lends both, matching the source_info
-        // borrow shape.
-        //
-        // R3044 -- a value that arrived as a list of slices after a
-        // shared-memory marker was read and acknowledged BEFORE this query was
-        // routed (`dispatch_request`), and its bytes come in as `unswapped_value`
-        // and are lent as they are; the plain shape is still read off the
-        // chain here, borrowed.
-        let plain_value = extract_query_value(query);
-        // R3061 -- the un-swapped value is held as the shareable type and LENT as it is,
-        // so a value that is one shared-memory slice reaches each matched queryable as
-        // the page it lies on (`QueryView::payload_shared`) as well as the bytes of it.
-        // Without `query-value` the application sees no value at all: the slices were
-        // still read and acknowledged, which is owed whatever is delivered.
-        #[cfg(not(feature = "query-value"))]
-        let unswapped_value = {
-            let _ = unswapped_value;
-            None::<(crate::sample::EncodingHint, crate::link::RxBytes)>
+    ) -> DispatchOutcome
+    where
+        L::Sink: ResponderSink,
+    {
+        let peer_keyexpr_table = peer_keyexpr_table.into();
+        // Only the Query body arm triggers application-visible
+        // dispatch — see scope note above. zenoh's wire entry never enters its
+        // Query arm for these bodies either (session.rs:2771).
+        let query = match &request.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => q,
+            _ => return DispatchOutcome::NOT_DISPATCHED,
         };
-        // A plain value that arrived in a frame the link lent is LENT too, as the range of
-        // that frame that follows its encoding, so a queryable that keeps the query takes a
-        // second reference to the storage and not a copy of the bytes. It is the same run
-        // of bytes `plain_value` borrows, so the two readings cannot disagree.
-        let unswapped_value = unswapped_value.or_else(|| extract_query_value_shared(query));
-        // The attachment likewise: the range of the frame, lent beside the value.
-        let attachment_shared = extract_query_attachment_shared(query);
-        QueryProjection {
-            parameters: parameters_view,
-            attachment: attachment_view,
-            source_info: source_info_view,
-            plain_value,
-            shared_value: unswapped_value,
-            attachment_shared,
+
+        // R3044 -- the value of a query that arrived as a list of slices after a
+        // shared-memory marker is read and acknowledged FIRST, before the query is
+        // routed, as upstream's transport does for every message that carries a
+        // payload (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+        // `map_zmsg_to_shmbuf(`). Two things follow from the order. A query that
+        // routing then refuses has still arrived, so its slices are already given
+        // back and acknowledged when the keyexpr below fails to resolve. And a
+        // value that cannot be read drops the WHOLE query, with no Final, which is
+        // what upstream does when mapping fails: the requester is not told
+        // anything it could act on, and no queryable sees a query whose value is
+        // a descriptor.
+        #[cfg(feature = "transport-shm")]
+        let unswapped_value = {
+            let band = crate::declare_ext_qos::read_request_qos(request)
+                .priority()
+                .wire_byte() as usize;
+            match self.unswap_query_value(query, band) {
+                Ok(value) => value,
+                Err(()) => return DispatchOutcome::NOT_DISPATCHED,
+            }
+        };
+        #[cfg(not(feature = "transport-shm"))]
+        let unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)> = None;
+
+        // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
+        // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
+        // None -> drop, covering the empty form + an undeclared id).
+        // zenoh's twin exit: `Err(err) => error!("Received Query for unknown
+        // key_expr")` returns before `handle_query`, so no Final is owed.
+        //
+        // S9b — resolved into a buffer on this frame ([`KeyexprBuf`]) and not into a
+        // `String`: the keyexpr is lent from the request when one string IS it (an
+        // `id == 0` reference, or the peer's literal for an id with no suffix), which
+        // costs nothing, and composed in the buffer otherwise. On the fixed backing
+        // the buffer is [`caps::MAX_KEYEXPR_BYTES`]; a keyexpr composed past it is
+        // still ROUTED, resolved into a `String` as this path always did (the lent
+        // path's documented fallback: such a query is delivered, not dropped), and
+        // that one case is the only one that allocates.
+        let mut composed = KeyexprBuf::new();
+        let long;
+        let resolved: &str =
+            match resolve_wireexpr_into(&request.keyexpr.body, peer_keyexpr_table, &mut composed) {
+                Ok(Some(r)) => r,
+                Ok(None) => return DispatchOutcome::UNRESOLVED,
+                Err(KeyexprPastBound) => {
+                    long = match resolve_wireexpr_in(&request.keyexpr.body, peer_keyexpr_table) {
+                        Some(r) => r,
+                        None => return DispatchOutcome::UNRESOLVED,
+                    };
+                    &long
+                }
+            };
+
+        // zenoh session.rs:2430 — the completeness filter reads the query's
+        // `ext_target`. Absent / BestMatching / All -> None or All (every
+        // matching queryable fires); `AllComplete` -> only complete queryables.
+        // Read off the SAME wire Request the dispatch already holds, so no
+        // signature change: the target rides the Request envelope, not the
+        // Query body.
+        let target = crate::request_routing_context::read_request_target(request);
+
+        // R223 — every Request reaching dispatch_request has been
+        // parsed off the wire, so the inner fan-out treats this as a
+        // remote-origin dispatch. R238 — the same fan-out logic is
+        // shared with [`QueryableRegistry::local_query`] (is_remote=false) so the
+        // pattern-match / responder-build / callback-fire body lives
+        // in `fire_query` once. The "deferred
+        // self-publish loopback" carry note prior to R238 lands here:
+        // the helper switch is the textbook resolution.
+        //
+        // R311y337 — past this point the query HAS been routed (wz's equivalent
+        // of zenoh entering `handle_query`), so the requester is owed a Final
+        // even if `matched` comes back 0.
+        // R2594 — the query's QoS, off the same envelope as its target. Every
+        // reply a matched queryable stages inherits it (upstream: `msg.ext_qos`
+        // into `QueryInner::qos`, then into each reply builder).
+        let qos = crate::declare_ext_qos::read_request_qos(request);
+        let envelope = QueryEnvelope {
+            rid: request.rid,
+            target,
+            qos,
+        };
+        // The timestamp stack the Request carries: the nodes it crossed recorded on it.
+        #[cfg(feature = "pubsub-ts-stack")]
+        let ts_stack =
+            crate::ts_stack::read_ts_stack(request.extensions.entries().unwrap_or(&[]).iter());
+        let projection = project_owned_query(
+            query,
+            unswapped_value,
             #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack,
-        }
+            ts_stack.as_ref(),
+        );
+        let matched = self.fire_projection(queryables, envelope, resolved, projection, replies);
+        DispatchOutcome::routed(matched)
     }
 
-    /// [`fire_query`] for a query this registry's own session asks (`is_remote` false), or one a
-    /// peer asks, which a query longer than the session allows reaches no queryable of: it is
-    /// still a query that was routed (the caller owes its final, as for one that matched
-    /// nobody), so the asker's query ends with no reply and does not wait out its timeout.
-    fn fire_projection<S: Storage>(
+    /// The value of `query` when it arrived as a list of slices after a
+    /// shared-memory marker: every slice read through the resolver and
+    /// acknowledged at `band`, and the bytes returned with the value's encoding.
+    ///
+    /// `Ok(None)` is a query whose value is not that shape (no value, or the
+    /// plain one, which the fan-out reads off the chain borrowed). `Err(())` is a
+    /// value that could not be read, counted by the receive state, and the caller
+    /// drops the whole query.
+    #[cfg(feature = "transport-shm")]
+    #[cfg(feature = "alloc")]
+    fn unswap_query_value(
         &mut self,
+        query: &QueryOwned,
+        band: usize,
+    ) -> Result<Option<(crate::sample::EncodingHint, crate::link::RxBytes)>, ()> {
+        use crate::ext_view::ExtEntryView;
+        use sce_forge_runtime::codec::SceList;
+        use wz_codecs::query_ext_entry::QueryExtEntryOwnedVariant;
+        let Some(exts) = crate::held_list::HeldList::entries(&query.extensions) else {
+            return Ok(None);
+        };
+        for ext in exts {
+            if ExtEntryView::eid(ext) != crate::ext_header::body_eid::QUERY_VALUE {
+                continue;
+            }
+            let QueryExtEntryOwnedVariant::CodecZenohQueryValueZbuf(value) = &ext.body else {
+                continue;
+            };
+            let wz_codecs::query_value_zbuf::QueryValueZbufAfterShm::AfterShm {
+                encoding,
+                slices,
+                ..
+            } = &value.after_shm
+            else {
+                continue;
+            };
+            // The encoding precedes the slices on the wire, in the same codec the
+            // plain shape's leading bytes are read with.
+            let encoding = crate::sample::EncodingHint::from_codec(encoding);
+            return match self
+                .shm
+                .unswap_slices(SceList::as_slice(slices.inner()), band)
+            {
+                Some(bytes) => Ok(Some((encoding, bytes))),
+                None => Err(()),
+            };
+        }
+        Ok(None)
+    }
+
+    /// [`fire_query`] for a query this face's peer asks: one longer than the session allows reaches
+    /// no queryable, and is counted ([`Self::oversize_refusals`]). It is still a query that was
+    /// routed (the caller owes its final, as for one that matched nobody), so the asker's query
+    /// ends with no reply and does not wait out its timeout. The one body both receive paths fire
+    /// through is the one place the bound is read.
+    fn fire_projection<L: LocalQueryables, S: Storage>(
+        &mut self,
+        queryables: &mut L,
         envelope: QueryEnvelope,
         keyexpr: &str,
         projection: QueryProjection<'_>,
         replies: &mut ReplyStage<S>,
-        is_remote: bool,
-    ) -> usize {
+    ) -> usize
+    where
+        L::Sink: ResponderSink,
+    {
         let (max_parameters, max_attachment) = self.query_size_bounds();
-        if is_remote
-            && request_past_bounds(
-                projection.parameters,
-                projection.attachment,
-                max_parameters,
-                max_attachment,
-            )
-        {
+        if request_past_bounds(
+            projection.parameters,
+            projection.attachment,
+            max_parameters,
+            max_attachment,
+        ) {
             self.oversize_refused = self.oversize_refused.saturating_add(1);
             return 0;
         }
-        // Who the link proved the sender to be (decision D12).
-        let requester = self.requester;
         fire_query(
-            self, requester, envelope, keyexpr, projection, replies, is_remote,
+            queryables,
+            self.requester,
+            envelope,
+            keyexpr,
+            projection,
+            replies,
+            true,
         )
     }
 
@@ -3539,13 +3471,16 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     /// [`Self::dispatch_request`]; they do not enqueue a Final
     /// either.
     #[cfg(feature = "alloc")]
-    pub fn dispatch_messages<'a, S: Storage>(
+    pub fn dispatch_messages<'a, L: LocalQueryables, S: Storage>(
         &mut self,
+        queryables: &mut L,
         messages: &[NetworkMessage],
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) {
+    ) where
+        L::Sink: ResponderSink,
+    {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         // R311dx — the whole registry impl is `codec-request`-gated, so
         // `NetworkMessage::Request` (itself a `codec-request` variant) is
@@ -3596,7 +3531,8 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
                     pending_final_rids.refuse_request();
                     continue;
                 }
-                let outcome = self.dispatch_request(req, peer_keyexpr_table, pending_replies);
+                let outcome =
+                    self.dispatch_request(queryables, req, peer_keyexpr_table, pending_replies);
                 if outcome.owes_final(self.answers_unresolved_queries()) {
                     // R2595 — the terminator carries the QUERY's QoS, as every
                     // reply before it does: upstream stamps it on the final from
@@ -3619,19 +3555,23 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
     // Out of line, for the stack: the observer's fan (`SlotObserverOf::dispatch_event_among`)
     // calls each plane in turn, and each plane's temporaries stay in a frame of its own.
     #[inline(never)]
-    pub fn dispatch_iteration_event<'a, S: Storage>(
+    pub fn dispatch_iteration_event<'a, L: LocalQueryables, S: Storage>(
         &mut self,
+        queryables: &mut L,
         event: IterationEvent<'_, '_>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a>>,
         pending_replies: &mut ReplyStage<S>,
         pending_final_rids: &mut FinalStage<S>,
-    ) {
+    ) where
+        L::Sink: ResponderSink,
+    {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match event {
             #[cfg(feature = "alloc")]
             IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => {
                 if let Some(messages) = crate::driver_loop::owned_records(messages) {
                     self.dispatch_messages(
+                        queryables,
                         messages,
                         peer_keyexpr_table,
                         pending_replies,
@@ -3644,6 +3584,7 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             IterationEvent::InPlace(record) => {
                 if let Some(request) = record.request() {
                     self.dispatch_request_in_place(
+                        queryables,
                         request,
                         peer_keyexpr_table,
                         pending_replies,
@@ -3653,6 +3594,75 @@ impl<C: ResponderSink, P: Storage> QueryableRegistry<C, P> {
             }
             _ => {}
         }
+    }
+}
+
+/// What a queryable is shown of the owned query `query`, read off it ONCE for every queryable it
+/// is matched against; the fan-out is [`fire_query`].
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn project_owned_query<'q>(
+    query: &'q QueryOwned,
+    unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+    #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&'q crate::ts_stack::TsStack>,
+) -> QueryProjection<'q> {
+    // The projection inputs, extracted ONCE; the fan-out is
+    // `fire_projection`.
+    //
+    // R311gb-3b-cleanup — extract the projection inputs ONCE per
+    // matched queryable (the parameters byte slice and attachment
+    // view are stable across all matched handlers for a single
+    // inbound query); each match builds a `BorrowedQuery` from them.
+    // The keyexpr field re-borrows the
+    // dispatcher's `keyexpr` argument; the parameters field
+    // borrows directly from `Query.parameters`; the attachment
+    // view is extracted from the inbound extensions chain at R311v
+    // (`extract_query_attachment`).
+    // R311cj — query-selector-parameters gates the parameters
+    // slice projection. cfg-off: callback always observes None.
+    // R2844 — through the one projection the forwarder uses too.
+    let parameters_view = query_parameters(query);
+    let attachment_view = extract_query_attachment(query);
+    // R311 — querier source-info, decoded once per inbound query into
+    // this local; each matched queryable's `BorrowedQuery` lends it
+    // (`.as_ref()`), matching the attachment/parameters borrow shape.
+    let source_info_view = extract_query_source_info(query);
+    // R311y248 — querier VALUE ext, decoded once per inbound query into
+    // this local (owned encoding + borrowed payload); each matched
+    // queryable's `BorrowedQuery` lends both, matching the source_info
+    // borrow shape.
+    //
+    // R3044 -- a value that arrived as a list of slices after a
+    // shared-memory marker was read and acknowledged BEFORE this query was
+    // routed (`dispatch_request`), and its bytes come in as `unswapped_value`
+    // and are lent as they are; the plain shape is still read off the
+    // chain here, borrowed.
+    let plain_value = extract_query_value(query);
+    // R3061 -- the un-swapped value is held as the shareable type and LENT as it is,
+    // so a value that is one shared-memory slice reaches each matched queryable as
+    // the page it lies on (`QueryView::payload_shared`) as well as the bytes of it.
+    // Without `query-value` the application sees no value at all: the slices were
+    // still read and acknowledged, which is owed whatever is delivered.
+    #[cfg(not(feature = "query-value"))]
+    let unswapped_value = {
+        let _ = unswapped_value;
+        None::<(crate::sample::EncodingHint, crate::link::RxBytes)>
+    };
+    // A plain value that arrived in a frame the link lent is LENT too, as the range of
+    // that frame that follows its encoding, so a queryable that keeps the query takes a
+    // second reference to the storage and not a copy of the bytes. It is the same run
+    // of bytes `plain_value` borrows, so the two readings cannot disagree.
+    let unswapped_value = unswapped_value.or_else(|| extract_query_value_shared(query));
+    // The attachment likewise: the range of the frame, lent beside the value.
+    let attachment_shared = extract_query_attachment_shared(query);
+    QueryProjection {
+        parameters: parameters_view,
+        attachment: attachment_view,
+        source_info: source_info_view,
+        plain_value,
+        shared_value: unswapped_value,
+        attachment_shared,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack,
     }
 }
 
@@ -3704,7 +3714,7 @@ where
     let accept_mode = ReplyKeyExpr::from_parameter_bytes(parameters_view);
     // The query's key is read once for every queryable it is matched against.
     let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
-    queryables.fire_matching(keyexpr, keyexpr_facts, is_remote, target, |sink| {
+    queryables.fire_matching_queryables(keyexpr, keyexpr_facts, is_remote, target, |sink| {
         // R311y834 — the acceptance mode comes from the QUERY's own
         // selector parameters, the same token the requester's gate
         // reads (R311y833). `parameters_view` is already the
@@ -4122,7 +4132,12 @@ mod tests {
 
         let req = request_query_nonlocal(7, 7, None);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, MappingSpaces::with_own(&peer, &own), &mut replies);
+        QueryPeer::default().dispatch_request(
+            &mut reg,
+            &req,
+            MappingSpaces::with_own(&peer, &own),
+            &mut replies,
+        );
 
         assert_eq!(
             ours.load(Ordering::SeqCst),
@@ -4162,7 +4177,7 @@ mod tests {
 
         let req = request_query_nonlocal(7, 7, None);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &peer, &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &peer, &mut replies);
 
         assert_eq!(ours.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -4179,7 +4194,7 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let req = request_query(42, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
         assert!(replies.is_empty(), "no queryables → no replies");
@@ -4237,7 +4252,7 @@ mod tests {
 
         let req = request_query(7, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
@@ -4270,7 +4285,8 @@ mod tests {
         // Three different keyexpr literals should all match `home/**`.
         let mut replies = ReplyStage::new();
         for suffix in ["home", "home/temp", "home/zone/1/temp"] {
-            reg.dispatch_request(
+            QueryPeer::default().dispatch_request(
+                &mut reg,
                 &request_query(1, 0, Some(suffix)),
                 &HashMap::new(),
                 &mut replies,
@@ -4301,7 +4317,8 @@ mod tests {
 
         let mut replies = ReplyStage::new();
         // A wildcard selector that INTERSECTS the concrete queryable → fires.
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(1, 0, Some("@zid/*/3912/aligner")),
             &HashMap::new(),
             &mut replies,
@@ -4315,7 +4332,8 @@ mod tests {
 
         // A wildcard selector that does NOT intersect (the fingerprint chunk
         // differs) must NOT fire — the match is intersection, not match-all.
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(2, 0, Some("@zid/*/9999/aligner")),
             &HashMap::new(),
             &mut replies,
@@ -4343,17 +4361,17 @@ mod tests {
         // mapping_id=11, no suffix → table lookup yields "sensors/temp"
         let req = request_query(1, 11, None);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &peer_table, &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &peer_table, &mut replies);
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
 
         // mapping_id=11, suffix=Some(""/extra") → concat
         let req2 = request_query(2, 11, Some(""));
-        reg.dispatch_request(&req2, &peer_table, &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req2, &peer_table, &mut replies);
         assert_eq!(invocations.load(Ordering::SeqCst), 2);
 
         // mapping_id=99 not in table → silent drop, no callback
         let req3 = request_query(3, 99, None);
-        reg.dispatch_request(&req3, &peer_table, &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req3, &peer_table, &mut replies);
         assert_eq!(
             invocations.load(Ordering::SeqCst),
             2,
@@ -4377,7 +4395,7 @@ mod tests {
 
         let req = request_query_with_attachment(11, Some("home/temp"), b"hello-att");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         let got = captured.lock().unwrap().clone();
         assert_eq!(
@@ -4403,7 +4421,7 @@ mod tests {
 
         let req = request_query(7, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             *captured.lock().unwrap(),
@@ -4463,7 +4481,7 @@ mod tests {
 
         let req = request_query_with_parameters(13, "home/temp", b"key=value");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             captured.lock().unwrap().as_deref(),
@@ -4520,24 +4538,25 @@ mod tests {
 
         let req = request_query_with_parameters(21, "home/temp", &params);
         let mut replies = ReplyStage::new();
-        let outcome = reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        let mut peer = QueryPeer::default();
+        let outcome = peer.dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert!(outcome.dispatched, "routed either way: its final is owed");
         if bound == 0 {
             assert_eq!(outcome.matched, 1);
             assert_eq!(*runs.lock().unwrap(), 1);
-            assert_eq!(reg.oversize_refusals(), 0);
+            assert_eq!(peer.oversize_refusals(), 0);
         } else {
             assert_eq!(outcome.matched, 0);
             assert_eq!(*runs.lock().unwrap(), 0);
-            assert_eq!(reg.oversize_refusals(), 1);
+            assert_eq!(peer.oversize_refusals(), 1);
             // A query at the bound is run.
             let at_bound = std::vec![b'x'; bound];
             let req = request_query_with_parameters(22, "home/temp", &at_bound);
-            let outcome = reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+            let outcome = peer.dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
             assert_eq!(outcome.matched, 1);
             assert_eq!(
-                reg.oversize_refusals(),
+                peer.oversize_refusals(),
                 1,
                 "a query at the bound is not counted"
             );
@@ -4610,7 +4629,7 @@ mod tests {
 
         let req = request_query_with_source_info(21, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         let si = captured
             .lock()
@@ -4635,7 +4654,7 @@ mod tests {
 
         let mut replies = ReplyStage::new();
         let put_req = request_put(1, "home/temp");
-        reg.dispatch_request(&put_req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &put_req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -4660,7 +4679,7 @@ mod tests {
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
         assert_eq!(
             invocations.load(Ordering::SeqCst),
             1,
@@ -4688,7 +4707,7 @@ mod tests {
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
         assert_eq!(
             invocations.load(Ordering::SeqCst),
             0,
@@ -4710,7 +4729,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
             &mut replies,
@@ -4895,7 +4915,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
             &mut replies,
@@ -4967,7 +4988,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("@zid/aligner")),
             &HashMap::new(),
             &mut replies,
@@ -5030,7 +5052,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(99, 0, Some("clear/me")),
             &HashMap::new(),
             &mut replies,
@@ -5061,7 +5084,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(5, 0, Some("error/path")),
             &HashMap::new(),
             &mut replies,
@@ -5096,7 +5120,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(123, 0, Some("series/data")),
             &HashMap::new(),
             &mut replies,
@@ -5139,7 +5164,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("home/temp")),
             &HashMap::new(),
             &mut replies,
@@ -5212,7 +5238,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(9, 0, Some("error/path")),
             &HashMap::new(),
             &mut replies,
@@ -5249,7 +5276,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(42, 0, Some("home/temp")),
             &HashMap::new(),
             &mut replies,
@@ -5292,7 +5320,8 @@ mod tests {
         .expect("no quota is stated on this table");
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(42, 0, Some("home/temp")),
             &HashMap::new(),
             &mut replies,
@@ -5351,8 +5380,9 @@ mod tests {
             .build()
             .unwrap();
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&request, &HashMap::new(), &mut replies);
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(&mut reg, &request, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(43, 0, Some("home/temp")),
             &HashMap::new(),
             &mut replies,
@@ -5483,7 +5513,8 @@ mod tests {
         })
         .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/data")),
             &HashMap::new(),
             &mut replies,
@@ -5524,7 +5555,8 @@ mod tests {
         })
         .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/data")),
             &HashMap::new(),
             &mut replies,
@@ -5589,7 +5621,8 @@ mod tests {
         })
         .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
             &mut replies,
@@ -5662,7 +5695,8 @@ mod tests {
         })
         .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(7, 0, Some("demo/**")),
             &HashMap::new(),
             &mut replies,
@@ -5758,7 +5792,12 @@ mod tests {
             .build()
             .unwrap();
         let mut replies = ReplyStage::new();
-        let matched = reg.dispatch_request(&request, &HashMap::new(), &mut replies);
+        let matched = QueryPeer::default().dispatch_request(
+            &mut reg,
+            &request,
+            &HashMap::new(),
+            &mut replies,
+        );
         assert_eq!(
             matched.matched, 1,
             "the demo/data queryable matched the query"
@@ -5823,7 +5862,8 @@ mod tests {
         })
         .expect("no quota is stated on this table");
         let mut replies = ReplyStage::new();
-        let outcome = reg.dispatch_request(request, &HashMap::new(), &mut replies);
+        let outcome =
+            QueryPeer::default().dispatch_request(&mut reg, request, &HashMap::new(), &mut replies);
         assert_eq!(outcome.matched, 1, "the demo/data queryable matched");
         let seen = seen.lock().unwrap().take().expect("the handler ran");
         seen
@@ -6027,7 +6067,13 @@ mod tests {
         ];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
         assert_eq!(
@@ -6072,7 +6118,13 @@ mod tests {
         )))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
         assert!(replies.is_empty(), "nothing matched, so nothing replied");
         assert_eq!(
             &finals[..],
@@ -6106,7 +6158,13 @@ mod tests {
         ))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
         assert!(
             replies.is_empty(),
             "AllComplete filtered the incomplete queryable out, so it never fired"
@@ -6133,7 +6191,13 @@ mod tests {
         )))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
         assert!(replies.is_empty());
         assert!(
             finals.is_empty(),
@@ -6155,10 +6219,11 @@ mod tests {
             responder.reply(b"21.0");
         })
         .expect("no quota is stated on this table");
+        let mut peer = QueryPeer::default();
         assert_eq!(
-            reg.answers_unresolved_queries(),
+            peer.answers_unresolved_queries(),
             QueryUnanswerableFinal::DEFAULT == QueryUnanswerableFinal::EmptyFinal,
-            "a registry no session stated a value to answers by the build's default"
+            "a face no session stated a value to answers by the build's default"
         );
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
             77, 99, None,
@@ -6169,17 +6234,23 @@ mod tests {
             QueryUnanswerableFinal::None,
             QueryUnanswerableFinal::EmptyFinal,
         ] {
-            let before = reg.answers_unresolved_queries();
-            reg.set_unanswerable_final(value);
+            let before = peer.answers_unresolved_queries();
+            peer.set_unanswerable_final(value);
             let answers = if QueryUnanswerableFinal::DOMAIN.contains(value) {
                 value == QueryUnanswerableFinal::EmptyFinal
             } else {
                 before
             };
-            assert_eq!(reg.answers_unresolved_queries(), answers, "{}", value.id());
+            assert_eq!(peer.answers_unresolved_queries(), answers, "{}", value.id());
             let mut replies = ReplyStage::new();
             let mut finals = FinalStage::new();
-            reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+            peer.dispatch_messages(
+                &mut reg,
+                &messages,
+                &HashMap::new(),
+                &mut replies,
+                &mut finals,
+            );
             assert!(
                 replies.is_empty(),
                 "no queryable runs on a key it cannot read"
@@ -6254,7 +6325,13 @@ mod tests {
         )))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
         assert!(replies.is_empty(), "a MsgPut body fires no queryable");
         assert!(
             finals.is_empty(),
@@ -6283,7 +6360,13 @@ mod tests {
         )))];
         let mut replies = ReplyStage::new();
         let mut finals = FinalStage::new();
-        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &messages,
+            &HashMap::new(),
+            &mut replies,
+            &mut finals,
+        );
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
         assert!(replies.is_empty());
         assert!(finals.is_empty());
@@ -6319,7 +6402,8 @@ mod tests {
         assert_ne!(id_a, id_b);
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(1, 0, Some("metrics/cpu")),
             &HashMap::new(),
             &mut replies,
@@ -6787,7 +6871,8 @@ mod tests {
 
         // AllComplete ext on the wire -> only the complete queryable matches.
         let mut replies = ReplyStage::new();
-        let matched = reg.dispatch_request(
+        let matched = QueryPeer::default().dispatch_request(
+            &mut reg,
             &build_request_query_with_target(1, 0, Some("metrics/cpu"), QueryTarget::AllComplete)
                 .unwrap(),
             &HashMap::new(),
@@ -6807,7 +6892,8 @@ mod tests {
 
         // Plain Request (no target ext = BestMatching) -> both match.
         let mut replies_plain = ReplyStage::new();
-        let matched_plain = reg.dispatch_request(
+        let matched_plain = QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(2, 0, Some("metrics/cpu")),
             &HashMap::new(),
             &mut replies_plain,
@@ -6833,20 +6919,24 @@ mod tests {
             responder.reply(b"put");
         })
         .expect("no quota is stated on this table");
-        let ask = |reg: &mut QueryableRegistry<_>, rid: crate::wire_id::RequestId| {
+        let ask = |peer: &mut QueryPeer,
+                   reg: &mut QueryableRegistry<_>,
+                   rid: crate::wire_id::RequestId| {
             let mut replies = ReplyStage::new();
-            reg.dispatch_request(
+            peer.dispatch_request(
+                reg,
                 &request_query(rid, 0, Some("metrics/cpu")),
                 &HashMap::new(),
                 &mut replies,
             );
         };
 
-        ask(&mut reg, 1);
-        reg.set_requester(Some([0x1f; 16]));
-        ask(&mut reg, 2);
-        reg.set_requester(None);
-        ask(&mut reg, 3);
+        let mut peer = QueryPeer::default();
+        ask(&mut peer, &mut reg, 1);
+        peer.set_requester(Some([0x1f; 16]));
+        ask(&mut peer, &mut reg, 2);
+        peer.set_requester(None);
+        ask(&mut peer, &mut reg, 3);
         assert_eq!(
             *seen.lock().unwrap(),
             [None, Some([0x1f; 16]), None],
@@ -6879,9 +6969,11 @@ mod tests {
             Typed(Arc::clone(&seen)),
         )
         .expect("the table has room");
-        reg.set_requester(Some([0x2e; 16]));
+        let mut peer = QueryPeer::default();
+        peer.set_requester(Some([0x2e; 16]));
         let mut replies = ReplyStage::new();
-        let outcome = reg.dispatch_request(
+        let outcome = peer.dispatch_request(
+            &mut reg,
             &request_query(4, 0, Some("metrics/cpu")),
             &HashMap::new(),
             &mut replies,
@@ -6933,7 +7025,12 @@ mod tests {
                 .build()
                 .unwrap();
             let mut replies = ReplyStage::new();
-            reg.dispatch_request(&request, &HashMap::new(), &mut replies);
+            QueryPeer::default().dispatch_request(
+                &mut reg,
+                &request,
+                &HashMap::new(),
+                &mut replies,
+            );
             assert_eq!(replies.len(), arms, "every reply arm staged one reply");
             for reply in replies {
                 let response = reply.into_response().unwrap();
@@ -6951,7 +7048,8 @@ mod tests {
         );
 
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(
+        QueryPeer::default().dispatch_request(
+            &mut reg,
             &request_query(3, 0, Some("metrics/cpu")),
             &HashMap::new(),
             &mut replies,
@@ -7005,7 +7103,7 @@ mod tests {
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -7185,7 +7283,7 @@ mod tests {
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             seen.load(Ordering::SeqCst),
@@ -7293,7 +7391,7 @@ mod tests {
         };
         let req = request_query_with_value(15, Some("home/temp"), b"fixture-value", &encoding);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -7442,7 +7540,7 @@ mod request_decode_isolation_tests {
 
         let req = request_query_with_attachment(11, "home/temp", b"hello-att");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -7471,7 +7569,7 @@ mod request_decode_isolation_tests {
 
         let req = request_query_with_parameters(12, "home/temp", b"key=value");
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -7545,7 +7643,7 @@ mod request_decode_isolation_tests {
 
         let req = request_query_with_source_info(14, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
         let mut replies = ReplyStage::new();
-        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        QueryPeer::default().dispatch_request(&mut reg, &req, &HashMap::new(), &mut replies);
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -7796,6 +7894,7 @@ mod shm_value_tests {
     /// shared memory installed with `resolver`, and the things a test reads.
     struct Rig {
         registry: QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+        peer: QueryPeer,
         seen: Arc<Mutex<Vec<Seen>>>,
         bands: Arc<Mutex<Vec<usize>>>,
     }
@@ -7814,11 +7913,13 @@ mod shm_value_tests {
             })
             .expect("no quota is stated on this table");
         let bands: Arc<Mutex<Vec<usize>>> = Arc::default();
-        registry.set_shm_resolver_shared(resolver);
-        registry.set_shm_negotiated(negotiated);
-        registry.set_shm_handoff_shared(Some(Arc::new(RecordingHandoff(bands.clone()))));
+        let mut peer = QueryPeer::default();
+        peer.set_shm_resolver_shared(resolver);
+        peer.set_shm_negotiated(negotiated);
+        peer.set_shm_handoff_shared(Some(Arc::new(RecordingHandoff(bands.clone()))));
         Rig {
             registry,
+            peer,
             seen,
             bands,
         }
@@ -7838,9 +7939,9 @@ mod shm_value_tests {
         let mut rig = rig(true, counting(&resolved));
         let request = parse_request(&upstream_shm_get());
         let mut replies = ReplyStage::new();
-        let outcome = rig
-            .registry
-            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        let outcome =
+            rig.peer
+                .dispatch_request(&mut rig.registry, &request, &HashMap::new(), &mut replies);
         assert!(outcome.dispatched, "the query was routed");
         assert_eq!(outcome.matched, 1, "the one queryable fired");
         assert_eq!(
@@ -7909,9 +8010,9 @@ mod shm_value_tests {
         let mut rig = rig(true, counting(&resolved));
         let request = parse_request(&message(&chain));
         let mut replies = ReplyStage::new();
-        let outcome = rig
-            .registry
-            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        let outcome =
+            rig.peer
+                .dispatch_request(&mut rig.registry, &request, &HashMap::new(), &mut replies);
         assert!(outcome.dispatched);
         assert_eq!(
             *rig.seen.lock().expect("seen"),
@@ -7946,14 +8047,15 @@ mod shm_value_tests {
                 ));
             })
             .expect("no quota is stated on this table");
-        registry.set_shm_resolver_shared(Arc::new(crate::extshm::test_support::LendsStorage(
+        let mut peer = QueryPeer::default();
+        peer.set_shm_resolver_shared(Arc::new(crate::extshm::test_support::LendsStorage(
             storage.clone(),
         )));
-        registry.set_shm_negotiated(true);
+        peer.set_shm_negotiated(true);
 
         let request = parse_request(&upstream_shm_get());
         let mut replies = ReplyStage::new();
-        let outcome = registry.dispatch_request(&request, &HashMap::new(), &mut replies);
+        let outcome = peer.dispatch_request(&mut registry, &request, &HashMap::new(), &mut replies);
         assert_eq!(outcome.matched, 1);
 
         let address = storage.as_ptr() as usize;
@@ -7986,12 +8088,13 @@ mod shm_value_tests {
                 );
             })
             .expect("no quota is stated on this table");
-        registry.set_shm_resolver_shared(counting(&resolved));
-        registry.set_shm_negotiated(true);
+        let mut peer = QueryPeer::default();
+        peer.set_shm_resolver_shared(counting(&resolved));
+        peer.set_shm_negotiated(true);
 
         let request = parse_request(&upstream_shm_get());
         let mut replies = ReplyStage::new();
-        registry.dispatch_request(&request, &HashMap::new(), &mut replies);
+        peer.dispatch_request(&mut registry, &request, &HashMap::new(), &mut replies);
 
         assert_eq!(
             *seen.lock().expect("seen"),
@@ -8010,14 +8113,14 @@ mod shm_value_tests {
         let mut rig = rig(false, counting(&resolved));
         let request = parse_request(&upstream_shm_get());
         let mut replies = ReplyStage::new();
-        let outcome = rig
-            .registry
-            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        let outcome =
+            rig.peer
+                .dispatch_request(&mut rig.registry, &request, &HashMap::new(), &mut replies);
         assert!(!outcome.dispatched, "no queryable sees the query");
         assert!(rig.seen.lock().expect("seen").is_empty());
         assert_eq!(resolved.load(Ordering::SeqCst), 0, "no segment is opened");
         assert!(rig.bands.lock().expect("bands").is_empty());
-        assert_eq!(rig.registry.shm_unnegotiated_drops(), 1);
+        assert_eq!(rig.peer.shm_unnegotiated_drops(), 1);
         assert!(
             replies.is_empty(),
             "and no Final is owed for a dropped query"
@@ -8032,15 +8135,15 @@ mod shm_value_tests {
         let mut rig = rig(true, Arc::new(Refuses));
         let request = parse_request(&upstream_shm_get());
         let mut replies = ReplyStage::new();
-        let outcome = rig
-            .registry
-            .dispatch_request(&request, &HashMap::new(), &mut replies);
+        let outcome =
+            rig.peer
+                .dispatch_request(&mut rig.registry, &request, &HashMap::new(), &mut replies);
         assert!(
             !outcome.dispatched,
             "no queryable sees a descriptor as a value"
         );
         assert!(rig.seen.lock().expect("seen").is_empty());
-        assert_eq!(rig.registry.shm_unresolved_drops(), 1);
+        assert_eq!(rig.peer.shm_unresolved_drops(), 1);
         assert_eq!(
             *rig.bands.lock().expect("bands"),
             [5],

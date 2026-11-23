@@ -16763,7 +16763,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// built upstream by `ResponseReplyBuilder` /
     /// `ResponseErrBuilder` (or composed from a
     /// `crate::query::QueryReply::into_response` call drained out of
-    /// `crate::query::QueryableRegistry::dispatch_messages`).
+    /// `crate::query::QueryPeer::dispatch_messages`).
     ///
     /// Always reliable — Reply data delivery loss would leave the
     /// requesting peer's `z_get` future waiting for a reply that never
