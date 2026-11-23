@@ -1420,8 +1420,6 @@ pub mod plain_push;
         feature = "codec-request"
     )
 ))]
-// Totality debt TD-146 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod put_payload;
 
 // Shared codec-agnostic `Wireexpr` constructors (`literal_wireexpr`) — the

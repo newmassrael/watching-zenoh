@@ -188,7 +188,7 @@ pub fn set_chain<S: MsgPutStorage>(
     let mut count = 0;
     for entry in entries {
         list.try_push(entry)?;
-        count += 1;
+        count = count.saturating_add(1);
     }
     let held = match &mut put.extensions_has_0x12 {
         MsgPutExtensionsHas0x12::Has0x12 { extensions, .. } => {
