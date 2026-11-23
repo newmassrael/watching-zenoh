@@ -197,16 +197,16 @@ pub fn encode_frame_stuffing(
     let mut sink = SliceSink::new(&mut pre_cobs);
     env.encode(&mut sink)
         .map_err(|_| SerialFrameError::TooLarge)?;
-    let pre_len = sink.position();
-    cobs_encode(&pre_cobs[..pre_len], stuffed).map_err(|_| SerialFrameError::Cobs)?;
+    cobs_encode(sink.into_written(), stuffed).map_err(|_| SerialFrameError::Cobs)?;
     let body = stuffed.as_slice();
-    let len = body.len() + 1;
-    if out.len() < len {
-        return Err(SerialFrameError::Cobs);
-    }
-    out[..body.len()].copy_from_slice(body);
-    out[body.len()] = SERIAL_EOP;
-    Ok(len)
+    // The stuffed body, then the EOP byte after it: an `out` too short for both is refused.
+    let (frame, rest) = out
+        .split_at_mut_checked(body.len())
+        .ok_or(SerialFrameError::Cobs)?;
+    let eop = rest.first_mut().ok_or(SerialFrameError::Cobs)?;
+    frame.copy_from_slice(body);
+    *eop = SERIAL_EOP;
+    Ok(body.len().saturating_add(1))
 }
 
 /// Decode one serial on-wire frame (mirror of `_z_serial_msg_deserialize`,
@@ -364,16 +364,18 @@ impl SerialFrameReader {
 pub fn pending_init_header(received: &[u8]) -> Option<u8> {
     let responder = SerialHandshake::responder();
     let mut init = None;
-    let mut span_start = 0;
+    let mut span_start = 0usize;
     for (eop_at, _) in received
         .iter()
         .enumerate()
         .filter(|&(_, &byte)| byte == SERIAL_EOP)
     {
-        if let Some(header) = init_header_ending_at(&received[span_start..eop_at], &responder) {
+        // A span starts past the EOP before it, so it never starts past its own end.
+        let span = received.get(span_start..eop_at).unwrap_or_default();
+        if let Some(header) = init_header_ending_at(span, &responder) {
             init = Some(header);
         }
-        span_start = eop_at + 1;
+        span_start = eop_at.saturating_add(1);
     }
     init
 }
@@ -384,19 +386,24 @@ pub fn pending_init_header(received: &[u8]) -> Option<u8> {
 fn init_header_ending_at(span: &[u8], responder: &SerialHandshake) -> Option<u8> {
     // No frame is longer than SERIAL_MAX_COBS_BUF, so earlier offsets cannot start one.
     let window_start = span.len().saturating_sub(SERIAL_MAX_COBS_BUF);
-    let window = &span[window_start..];
+    let window = span.get(window_start..).unwrap_or_default();
     // `lands[i]`: the COBS blocks from `window[i]` end exactly at the window end.
     // A span holds no 0x00, so every code byte steps forward by at least one.
-    let mut lands = alloc::vec![false; window.len() + 1];
-    lands[window.len()] = true;
-    for at in (0..window.len()).rev() {
-        let next = at + usize::from(window[at]);
-        lands[at] = next <= window.len() && lands[next];
+    let mut lands = alloc::vec![false; window.len().saturating_add(1)];
+    if let Some(end) = lands.last_mut() {
+        *end = true;
+    }
+    for (at, &code) in window.iter().enumerate().rev() {
+        let next = at.saturating_add(usize::from(code));
+        let landed = lands.get(next).copied().unwrap_or(false);
+        if let Some(slot) = lands.get_mut(at) {
+            *slot = landed;
+        }
     }
     (0..window.len())
-        .filter(|&at| window_start + at == 0 || lands[at])
+        .filter(|&at| (window_start == 0 && at == 0) || lands.get(at).copied().unwrap_or(false))
         .find_map(|at| {
-            let frame = decode_frame(&window[at..]).ok()?;
+            let frame = decode_frame(window.get(at..)?).ok()?;
             matches!(
                 responder.on_header(frame.header),
                 HandshakeStep::EmitAndConnect(_)
