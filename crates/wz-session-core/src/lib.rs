@@ -2422,8 +2422,6 @@ pub mod reconnect;
 /// [`declaration_sync::DeclarationSync`], the interests it sent whose final has not arrived, each
 /// with a deadline (`DECLARATION_SYNC_FINAL_TIMEOUT_MS`). Pure: it reads no clock.
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
-// Totality debt TD-134 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod declaration_sync;
 
 /// Stage 3 — runtime-agnostic drive-loop dispatch core. `dispatch_link_event`
