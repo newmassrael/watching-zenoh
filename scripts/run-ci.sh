@@ -29324,8 +29324,10 @@ _qzk_pico_ceiling() {
 # ─── Layer Fz — the fuzz targets' seeds and reproducers, once each ──
 # The C ABI doors of wz-capi-dissect and wz-capi-replay take bytes a consumer
 # was handed from outside (capture files, live packets, schemas, E2E headers,
-# replay payloads), and a defect there is a crash of the consumer's process.
-# `crates/wz-fuzz` holds a coverage-guided target per family of doors; this lane
+# replay payloads), and a defect there is a crash of the consumer's process; a
+# session takes bytes from its peer, and a defect there is a crash of every
+# node a peer reaches. `crates/wz-fuzz` holds a coverage-guided target per
+# family of doors and per layer of the ingress (its README); this lane
 # builds them (their own pinned nightly, AddressSanitizer) and runs every seed
 # `scripts/lib/fuzz_seeds.py` derives from `captures/` and the crate's examples,
 # and every reproducer under `crates/wz-fuzz/regressions/`, through its target

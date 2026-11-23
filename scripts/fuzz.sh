@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# fuzz.sh -- build, replay and run the fuzz targets of `crates/wz-fuzz`, the
+# fuzz.sh -- build, replay and run the fuzz targets of `crates/wz-fuzz`: the
 # C ABI doors of `wz-capi-dissect`, `wz-capi-replay` and `wz-capi-c` (the
-# config verdict and the end-to-end sender) a consumer hands outside bytes to.
+# config verdict and the end-to-end sender) a consumer hands outside bytes to,
+# and the network ingress, the bytes a peer sends into a session (the
+# transport decoders and record walks, the reassembly, and a session of each
+# profile behind them; `crates/wz-fuzz/README.md`).
 #
-#   bash scripts/fuzz.sh build                     build every target (ASan)
+#   bash scripts/fuzz.sh build [TARGET...]         build every target, or those named (ASan)
 #   bash scripts/fuzz.sh regress [TARGET...]       every seed and every committed
 #                                                  reproducer through each target, once
 #   bash scripts/fuzz.sh run TARGET SECONDS [JOBS] fuzz one target for SECONDS
@@ -100,14 +103,31 @@ build() {
     channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$fuzz_dir/rust-toolchain.toml")"
     [[ -n "$channel" ]] || { echo "fuzz.sh: crates/wz-fuzz/rust-toolchain.toml names no channel" >&2; exit 2; }
     rustup toolchain install "$channel" --profile minimal >/dev/null
-    local bins=()
-    for target in "$@"; do bins+=(--bin "$target"); done
-    ((${#bins[@]})) || bins=(--bins)
+    local selected=("$@")
+    ((${#selected[@]})) || mapfile -t selected < <(targets)
+    # One cargo invocation for each package of the fuzz workspace: cargo unifies
+    # the features of the packages one invocation builds, and the session
+    # targets each build the session shell on a profile of its own, which must
+    # meet neither another's nor the dissector's (`fuzz_seeds.py --packages`).
+    local -A package_of=() bins_of=()
+    local target package
+    while read -r target package; do
+        package_of[$target]="$package"
+    done < <(python3 "$seeds_py" --packages)
+    for target in "${selected[@]}"; do
+        package="${package_of[$target]:-}"
+        [[ -n "$package" ]] || { echo "fuzz.sh: no target '$target'" >&2; exit 2; }
+        bins_of[$package]+=" --bin $target"
+    done
     # From inside the fuzz directory, so its rust-toolchain.toml picks the
     # compiler and not the product workspace's stable. `--target` keeps the
     # flags off build scripts and proc macros, as cargo-fuzz does.
-    (cd "$fuzz_dir" && RUSTFLAGS="${fuzz_rustflags[*]}" \
-        cargo build --release --locked --target "$triple" --target-dir "$build_dir" "${bins[@]}")
+    for package in "${!bins_of[@]}"; do
+        # shellcheck disable=SC2086 # each `--bin NAME` pair is two words
+        (cd "$fuzz_dir" && RUSTFLAGS="${fuzz_rustflags[*]}" \
+            cargo build --release --locked --target "$triple" --target-dir "$build_dir" \
+            -p "$package" ${bins_of[$package]})
+    done
 }
 
 binary() {
@@ -124,7 +144,7 @@ seed_dir() {
 regress() {
     local selected=("$@")
     ((${#selected[@]})) || mapfile -t selected < <(targets)
-    build
+    build "${selected[@]}"
     local fail=0 target dir inputs log ran started now
     for target in "${selected[@]}"; do
         dir="$(seed_dir "$target")"
