@@ -275,8 +275,8 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
 
-    /// Where the C ABI's objects keep their keys when the session keeps a key arena: each key once,
-    /// in a block every holder counts, shared with the session's own record of an equal key.
+    /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
+    /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
     /// their own.
     fn key_arena(&self) -> Option<&dyn SessionKeys> {

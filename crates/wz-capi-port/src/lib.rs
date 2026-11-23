@@ -90,7 +90,7 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
-pub use held_key::{HeldKey, KeyNotHeld, SessionKeys};
+pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
 pub use query::{
     HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback,

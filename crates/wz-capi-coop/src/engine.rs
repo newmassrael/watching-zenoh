@@ -60,9 +60,9 @@ use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyNotHeld,
-    MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive,
-    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyAsk,
+    KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
+    SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -1691,13 +1691,6 @@ fn suffix_place(keyexpr: &str, suffix: Option<&str>) -> Option<usize> {
     keyexpr.ends_with(suffix).then_some(at)
 }
 
-/// Whether a row's key is `text`: one body for every table a key the session keeps already is
-/// looked for in (`Core::kept_key`), each of which would carry a copy of the comparison.
-#[inline(never)]
-fn is_text(key: &RowKey, text: &str) -> bool {
-    key.as_str() == text
-}
-
 struct MatchEntry {
     id: MatchId,
     /// What the listener counts, as a write filter names it: which registry `watch` is in.
@@ -1900,34 +1893,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
     /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
     /// key the session cannot hold is refused, never cut short, and the declaration with it,
-    /// before an id is taken or anything is sent.
+    /// before an id is taken or anything is sent. A text the arena keeps already, whoever holds it
+    /// (a row of the session's record, a table of the registry, an object of the program), is that
+    /// block shared ([`KeySpace::kept`]), so a key the session's declarations and the program's
+    /// objects name alike takes one block, whichever of them came first.
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
         if !self.keys.holds_key(keyexpr.len()) {
             return None;
         }
-        if let Some(kept) = self.kept_key(keyexpr) {
-            return Some(kept);
-        }
-        self.keys.key(keyexpr).ok()
-    }
-
-    /// The block of a row of the session's own record that keeps `keyexpr` already, shared: a key
-    /// the session's declarations and the program's objects name alike (a publisher's key, its write
-    /// filter's and its Interest's) takes one block, whichever of them came first.
-    fn kept_key(&self, keyexpr: &str) -> Option<RowKey> {
-        let kept = |key: &&RowKey| is_text(key, keyexpr);
-        let found = self
-            .keyexprs
-            .iter()
-            .map(|e| &e.keyexpr)
-            .find(kept)
-            .or_else(|| self.subscribers.iter().map(|e| &e.keyexpr).find(kept))
-            .or_else(|| self.filters.iter().map(|e| &e.keyexpr).find(kept))
-            .or_else(|| self.interests.iter().map(|e| &e.keyexpr).find(kept))
-            .or_else(|| self.matches.iter().map(|e| &e.keyexpr).find(kept));
-        #[cfg(feature = "queryable")]
-        let found = found.or_else(|| self.queryables.iter().map(|e| &e.keyexpr).find(kept));
-        found.cloned()
+        self.keys
+            .kept(keyexpr)
+            .or_else(|| self.keys.key(keyexpr).ok())
     }
 
     /// The dial role's face, which the session holds for its whole life.
@@ -6624,46 +6600,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 }
 
-/// The keys the C ABI's objects hold, in the session's key arena. A closed session makes no key
-/// and gives no block back: its close emptied the record, and its arena is given back whole when
-/// the engine goes, which a holder's hold on the engine keeps from happening first. So a key shared
-/// or let go of after the close takes no lock, and a holder the close itself lets go of, under the
-/// lock, does not wait on it.
+/// The keys the C ABI's objects hold, in the session's key arena, all through one body. A closed
+/// session makes no key and gives no block back: its close emptied the record, and its arena is
+/// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
+/// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
+/// lets go of, under the lock, does not wait on it.
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
-    fn hold_key(&self, text: &str) -> Result<HeldKey, KeyNotHeld> {
+    #[inline(never)]
+    fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
         let Some(core) = self.live() else {
-            return Err(KeyNotHeld::Closed);
+            return match ask {
+                KeyAsk::Hold(_) => Err(KeyNotHeld::Closed),
+                // SAFETY: the session is closed, so its arena makes no key and gives no block
+                // back, and a release after the close hands nothing to the arena (below).
+                KeyAsk::Share(key) => Ok(Some(unsafe { key.uncounted() })),
+                KeyAsk::Release(_) => Ok(None),
+            };
         };
         let core = &core.0;
-        if !core.keys.holds_key(text.len()) {
-            return Err(KeyNotHeld::TooLong);
-        }
-        let key = core.row_key(text).ok_or(KeyNotHeld::NoRoom)?;
-        // SAFETY: the session's lock is held (`core`), the key is its arena's, and the arena is
-        // given back only when the engine goes, which the holder's hold on it keeps from happening.
-        Ok(unsafe { HeldKey::new(key) })
-    }
-
-    fn share_key(&self, key: &HeldKey) -> HeldKey {
-        if !self.closed.load(Ordering::Acquire) {
-            let _session = self.core.lock();
-            if !self.closed.load(Ordering::Acquire) {
-                // SAFETY: the session's lock is held (`_session`).
-                return unsafe { key.share() };
+        match ask {
+            KeyAsk::Hold(text) if !core.keys.holds_key(text.len()) => Err(KeyNotHeld::TooLong),
+            KeyAsk::Hold(text) => core
+                .row_key(text)
+                .map(|key| Some(HeldKey::of(key)))
+                .ok_or(KeyNotHeld::NoRoom),
+            // SAFETY: the session's lock is held (`core`), and the key is its arena's.
+            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&core.keys) })),
+            KeyAsk::Release(key) => {
+                // SAFETY: as a share.
+                unsafe { key.release(&core.keys) };
+                Ok(None)
             }
-        }
-        // SAFETY: the session is closed, so its arena makes no key and gives no block back.
-        unsafe { key.uncounted() }
-    }
-
-    fn release_key(&self, key: HeldKey) {
-        if self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        let _session = self.core.lock();
-        if !self.closed.load(Ordering::Acquire) {
-            // SAFETY: the session's lock is held (`_session`).
-            unsafe { key.release() };
         }
     }
 }

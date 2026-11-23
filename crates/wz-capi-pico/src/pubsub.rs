@@ -2629,9 +2629,9 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 
 /// The wire form a subscriber on `keyexpr` is announced in: the CALLER's key
 /// (see the declare site for why it is not the subscription's own), keeping
-/// alive both the caller's declaration, if it named one, and the
-/// subscription's own `key` — the registry entry is the only holder a
-/// background subscriber has.
+/// alive both the caller's declaration, if it named one, and the declaration
+/// of the subscription's own `key` — the registry entry is the only holder a
+/// background subscriber has. The key's text is not held: nothing reads it here.
 ///
 /// # Safety
 /// `keyexpr` must be null or a live loaned keyexpr.
@@ -2642,8 +2642,8 @@ unsafe fn subscriber_wire(
 ) -> Option<WireKey> {
     let wire = wire_key_of(keyexpr, shared)?;
     let anchor: Arc<dyn Send + Sync> = Arc::new((
-        key.share(),
-        declared_of(keyexpr).map(DeclaredKeyexpr::share),
+        key.declaration_hold(),
+        declared_of(keyexpr).and_then(DeclaredKeyexpr::declaration_hold),
     ));
     Some(wire.keeping(anchor))
 }
