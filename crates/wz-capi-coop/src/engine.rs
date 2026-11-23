@@ -1289,8 +1289,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's delivery lane, which every link's gate asks before it reads a batch
     /// (`crate::lane::LaneGate`).
     lane: Arc<SharedLane>,
-    /// The buffers the session's links stage the chains of their fragmented messages in, lent
-    /// from the arena (`ArenaPlan::reassembly`).
+    /// The buffers the session's links stage the chains of their fragmented messages in, each
+    /// claimed by a chain while it is open, lent from the arena (`ArenaPlan::reassembly`).
     reassembly: LentByteCells,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
@@ -2060,12 +2060,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             actions.clone(),
             self.lane.clone(),
         );
-        // The link's fragmented messages are staged in buffers of the session's arena, as many
-        // chains at once as the table has buffers free for it; a chain that finds none is refused
-        // and counted, and the buffers go back when the session over the link ends. The buffers
-        // are claimed now; the Router over them is written in the pump's own field when the task
-        // first runs, so its slot machines are not a value on this call's stack.
-        let chains = LentChains::claim(&self.reassembly, LENT_CHAINS);
+        // The link's fragmented messages are staged in buffers of the session's one table, which
+        // its links share: a chain claims one when its first fragment arrives and gives it back
+        // when it ends, so no buffer is held while no chain is open, and a chain that finds none
+        // free is refused and counted. The Router over them is written in the pump's own field
+        // when the task first runs, so its slot machines are not a value on this call's stack.
+        let chains = LentChains::over(&self.reassembly, LENT_CHAINS);
         let policy = self.policy;
         let task = spawn_session_with_router(
             &self.local,
@@ -3347,6 +3347,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let registry = Registry::new(
             &resolve_limits(&config),
             arena.arena_mut(),
+            keys,
             ObserverRows {
                 subscribers: entities.subscribers,
                 queryables: entities.queryables,

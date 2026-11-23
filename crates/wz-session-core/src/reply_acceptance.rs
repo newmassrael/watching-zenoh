@@ -42,8 +42,7 @@
 
 use core::fmt;
 
-use crate::bounded::{BoundedString, Profile, Storage};
-use crate::caps;
+use crate::bounded::{KeyMaker, KeyUnkept, Profile, Storage};
 use crate::keyexpr_match;
 use crate::reply_sink::{ReplyKind, ReplyView};
 
@@ -122,9 +121,11 @@ impl<'a> ReplyAcceptance<'a> {
         }
     }
 
-    /// The stored form, or [`crate::registry_error::RegisterError::KeyexprTooLong`]
-    /// when the queried keyexpr is longer than `key_quota` admits, the session's
-    /// `MAX_KEYEXPR_BYTES`, or than [`caps::MAX_KEYEXPR_BYTES`] on a no-alloc backing.
+    /// The stored form, its keyexpr made in `keys` ([`Storage::Keys`]), or
+    /// [`crate::registry_error::RegisterError::KeyexprTooLong`] when the queried keyexpr is
+    /// longer than `key_quota` admits, the session's `MAX_KEYEXPR_BYTES`, or than
+    /// [`crate::caps::MAX_KEYEXPR_BYTES`] on a no-alloc backing, and
+    /// [`crate::registry_error::RegisterError::TableFull`] when `keys` has no room for it.
     ///
     /// Refusing is the only sound answer there: a truncated keyexpr would gate
     /// on a DIFFERENT expression than the one queried, and would do it in the
@@ -133,50 +134,44 @@ impl<'a> ReplyAcceptance<'a> {
     /// pattern at register time for the same reason.
     pub(crate) fn store<P: Storage>(
         self,
+        keys: &P::Keys,
         key_quota: crate::limits::MaxKeyexprBytesHeld,
     ) -> Result<ReplyAcceptanceStored<P>, crate::registry_error::RegisterError> {
-        let mut stored = ReplyAcceptanceStored {
-            mode: ReplyKeyExpr::Any,
-            keyexpr: BoundedString::default(),
-        };
-        if let Self::Matching(keyexpr) = self {
-            if !key_quota.admits(keyexpr.len()) {
-                return Err(crate::registry_error::RegisterError::KeyexprTooLong);
+        let keyexpr = match self {
+            Self::Any => None,
+            Self::Matching(keyexpr) => {
+                if !key_quota.admits(keyexpr.len()) {
+                    return Err(crate::registry_error::RegisterError::KeyexprTooLong);
+                }
+                Some(keys.key(keyexpr).map_err(|unkept| match unkept {
+                    KeyUnkept::TooLong => crate::registry_error::RegisterError::KeyexprTooLong,
+                    KeyUnkept::NoRoom => crate::registry_error::RegisterError::TableFull,
+                })?)
             }
-            stored.mode = ReplyKeyExpr::MatchingQuery;
-            stored
-                .keyexpr
-                .push_str(keyexpr)
-                .map_err(|_| crate::registry_error::RegisterError::KeyexprTooLong)?;
-        }
-        Ok(stored)
+        };
+        Ok(ReplyAcceptanceStored { keyexpr })
     }
 }
 
 /// The owned policy a [`crate::reply::ReplyRegistry`] pending entry keeps —
-/// pico's `_z_pending_query_t::{_key, _anyke}` pair, and deliberately in pico's
-/// own shape: TWO FIELDS, not a sum type.
+/// pico's `_z_pending_query_t::{_key, _anyke}` pair: the expression the query was
+/// asked under, or none for `_anyke`.
 ///
-/// R311y833 — the first cut made this an `enum { Any, Matching(BoundedString) }`
-/// and `clippy::large_enum_variant` refused it on the profile that matters.
-/// With `alloc` a [`BoundedString`] is a 24-byte heap handle and the disparity
-/// is invisible; with NO alloc it is a 264-byte inline buffer beside a
-/// data-less `Any`, so `--no-default-features` was the only build that could
-/// see it — and Layer C1cf, which is exactly that build, is where it surfaced.
-/// The struct form is the same size as the enum's largest variant, so nothing
-/// is paid for the change, and it is closer to the upstream it ports.
+/// The key is the one the storage policy keeps ([`Storage::Key`]): on the lent
+/// policy the place of a block of the session's key arena, so a pending get takes
+/// the bytes of its key and not a buffer of the longest one. `Any` takes no key at
+/// all, which is also why this is not the `enum { Any, Matching(..) }` the first cut
+/// was: with a key inline in the row that enum's variants differed by a whole buffer
+/// (`clippy::large_enum_variant` on the build without `alloc`).
 pub(crate) struct ReplyAcceptanceStored<P: Storage = Profile> {
-    /// pico's `_anyke`. [`ReplyKeyExpr::Any`] leaves `keyexpr` empty and unread.
-    mode: ReplyKeyExpr,
-    /// pico's `_key` — the expression the query was asked under. Empty and
-    /// meaningless when `mode` is [`ReplyKeyExpr::Any`].
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// pico's `_key` — the expression the query was asked under; `None` is pico's
+    /// `_anyke`, [`ReplyKeyExpr::Any`].
+    keyexpr: Option<P::Key>,
 }
 
 impl<P: Storage> fmt::Debug for ReplyAcceptanceStored<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReplyAcceptanceStored")
-            .field("mode", &self.mode)
             .field("keyexpr", &self.keyexpr)
             .finish()
     }
@@ -193,13 +188,13 @@ impl<P: Storage> ReplyAcceptanceStored<P> {
     /// neither upstream performs and would swallow the error a caller is
     /// waiting on.
     pub(crate) fn admits(&self, reply: &dyn ReplyView) -> bool {
-        if self.mode == ReplyKeyExpr::Any {
+        let Some(keyexpr) = &self.keyexpr else {
             return true;
-        }
+        };
         if reply.kind() == ReplyKind::Err {
             return true;
         }
-        reply_keyexpr_intersects(self.keyexpr.as_str(), reply.keyexpr())
+        reply_keyexpr_intersects(keyexpr, reply.keyexpr())
     }
 }
 

@@ -20,8 +20,8 @@
 //! that ends where the bump area starts is given back to it. So no two free blocks lie side by
 //! side, and a program that declares and undeclares keys of a few lengths reuses the same bytes. A
 //! key that no free block and not the bump area holds is refused ([`KeysExhausted`]) and counted,
-//! and nothing is taken: the declaration that asked for it is refused as one that finds its table
-//! full is.
+//! and nothing is taken: the declaration of the session's that asked for it is refused as one that
+//! finds its table full is, and one a peer sent is dropped and counted with its table's refusals.
 //!
 //! # Sharing
 //!
@@ -46,7 +46,7 @@ use core::fmt;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
-use crate::bounded::Arena;
+use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept};
 
 /// The bytes of a block's header: its length and how many keys hold it (or, free, the next free
 /// block), each a `u32`.
@@ -358,6 +358,40 @@ impl fmt::Debug for KeySpace {
     }
 }
 
+/// The key arena a table of the [`Lent`](crate::bounded::Lent) policy makes its rows' keys in
+/// ([`Storage::Keys`](crate::bounded::Storage::Keys)): the session's [`KeySpace`], which the
+/// table is handed with its rows, or none for a table made by `Default`, which keeps no key.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LentKeys(Option<KeySpace>);
+
+impl LentKeys {
+    /// The key arena the table keeps its keys in, if it was handed one.
+    pub fn space(&self) -> Option<KeySpace> {
+        self.0
+    }
+}
+
+impl From<KeySpace> for LentKeys {
+    fn from(keys: KeySpace) -> Self {
+        Self(Some(keys))
+    }
+}
+
+impl KeyMaker<KeyRef> for LentKeys {
+    /// A key past `MAX_KEYEXPR_BYTES` is refused as a row of the static policy refuses it, so the
+    /// bound a key is held to is the build's whichever policy keeps it; a key the arena has no room
+    /// for is refused and counted by the arena ([`KeyCounts::refused`]).
+    fn key(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
+        if text.len() > crate::caps::MAX_KEYEXPR_BYTES {
+            return Err(KeyUnkept::TooLong);
+        }
+        let Some(keys) = &self.0 else {
+            return Err(KeyUnkept::NoRoom);
+        };
+        keys.key(text).map_err(|_| KeyUnkept::NoRoom)
+    }
+}
+
 /// A key a row holds: where its block lies in its session's key arena and how long it is. It reads
 /// as the key's text ([`Deref`] to `str`); a clone shares the block, which is given back when the
 /// last of them is dropped.
@@ -434,6 +468,12 @@ impl Deref for KeyRef {
 
     fn deref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl KeyBacking for KeyRef {
+    fn as_str(&self) -> &str {
+        KeyRef::as_str(self)
     }
 }
 
@@ -668,6 +708,32 @@ mod tests {
         assert_eq!(keys.counts().used, used);
         drop(second);
         assert_eq!(keys.counts().used, 0);
+    }
+
+    /// A table's key arena keeps a key as the arena does, refuses one past `MAX_KEYEXPR_BYTES`
+    /// as a row of the static policy refuses it, before any room is asked, and one the arena has
+    /// no room for as no room; a table handed no key arena keeps no key.
+    #[test]
+    fn a_tables_key_arena_keeps_a_key_or_says_why_not() {
+        let block = block_bytes(crate::caps::MAX_KEYEXPR_BYTES).expect("the longest key");
+        let keys = keys_of(block);
+        let lent = LentKeys::from(keys);
+        let long = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES + 1);
+        assert_eq!(lent.key(&long).err(), Some(KeyUnkept::TooLong));
+        assert_eq!(keys.counts().refused, 0, "a key too long asks no room");
+        let longest = "k".repeat(crate::caps::MAX_KEYEXPR_BYTES);
+        let held = lent.key(&longest).expect("the arena holds the longest key");
+        assert_eq!(held.as_str(), longest);
+        assert_eq!(lent.key("k").err(), Some(KeyUnkept::NoRoom));
+        assert_eq!(
+            keys.counts().refused,
+            1,
+            "the arena counts the key it had no room for"
+        );
+        drop(held);
+        assert_eq!(lent.key("k").map(|key| key.len()), Ok(1));
+        assert_eq!(LentKeys::default().key("k").err(), Some(KeyUnkept::NoRoom));
+        assert!(LentKeys::default().space().is_none());
     }
 
     /// An arena refuses a key arena whose span is past what it has left, taking nothing, and one

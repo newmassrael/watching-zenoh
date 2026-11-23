@@ -29,6 +29,7 @@
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -123,17 +124,19 @@ impl FaceTables {
     }
 
     /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its
-    /// peer's tables, from `arena`, in that order, held to `limits`. Refused when the arena has not
-    /// the rows; the set stays whole, with what was lent before the refusal.
+    /// peer's tables, from `arena`, in that order, the peer's keys kept in `keys`, the session's
+    /// key arena, held to `limits`. Refused when the arena has not the rows; the set stays whole,
+    /// with what was lent before the refusal.
     fn lend(
         &mut self,
         arena: &mut Arena,
+        keys: KeySpace,
         gets: RequesterRows,
         peer: PeerRows,
         limits: &SessionLimits,
     ) -> Result<(), LendRefused> {
-        self.gets = Gets::lent(arena, gets, limits)?;
-        self.peer.lend_rows(arena, peer, limits)
+        self.gets = Gets::lent(arena, keys, gets, limits)?;
+        self.peer.lend_rows(arena, keys, peer, limits)
     }
 
     /// Give the set back where it lies, for the next face: what its peer wrote is dropped and its
@@ -311,29 +314,31 @@ impl Registry {
     /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
     /// of each, and the tables of each face `gets` and `peers` count lent from it too: the dial
     /// face's, the session's own gets where it answers its own, and the rest kept for the faces to
-    /// come. Refused when the arena has not the rows, which one reserved by the plan that counts
-    /// them always has.
+    /// come. What the peers declare keeps its keys in `keys`, the session's key arena, as the
+    /// session's own declarations do. Refused when the arena has not the rows, which one reserved
+    /// by the plan that counts them always has.
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
+        keys: KeySpace,
         rows: ObserverRows,
         gets: GetTables,
         peers: FacePeers,
     ) -> Result<Self, LendRefused> {
-        let app = App::lent(arena, rows, limits)?;
+        let app = App::lent(arena, keys, rows, limits)?;
         // The sets are lent in the order the plan counts them: the dial face's, the session's own
         // gets, then the faces to come.
         let mut sets = Vec::with_capacity(peers.tables.max(1));
         let mut held = Vec::with_capacity(sets.capacity());
-        lend_set(&mut sets, arena, gets.rows, peers.rows, limits)?;
+        lend_set(&mut sets, arena, keys, gets.rows, peers.rows, limits)?;
         held.push(HeldSet {
             at: 0,
             id: DIAL_FACE,
         });
         #[cfg(feature = "local-queryable")]
-        let local = Gets::lent(arena, gets.rows, limits)?;
+        let local = Gets::lent(arena, keys, gets.rows, limits)?;
         for _ in 1..peers.tables {
-            lend_set(&mut sets, arena, gets.rows, peers.rows, limits)?;
+            lend_set(&mut sets, arena, keys, gets.rows, peers.rows, limits)?;
         }
         Ok(Self {
             app,
@@ -900,15 +905,17 @@ fn push_rowless<'s>(sets: &'s mut Vec<FaceTables>, limits: &SessionLimits) -> &'
 }
 
 /// Write a set at the end of `sets` and lend it its rows there, `gets` and `peer` of them from
-/// `arena`, held to `limits`. A refused set stays in `sets`, whole, and goes with it.
+/// `arena`, the peer's keys kept in `keys`, held to `limits`. A refused set stays in `sets`,
+/// whole, and goes with it.
 fn lend_set(
     sets: &mut Vec<FaceTables>,
     arena: &mut Arena,
+    keys: KeySpace,
     gets: RequesterRows,
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, limits).lend(arena, gets, peer, limits)
+    push_rowless(sets, limits).lend(arena, keys, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -950,9 +957,14 @@ mod tests {
             },
             tables: faces,
         };
+        let keys = arena
+            .arena_mut()
+            .lend_keys(4096)
+            .expect("the arena holds the key arena");
         let registry = Registry::new(
             &SessionLimits::defaults(),
             arena.arena_mut(),
+            keys,
             ObserverRows::default(),
             gets,
             peers,
@@ -1148,13 +1160,22 @@ mod tests {
         };
         let mut by_value_arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let by_value_gets = Gets::lent(by_value_arena.arena_mut(), gets, &limits).expect("rows");
+        let by_value_keys = by_value_arena
+            .arena_mut()
+            .lend_keys(256)
+            .expect("the arena holds the key arena");
+        let by_value_gets =
+            Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
         let mut by_value_peer =
-            Peer::lent(by_value_arena.arena_mut(), peer, &limits).expect("rows");
+            Peer::lent(by_value_arena.arena_mut(), by_value_keys, peer, &limits).expect("rows");
         let mut arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+        let keys = arena
+            .arena_mut()
+            .lend_keys(256)
+            .expect("the arena holds the key arena");
         let mut sets = Vec::new();
-        lend_set(&mut sets, arena.arena_mut(), gets, peer, &limits)
+        lend_set(&mut sets, arena.arena_mut(), keys, gets, peer, &limits)
             .expect("the arena has the rows");
         assert_eq!(
             arena.arena_mut().high_water(),

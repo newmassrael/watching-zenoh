@@ -410,6 +410,46 @@ fn the_plan_lays_out_the_key_arena_the_limits_state() {
     }
 }
 
+/// The plan lends each keyed row of the session at the lent policy's size, which keeps the place
+/// of its key and not its text: a subscription's row and a face's peer tables are shorter than the
+/// static policy's, whose rows keep a key of `MAX_KEYEXPR_BYTES` inline, and the text of every key
+/// lies in the plan's one key arena row.
+#[test]
+fn the_plans_keyed_rows_keep_a_keys_place_and_not_its_text() {
+    use wz_session_core::bounded::Static;
+    use wz_session_core::id_map::{DeclaredKeys, PeerAliases};
+    use wz_session_core::key_arena::KeyRef;
+    use wz_session_core::pubsub::SubscriberTable;
+    use wz_session_core::sink::BoxedSink;
+
+    let plan =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    assert_eq!(
+        row(&plan, "subscribers").entry_bytes,
+        SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+    );
+    assert_eq!(row(&plan, "key arena").count, 1, "one area for every key");
+    // A key of the static policy is its text and its length; a place is a few words.
+    if caps::MAX_KEYEXPR_BYTES >= 2 * core::mem::size_of::<KeyRef>()
+        && caps::MAX_PEER_KEYEXPR_ALIASES > 0
+        && caps::MAX_REMOTE_DECLS > 0
+    {
+        const {
+            assert!(
+                SubscriberTable::<BoxedSink, Lent>::ROW_BYTES
+                    < SubscriberTable::<BoxedSink, Static>::ROW_BYTES
+            );
+        }
+        assert!(
+            core::mem::size_of::<PeerAliases<Lent>>() < core::mem::size_of::<PeerAliases<Static>>()
+        );
+        assert!(
+            core::mem::size_of::<DeclaredKeys<Lent>>()
+                < core::mem::size_of::<DeclaredKeys<Static>>()
+        );
+    }
+}
+
 /// A listener lays out the gets and the link of a face for the dial role, each face it admits and
 /// each handshake it holds; the application's tables are the session's, once, however many faces
 /// it holds.
@@ -495,11 +535,12 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     );
 }
 
-/// Each link the session may hold is lent a buffer for each chain it stages at once, as long as
-/// the session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
+/// The session is lent one table of reassembly buffers its links share, a buffer for each chain
+/// one peer stages at once however many links the session may hold, each as long as the
+/// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
 /// session lowers it to, and a value over the build's refuses the plan under its own name.
 #[test]
-fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
+fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length() {
     use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 
     let config = CoopConfig {
@@ -507,14 +548,24 @@ fn each_link_is_lent_reassembly_buffers_of_the_snapshots_length() {
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&built, "reassembly buffers").count, 3 * LENT_CHAINS);
+    assert_eq!(row(&built, "reassembly buffers").count, LENT_CHAINS);
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
         caps::PICO_FRAG_MAX_BYTES
     );
+    assert_eq!(built.reassembly(), (caps::PICO_FRAG_MAX_BYTES, LENT_CHAINS));
+    let one_link = ArenaPlan::of(
+        &CoopConfig {
+            max_faces: 0,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
     assert_eq!(
+        one_link.reassembly(),
         built.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, 3 * LENT_CHAINS)
+        "the table does not grow with the links"
     );
     let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
     let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");

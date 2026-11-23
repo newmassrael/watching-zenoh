@@ -52,6 +52,7 @@ use crate::declare::queryable::RemoteQueryableTable;
 #[cfg(feature = "declare-subscriber")]
 use crate::declare::subscriber::RemoteSubscriberTable;
 use crate::driver_loop::IterationEvent;
+use crate::key_arena::KeySpace;
 use crate::peer_tables::PeerTables;
 use crate::pubsub::SubscriberTable;
 #[cfg(feature = "query-queryable")]
@@ -119,16 +120,18 @@ pub struct RequesterRows {
 }
 
 impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
-    /// No query pending, each registry's rows lent from `arena` as `rows` states and held to
-    /// `limits` as [`Requesters::with_limits`] holds one. Refused when the arena has not the
-    /// room, the rows lent so far going back with the arena.
+    /// No query pending, each registry's rows lent from `arena` as `rows` states, the keyexpr
+    /// each query was asked under kept in `keys`, the session's key arena, and held to `limits`
+    /// as [`Requesters::with_limits`] holds one. Refused when the arena has not the room, the rows
+    /// lent so far going back with the arena.
     pub fn lent(
         arena: &mut Arena,
+        keys: KeySpace,
         rows: RequesterRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
         let mut requesters = Self {
-            replies: ReplyRegistry::lent(arena, rows.queries)?,
+            replies: ReplyRegistry::lent(arena, keys, rows.queries)?,
             #[cfg(feature = "liveliness-get")]
             liveliness_gets: LivelinessGetRegistry::lent(arena, rows.liveliness_gets)?,
             #[cfg(not(feature = "liveliness-get"))]
@@ -611,21 +614,23 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
 
 impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
     /// An observer with nothing registered whose application tables are lent from `arena`, as
-    /// many rows each as `rows` states, and held to `limits` as [`SlotObserverOf::with_limits`]
-    /// holds one. Refused, the rows lent so far going back with the arena, when the arena has not
-    /// the room. The declaration watchers are the build's profile's: their lists are installed
-    /// once, at most `MAX_DECL_OBSERVERS` each.
+    /// many rows each as `rows` states, their keys kept in `keys`, the session's key arena, and
+    /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. Refused, the rows lent so
+    /// far going back with the arena, when the arena has not the room. The declaration watchers
+    /// are the build's profile's: their lists are installed once, at most `MAX_DECL_OBSERVERS`
+    /// each.
     pub fn lent(
         arena: &mut Arena,
+        keys: KeySpace,
         rows: ObserverRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
         let mut observer = Self {
-            subscribers: SubscriberTable::lent(arena, rows.subscribers)?,
+            subscribers: SubscriberTable::lent(arena, keys, rows.subscribers)?,
             #[cfg(feature = "switchboard")]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "query-queryable")]
-            queryables: QueryableRegistry::lent(arena, rows.queryables)?,
+            queryables: QueryableRegistry::lent(arena, keys, rows.queryables)?,
             #[cfg(feature = "declare-subscriber")]
             remote_subscribers: RemoteSubscriberTable::with_sink_backing(),
             #[cfg(feature = "declare-queryable")]
@@ -633,10 +638,11 @@ impl<K: ObserverSinks> SlotObserverOf<K, Lent> {
             #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::new(),
             #[cfg(feature = "liveliness-token")]
-            local_tokens: LocalTokenRegistry::lent(arena, rows.local_tokens)?,
+            local_tokens: LocalTokenRegistry::lent(arena, keys, rows.local_tokens)?,
             #[cfg(feature = "liveliness-subscriber")]
             liveliness_subscribers: LivelinessSubscriberTable::lent(
                 arena,
+                keys,
                 rows.liveliness_subscribers,
             )?,
         };
@@ -1486,21 +1492,35 @@ mod lent_tests {
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
     }
 
+    /// A key arena of `bytes` bytes of blocks, lent from an arena of its own, so an arena tables
+    /// are lent from is laid out by their plan alone.
+    fn keys(bytes: usize) -> KeySpace {
+        arena(KeySpace::span_bytes(bytes).expect("a small key arena"))
+            .lend_keys(bytes)
+            .expect("the arena is the key arena's span")
+    }
+
     fn sink() -> BoxedSink {
         BoxedSink::new(|_sample: &dyn SampleView| {})
     }
 
-    fn lent_with(subscribers: usize) -> SlotObserverOf<HeapSinks, Lent> {
+    /// An observer of `subscribers` lent rows whose patterns are kept in `keys`.
+    fn lent_in(subscribers: usize, keys: KeySpace) -> SlotObserverOf<HeapSinks, Lent> {
         let rows = ObserverRows {
             subscribers,
             ..ObserverRows::default()
         };
         SlotObserverOf::<HeapSinks, Lent>::lent(
             &mut arena(1 << 16),
+            keys,
             rows,
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows")
+    }
+
+    fn lent_with(subscribers: usize) -> SlotObserverOf<HeapSinks, Lent> {
+        lent_in(subscribers, keys(4096))
     }
 
     /// The own zid a peer's tables hold is inline whatever their policy: a side of the lent policy,
@@ -1571,6 +1591,7 @@ mod lent_tests {
         };
         let refused = SlotObserverOf::<HeapSinks, Lent>::lent(
             &mut arena(0),
+            keys(64),
             rows,
             &SessionLimits::defaults(),
         );
@@ -1583,8 +1604,14 @@ mod lent_tests {
     /// The requesters of one face, `queries` rows of pending queries and `gets` of liveliness
     /// snapshots lent from an arena of their own.
     fn requesters(queries: usize, gets: usize) -> Lending {
+        requesters_in(queries, gets, keys(4096))
+    }
+
+    /// [`requesters`] whose pending queries keep their keys in `keys`.
+    fn requesters_in(queries: usize, gets: usize, keys: KeySpace) -> Lending {
         Lending::lent(
             &mut arena(1 << 16),
+            keys,
             RequesterRows {
                 queries,
                 liveliness_gets: gets,
@@ -1637,6 +1664,114 @@ mod lent_tests {
         assert!(requesters.replies.is_empty());
     }
 
+    /// The patterns of a lent observer's subscriptions lie in the key arena it was handed, a block
+    /// each as long as the pattern, and match as they did inline: a subscription on `demo/a/**`
+    /// matches `demo/a/x` and not `demo/b`. Its unregistration gives the block back, and the next
+    /// pattern of that length takes the same bytes.
+    #[test]
+    fn a_lent_observers_patterns_lie_in_the_key_arena_and_match_as_before() {
+        use crate::key_arena::block_bytes;
+
+        let keys = keys(256);
+        let mut observer = lent_in(2, keys);
+        let id = observer
+            .subscribers
+            .register_sink("demo/a/**", Locality::Any, sink())
+            .expect("a row and a block are free");
+        assert!(observer.subscribers.has_local_matching("demo/a/x"));
+        assert!(!observer.subscribers.has_local_matching("demo/b"));
+        assert_eq!(
+            keys.counts().used,
+            block_bytes("demo/a/**".len()).expect("short"),
+            "one block of the pattern's length"
+        );
+        let peak = keys.counts().peak;
+        assert!(observer.subscribers.unregister(id));
+        assert_eq!(keys.counts().used, 0, "the block went back");
+        observer
+            .subscribers
+            .register_sink("demo/c/**", Locality::Any, sink())
+            .expect("the block given back holds the next");
+        assert!(observer.subscribers.has_local_matching("demo/c/y"));
+        assert_eq!(keys.counts().peak, peak, "the same bytes, taken again");
+    }
+
+    /// A subscription whose pattern finds no room in the observer's key arena is refused as a
+    /// full table refuses it, with a row still free, and counted by the arena; the block an
+    /// unregistration gives back takes it.
+    #[test]
+    fn a_lent_observer_refuses_a_pattern_its_key_arena_cannot_hold() {
+        use crate::key_arena::block_bytes;
+
+        let keys = keys(block_bytes("demo/k/1".len()).expect("short"));
+        let mut observer = lent_in(2, keys);
+        let first = observer
+            .subscribers
+            .register_sink("demo/k/1", Locality::Any, sink())
+            .expect("room for one pattern");
+        assert!(matches!(
+            observer
+                .subscribers
+                .register_sink("demo/k/2", Locality::Any, sink()),
+            Err(RegisterError::TableFull)
+        ));
+        assert_eq!(
+            (observer.subscribers.len(), keys.counts().refused),
+            (1, 1),
+            "(subscriptions held, keys the arena refused)"
+        );
+        assert!(observer.subscribers.unregister(first));
+        assert!(observer
+            .subscribers
+            .register_sink("demo/k/2", Locality::Any, sink())
+            .is_ok());
+    }
+
+    /// A pending get gated on its keyexpr keeps that keyexpr in the key arena; one the arena has no
+    /// room for is refused as a full table refuses it, while a get that accepts any key takes no
+    /// key and is held. Its end gives the block back.
+    #[test]
+    fn a_lent_get_whose_key_finds_no_room_is_refused_as_a_full_table() {
+        use crate::key_arena::block_bytes;
+
+        let keys = keys(block_bytes("demo/q/1".len()).expect("short"));
+        let mut requesters = requesters_in(3, 0, keys);
+        requesters
+            .replies
+            .register_sink(
+                1,
+                1,
+                None,
+                ReplyAcceptance::Matching("demo/q/1"),
+                reply_sink(),
+            )
+            .expect("room for one key");
+        assert!(matches!(
+            requesters.replies.register_sink(
+                2,
+                1,
+                None,
+                ReplyAcceptance::Matching("demo/q/2"),
+                reply_sink()
+            ),
+            Err(RegisterError::TableFull)
+        ));
+        hold(&mut requesters, 3).expect("a get on any key takes no key");
+        assert_eq!(requesters.replies.len(), 2);
+        assert!(requesters.replies.unregister(1));
+        assert_eq!(keys.counts().used, 0, "the get's end gave its key back");
+        requesters
+            .replies
+            .register_sink(
+                2,
+                1,
+                None,
+                ReplyAcceptance::Matching("demo/q/2"),
+                reply_sink(),
+            )
+            .expect("the block given back holds the next key");
+    }
+
     /// What lending a face's requesters takes from an arena is what their plan states, to the byte.
     #[test]
     fn lent_requesters_take_the_bytes_their_plan_states() {
@@ -1645,7 +1780,7 @@ mod lent_tests {
             liveliness_gets: 2,
         };
         let mut memory = arena(1 << 16);
-        let lent = Lending::lent(&mut memory, rows, &SessionLimits::defaults())
+        let lent = Lending::lent(&mut memory, keys(64), rows, &SessionLimits::defaults())
             .expect("the arena has the rows");
         let planned = Lending::arena_bytes(rows).expect("within the address space");
         assert_eq!(memory.high_water(), planned);
@@ -1659,7 +1794,7 @@ mod lent_tests {
             queries: 1,
             liveliness_gets: 0,
         };
-        let refused = Lending::lent(&mut arena(0), rows, &SessionLimits::defaults());
+        let refused = Lending::lent(&mut arena(0), keys(64), rows, &SessionLimits::defaults());
         assert!(refused.is_err());
     }
 

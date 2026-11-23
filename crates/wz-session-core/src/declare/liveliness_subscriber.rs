@@ -88,7 +88,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 use wz_codecs::lent::DeclareVariant;
 
 use crate::bounded::{
-    Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Static, Storage,
+    Arena, BoundedVec, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Static, Storage,
 };
 use crate::caps;
 #[cfg(feature = "alloc")]
@@ -99,6 +99,7 @@ use crate::driver_loop::IterationEvent;
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{DeclaredKeys, FixedIdMap, IdMap};
+use crate::key_arena::{KeySpace, LentKeys};
 // Both fan paths ask INTERSECTION and never import `keyexpr_matches`: a token
 // keyexpr may itself be a pattern, and reading it as a literal key would hide a
 // token declared on `demo/*` from a subscriber on `demo/a`.
@@ -138,14 +139,12 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink, P: Storage = Profile> {
     /// R311gb (Track 2) — the slot's interest id (was the `HashMap` key;
     /// now carried in-row since the slot table is a linear `BoundedVec`).
     interest_id: u64,
-    /// R311gb (Track 2) — the subscriber's keyexpr pattern, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it on
-    /// `/` at dispatch time into a stack chunk view (the pre-split owned
-    /// `Vec<String>` + duplicate `keyexpr` `String` are folded into this
-    /// single buffer). Empty literal chunks are preserved so `a//b` is
-    /// distinguishable from `a/b`; the registry's `keyexpr` accessor
-    /// returns this verbatim.
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// R311gb (Track 2) — the subscriber's keyexpr pattern, kept as the policy keeps a row's key
+    /// ([`Storage::Key`]): inline in the row on the static policy, a block of the session's key
+    /// arena on the lent one. Matching splits it on `/` at dispatch time into a stack chunk view.
+    /// Empty literal chunks are preserved so `a//b` is distinguishable from `a/b`; the
+    /// registry's `keyexpr` accessor returns this verbatim.
+    pattern: P::Key,
     /// R311gb-3d — the delivery sink (DIP seam). Fired in registration
     /// order if multiple subscribers are declared on overlapping
     /// patterns. `C = BoxedLivelinessSampleSink` on AP, a consumer-
@@ -201,6 +200,10 @@ pub struct LivelinessSubscriberTable<C: LivelinessSampleSink, P: Storage = Profi
     /// resolved ([`Self::limit_keys_to`]), the build's value until it does. Where the build fixes
     /// the bound to the slots' capacity it is held in no byte and the slots refuse alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the slots keep their patterns ([`Storage::Keys`]): the session's key arena on the
+    /// lent policy ([`Self::lent`]). A pattern with no room there is refused as a full table
+    /// refuses the subscriber ([`RegisterError::TableFull`]).
+    keys: P::Keys,
 }
 
 /// The tokens ONE peer has declared to this session: the table a peer writes.
@@ -245,6 +248,12 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
+    /// policy, handed over with the session's other tables ([`Self::keep_keys_in`]). A
+    /// `DeclToken` whose key finds no room there is dropped and counted with the table's
+    /// refusals, as one the table has no room for is.
+    #[cfg(feature = "storage-profile")]
+    keys: P::Keys,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -277,6 +286,8 @@ impl<P: Storage> Default for PeerTokens<P> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            keys: Default::default(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -295,6 +306,8 @@ impl PeerTokens<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            keys: crate::bounded::InlineKeys,
             _policy: core::marker::PhantomData,
         }
     }
@@ -349,6 +362,13 @@ impl<P: Storage> PeerTokens<P> {
     #[cfg(feature = "storage-profile")]
     pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
         self.key_quota
+    }
+
+    /// Keep the keys of the tokens the peer declares from here on in `keys`: the session's key
+    /// arena, on the lent policy. The tokens already held keep theirs.
+    #[cfg(feature = "storage-profile")]
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.keys = keys;
     }
 
     /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
@@ -438,6 +458,7 @@ impl<C: LivelinessSampleSink, P: Storage> Default for LivelinessSubscriberTable<
             slots: BoundedVec::default(),
             quota: Default::default(),
             key_quota: Default::default(),
+            keys: Default::default(),
         }
     }
 }
@@ -629,11 +650,13 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Profile> {
 
 impl<C: LivelinessSampleSink> LivelinessSubscriberTable<C, Lent> {
     /// An empty table whose subscribers are `rows` rows lent from `arena`, at most
-    /// `MAX_LIVELINESS_SUBSCRIPTIONS`: a session's, at its open. Refused, taking nothing, past
-    /// that ceiling or past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS`, their patterns kept in `keys`, the session's key arena: a
+    /// session's, at its open. Refused, taking nothing, past that ceiling or past what the arena
+    /// has left.
+    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
             slots: arena.lend(rows)?,
+            keys: LentKeys::from(keys),
             ..Self::default()
         })
     }
@@ -680,8 +703,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// surface keeps its `impl FnMut(LivelinessSample)` closure shape and
     /// wraps it in a [`BoxedLivelinessSampleSink`] before calling here.
     ///
-    /// R311gb (Track 2) — takes the keyexpr by `&str` (stored in the slot's
-    /// [`BoundedString`]) and is fallible on the no-alloc backing:
+    /// R311gb (Track 2) — takes the keyexpr by `&str` (stored as the slot's key,
+    /// [`Storage::Key`]) and is fallible on the no-alloc backing:
     /// `Ok(true)` = newly registered, `Ok(false)` = duplicate
     /// `interest_id` (no-op), `Err(TableFull)` = slot table at capacity,
     /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
@@ -711,10 +734,10 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         if !self.key_quota.admits(keyexpr.len()) {
             return Err(RegisterError::KeyexprTooLong);
         }
-        let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> = BoundedString::default();
-        pattern
-            .push_str(keyexpr)
-            .map_err(|_| RegisterError::KeyexprTooLong)?;
+        let pattern = self.keys.key(keyexpr).map_err(|unkept| match unkept {
+            KeyUnkept::TooLong => RegisterError::KeyexprTooLong,
+            KeyUnkept::NoRoom => RegisterError::TableFull,
+        })?;
         self.slots
             .push(LivelinessSubscriberSlot {
                 interest_id,
@@ -777,7 +800,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         self.slots
             .iter()
             .find(|s| s.interest_id == interest_id)
-            .map(|slot| slot.pattern.as_str())
+            .map(|slot| &*slot.pattern)
     }
 
     /// `true` when the subscriber requested CURRENT replay AND the
@@ -1015,9 +1038,19 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // what they are told is what the table holds, so a later
         // `UndeclToken` can name it.
         // Of the peer's own policy: the row it is kept in is that peer's table's.
-        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
-            peer.oversize = peer.oversize.saturating_add(1);
-            return;
+        let text = match key_text_within::<Q>(&peer.keys, resolved, peer.key_quota) {
+            Ok(text) => text,
+            Err(KeyUnkept::TooLong) => {
+                peer.oversize = peer.oversize.saturating_add(1);
+                return;
+            }
+            // No room where the rows keep their keys: dropped and counted as a token the table
+            // has no room for, and announced to no subscriber, as zenoh-pico drops one its heap
+            // cannot hold.
+            Err(KeyUnkept::NoRoom) => {
+                peer.table.count_refused();
+                return;
+            }
         };
         let quota = peer.quota;
         if peer
@@ -1296,7 +1329,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
 
     /// Internal fan-out helper (the no-heap match SSOT). Walks every slot
     /// and invokes its sink when the slot's pattern matches the resolved
-    /// keyexpr, matching the slot's [`BoundedString`] pattern against it as
+    /// keyexpr, matching the slot's pattern ([`Storage::Key`]) against it as
     /// text (no heap). On the fixed backing a pattern or a keyexpr deeper
     /// than [`MAX_KEYEXPR_CHUNKS`](crate::keyexpr_match::MAX_KEYEXPR_CHUNKS)
     /// chunks fires nothing rather than being matched truncated; the matcher

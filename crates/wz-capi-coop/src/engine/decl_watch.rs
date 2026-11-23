@@ -575,8 +575,13 @@ mod tests {
     fn the_observers_come_and_go_in_the_application_tables_an_arena_lent() {
         let mut arena =
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
+        let keys = arena
+            .arena_mut()
+            .lend_keys(1024)
+            .expect("the arena holds the key arena");
         let mut app = App::lent(
             arena.arena_mut(),
+            keys,
             ObserverRows::default(),
             &SessionLimits::defaults(),
         )

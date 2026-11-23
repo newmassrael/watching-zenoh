@@ -319,12 +319,13 @@ pub struct MappingSpaces<'a> {
 }
 
 /// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
-/// face, a multicast peer, a test) or the table a session of the static storage
-/// policy keeps ([`PeerAliases`] of [`Static`]).
+/// face, a multicast peer, a test) or the table a session of the static or the lent
+/// storage policy keeps ([`PeerAliases`] of [`Static`], or of the lent policy, whose rows
+/// hold their keys in the session's key arena).
 ///
-/// Closed, and not a trait object: the two tables are the two representations a
-/// storage policy has, and which of them a given [`PeerAliases`] is the policy
-/// says ([`Storage::peer_space`]), so a reader never needs to know the policy.
+/// Closed, and not a trait object: the tables are the representations a storage
+/// policy has, and which of them a given [`PeerAliases`] is the policy says
+/// ([`Storage::peer_space`]), so a reader never needs to know the policy.
 #[derive(Clone, Copy)]
 pub struct PeerSpace<'a>(PeerSpaceRepr<'a>);
 
@@ -339,6 +340,8 @@ enum PeerSpaceRepr<'a> {
     Ours(&'a HashMap<crate::wire_id::ExprId, String>),
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
+    /// The lent policy's bounded table, whose rows hold their keys in the session's key arena.
+    LentTable(&'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
 }
 
 impl<'a> PeerSpace<'a> {
@@ -355,6 +358,13 @@ impl<'a> PeerSpace<'a> {
         Self(PeerSpaceRepr::Table(table))
     }
 
+    /// The lent policy's table, as a peer space.
+    pub(crate) fn of_lent_table(
+        table: &'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
+    ) -> Self {
+        Self(PeerSpaceRepr::LentTable(table))
+    }
+
     /// The literal keyexpr the peer declared for `id`.
     ///
     /// A peer's table holds ids widened to 64 bits, as the id map every
@@ -368,6 +378,7 @@ impl<'a> PeerSpace<'a> {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Ours(map) => map.get(&id).map(String::as_str),
             PeerSpaceRepr::Table(table) => table.find(key).map(|text| text.as_str()),
+            PeerSpaceRepr::LentTable(table) => table.find(key).map(|text| text.as_str()),
         }
     }
 }
@@ -391,6 +402,7 @@ impl<'a> PeerSpaceView<'a> {
             #[cfg(feature = "alloc")]
             PeerSpaceRepr::Ours(map) => map.len(),
             PeerSpaceRepr::Table(table) => table.count(),
+            PeerSpaceRepr::LentTable(table) => table.count(),
         }
     }
 

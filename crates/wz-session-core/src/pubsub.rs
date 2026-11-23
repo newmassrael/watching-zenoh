@@ -98,7 +98,10 @@ use alloc::string::String;
 // a subset no lane built until Layer C1bj. Fully qualifying removes the
 // coupling rather than restating it in a longer cfg.
 
-use crate::bounded::{Arena, BoundedString, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedString, BoundedVec, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
+};
+use crate::key_arena::{KeySpace, LentKeys};
 // The fixed own-zid row of a peer's naming is its one reader.
 #[cfg(feature = "storage-profile")]
 use crate::bounded::Static;
@@ -251,14 +254,13 @@ impl SubscriptionId {
 
 struct Subscriber<C: SampleSink, P: Storage = Profile> {
     id: SubscriptionId,
-    /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
-    /// [`BoundedString`] (no-alloc backing on MCU). Matching reads it
-    /// as text at dispatch time rather than keeping a pre-split owned
-    /// `Vec<String>`, so the subscriber row carries a single bounded
-    /// buffer. A pattern with an empty chunk (like `a//b`) is stored as
-    /// written and matches nothing; `*` / `**` are single-char chunks;
+    /// R311gb (Track 2) — the canonical keyexpr pattern, kept as the policy keeps a row's key
+    /// ([`Storage::Key`]): a buffer inline in the row on the static policy, a block of the
+    /// session's key arena on the lent one. Matching reads it as text at dispatch time rather
+    /// than keeping a pre-split owned `Vec<String>`. A pattern with an empty chunk (like
+    /// `a//b`) is stored as written and matches nothing; `*` / `**` are single-char chunks;
     /// matching is performed by [`keyexpr_intersects`].
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    pattern: P::Key,
     /// What [`KeyFacts`] reads of `pattern`, read once at registration so that a message
     /// matched against it does not scan the pattern again.
     pattern_facts: KeyFacts,
@@ -353,6 +355,10 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// the image's key set and drops the rest, counted by reason. Starts as the build's
     /// `key-set` policy ([`KeyGate::of_build`]); see [`Self::set_key_gate`].
     key_gate: KeyGate<'static>,
+    /// Where the subscriptions keep their patterns ([`Storage::Keys`]): the session's key arena
+    /// on the lent policy ([`Self::lent`]). A pattern with no room there is refused as a full
+    /// table refuses the subscription ([`RegisterError::TableFull`]).
+    keys: P::Keys,
     /// transport-shm — the receive side of shared memory for a push: the negotiated
     /// capability, the AP-injected resolver, the means of acknowledging the peer's
     /// slices, the drop counters, and the un-swap itself. R3042 moved all of it into
@@ -445,6 +451,10 @@ struct PeerNaming<P: Storage = Profile> {
     /// session's tables resolved ([`SubscriberPeer::limit_keys_to`]), the build's value until it
     /// does. A `DeclKexpr` whose keyexpr is longer is dropped, as one a fixed row cannot hold is.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
+    /// Where the alias rows keep their keys ([`Storage::Keys`]): the session's key arena on the
+    /// lent policy ([`SubscriberPeer::keep_keys_in`]). A `DeclKexpr` whose key finds no room
+    /// there is dropped and counted with the alias table's refusals.
+    keys: P::Keys,
     /// R311y739 — OUR id space, the other half of the pair the `M` bit picks
     /// between. Installed (not owned) so there is exactly ONE copy of the fact:
     /// the table itself lives on `SessionActions::outbound_mappings`, written by
@@ -539,6 +549,11 @@ struct InterestSide<P: Storage = Profile> {
     /// under `session-slot`) reads it; see [`Self::reconcile`].
     #[cfg(feature = "declare-subscriber")]
     reconciled_epoch: u64,
+    /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
+    /// policy ([`SubscriberPeer::keep_keys_in`]). An interest whose key finds no room there is
+    /// answered by its `Final` alone, as one whose key is past the bound is.
+    #[cfg(feature = "declare-subscriber")]
+    keys: P::Keys,
 }
 
 /// The Push records the in-place receive path (`drive::dispatch_datagram`, the
@@ -643,8 +658,8 @@ struct InboundSubInterest<P: Storage = Profile> {
     /// `DeclFinal` so the peer routes them to this interest.
     interest_id: u64,
     /// The interest's RESOLVED keyexpr — the reply keyexpr when
-    /// [`aggregate`](Self::aggregate) is set.
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// [`aggregate`](Self::aggregate) is set — kept as the policy keeps a row's key.
+    keyexpr: P::Key,
     /// The `AGGREGATE` flag off the interest body. Load-bearing, not
     /// informational: an aggregate interest's replies are associated by
     /// `_z_keyexpr_equals` against THIS keyexpr (`session/interest.c:274-276`),
@@ -789,11 +804,12 @@ impl<C: SampleSink> SubscriberTable<C, Profile> {
 
 impl<C: SampleSink> SubscriberTable<C, Lent> {
     /// An empty table whose subscriptions are `rows` rows lent from `arena`, at most
-    /// `MAX_SUBSCRIPTIONS`: a session's, at its open. Refused, taking nothing, past that ceiling
-    /// or past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+    /// `MAX_SUBSCRIPTIONS`, their patterns kept in `keys`, the session's key arena: a session's,
+    /// at its open. Refused, taking nothing, past that ceiling or past what the arena has left.
+    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
             subscribers: arena.lend(rows)?,
+            keys: LentKeys::from(keys),
             ..Self::default()
         })
     }
@@ -817,6 +833,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
                 <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
             ),
             key_gate: KeyGate::of_build(),
+            keys: Default::default(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
             #[cfg(all(
@@ -1164,6 +1181,13 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         if !self.quota.admits(self.subscribers.len() + 1) {
             return Err(RegisterError::TableFull);
         }
+        // The row's key, also before an entity or an id is taken: a pattern with no room where
+        // the table keeps its keys is refused as a full table refuses it, and a refusal after this
+        // gives the key back as it drops.
+        let key = self.keys.key(&pattern).map_err(|unkept| match unkept {
+            KeyUnkept::TooLong => RegisterError::KeyexprTooLong,
+            KeyUnkept::NoRoom => RegisterError::TableFull,
+        })?;
         // A closed key set admits a subscription only on a pattern the image declares as one, and
         // numbers it: the entity it is delivered by. An open table has none.
         let entity = self
@@ -1177,7 +1201,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         self.subscribers
             .push(Subscriber {
                 id,
-                pattern,
+                pattern: key,
                 pattern_facts,
                 allowed_origin,
                 entity,
@@ -1595,17 +1619,21 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         {
             true
         } else {
-            // Of the interest side's own policy: the row it is kept in is that side's.
-            let mut keyexpr = BoundedString::<{ caps::MAX_KEYEXPR_BYTES }, Q>::default();
+            // Of the interest side's own policy: the row it is kept in is that side's, and so is
+            // where the row keeps its key.
             let text = pattern.unwrap_or("**");
-            if !self.key_quota.admits(text.len()) || keyexpr.push_str(text).is_err() {
-                // A keyexpr past the bounded field cannot be replied with
-                // anyway; terminate the chain honestly instead of half-
-                // answering it. The terminator is a chain of one, staged
-                // whole or counted.
+            let keyexpr = if self.key_quota.admits(text.len()) {
+                interests.keys.key(text).ok()
+            } else {
+                None
+            };
+            let Some(keyexpr) = keyexpr else {
+                // A keyexpr past the bounded field, or with no room where the side keeps its
+                // keys, cannot be replied with anyway; terminate the chain honestly instead of
+                // half-answering it. The terminator is a chain of one, staged whole or counted.
                 interests.stage_final_only(self.reply_quota, interest_id);
                 return 0;
-            }
+            };
             // R2292 (open-debt item 627) — ONE id space per session, drawn
             // from the SAME counter `register_sink` uses for a
             // `SubscriptionId`. It used to be a second counter that also
@@ -1682,7 +1710,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         } else {
             self.subscribers
                 .iter()
-                .filter(|sub| subscription_matches_interest(sub.pattern.as_str(), pattern))
+                .filter(|sub| subscription_matches_interest(&sub.pattern, pattern))
                 .count()
         };
         if !interests.has_room(self.reply_quota, replies.saturating_add(1)) {
@@ -1699,7 +1727,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             }
         } else {
             for sub in self.subscribers.iter() {
-                if subscription_matches_interest(sub.pattern.as_str(), pattern) {
+                if subscription_matches_interest(&sub.pattern, pattern) {
                     interests
                         .staged
                         .push(SubInterestReply::Concrete {
@@ -1723,7 +1751,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     fn any_subscription_matches(&self, pattern: Option<&str>) -> bool {
         self.subscribers
             .iter()
-            .any(|sub| subscription_matches_interest(sub.pattern.as_str(), pattern))
+            .any(|sub| subscription_matches_interest(&sub.pattern, pattern))
     }
 
     /// R311y530 — stage an unsolicited `DeclSubscriber` for a subscription
@@ -1755,9 +1783,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             let Some(sub) = self.subscribers.iter().find(|s| s.id == new_id) else {
                 return;
             };
-            let new_pattern = sub.pattern.as_str();
+            let new_pattern: &str = &sub.pattern;
             for row in interests.rows.iter() {
-                if subscription_matches_interest(new_pattern, Some(row.keyexpr.as_str()))
+                if subscription_matches_interest(new_pattern, Some(&*row.keyexpr))
                     && hits.push((row.interest_id, row.aggregate)).is_err()
                 {
                     break;
@@ -1810,7 +1838,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         for row in interests.rows.iter() {
             if row.aggregate
                 && row.announced
-                && !self.any_subscription_matches(Some(row.keyexpr.as_str()))
+                && !self.any_subscription_matches(Some(&*row.keyexpr))
                 && hits.push(row.interest_id).is_err()
             {
                 break;
@@ -1846,7 +1874,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         let idx = rows
             .iter()
             .position(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
-        if self.any_subscription_matches(Some(rows[idx].keyexpr.as_str())) {
+        if self.any_subscription_matches(Some(&*rows[idx].keyexpr)) {
             return None;
         }
         let row = &mut rows[idx];
@@ -1907,15 +1935,15 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 .rows
                 .iter()
                 .find(|row| row.interest_id == *interest_id)
-                .filter(|row| self.any_subscription_matches(Some(row.keyexpr.as_str())))
-                .map(|row| (u64::from(row.aggregate_decl_id), row.keyexpr.as_str())),
+                .filter(|row| self.any_subscription_matches(Some(&*row.keyexpr)))
+                .map(|row| (u64::from(row.aggregate_decl_id), &*row.keyexpr)),
             SubInterestReply::Concrete {
                 subscription_id, ..
             } => self
                 .subscribers
                 .iter()
                 .find(|sub| sub.id.as_u64() == *subscription_id)
-                .map(|sub| (sub.id.as_u64(), sub.pattern.as_str())),
+                .map(|sub| (sub.id.as_u64(), &*sub.pattern)),
             SubInterestReply::Final { .. } => None,
             // R2292 — a retraction is not a reply: it resolves through
             // `take_aggregate_retract`, which needs `&mut self` to clear the
@@ -2954,6 +2982,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 aliases: PeerAliases::<P>::default(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+                keys: Default::default(),
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2978,6 +3007,7 @@ impl SubscriberPeer<crate::bounded::Static> {
                 aliases: crate::id_map::FixedIdMap::new(),
                 alias_quota: crate::limits::MaxPeerKeyexprAliasesHeld::build_default(),
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
+                keys: crate::bounded::InlineKeys,
                 #[cfg(feature = "alloc")]
                 own_mapping_space: None,
                 #[cfg(feature = "shared-key-ids")]
@@ -2995,7 +3025,8 @@ impl SubscriberPeer<crate::bounded::Static> {
 impl SubscriberPeer<Lent> {
     /// An empty side whose interest table (`interests` rows) and staging (`staged` rows) are lent
     /// from `arena`. Refused when either is over the build's capacity or the arena has not the
-    /// room. The alias table is the policy's inline one.
+    /// room. The alias table is the policy's inline one, whose keys are kept in the key arena it is
+    /// handed ([`Self::keep_keys_in`]), and in none before.
     pub fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
         let mut side = Self::default();
         side.lend_rows(arena, interests, staged)?;
@@ -3218,6 +3249,17 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.key_quota
     }
 
+    /// Keep the keys of the aliases the peer declares from here on in `keys`: the session's key
+    /// arena, on the lent policy. The aliases already held keep theirs.
+    #[cfg(feature = "storage-profile")]
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            self.interests.keys = keys.clone();
+        }
+        self.naming.keys = keys;
+    }
+
     /// The quota the peer's alias table is held to (`MAX_PEER_KEYEXPR_ALIASES`): what the
     /// creator of the session's tables stated ([`Self::limit_aliases_to`]), the build's value
     /// until it did.
@@ -3346,9 +3388,18 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
-                    return;
-                };
+                // Past the quota or a row's text the alias is dropped; with no room where the rows
+                // keep their keys it is dropped and counted with the alias table's refusals, as
+                // zenoh-pico drops one its heap cannot hold.
+                let text =
+                    match key_text_within::<P>(&self.naming.keys, literal, self.naming.key_quota) {
+                        Ok(text) => text,
+                        Err(crate::bounded::KeyUnkept::TooLong) => return,
+                        Err(crate::bounded::KeyUnkept::NoRoom) => {
+                            self.naming.aliases.count_refused();
+                            return;
+                        }
+                    };
                 // A refusal, for want of room or past the quota, is counted by the
                 // table itself; the declaration that did not fit is dropped here, with
                 // the peer none the wiser.
@@ -3423,9 +3474,18 @@ impl<P: Storage> SubscriberPeer<P> {
                     // Unresolvable, or too long for the table's text.
                     Ok(None) | Err(_) => return,
                 };
-                let Ok(text) = key_text_within::<P>(literal, self.naming.key_quota) else {
-                    return;
-                };
+                // Past the quota or a row's text the alias is dropped; with no room where the rows
+                // keep their keys it is dropped and counted with the alias table's refusals, as
+                // zenoh-pico drops one its heap cannot hold.
+                let text =
+                    match key_text_within::<P>(&self.naming.keys, literal, self.naming.key_quota) {
+                        Ok(text) => text,
+                        Err(crate::bounded::KeyUnkept::TooLong) => return,
+                        Err(crate::bounded::KeyUnkept::NoRoom) => {
+                            self.naming.aliases.count_refused();
+                            return;
+                        }
+                    };
                 // A refusal is counted by the table itself, as for the owned form.
                 let quota = self.naming.alias_quota;
                 let _ = self.naming.aliases.bind_within(
@@ -3483,6 +3543,7 @@ impl<P: Storage> Default for InterestSide<P> {
             staged: BoundedVec::default(),
             refusals: SubInterestRefusals::default(),
             reconciled_epoch: 0,
+            keys: Default::default(),
         }
     }
 }
@@ -3497,6 +3558,7 @@ impl InterestSide<Lent> {
             staged: arena.lend(staged)?,
             refusals: SubInterestRefusals::default(),
             reconciled_epoch: 0,
+            keys: LentKeys::default(),
         })
     }
 
@@ -3525,6 +3587,7 @@ impl InterestSide<crate::bounded::Static> {
                 announcements: 0,
             },
             reconciled_epoch: 0,
+            keys: crate::bounded::InlineKeys,
         }
     }
 }
@@ -3694,10 +3757,8 @@ impl<P: Storage> SubscriberPeer<P> {
                 .iter()
                 .filter(|s| s.id.as_u64() >= watermark)
             {
-                if !subscription_matches_interest(
-                    sub.pattern.as_str(),
-                    Some(interests.rows[at].keyexpr.as_str()),
-                ) {
+                if !subscription_matches_interest(&sub.pattern, Some(&*interests.rows[at].keyexpr))
+                {
                     continue;
                 }
                 let item = if aggregate {

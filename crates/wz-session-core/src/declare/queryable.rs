@@ -19,6 +19,8 @@
 // through the borrowed `DeclView` seam.
 #[cfg(feature = "storage-profile")]
 use crate::bounded::EpochCounter;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::bounded::KeyUnkept;
 use crate::bounded::{Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
@@ -269,7 +271,7 @@ trait DeclaredRow {
 #[cfg(feature = "storage-profile")]
 impl<P: Storage> DeclaredRow for DeclaredQueryable<P> {
     fn keyexpr(&self) -> &str {
-        crate::bounded::TextBacking::as_str(&self.keyexpr)
+        crate::bounded::KeyBacking::as_str(&self.keyexpr)
     }
 
     #[cfg(feature = "keyexpr-includes")]
@@ -371,6 +373,12 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// text. Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
+    /// policy, handed over with the session's other tables ([`Self::keep_keys_in`]). A
+    /// `DeclQueryable` whose key finds no room there is dropped and counted with the table's
+    /// refusals, as one the table has no room for is.
+    #[cfg(feature = "storage-profile")]
+    keys: P::Keys,
     /// Moves after every change to `declared`: a shared counter on a policy that can
     /// share one ([`crate::declare::DeclEpoch`]), nothing on one that cannot.
     #[cfg(feature = "storage-profile")]
@@ -400,6 +408,8 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
+            keys: Default::default(),
+            #[cfg(feature = "storage-profile")]
             epoch: <P::Epoch as Default>::default(),
             _policy: core::marker::PhantomData,
         }
@@ -419,6 +429,8 @@ impl RemoteQueryablePeer<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            keys: crate::bounded::InlineKeys,
             #[cfg(feature = "storage-profile")]
             epoch: (),
             #[cfg(feature = "alloc")]
@@ -523,6 +535,13 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     #[cfg(feature = "storage-profile")]
     pub fn key_quota(&self) -> crate::limits::MaxKeyexprBytesHeld {
         self.key_quota
+    }
+
+    /// Keep the keys of the rows the peer declares from here on in `keys`: the session's key
+    /// arena, on the lent policy. The rows already held keep theirs.
+    #[cfg(feature = "storage-profile")]
+    pub fn keep_keys_in(&mut self, keys: P::Keys) {
+        self.keys = keys;
     }
 
     /// The quota the peer's table is held to (`MAX_REMOTE_DECLS`): what the creator of the
@@ -1173,9 +1192,18 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteQueryableTable<D, U, P> {
         // subsequent declare with the same id overwrites
         // the prior entry (peer renamed the keyexpr), which
         // matches zenoh-pico's same-id-replaces behaviour.
-        let Ok(text) = key_text_within::<Q>(resolved, peer.key_quota) else {
-            peer.oversize = peer.oversize.saturating_add(1);
-            return;
+        let text = match key_text_within::<Q>(&peer.keys, resolved, peer.key_quota) {
+            Ok(text) => text,
+            Err(KeyUnkept::TooLong) => {
+                peer.oversize = peer.oversize.saturating_add(1);
+                return;
+            }
+            // No room where the rows keep their keys: dropped and counted as a declaration the
+            // table has no room for, as zenoh-pico drops one its heap cannot hold.
+            Err(KeyUnkept::NoRoom) => {
+                peer.declared.count_refused();
+                return;
+            }
         };
         #[cfg(feature = "alloc")]
         let told_as = peer.told_as(resolved, complete);
