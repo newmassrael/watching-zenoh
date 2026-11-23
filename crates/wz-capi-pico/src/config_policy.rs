@@ -866,17 +866,16 @@ mod tests {
         )
     }
 
+    /// A config that states nothing resolves the build's policies and the limits every session of
+    /// this ABI opens under (`crate::session::opening_limits`), no value from any layer. Turned
+    /// red by a resolution that starts from the build's limits instead.
     #[test]
-    fn a_config_that_states_nothing_opens_under_the_build_defaults() {
+    fn a_config_that_states_nothing_opens_under_the_opening_limits() {
+        let mut expected = Resolved::unchanged(SessionPolicy::defaults());
+        expected.limits.session = crate::session::opening_limits();
         let config = Config::new();
-        assert_eq!(
-            config.resolved(),
-            Resolved::unchanged(SessionPolicy::defaults())
-        );
-        assert_eq!(
-            resolve_policy(&PolicyStatements::none()),
-            Ok(Resolved::unchanged(SessionPolicy::defaults()))
-        );
+        assert_eq!(config.resolved(), expected);
+        assert_eq!(resolve_policy(&PolicyStatements::none()), Ok(expected));
     }
 
     /// What the open and the doors resolve for a config is what the record of where each value

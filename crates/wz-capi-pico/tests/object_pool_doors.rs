@@ -167,9 +167,11 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             ..Default::default()
         };
         let mut needed = 0usize;
-        let limits = wz_session_core::limits::SessionLimits::defaults();
+        // The pools read a count left at zero against the limits every session of the ABI opens
+        // under, zenoh-pico's preset, and not the build's defaults.
+        let limits = wz_session_core::limits::SessionLimits::PICO_PRESET;
         if limits.max_subscriptions().most().is_none() {
-            // A heap build states no bound, so a subscriber count left at zero has none.
+            // A limit with no bound leaves a subscriber count left at zero with none.
             assert_eq!(
                 wz_ext_object_pool_bytes(&unstated, &mut needed),
                 Z_ERR_CONFIG_INVALID_VALUE

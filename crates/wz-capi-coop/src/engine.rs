@@ -6079,16 +6079,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     #[inline(never)]
     fn retain_keyexpr(&self, mapping_id: ExprId) {
-        let Some(mut core) = self.live() else {
+        let Some(core) = self.live() else {
             return;
         };
-        let core = &mut core.0;
-        if let Some(entry) = core
-            .keyexprs
-            .borrow_mut()
-            .iter_mut()
-            .find(|e| e.id == mapping_id)
-        {
+        let mut keyexprs = core.0.keyexprs.borrow_mut();
+        if let Some(entry) = keyexprs.iter_mut().find(|e| e.id == mapping_id) {
             entry.holds = entry.holds.saturating_add(1);
         }
     }
