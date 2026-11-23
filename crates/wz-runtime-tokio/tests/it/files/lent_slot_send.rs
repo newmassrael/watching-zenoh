@@ -327,6 +327,43 @@ fn the_fallback_keeps_the_sequence_numbers_gapless() {
     assert_eq!(lent[1][1], 9);
 }
 
+/// A message its encoder refuses (a key past the protocol's u16 length), sent with no window open
+/// over a lending link: the slot comes back, the send is refused typed rather than handed to the
+/// heap encode, and the SN minted for it is given back, so the next frame carries it.
+#[test]
+fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
+    let link = LendingLink::new(true, 2, SLOT_LEN, HEADROOM);
+    let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
+    let long_key = "k".repeat(usize::from(u16::MAX) + 1);
+    let refused = actions.send_plain_put_qos(
+        0,
+        Some(&long_key),
+        b"v",
+        None,
+        true,
+        false,
+        Priority::DEFAULT,
+    );
+    assert!(
+        matches!(
+            refused,
+            Some(Err(wz_session_core::send_wire_error::SendWireError::Codec(
+                _
+            )))
+        ),
+        "the encoder's refusal is the send's answer: {refused:?}"
+    );
+    actions
+        .send_push_literal("home/lent", b"after", true)
+        .expect("push");
+    let lent = link.lent();
+    assert_eq!(lent.len(), 1);
+    // Frame byte 1 is `VLE(sn)`.
+    assert_eq!(lent[0][1], 7, "the frame after carries the SN given back");
+    assert!(link.heap().is_empty());
+    link.assert_every_slot_home();
+}
+
 // transport-lowlatency: the bare network message with no Frame wrapper, no SN and
 // no fragmentation. The lend is the same one with nothing in front of the payload
 // but the link's own framing.

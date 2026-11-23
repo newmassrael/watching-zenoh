@@ -546,6 +546,90 @@ enum FrameLend {
     /// Nothing was sent: no slot, or a slot too short to say; encode on the
     /// heap as before.
     Heap,
+    /// Nothing was sent: the message's own encoder refused it, which no other
+    /// buffer would answer otherwise.
+    Refused(sce_forge_runtime::codec::CodecError),
+}
+
+/// What writing a frame (its envelope and the message) into a slot a link lent came to, the
+/// frame held to the batch budget: the one rule a batch frame's opening and a single frame's
+/// send both judge a lent slot by.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LentFill {
+    /// The frame is in the slot.
+    Fits,
+    /// The frame crossed the budget in a slot that holds the whole budget: the
+    /// message alone is past it.
+    PastBudget,
+    /// The frame crossed the end of a slot shorter than the budget, which says
+    /// nothing of the message.
+    ShortSlot,
+    /// The message's own encoder refused it.
+    Refused(sce_forge_runtime::codec::CodecError),
+}
+
+/// Write the frame of `sn` with the message `encode_body` writes into `slot`, through a cap at
+/// `mtu`, so a message past the budget is refused where it crosses it and its payload is not
+/// copied in only to be thrown away.
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[inline(never)]
+fn fill_lent_frame<D, P>(
+    slot: &mut crate::tx_lease::TxLease<'_, D>,
+    mtu: usize,
+    sn: u64,
+    reliable: bool,
+    ext_qos: Option<Priority>,
+    encode_body: &P,
+) -> LentFill
+where
+    D: crate::link::BoxedLinkDriver + ?Sized,
+    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    use crate::tx_buf::TxBuf;
+    use sce_forge_runtime::codec::CodecError;
+    let whole_budget = slot.capacity() >= mtu;
+    let written = crate::frame_encode::encode_frame_envelope_into(
+        &mut crate::tx_buf::CappedTxBuf::new(&mut *slot, mtu),
+        sn,
+        crate::frame_encode::frame_flags(reliable),
+        ext_qos,
+        encode_body,
+    );
+    match written {
+        Ok(()) if slot.len() <= mtu => LentFill::Fits,
+        Ok(()) | Err(CodecError::BufferOverflow) if whole_budget => LentFill::PastBudget,
+        Ok(()) | Err(CodecError::BufferOverflow) => LentFill::ShortSlot,
+        Err(refused) => LentFill::Refused(refused),
+    }
 }
 
 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
@@ -5196,25 +5280,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // reserves for the same frame.
         let want = 1 + 10 + 2 + worst_case_payload;
         let lent = self.send_lent(reliability, priority, want, |slot| {
-            // The frame is encoded through a cap at the batch budget, so a frame
-            // past it is refused as soon as it crosses it and its payload is not
-            // copied in only to be thrown away. Over a slot that holds the whole
-            // budget a refusal can only mean the frame is past the budget; over a
-            // shorter one it may mean the slot is short, and the heap decides.
-            let whole_budget = slot.capacity() >= emit.mtu;
-            let mut capped = crate::tx_buf::CappedTxBuf::new(slot, emit.mtu);
-            match crate::frame_encode::encode_frame_envelope_into(
-                &mut capped,
+            // Over a slot that holds the whole budget a frame that crosses it is
+            // past the budget; over a shorter one the slot may be what is short,
+            // and the heap decides.
+            match fill_lent_frame(
+                slot,
+                emit.mtu,
                 emit.sn,
-                crate::frame_encode::frame_flags(emit.reliable),
+                emit.reliable,
                 emit.ext_qos,
                 encode_body,
             ) {
-                Ok(()) => Ok(()),
-                Err(sce_forge_runtime::codec::CodecError::BufferOverflow) if whole_budget => {
-                    Err(FrameLend::PastMtu)
-                }
-                Err(_) => Err(FrameLend::Heap),
+                LentFill::Fits => Ok(()),
+                LentFill::PastBudget => Err(FrameLend::PastMtu),
+                LentFill::ShortSlot => Err(FrameLend::Heap),
+                LentFill::Refused(refused) => Err(FrameLend::Refused(refused)),
             }
         });
         match lent {
@@ -5326,7 +5406,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
-        use crate::tx_buf::TxBuf;
         let reliability = Reliability::from_reliable_bool(reliable);
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
@@ -5338,19 +5417,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if slot.capacity() < mtu {
                 return LentBatchOpen::Heap(HeapStage::ShortSlot);
             }
-            // Through a cap at the budget, as a whole frame is: a message past
-            // it is refused where it crosses it, and its payload is never copied
-            // into a slot it cannot leave in.
-            let fits = crate::frame_encode::encode_frame_envelope_into(
-                &mut crate::tx_buf::CappedTxBuf::new(&mut slot, mtu),
-                sn,
-                crate::frame_encode::frame_flags(reliable),
-                ext_qos,
-                encode_body,
-            )
-            .is_ok()
-                && slot.len() <= mtu;
-            if !fits {
+            // A message its encoder refuses takes the oversize path too, which
+            // measures it again and answers the refusal (`emit_fragments_encoded`).
+            if fill_lent_frame(&mut slot, mtu, sn, reliable, ext_qos, encode_body) != LentFill::Fits
+            {
                 return LentBatchOpen::Heap(HeapStage::PastBudget);
             }
             if let Some(stale) = link.batch_slots[idx].take() {
@@ -11737,6 +11807,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 FrameLend::Heap => {
                     batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
                 }
+                // Refused before a byte left, as the oversize path refuses it: the SN minted
+                // above is given back.
+                FrameLend::Refused(refused) => {
+                    self.outbound_frame_sn.unmint(priority, reliable);
+                    return Err(SendWireError::Codec(refused));
+                }
             }
             #[cfg(not(feature = "tx-lend-only"))]
             {
@@ -11778,6 +11854,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 FrameLend::Heap => Err(SendWireError::LinkRefused(
                     self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
                 )),
+                FrameLend::Refused(refused) => {
+                    self.outbound_frame_sn.unmint(priority, reliable);
+                    Err(SendWireError::Codec(refused))
+                }
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
