@@ -178,8 +178,6 @@ pub mod slot_active;
 pub mod slot_node;
 // The same node as a getter: it asks one query again and again and keeps the round trips, for
 // every platform. What the platform supplies is a clock, the table's sizes and where the figures go.
-// Totality debt TD-211 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(all(
     feature = "session-slot",
     feature = "client-core",

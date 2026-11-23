@@ -242,24 +242,29 @@ where
         if self.issued.get() == 0 {
             self.first_us.set(now_us);
         }
-        self.started_us[slot as usize].set(now_us);
+        if let Some(started) = self.started_us.get(usize::from(slot)) {
+            started.set(now_us);
+        }
         self.busy.set(self.busy.get() | (1 << slot));
-        self.outstanding.set(self.outstanding.get() + 1);
-        self.issued.set(self.issued.get() + 1);
+        self.outstanding
+            .set(self.outstanding.get().saturating_add(1));
+        self.issued.set(self.issued.get().saturating_add(1));
     }
 
     /// A query that was taken was not asked after all: nothing is pending and nothing was sent.
     fn give_back(&self, slot: u8, why: GetError) {
         self.release(slot);
-        self.refused.set(self.refused.get() + 1);
+        self.refused.set(self.refused.get().saturating_add(1));
         self.last_refusal.set(MaybeUninit::new(why));
     }
 
     /// A taken slot goes back with its count: the query was never asked.
     fn release(&self, slot: u8) {
         self.busy.set(self.busy.get() & !(1 << slot));
-        self.outstanding.set(self.outstanding.get() - 1);
-        self.issued.set(self.issued.get() - 1);
+        // A slot given back was taken, which counted it in both.
+        self.outstanding
+            .set(self.outstanding.get().saturating_sub(1));
+        self.issued.set(self.issued.get().saturating_sub(1));
     }
 
     /// The request of the next query.
@@ -279,7 +284,7 @@ where
     /// Leave as many queries in the mailbox as there are places free, from the main loop. How many
     /// were left: the caller wakes the session's loop when it is not none.
     pub fn top_up(&'static self) -> u32 {
-        let mut left = 0;
+        let mut left = 0u32;
         while let Some(slot) = self.free_slot() {
             self.take(slot);
             let sink = PlanSink { plan: self, slot };
@@ -289,7 +294,7 @@ where
                 self.release(slot);
                 break;
             }
-            left += 1;
+            left = left.saturating_add(1);
         }
         left
     }
@@ -297,11 +302,14 @@ where
     /// A reply arrived for a query in flight.
     fn reply(&self, view: &dyn ReplyView) {
         if view.kind() == ReplyKind::Err {
-            self.errors.set(self.errors.get() + 1);
+            self.errors.set(self.errors.get().saturating_add(1));
         } else {
-            self.replies.set(self.replies.get() + 1);
-            self.payload_bytes
-                .set(self.payload_bytes.get() + view.payload().len() as u64);
+            self.replies.set(self.replies.get().saturating_add(1));
+            self.payload_bytes.set(
+                self.payload_bytes
+                    .get()
+                    .saturating_add(view.payload().len() as u64),
+            );
         }
     }
 
@@ -309,16 +317,17 @@ where
     fn end(&self, slot: u8, timed_out: bool) {
         let now_us = C::default().now_us();
         if let Some(timed_at) = self.finished.get().checked_sub(self.warmup.get()) {
-            if let Some(cell) = self.rtt_us.get(timed_at as usize) {
-                let elapsed = now_us.saturating_sub(self.started_us[slot as usize].get());
+            let started = self.started_us.get(usize::from(slot));
+            if let (Some(cell), Some(started)) = (self.rtt_us.get(timed_at as usize), started) {
+                let elapsed = now_us.saturating_sub(started.get());
                 cell.set(u32::try_from(elapsed).unwrap_or(u32::MAX));
             }
         }
         if timed_out {
-            self.timeouts.set(self.timeouts.get() + 1);
+            self.timeouts.set(self.timeouts.get().saturating_add(1));
         }
         self.last_us.set(now_us);
-        self.finished.set(self.finished.get() + 1);
+        self.finished.set(self.finished.get().saturating_add(1));
         self.busy.set(self.busy.get() & !(1 << slot));
         self.outstanding
             .set(self.outstanding.get().saturating_sub(1));
@@ -353,12 +362,11 @@ where
         let samples: &mut [u32] =
             unsafe { core::slice::from_raw_parts_mut(self.rtt_us.as_ptr() as *mut u32, timed) };
         samples.sort_unstable();
+        // The sample at `per_mille` of the way, the last one at most; none of no samples.
         let at = |per_mille: usize| -> u32 {
-            if samples.is_empty() {
-                0
-            } else {
-                samples[(samples.len() * per_mille / 1000).min(samples.len() - 1)]
-            }
+            let last = samples.len().saturating_sub(1);
+            let place = (samples.len().saturating_mul(per_mille) / 1000).min(last);
+            samples.get(place).copied().unwrap_or(0)
         };
         Summary {
             issued: self.issued.get(),
@@ -367,7 +375,7 @@ where
             errors: self.errors.get(),
             timeouts: self.timeouts.get(),
             // Counting what the mailbox refused for good, which the plan counts as in flight.
-            refused: self.refused.get() + self.mailbox.rejected(),
+            refused: self.refused.get().saturating_add(self.mailbox.rejected()),
             payload_bytes: self.payload_bytes.get(),
             timed,
             min_us: at(0),
@@ -613,7 +621,7 @@ where
         // A getter says where it is once a second, so a run that does not end can be told from
         // one that is slow.
         if plan.is_set() && now_ms >= self.progress_at_ms {
-            self.progress_at_ms = now_ms + 1_000;
+            self.progress_at_ms = now_ms.saturating_add(1_000);
             self.report.progress(&plan.progress(), plan.last_refusal());
         }
         // A getter is done when every query it was asked to make has ended, and says how they went.
