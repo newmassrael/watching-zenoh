@@ -325,7 +325,7 @@ impl z_owned_querier_t {
 /// # Safety
 /// `h` must be a live handle a querier's slot was filled for.
 unsafe fn free_querier(h: *mut c_void) {
-    crate::object_slot::release(h as *mut QuerierState);
+    crate::object_slot::release_entity(h as *mut QuerierState);
 }
 
 impl_handle_ownership7!(
@@ -406,9 +406,11 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
         // and its gets are issued on that declaration.
-        // The querier's place is taken before anything is declared, so a full pool refuses the
-        // querier and nothing is declared.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Querier) else {
+        // The querier's place is taken from its session before anything is declared, so a
+        // session with no place left refuses the querier and nothing is declared.
+        let Some(slot) =
+            crate::object_slot::Slot::take_entity(&engine, crate::object_slot::Kind::Querier)
+        else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let key = match DeclaredKeyexpr::declare(&engine, ke, declared_of(keyexpr)) {
@@ -477,7 +479,7 @@ pub unsafe extern "C" fn z_undeclare_querier(querier: *mut z_moved_querier_t) ->
         if !handle.is_null() {
             (*querier)._this = z_owned_querier_t::null_value();
             // The `Drop` impl retracts this querier's matching listeners; its place goes back.
-            crate::object_slot::release(handle as *mut QuerierState);
+            crate::object_slot::release_entity(handle as *mut QuerierState);
         }
         Z_OK
     })

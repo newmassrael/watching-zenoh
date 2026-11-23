@@ -209,10 +209,12 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        // The token's place is taken before it is declared, so a full pool refuses the
-        // declaration and declares nothing.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessToken)
-        else {
+        // The token's place is taken from its session before it is declared, so a session with
+        // no place left refuses the declaration and declares nothing.
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &engine_of(handle),
+            crate::object_slot::Kind::LivelinessToken,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let state = match TokenState::declare(&PicoSession::of(handle), ke, declared_of(keyexpr)) {
@@ -242,7 +244,7 @@ pub unsafe extern "C" fn z_liveliness_undeclare_token(
             // The retraction is `TokenState::drop`, so this is the same path
             // `z_liveliness_token_drop` takes — deliberately, so an explicit
             // undeclare and an implicit one cannot drift apart.
-            crate::object_slot::release(handle as *mut TokenState);
+            crate::object_slot::release_entity(handle as *mut TokenState);
             (*token)._this = z_owned_liveliness_token_t::null_value();
         }
         Z_OK
@@ -352,14 +354,15 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         };
         // A NULL options pointer is pico's "defaults", not an error.
         let history = !options.is_null() && (*options).history;
-        // The subscriber's place is taken before anything is declared, so a full pool refuses
-        // the declaration and declares nothing.
-        let Some(slot) =
-            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
-        else {
+        // The subscriber's place is taken from its session before anything is declared, so a
+        // session with no place left refuses the declaration and declares nothing.
+        let engine = engine_of(handle);
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &engine,
+            crate::object_slot::Kind::LivelinessSubscriber,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let engine = engine_of(handle);
         // R2959 — pico declares the WHOLE key for a liveliness subscriber and
         // sends its interest on that declaration
         // (`vendor/zenoh-pico/src/net/liveliness.c` @

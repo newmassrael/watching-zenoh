@@ -1455,14 +1455,15 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
         // `z_liveliness_declare_subscriber(&sess_rc, liveliness_subscriber, z_keyexpr_loan(&keyexpr), callback, &opt);`),
         // so it gets that call's whole-key declaration and interest on it.
-        // The subscriber's place is taken before anything is declared, so a full pool refuses
-        // the declaration and declares nothing.
-        let Some(slot) =
-            crate::object_slot::Slot::take(crate::object_slot::Kind::LivelinessSubscriber)
-        else {
+        // The subscriber's place is taken from its session before anything is declared, so a
+        // session with no place left refuses the declaration and declares nothing.
+        let engine = state.engine.clone();
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &engine,
+            crate::object_slot::Kind::LivelinessSubscriber,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let engine = state.engine.clone();
         let key = match crate::keyexpr::DeclaredKeyexpr::declare(&engine, &ke, None) {
             Ok(key) => key,
             Err(rc) => return rc,

@@ -1121,7 +1121,7 @@ impl z_owned_queryable_t {
 /// # Safety
 /// `h` must be a live `QueryableState` handle.
 unsafe fn free_queryable(h: *mut c_void) {
-    crate::object_slot::release(h as *mut QueryableState);
+    crate::object_slot::release_entity(h as *mut QueryableState);
 }
 
 impl_handle_ownership7!(
@@ -1302,9 +1302,24 @@ pub unsafe extern "C" fn z_declare_queryable(
         if queryable.is_null() {
             return Z_ERR_NULL;
         }
-        // The queryable's place is taken before it is declared, so a full pool refuses the
-        // declaration and declares nothing; the closure is consumed as on every refusal.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Queryable) else {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        // The queryable's place is taken from its session before it is declared, so a session
+        // with no place left refuses the declaration and declares nothing; a session that is not
+        // open is refused as the declaration refuses it. The closure is consumed as on every
+        // refusal.
+        let handle = match crate::session::open_session_handle(zs) {
+            Ok(handle) => handle,
+            Err(code) => {
+                z_closure_query_drop(callback);
+                return code;
+            }
+        };
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &crate::session::engine_of(handle),
+            crate::object_slot::Kind::Queryable,
+        ) else {
             z_closure_query_drop(callback);
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
@@ -1369,7 +1384,7 @@ pub unsafe extern "C" fn z_undeclare_queryable(queryable: *mut z_moved_queryable
         }
         let handle = (*queryable)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release(handle as *mut QueryableState);
+            crate::object_slot::release_entity(handle as *mut QueryableState);
             (*queryable)._this = z_owned_queryable_t::null_value();
         }
         Z_OK

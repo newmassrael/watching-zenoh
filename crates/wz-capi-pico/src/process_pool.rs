@@ -8,13 +8,15 @@
 //! # What they hold
 //!
 //! Each kind of object has a pool of its own (`crate::object_slot::Kind`): the objects behind the
-//! owned handles (on the tokio engine its sessions, and the publishers, subscribers, queryables,
-//! liveliness tokens and liveliness subscribers, and the samples, replies, queries and payloads a
-//! program holds), and what a program makes before any session: its configs and the hellos it
-//! keeps. Beside the pools lies the payloads' area: the bytes the owned payloads, strings and
-//! slices carry, in blocks of power-of-two sizes a payload takes the smallest of that holds it, of
-//! `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative engine lies in
-//! its own arena, not here.
+//! owned handles (on the tokio engine its sessions, publishers, subscribers, queryables,
+//! liveliness tokens, liveliness subscribers and queriers, and the samples, replies, queries and
+//! payloads a program holds), and what a program makes before any session: its configs and the
+//! hellos it keeps. Beside the pools lies the payloads' area: the bytes the owned payloads,
+//! strings and slices carry, in blocks of power-of-two sizes a payload takes the smallest of that
+//! holds it, of `HELD_PAYLOAD_BYTES` bytes together ([`Blocks`]). A session of the cooperative
+//! engine lies in its own arena, not here, and so do its entities, each in a place its open laid
+//! out under the session's own limit (`crate::object_slot::held_places`): a count of the pools'
+//! for an entity does not apply there.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -312,13 +314,20 @@ impl Plan {
         {
             plan = plan.with::<crate::session::PicoSessionHandle>(Kind::Session, objects.sessions);
         }
-        plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
-        plan = plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
-        #[cfg(feature = "queryable")]
+        // An entity of the cooperative engine lies in its own session's arena, as many as the
+        // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
+        // the process's would let one session's entities spend another's.
+        #[cfg(feature = "engine-tokio")]
+        {
+            plan = plan.with::<crate::pubsub::PublisherState>(Kind::Publisher, objects.publishers);
+            plan =
+                plan.with::<crate::pubsub::SubscriberState>(Kind::Subscriber, objects.subscribers);
+        }
+        #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         {
             plan = plan.with::<crate::query::QueryableState>(Kind::Queryable, objects.queryables);
         }
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         {
             plan = plan.with::<crate::liveliness::TokenState>(
                 Kind::LivelinessToken,
@@ -344,7 +353,7 @@ impl Plan {
         {
             plan = plan.with::<crate::scout::KeptHello>(Kind::Hello, objects.hellos);
         }
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
         {
             plan = plan.with::<crate::querier::QuerierState>(Kind::Querier, objects.queriers);
         }
@@ -1774,13 +1783,15 @@ mod tests {
         };
         #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
         check(Kind::Session);
+        #[cfg(feature = "engine-tokio")]
         check(Kind::Publisher);
+        #[cfg(feature = "engine-tokio")]
         check(Kind::Subscriber);
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "engine-tokio", feature = "queryable"))]
         check(Kind::Queryable);
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         check(Kind::LivelinessToken);
-        #[cfg(feature = "liveliness")]
+        #[cfg(all(feature = "engine-tokio", feature = "liveliness"))]
         check(Kind::LivelinessSubscriber);
         check(Kind::Sample);
         #[cfg(feature = "query")]
@@ -1791,7 +1802,7 @@ mod tests {
         check(Kind::Config);
         #[cfg(any(feature = "scout", feature = "scout-mcu"))]
         check(Kind::Hello);
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "engine-tokio", feature = "query"))]
         check(Kind::Querier);
         check(Kind::Keyexpr);
         assert_eq!(pools.held(), 0);

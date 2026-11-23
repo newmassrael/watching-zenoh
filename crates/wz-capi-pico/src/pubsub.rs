@@ -1611,12 +1611,12 @@ impl z_owned_subscriber_t {
 /// # Safety
 /// `h` must be a live `PublisherState` handle.
 unsafe fn free_publisher(h: *mut c_void) {
-    crate::object_slot::release(h as *mut PublisherState);
+    crate::object_slot::release_entity(h as *mut PublisherState);
 }
 /// # Safety
 /// `h` must be a live `SubscriberState` handle.
 unsafe fn free_subscriber(h: *mut c_void) {
-    crate::object_slot::release(h as *mut SubscriberState);
+    crate::object_slot::release_entity(h as *mut SubscriberState);
 }
 
 impl_handle_ownership7!(
@@ -2866,9 +2866,12 @@ pub unsafe extern "C" fn z_declare_publisher(
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        // The publisher's place is taken before it is declared, so a full pool refuses the
-        // declaration and nothing is declared.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Publisher) else {
+        // The publisher's place is taken from its session before it is declared, so a session
+        // with no place left refuses the declaration and nothing is declared.
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &engine_of(state),
+            crate::object_slot::Kind::Publisher,
+        ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let core = match PlainPublisher::declare(
@@ -2930,7 +2933,7 @@ pub unsafe extern "C" fn z_undeclare_publisher(publisher: *mut z_moved_publisher
         }
         let handle = (*publisher)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release(handle as *mut PublisherState);
+            crate::object_slot::release_entity(handle as *mut PublisherState);
             (*publisher)._this = z_owned_publisher_t::null_value();
         }
         Z_OK
@@ -3163,8 +3166,11 @@ unsafe fn declare_subscriber_with(
     // no copy is made for the call. One the outbound gate refuses is refused before anything is
     // declared.
     let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
+    let engine = engine_of(state);
+    // An owned subscriber's place is taken from its session before anything is declared, so a
+    // session with no place left refuses it and declares nothing.
     let slot = if owned {
-        match crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber) {
+        match crate::object_slot::Slot::take_entity(&engine, crate::object_slot::Kind::Subscriber) {
             Some(slot) => Some(slot),
             None => return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY),
         }
@@ -3177,7 +3183,6 @@ unsafe fn declare_subscriber_with(
     // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
     // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
-    let engine = engine_of(state);
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, ke, declared_of(keyexpr))?;
     let wire = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
@@ -3234,7 +3239,7 @@ pub unsafe extern "C" fn z_undeclare_subscriber(subscriber: *mut z_moved_subscri
         }
         let handle = (*subscriber)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release(handle as *mut SubscriberState);
+            crate::object_slot::release_entity(handle as *mut SubscriberState);
             (*subscriber)._this = z_owned_subscriber_t::null_value();
         }
         Z_OK
