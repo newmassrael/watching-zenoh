@@ -30,7 +30,9 @@
 
 static ex_counter_t heard;
 static ex_counter_t replies;
-static volatile int reply_done;
+/* The gets whose reply closure was dropped. A count under a lock and not a plain flag: the drop
+ * runs on a session thread and the program polls on its own. */
+static ex_counter_t dropped;
 static char reply_text[64];
 
 static void on_sample(z_loaned_sample_t *sample, void *arg) {
@@ -55,7 +57,7 @@ static void on_reply(z_loaned_reply_t *reply, void *arg) {
 
 static void on_reply_drop(void *arg) {
     (void)arg;
-    reply_done = 1;
+    ex_counter_add(&dropped, 1);
 }
 
 static void on_peer(const z_id_t *id, void *arg) {
@@ -83,7 +85,7 @@ static int wait_for_peer(const z_loaned_session_t *session) {
 
 static int ask(const z_loaned_session_t *session) {
     for (int attempt = 0; attempt < 15; attempt++) {
-        reply_done = 0;
+        int before = ex_counter_get(&dropped);
         z_owned_closure_reply_t closure;
         z_closure_reply(&closure, on_reply, on_reply_drop, NULL);
         z_view_keyexpr_t ke;
@@ -94,7 +96,7 @@ static int ask(const z_loaned_session_t *session) {
         if (z_get(session, z_view_keyexpr_loan(&ke), "", z_closure_reply_move(&closure), &options) != Z_OK) {
             return 0;
         }
-        for (int i = 0; i < 500 && !reply_done; i++) z_sleep_ms(10);
+        (void)ex_wait_for(&dropped, before + 1, 5000);
         if (ex_counter_get(&replies) > 0) return 1;
         /* A get that found no target completed at once; the next is asked after a pause. */
         z_sleep_ms(200);
@@ -106,6 +108,7 @@ static int ask(const z_loaned_session_t *session) {
 static void exchange(const char *what, z_owned_session_t *one, z_owned_session_t *two) {
     ex_counter_init(&heard);
     ex_counter_init(&replies);
+    ex_counter_init(&dropped);
     reply_text[0] = '\0';
 
     z_owned_closure_sample_t sample_closure;
@@ -138,6 +141,7 @@ static void exchange(const char *what, z_owned_session_t *one, z_owned_session_t
     z_queryable_drop(z_queryable_move(&queryable));
     ex_counter_drop(&heard);
     ex_counter_drop(&replies);
+    ex_counter_drop(&dropped);
 }
 
 /* A listener on `scheme`/127.0.0.1 and a client dialling it. */
