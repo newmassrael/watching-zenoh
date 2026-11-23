@@ -995,8 +995,6 @@ pub mod send_wire_error;
 // feature. Re-exported from wz-runtime-tokio for `crate::sample::*`
 // callsite compatibility.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-052 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod sample;
 
 /// An [`sample::EncodingHint`] from an encoding label and back, under each upstream library's
