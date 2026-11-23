@@ -50,7 +50,9 @@ impl<T> CoopLocalJoinHandle<T> {
         }
     }
 
-    /// The handle of a spawn the runtime refused: it reads `Err(RuntimeError::Shutdown)`.
+    /// The handle of a spawn the runtime refused: it reads `Err(RuntimeError::Shutdown)`. The slot
+    /// profile hands a refusal back as a value, so only the heap profile makes one.
+    #[cfg(not(feature = "session-slot"))]
     pub(crate) fn refused() -> Self {
         Self::new(TaskJoin::refused())
     }
