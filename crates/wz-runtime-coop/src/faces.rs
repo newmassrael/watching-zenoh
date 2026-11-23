@@ -979,7 +979,7 @@ mod tests {
         let mut clock_reads = 0;
         let mut now = || {
             clock_reads += 1;
-            1_000
+            1_000u64
         };
         let mut faces = supervisor(Link::Waiting { at_us: 5_000 }, 1);
         assert!(matches!(
@@ -1009,7 +1009,7 @@ mod tests {
         faces.put_link(0, Link::Up(wire(&local, session(true, None), true, false)));
         assert!(faces.holds_input());
         assert!(matches!(
-            faces.idle_wait(10, &mut || 0, || true, []),
+            faces.idle_wait(10, &mut || 0u64, || true, []),
             IdleWait::None
         ));
     }
