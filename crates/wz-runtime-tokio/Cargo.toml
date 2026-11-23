@@ -1337,6 +1337,8 @@ link-interfaces = ["dep:libc", "dep:windows-sys", "dep:wz-host-net"]
 # not a smaller build, it is an engine with no subject. `-D dead-code` says so
 # too — R2702 measured it, and the resolver went unused until a session
 # consulted it.
+# The session's replies are judged through the action bundle's egress gate, which the session
+# core compiles only when asked (`reply-egress-gate`).
 access-acl = [
     "link-interfaces",
     "transport-unicast",
@@ -1346,6 +1348,7 @@ access-acl = [
     "codec-request",
     "codec-declare",
     "codec-response",
+    "wz-session-core/reply-egress-gate",
 ]
 # The §5.16 pipeline on a MULTICAST session. Upstream installs NO interceptor on a multicast
 # transport (every factory's `new_transport_multicast` and `new_peer_multicast` return `None`), so

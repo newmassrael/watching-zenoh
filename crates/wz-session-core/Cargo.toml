@@ -127,6 +127,14 @@ bounded-heapless = []
 # Additive; named by the runtimes and the test builds that read the counters.
 action-trace = []
 
+# `reply-egress-gate` compiles in the egress admission of the replies a session sends
+# (`SessionLinkActions::set_egress_reply_gate`): the access policy's verdict, asked of every
+# `Response` and of every `Declare` that answers a peer's Interest, over the owned message it
+# judges. Named by the runtime that installs one (`wz-runtime-tokio`'s `access-acl`). Without it a
+# session has no gate to install and admits every reply, and a reply written from its parts never
+# builds the owned message a gate would read, so a library with no access policy links neither.
+reply-egress-gate = ["alloc"]
+
 # `key-set-closed` compiles in the closed key set: the sealed key table, the delivery of a message
 # by the selection of its key, the refusal of a key outside the set and the per-peer allowance. It
 # is what the `key-set` policy's `closed` value needs, and a build whose policy is `closed` without

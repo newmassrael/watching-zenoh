@@ -2243,7 +2243,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// session with no policy, and then [`Self::set_egress_reply_gate`]'s flag keeps the test to
     /// one atomic read.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -2254,7 +2254,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// Whether [`Self::egress_reply_gate`] holds a gate: the data path reads this and takes the
     /// lock only when it is set.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -3611,7 +3611,7 @@ pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sy
 /// to count references with, so the gate is called where it is stored (under its slot's lock)
 /// and never cloned out.
 #[cfg(all(
-    feature = "alloc",
+    feature = "reply-egress-gate",
     any(
         feature = "codec-response",
         feature = "liveliness-token",
@@ -4602,7 +4602,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     noted_requests,
                 )),
                 #[cfg(all(
-                    feature = "alloc",
+                    feature = "reply-egress-gate",
                     any(
                         feature = "codec-response",
                         feature = "liveliness-token",
@@ -4611,7 +4611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 ))]
                 egress_reply_gate: R::new_mutex(None::<ReplyEgressGate>),
                 #[cfg(all(
-                    feature = "alloc",
+                    feature = "reply-egress-gate",
                     any(
                         feature = "codec-response",
                         feature = "liveliness-token",
@@ -15245,7 +15245,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // denied is announced anyway the first time a peer's Interest reaches it. Asked of the
         // key as the user wrote it, before the namespace below decorates it, as a query reply
         // is; a denied answer is consumed, and the chain's `DeclareFinal`, which no policy
-        // governs, still ends the peer's Interest.
+        // governs, still ends the peer's Interest. A build with no egress gate
+        // (`reply-egress-gate`) asks nothing.
+        #[cfg(feature = "reply-egress-gate")]
         let declare = if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -15299,6 +15301,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             return;
         }
+        #[cfg(feature = "reply-egress-gate")]
         if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -16805,20 +16808,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// counted a reply twice would halve itself.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn reply_egress_verdict(&self, response: ResponseOwned) -> Option<ResponseOwned> {
-        if !self
-            .egress_reply_gate_set
-            .load(core::sync::atomic::Ordering::Acquire)
+        #[cfg(feature = "reply-egress-gate")]
         {
-            return Some(response);
+            if !self
+                .egress_reply_gate_set
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                return Some(response);
+            }
+            let message =
+                crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
+            if !self.reply_gate_admits(&message) {
+                return None;
+            }
+            match message {
+                crate::network_message::NetworkMessage::Response(response) => Some(*response),
+                _ => None,
+            }
         }
-        let message =
-            crate::network_message::NetworkMessage::Response(alloc::boxed::Box::new(response));
-        if !self.reply_gate_admits(&message) {
-            return None;
-        }
-        match message {
-            crate::network_message::NetworkMessage::Response(response) => Some(*response),
-            _ => None,
+        // A build with no egress gate admits every reply.
+        #[cfg(not(feature = "reply-egress-gate"))]
+        {
+            Some(response)
         }
     }
 
@@ -16832,6 +16843,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if cfg!(feature = "transport-stats") {
             return false;
         }
+        #[cfg(feature = "reply-egress-gate")]
         if self
             .egress_reply_gate_set
             .load(core::sync::atomic::Ordering::Acquire)
@@ -16863,7 +16875,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Called under the slot's lock: the gate takes the session's chain and mapping locks and
     /// never this one, so it cannot meet itself here.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
@@ -16882,7 +16894,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the session's observer lock (the observer's own pending replies are sent from inside it),
     /// so it must not take that lock.
     #[cfg(all(
-        feature = "alloc",
+        feature = "reply-egress-gate",
         any(
             feature = "codec-response",
             feature = "liveliness-token",
