@@ -659,3 +659,36 @@ fn the_time_source_still_reads_milliseconds_from_the_cells_clock() {
     NOW.store(2_500, Ordering::SeqCst);
     assert_eq!(time.now_monotonic_ms(), 2);
 }
+
+/// The task table says, as a pool, the most cells it has held at once where the build keeps the
+/// mark (`pool-monitor`), and no mark where it does not: a mark that is not kept reads as unknown,
+/// never as zero. Two tasks held together and then let go leave a mark of two and none in use.
+#[test]
+fn the_task_table_reports_the_most_cells_held_at_once_only_where_the_mark_is_kept() {
+    use wz_session_core::pool_gauge::PoolGauge;
+
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    static CELL: RuntimeCell<Hand, 3, 64, 1> = RuntimeCell::new();
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
+    let local = CoopLocalSet::new(&runtime);
+    let first = local.spawn_local(forever()).expect("a cell");
+    let second = local.spawn_local(forever()).expect("a cell");
+    for handle in [first, second] {
+        handle.abort();
+        local.run_until_idle();
+        drop(handle);
+    }
+    let stat = runtime.pool_stat("task-cells");
+    assert_eq!(stat.name, "task-cells");
+    assert_eq!(stat.capacity, 3);
+    assert_eq!(stat.in_use, 0, "both cells are free again");
+    assert_eq!(stat.refused, 0);
+    let kept = if cfg!(feature = "pool-monitor") {
+        Some(2)
+    } else {
+        None
+    };
+    assert_eq!(stat.high_water, kept);
+}

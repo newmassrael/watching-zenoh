@@ -400,3 +400,58 @@ fn a_begun_dial_meets_the_listener_on_one_thread_and_no_roots_refuse_it() {
         Err(LinkOpenError::Unsupported)
     ));
 }
+
+/// A listener tells the node's event log of a connection it took and ended without a stream
+/// (`event-ring`): bytes that are no handshake are dropped, and one event of the library's source
+/// for a dropped handshake follows, whose first integer says the failure was neither a stall nor a
+/// want of room and whose second is the channel's own code, which a failed handshake has. The log
+/// is read from its end as it stood, and the library is held, so no other test's handshake is read.
+#[cfg(feature = "event-ring")]
+#[test]
+fn a_connection_that_is_no_handshake_is_dropped_and_the_event_log_is_told() {
+    use std::io::Write;
+
+    use wz_capi_port::observation::events::{
+        self, Read, LEVEL_LIBRARY, SOURCE_TLS_HANDSHAKE_DROPPED, TLS_DROP_OTHER,
+    };
+
+    let _library = library();
+    let authority = Authority::new();
+    let server = authority.issue(ExtendedKeyUsagePurpose::ServerAuth);
+    let (_server, listener, port) = bind(&listen_config(&server, None));
+
+    let mut cursor = 0u64;
+    let mut args = [0u64; 4];
+    while events::read(&mut cursor, &mut args) != Read::Empty {}
+
+    let mut junk = std::net::TcpStream::connect(at(port)).expect("the port accepts");
+    junk.write_all(&[b'G'; 200]).expect("the bytes leave");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut told = None;
+    while told.is_none() && Instant::now() < deadline {
+        match listener.accept() {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("bytes that are no handshake made a stream"),
+            Err(e) => panic!("the listener broke: {e:?}"),
+        }
+        match events::read(&mut cursor, &mut args) {
+            Read::Record {
+                level,
+                arg_count,
+                source,
+                ..
+            } if source == SOURCE_TLS_HANDSHAKE_DROPPED => {
+                assert_eq!(level, LEVEL_LIBRARY);
+                assert_eq!(arg_count, 2, "why, and the channel's code");
+                told = Some([args[0], args[1]]);
+            }
+            Read::Record { .. } | Read::Lost { .. } => {}
+            Read::Empty => thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    let [why, code] = told.expect("the event log was told of the dropped connection");
+    assert_eq!(why, TLS_DROP_OTHER);
+    assert_ne!(code, 0, "a failed handshake has the channel's code");
+    drop(junk);
+}
