@@ -246,8 +246,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// Declare a subscriber on `keyexpr`, announced as `wire`, receiving what `allowed_origin`
-    /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
-    /// beside its id, when the declaring ABI's reference library names one.
+    /// admits through the callback `sink`, which the engine lets go of once it is done with it,
+    /// after its last call has returned. `retraction` is the key its undeclaration names beside
+    /// its id, when the declaring ABI's reference library names one.
     ///
     /// `None` when the session has handed out every declaration id it can put on the wire, as
     /// [`Self::declare_queryable_on_wire`] and [`Self::declare_liveliness_token_on_wire`] answer:

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
@@ -329,18 +329,12 @@ fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = Arc::clone(&heard);
     engine
-        .declare_subscriber_on_wire(
-            keyexpr,
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(keyexpr, WireKey::literal(), Locality::Any, None, {
+            let into = Arc::clone(&into);
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }
@@ -427,7 +421,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
         .expect("a session with ids left declares");
     eventually("the announcement to open the first's filter", || {

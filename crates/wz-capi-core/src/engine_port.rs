@@ -312,7 +312,7 @@ impl SessionEngine for SharedSession {
             wire,
             allowed_origin,
             retraction,
-            sink,
+            crate::faces::face_sink(sink),
         )
     }
 
@@ -607,7 +607,7 @@ impl SessionEngine for SharedSession {
             allowed_origin,
             links,
             retraction,
-            sink,
+            crate::faces::face_sink(sink),
         ))
     }
 

@@ -1606,23 +1606,24 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * a call that steps the session on the program's thread: the program sends
  * and pulls, the read task does the rest. */
 
-/* ================================================ callbacks at depth 1
+/* ================================================ callbacks
  *
- * No door of wz's own: this section states how the cooperative engine enters
- * a program's callbacks (docs/c-abi-architecture.md, section 3, L3). A
- * callback is entered at depth 1: the library calls it once for each
- * delivery, with no lock of the library held, and holds nothing for it to be
- * handed after it returns, so it is never called again from inside itself.
- * A call made from inside a callback that would need that callback again is
- * refused with a code, and does nothing:
+ * No door of wz's own: this section states how the cooperative engine calls
+ * a program's subscriber callbacks (docs/c-abi-architecture.md, section 3,
+ * L3). A callback is called as zenoh-pico calls it: with no lock of the
+ * library held, on the thread that delivers (the read task, or the thread
+ * whose zp_read or put reached it), so it may run on two threads at once and
+ * may be called again from inside itself:
  *
- *   a put        that reaches the subscriber whose callback made it answers
- *                _Z_ERR_INVALID (-75), the code a read task stopped from
- *                inside itself answers, and no subscriber of the session is
- *                handed it, where zenoh-pico would call the callback again
- *                from inside itself. A put made inside a callback that
- *                reaches only other subscribers is handed to them inside the
- *                put, as zenoh-pico's is. */
+ *   a put        made inside a subscriber's callback that reaches that same
+ *                subscriber calls the callback again from inside itself,
+ *                before the put returns, at any depth, as zenoh-pico's
+ *                recursion does; every other subscriber it reaches is
+ *                handed it inside the put as well.
+ *
+ * The library lets go of a callback once, after its last call has returned:
+ * then its drop runs, and z_undeclare_subscriber returns after it, as
+ * zenoh-pico's undeclare does. */
 
 /* ================================================ the program's transport
  *

@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::locality::Locality;
@@ -59,7 +60,7 @@ fn a_declaration_and_a_put_reach_every_face() {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
     };
     subscribe("demo/early/**");

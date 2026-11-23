@@ -8,8 +8,6 @@
 //! no query, so every operation that states one of these is refused by name and makes nothing,
 //! and the same operation stating none is made as before.
 
-use std::sync::Arc;
-
 use wz_capi_port::{
     FanoutError, LinksNotHonoured, SessionEngine, StatementNotHonoured, SubscriberSink, WireKey,
 };
@@ -75,8 +73,7 @@ fn a_stated_publish_is_refused_by_name_and_sends_nothing() {
 fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let sink: SubscriberSink =
-        Arc::new(|| Box::new(|_: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>);
+    let sink = || SubscriberSink::shared(|_: &dyn SampleView| {});
 
     let declares_before = router.seen(|s| s.declares);
     assert_eq!(
@@ -86,7 +83,7 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
             Locality::Any,
             one_link(),
             None,
-            sink.clone(),
+            sink(),
         ),
         Err(LinksNotHonoured)
     );
@@ -96,7 +93,7 @@ fn a_limited_subscriber_is_refused_by_name_and_declares_nothing() {
         Locality::Any,
         LinkRestriction::Any,
         None,
-        sink,
+        sink(),
     );
     assert!(
         matches!(taken, Ok(Some(_))),

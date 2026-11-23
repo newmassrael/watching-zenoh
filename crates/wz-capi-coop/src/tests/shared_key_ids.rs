@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, WireKey,
+    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -144,18 +144,12 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
     engine
-        .declare_subscriber_on_wire(
-            pattern,
-            wire,
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.keyexpr().to_owned());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(pattern, wire, Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.keyexpr().to_owned());
+            })
+        })
         .expect("a session with ids left declares");
     heard
 }

@@ -51,23 +51,31 @@ fn settle(engine: &Engine) {
     }
 }
 
-/// A subscriber's sink that counts the callbacks it mints: one for each declaration it is taken
-/// into, none for one refused.
-fn subscriber_sink(minted: &Arc<AtomicUsize>) -> SubscriberSink {
-    let minted = minted.clone();
-    Arc::new(move || {
-        minted.fetch_add(1, Ordering::SeqCst);
-        Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
+/// Counts its own drop.
+struct Dropped(Arc<AtomicUsize>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A subscriber's callback that counts its drop in `dropped`: held by a declaration it is taken
+/// into, let go of with one refused.
+fn subscriber_sink(dropped: &Arc<AtomicUsize>) -> SubscriberSink {
+    let guard = Dropped(dropped.clone());
+    SubscriberSink::shared(move |_sample: &dyn SampleView| {
+        let _held = &guard;
     })
 }
 
-fn declare_subscriber(engine: &Engine, key: &str, minted: &Arc<AtomicUsize>) -> Option<SubId> {
+fn declare_subscriber(engine: &Engine, key: &str, dropped: &Arc<AtomicUsize>) -> Option<SubId> {
     engine.declare_subscriber_on_wire(
         key,
         WireKey::literal(),
         Locality::Any,
         None,
-        subscriber_sink(minted),
+        subscriber_sink(dropped),
     )
 }
 
@@ -125,35 +133,35 @@ fn the_plan_lends_each_declaration_table_its_limit() {
     assert_eq!(count("interests"), Some(12));
 }
 
-/// The subscribers' table at its limit refuses one more: no id, no callback minted, nothing sent.
-/// Undeclaring one gives its row back, and the next declaration takes it.
+/// The subscribers' table at its limit refuses one more: no id, its callback let go of with the
+/// refusal, nothing sent. Undeclaring one gives its row back, and the next declaration takes it.
 #[test]
 fn a_subscriber_past_its_table_is_refused_and_sends_nothing() {
     let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(2)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
-    let minted = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
     let before = router.seen(|s| s.declares);
-    let first = declare_subscriber(&engine, "demo/s/1", &minted).expect("a row is free");
-    declare_subscriber(&engine, "demo/s/2", &minted).expect("the last row is free");
+    let first = declare_subscriber(&engine, "demo/s/1", &dropped).expect("a row is free");
+    declare_subscriber(&engine, "demo/s/2", &dropped).expect("the last row is free");
     until(&engine, "the router to see both subscribers", || {
         router.seen(|s| s.declares) >= before + 2
     });
     let seen = router.seen(|s| s.declares);
-    assert_eq!(minted.load(Ordering::SeqCst), 2);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0, "both callbacks are held");
 
-    assert_eq!(declare_subscriber(&engine, "demo/s/3", &minted), None);
+    assert_eq!(declare_subscriber(&engine, "demo/s/3", &dropped), None);
     settle(&engine);
     assert_eq!(
-        minted.load(Ordering::SeqCst),
-        2,
-        "no callback for a refusal"
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the refused callback goes with the refusal"
     );
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 
     engine.undeclare_subscriber(first);
     assert!(
-        declare_subscriber(&engine, "demo/s/3", &minted).is_some(),
+        declare_subscriber(&engine, "demo/s/3", &dropped).is_some(),
         "the row the undeclaration gave back takes the next one"
     );
 }

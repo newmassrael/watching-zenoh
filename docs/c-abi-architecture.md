@@ -105,10 +105,11 @@ not only in the total.
   pending queries and replies, interests. Routing/matching is a function over these tables. The
   callback of a local entity is stored in the entity's row (a C function pointer and context, or
   a Rust closure in a pool row); delivery calls it from the row, holding the row pinned, with no
-  intermediate lane and no copy. A callback is entered at depth 1: it is called once for each
-  delivery and nothing is held for it to be handed after it returns, so a call made from inside it
-  that would need it again (a put that reaches its own subscriber) is refused with a code
-  (`wz_ext.h`, "callbacks at depth 1").
+  intermediate lane and no copy. A callback is a `Fn`, called through a shared borrow: a C
+  closure's function, context and drop held as they are, a Rust closure an `Arc<dyn Fn + Send +
+  Sync>` as upstream zenoh's. So it is called with no lock held, from any thread and from inside
+  itself, as zenoh-pico calls it (a put a callback makes on its own subscriber's key reaches it
+  again at once; `wz_ext.h`, "callbacks"), and it is let go of once, after its last call.
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the

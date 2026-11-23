@@ -159,8 +159,24 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, SubscriberSink, TokenId, WireKey,
+    StatementNotHonoured, SubId, TokenId, WireKey,
 };
+
+/// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
+/// each face's session registers a callback of its own. A port's callback
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+pub type SubscriberSink =
+    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
+/// through a shared borrow, and the sink is let go of with the last of them, after its last call.
+pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> SubscriberSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: &dyn SampleView| sink.call(sample))
+    })
+}
 
 /// Mints one queryable callback per face.
 ///

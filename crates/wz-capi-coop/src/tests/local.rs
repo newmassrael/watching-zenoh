@@ -9,7 +9,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, WireKey};
+use wz_capi_port::{
+    FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, SubscriberSink, WireKey,
+};
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -28,18 +30,12 @@ fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<Atomic
     let count = Arc::new(AtomicUsize::new(0));
     let into = count.clone();
     let id = engine
-        .declare_subscriber_on_wire(
-            key,
-            WireKey::literal(),
-            origin,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |_: &dyn SampleView| {
-                    into.fetch_add(1, Ordering::SeqCst);
-                })
-            }),
-        )
+        .declare_subscriber_on_wire(key, WireKey::literal(), origin, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                into.fetch_add(1, Ordering::SeqCst);
+            })
+        })
         .expect("a session with ids left declares");
     (id, count)
 }
@@ -226,36 +222,70 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
     assert!(engine.write_filter_active(counting_filter));
 }
 
-/// A callback is entered at depth 1. A put one of the session's own subscribers' callbacks makes
-/// from inside itself that reaches that same subscriber is refused before any subscriber of the
-/// session is handed it, where zenoh-pico would call the callback again from inside itself, and
-/// nothing is held for the callback to be handed after it returns. The CONTROL is the outer put,
-/// handed to each of the three once, inside its call.
+/// A put a subscriber's callback makes from inside itself on its own subscriber's key reaches it
+/// again at once, from inside itself, as zenoh-pico's recursion does
+/// (`session/subscription.c`, `_z_trigger_subscriptions_impl`): each nested put is handed out to
+/// depth 3 before the one around it returns, and every other subscriber is handed each put once,
+/// the innermost first. The CONTROL is each put's answer: it reached both subscribers.
 #[test]
-fn a_put_made_inside_a_callback_that_reaches_it_is_refused_whole() {
+fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
-    let inner = Arc::new(Mutex::new(None));
-    subscribe_putting(&engine, &handed, &inner, "demo/l/fan");
+    let answers = Arc::new(Mutex::new(Vec::new()));
+    let session = Arc::downgrade(&engine);
+    let (into, said) = (handed.clone(), answers.clone());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/l/deep",
+            WireKey::literal(),
+            Locality::SessionLocal,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                let depth = sample.payload().first().copied().unwrap_or(0);
+                into.lock().unwrap().push((0, sample.payload().to_vec()));
+                if depth < 3 {
+                    if let Some(engine) = session.upgrade() {
+                        let sent = put_own(&engine, "demo/l/deep", &[depth + 1]);
+                        said.lock().unwrap().push(sent);
+                    }
+                }
+            }),
+        )
+        .expect("a session with ids left declares");
+    let into = handed.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/l/*",
+            WireKey::literal(),
+            Locality::SessionLocal,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push((1, sample.payload().to_vec()));
+            }),
+        )
+        .expect("a session with ids left declares");
 
-    put_own(&engine, "demo/l/fan", b"outer").expect("the publish is accepted");
-    assert_eq!(
-        *inner.lock().unwrap(),
-        Some(Err(FanoutError::InsideItsCallback)),
-        "the inner put reaches the callback it was made in"
-    );
-    let outer = b"outer".to_vec();
+    assert_eq!(put_own(&engine, "demo/l/deep", &[0]), Ok(2));
     assert_eq!(
         *handed.lock().unwrap(),
-        [(0, outer.clone()), (1, outer.clone()), (2, outer)],
-        "the refused put reached no subscriber, now or after the callback returned"
+        [
+            (0, vec![0]),
+            (0, vec![1]),
+            (0, vec![2]),
+            (0, vec![3]),
+            (1, vec![3]),
+            (1, vec![2]),
+            (1, vec![1]),
+            (1, vec![0]),
+        ],
+        "each nested put is handed out before the one around it goes on"
     );
+    assert_eq!(*answers.lock().unwrap(), [Ok(2), Ok(2), Ok(2)]);
 }
 
 /// A put a callback makes from inside itself that does not reach that callback's subscriber is
-/// handed to the others inside the call, as zenoh-pico's is: depth 1 holds back only the callback
-/// that runs.
+/// handed to the others inside the call, as zenoh-pico's is.
 #[test]
 fn a_put_made_inside_a_callback_reaches_the_other_subscribers_inside_it() {
     let router = Router::start(CatchAll::None);
@@ -310,22 +340,17 @@ fn subscribe_putting(
                 WireKey::literal(),
                 Locality::SessionLocal,
                 None,
-                Arc::new(move || {
-                    let handed = handed.clone();
-                    let inner = inner.clone();
-                    let session = session.clone();
-                    Box::new(move |sample: &dyn SampleView| {
-                        handed
-                            .lock()
-                            .unwrap()
-                            .push((subscriber, sample.payload().to_vec()));
-                        if subscriber == 0 && sample.payload() == b"outer" {
-                            if let Some(engine) = session.upgrade() {
-                                let sent = put_own(&engine, inner_key, b"inner");
-                                *inner.lock().unwrap() = Some(sent);
-                            }
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    handed
+                        .lock()
+                        .unwrap()
+                        .push((subscriber, sample.payload().to_vec()));
+                    if subscriber == 0 && sample.payload() == b"outer" {
+                        if let Some(engine) = session.upgrade() {
+                            let sent = put_own(&engine, inner_key, b"inner");
+                            *inner.lock().unwrap() = Some(sent);
                         }
-                    })
+                    }
                 }),
             )
             .expect("a session with ids left declares");

@@ -267,9 +267,11 @@ impl SessionEngine for RouterState {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id()?;
         // One callback for the node's one data plane, where a registry mints one for each face.
-        let host = self
-            .forwarder
-            .host_subscriber_from(keyexpr, allowed_origin, sink());
+        let host = self.forwarder.host_subscriber_from(
+            keyexpr,
+            allowed_origin,
+            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample)),
+        );
         self.engine
             .subscriptions
             .lock()

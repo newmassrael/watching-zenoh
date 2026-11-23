@@ -4180,12 +4180,6 @@ mod tokio_engine {
                 publication.key
             )
             .into(),
-            FanoutError::InsideItsCallback => zerror!(
-                "the publication on {} reached none of the session's own subscribers: it was \
-                 made from inside the callback of one of them, which is not entered again",
-                publication.key
-            )
-            .into(),
         }
     }
 

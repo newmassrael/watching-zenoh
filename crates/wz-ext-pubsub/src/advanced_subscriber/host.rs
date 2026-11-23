@@ -61,9 +61,6 @@ use super::state::{Miss, MissHandlers, RecoveryRequest, SampleMissListener, Stat
 use crate::prelude::*;
 use crate::sync::{lock_or_panic, Mutex, MutexGuard};
 
-/// One callback a subscription's sink mints: it reads each sample the subscription delivers.
-type SampleCallback = Box<dyn FnMut(&dyn SampleView) + Send>;
-
 /// Why declaring an advanced subscriber on an engine failed.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -323,20 +320,18 @@ impl EngineSubscriber {
         // The live subscription.
         let subscriber_form = form_of(forms.as_ref(), |f| f.subscriber(&base_keyexpr));
         let live_shared = Arc::clone(&shared);
-        let live_sink: SubscriberSink = Arc::new(move || -> SampleCallback {
-            let shared = Arc::clone(&live_shared);
-            Box::new(move |view: &dyn SampleView| {
-                if shared.is_closing() {
-                    return;
-                }
-                let now = shared.now_ms();
-                let request = shared.lock().handle_live(view, now);
-                // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback
-                // answer re-enters the state.
-                if let Some(request) = request {
-                    issue_recovery_query(&shared, request);
-                }
-            })
+        let live_sink = SubscriberSink::shared(move |view: &dyn SampleView| {
+            let shared = &live_shared;
+            if shared.is_closing() {
+                return;
+            }
+            let now = shared.now_ms();
+            let request = shared.lock().handle_live(view, now);
+            // Issued OUTSIDE the state lock: the get re-enters the engine, and a loopback answer
+            // re-enters the state.
+            if let Some(request) = request {
+                issue_recovery_query(shared, request);
+            }
         });
         let subscriber = declare_subscription(
             engine,
@@ -444,27 +439,25 @@ impl EngineSubscriber {
             if crate::advanced_ke::adv_ke_is_outbound_safe(&keyexpr) {
                 let form = form_of(forms.as_ref(), |f| f.heartbeat(&keyexpr));
                 let hb_shared = Arc::clone(&shared);
-                let sink: SubscriberSink = Arc::new(move || -> SampleCallback {
-                    let shared = Arc::clone(&hb_shared);
-                    Box::new(move |view: &dyn SampleView| {
-                        if shared.is_closing() || view.kind() != SampleKind::Put {
-                            return;
-                        }
-                        // Sequenced only: a heartbeat's payload IS a sequence number.
-                        let Some(AdvPublisherSource::Sequenced { zid, eid }) =
-                            parse_heartbeat_source(view.keyexpr())
-                        else {
-                            return;
-                        };
-                        let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
-                            return;
-                        };
-                        let now = shared.now_ms();
-                        let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
-                        if let Some(request) = request {
-                            issue_recovery_query(&shared, request);
-                        }
-                    })
+                let sink = SubscriberSink::shared(move |view: &dyn SampleView| {
+                    let shared = &hb_shared;
+                    if shared.is_closing() || view.kind() != SampleKind::Put {
+                        return;
+                    }
+                    // Sequenced only: a heartbeat's payload IS a sequence number.
+                    let Some(AdvPublisherSource::Sequenced { zid, eid }) =
+                        parse_heartbeat_source(view.keyexpr())
+                    else {
+                        return;
+                    };
+                    let Ok(last_sn) = z_deserialize::<u32>(view.payload()) else {
+                        return;
+                    };
+                    let now = shared.now_ms();
+                    let request = shared.lock().handle_heartbeat(zid, eid, last_sn, now);
+                    if let Some(request) = request {
+                        issue_recovery_query(shared, request);
+                    }
                 });
                 Some(declare_subscription(
                     engine,

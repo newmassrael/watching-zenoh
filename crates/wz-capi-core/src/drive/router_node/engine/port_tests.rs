@@ -855,8 +855,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
         "a get that states no set is the node's one leg"
     );
 
-    let sink: SubscriberSink =
-        Arc::new(|| Box::new(|_: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>);
+    let sink = || SubscriberSink::shared(|_: &dyn SampleView| {});
     assert_eq!(
         engine.declare_subscriber_on_link_set(
             key,
@@ -864,7 +863,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             Locality::Any,
             one,
             None,
-            sink.clone()
+            sink()
         ),
         Err(LinksNotHonoured),
         "a limited subscriber"
@@ -876,7 +875,7 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
             Locality::Any,
             LinkRestriction::Any,
             None,
-            sink,
+            sink(),
         )
         .expect("no set is never refused")
         .expect("a node has an id for a subscriber");

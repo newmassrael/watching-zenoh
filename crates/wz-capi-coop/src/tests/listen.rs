@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -114,18 +114,12 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
-    listener.declare_subscriber_on_wire(
-        "demo/l/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
-        }),
-    );
+    listener.declare_subscriber_on_wire("demo/l/**", WireKey::literal(), Locality::Any, None, {
+        let into = into.clone();
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
+        })
+    });
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -328,18 +322,12 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
 
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
-    listener.declare_subscriber_on_wire(
-        "demo/u/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
-        }),
-    );
+    listener.declare_subscriber_on_wire("demo/u/**", WireKey::literal(), Locality::Any, None, {
+        let into = into.clone();
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
+        })
+    });
 
     let first = client(&endpoint, 0xc1);
     let second = client(&endpoint, 0xc2);
@@ -427,18 +415,12 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let endpoint = engine.listening().pop().expect("one port is bound");
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/s/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine.declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+        let count = count.clone();
+        SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    });
     // The client's open waits for the listener's answer, and this thread is what steps the
     // listener: the client opens on a thread of its own meanwhile.
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
@@ -506,18 +488,12 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let endpoint = engine.listening().pop().expect("one port is bound");
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    engine.declare_subscriber_on_wire(
-        "demo/s/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    engine.declare_subscriber_on_wire("demo/s/**", WireKey::literal(), Locality::Any, None, {
+        let count = count.clone();
+        SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    });
     let dialing = std::thread::spawn(move || client(&endpoint, 0xc1));
     reads_until(&engine, "the client's face", || engine.faces_up() == 1);
     let peer = dialing.join().expect("the client opens");
@@ -578,18 +554,12 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
     let peer = client(&endpoint, 0xc1);
     let heard = Arc::new(AtomicUsize::new(0));
     let count = heard.clone();
-    peer.declare_subscriber_on_wire(
-        "demo/rt/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let count = count.clone();
-            Box::new(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        }),
-    );
+    peer.declare_subscriber_on_wire("demo/rt/**", WireKey::literal(), Locality::Any, None, {
+        let count = count.clone();
+        SubscriberSink::shared(move |_sample: &dyn SampleView| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    });
     eventually("the listener to hold the client's face", || {
         listener.faces_up() == 1
     });

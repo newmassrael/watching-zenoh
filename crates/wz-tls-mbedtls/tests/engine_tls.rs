@@ -24,7 +24,7 @@ use rcgen::ExtendedKeyUsagePurpose;
 use common::{library, Authority, End};
 use wz_capi_coop::arena::{admitted_faces, admitted_handshakes};
 use wz_capi_coop::{CoopConfig, CoopEngine, OpenError};
-use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -205,18 +205,12 @@ fn client(
 fn hearing(session: &Engine) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
-    session.declare_subscriber_on_wire(
-        "demo/t/**",
-        WireKey::literal(),
-        Locality::Any,
-        None,
-        Arc::new(move || {
-            let into = into.clone();
-            Box::new(move |sample: &dyn SampleView| {
-                into.lock().unwrap().push(sample.payload().to_vec());
-            })
-        }),
-    );
+    session.declare_subscriber_on_wire("demo/t/**", WireKey::literal(), Locality::Any, None, {
+        let into = into.clone();
+        SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.lock().unwrap().push(sample.payload().to_vec());
+        })
+    });
     heard
 }
 

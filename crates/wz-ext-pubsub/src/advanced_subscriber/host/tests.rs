@@ -66,7 +66,7 @@ struct Script {
     legs: Mutex<usize>,
     /// What was declared and retracted, in order.
     events: Mutex<Vec<String>>,
-    subscriptions: Mutex<Vec<(SubId, String, WireKey, SubscriberSink)>>,
+    subscriptions: Mutex<Vec<(SubId, String, WireKey, Arc<SubscriberSink>)>>,
     liveliness: Mutex<Vec<(SubId, String, bool, LivelinessSink)>>,
     gets: Mutex<Vec<GetRecord>>,
     tickers: Mutex<Vec<(TickerId, u64, Tick)>>,
@@ -93,10 +93,10 @@ impl Script {
         self.events.lock().unwrap().clone()
     }
 
-    /// The `n`th subscription's callback, minted as the engine would for a face.
+    /// The `n`th subscription's callback, called as an engine calls it.
     fn callback(&self, n: usize) -> SampleFn {
         let sink = Arc::clone(&self.subscriptions.lock().unwrap()[n].3);
-        sink()
+        Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample))
     }
 
     fn get_count(&self) -> usize {
@@ -164,7 +164,7 @@ impl SessionEngine for Script {
         self.subscriptions
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), wire, sink));
+            .push((id, keyexpr.to_owned(), wire, Arc::new(sink)));
         Some(id)
     }
     fn undeclare_subscriber(&self, id: SubId) {

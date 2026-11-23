@@ -1067,30 +1067,38 @@ impl OwnMappingSpace for SessionKeyexprs {
 unsafe impl Send for SessionKeyexprs {}
 unsafe impl Sync for SessionKeyexprs {}
 
-/// What a subscriber's sink mints: the callback a sample is handed to.
-type SubscriberCallbackFn = Box<dyn FnMut(&dyn SampleView) + Send + 'static>;
-
-/// A subscriber's callback, as the ABI's sink minted it: locked while it runs, so a delivery from
-/// the read task and one from the program's own `zp_read` never overlap, and retired when its
+/// A subscriber's callback, as the ABI handed it ([`SubscriberSink`]), and whether it is shown each
+/// sample's timestamp (`entity-timestamp-opt-in`). It is called through a shared borrow with no
+/// lock: a delivery of the read task, one of the program's own `zp_read` and a put its own
+/// callback makes reach it at once and at any depth, as zenoh-pico's do. It is retired when its
 /// subscriber is undeclared or its session closed, so a delivery that copied it out of the
-/// subscriber's row before hands it nothing more.
+/// subscriber's row before hands it nothing more; the sink is let go of with the last copy, after
+/// the last call has returned.
 pub(crate) struct LiveCallback {
     live: AtomicBool,
-    call: Mutex<SubscriberCallbackFn>,
+    expose: bool,
+    call: SubscriberSink,
 }
 
 impl LiveCallback {
-    pub(crate) fn new(call: SubscriberCallbackFn) -> Self {
+    pub(crate) fn new(call: SubscriberSink, expose: bool) -> Self {
         Self {
             live: AtomicBool::new(true),
-            call: Mutex::new(call),
+            expose,
+            call,
         }
     }
 
-    /// Hand `sample` to the callback, unless it was retired.
+    /// Hand `sample` to the callback, unless it was retired: the one place a sample is handed to
+    /// a subscriber's callback.
     pub(crate) fn hand(&self, sample: &dyn SampleView) {
-        if self.live.load(Ordering::Acquire) {
-            (lock(&self.call))(sample);
+        if !self.live.load(Ordering::Acquire) {
+            return;
+        }
+        if self.expose {
+            self.call.call(sample);
+        } else {
+            self.call.call(&HiddenTimestamp(sample));
         }
     }
 
@@ -1905,15 +1913,6 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
         event,
         wz_session_core::driver_loop::IterationEvent::InPlace(record) if record.push().is_some()
     )
-}
-
-/// A subscriber's `callback`, shown each sample's timestamp when `expose` and none otherwise
-/// (`entity-timestamp-opt-in`): the one place a sample is handed to a subscriber's callback.
-fn sample_shown(expose: bool, mut callback: SubscriberCallbackFn) -> SubscriberCallbackFn {
-    if expose {
-        return callback;
-    }
-    Box::new(move |sample: &dyn SampleView| callback(&HiddenTimestamp(sample)))
 }
 
 /// A get's leg `callback`, shown each reply's timestamp when `expose` and none otherwise
@@ -4340,13 +4339,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// lock of the library held. Whether anything was handed.
     fn hand_out_pending(&self) -> bool {
         self.samples
-            .deliver_pending(|subscriber, callback, sample| {
-                #[cfg(feature = "local-subscriber")]
-                let _running = self.deliveries.run(TargetKey::Subscriber(subscriber));
-                #[cfg(not(feature = "local-subscriber"))]
-                let _ = subscriber;
-                callback.hand(sample);
-            })
+            .deliver_pending(|_subscriber, callback, sample| callback.hand(sample))
     }
 
     /// Hand what the session's lane holds to the callbacks it is for, the oldest first. Whether
@@ -4423,20 +4416,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         sample: &dyn SampleView,
         subscribers: impl Iterator<Item = SubId>,
     ) {
-        let hand = |id: SubId, callback: &SubscriberCallback| {
-            #[cfg(feature = "local-subscriber")]
-            let _running = self.deliveries.run(TargetKey::Subscriber(id));
-            #[cfg(not(feature = "local-subscriber"))]
-            let _ = id;
-            callback.hand(sample);
-        };
         for (at, id) in subscribers.enumerate() {
             if at < RESOLVED_SUBSCRIBERS {
                 if let Some(callback) = self.resolved_subscriber_callback(resolved, at, id) {
-                    hand(id, callback);
+                    callback.hand(sample);
                 }
             } else if let Some(callback) = self.subscriber_callback(id) {
-                hand(id, &callback);
+                callback.hand(sample);
             }
         }
     }
@@ -4784,13 +4770,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
     /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
-    /// it here, with no lock of the session held, inside the put as zenoh-pico's does, by the
-    /// callback each one's row holds, copied out under the session's lock. A callback another
-    /// thread is running is waited for, as pico's lock is. A callback is entered at depth 1: one
-    /// the putting thread is inside of is not called again from inside itself, where pico's would
-    /// be, and nothing is held for it until it returns, so a put that reaches it is refused before
-    /// any subscriber is handed it ([`FanoutError::InsideItsCallback`]). The number of subscribers
-    /// reached.
+    /// it here, with no lock of the session held, inside the put as zenoh-pico's does
+    /// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), by the
+    /// callback each one's row holds, copied out under the session's lock. A callback is called
+    /// through a shared borrow ([`LiveCallback`]): one running on another thread is called beside
+    /// it, and one the putting thread is inside of is called again from inside itself, as pico's
+    /// is, so a put a callback makes on its own subscriber's key reaches it at once, at any depth.
+    /// The number of subscribers reached.
     #[cfg(feature = "local-subscriber")]
     fn publish_to_subscribers(
         &self,
@@ -4818,18 +4804,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The callbacks copied out are let go of with no lock of the session held, the last of
         // them perhaps the program's own drop of its closure.
         drop(core);
-        if reached
-            .iter()
-            .any(|(id, _)| self.deliveries.runs_here(TargetKey::Subscriber(*id)))
-        {
-            return Err(FanoutError::InsideItsCallback);
-        }
         {
             // A callback that steps the session from inside the put hands out nothing itself, as
             // one inside a delivery does.
             let _delivering = self.deliveries.enter();
-            for (id, callback) in reached.iter() {
-                let _running = self.deliveries.run(TargetKey::Subscriber(*id));
+            for (_, callback) in reached.iter() {
                 callback.hand(&sample);
             }
         }
@@ -5627,10 +5606,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         // The declaration states no choice about the timestamp, so it takes the session's
         // `entity-timestamp-opt-in`, as the policy the session was opened under resolves it.
-        let callback: SubscriberCallback = Arc::new(LiveCallback::new(sample_shown(
-            exposed_by(&core.policy),
-            sink(),
-        )));
+        let callback: SubscriberCallback =
+            Arc::new(LiveCallback::new(sink, exposed_by(&core.policy)));
         if let Some((_, row)) = core.registry.borrow_mut().app.subscribers.row_at_mut(at) {
             row.callback = Some(Arc::clone(&callback));
         }

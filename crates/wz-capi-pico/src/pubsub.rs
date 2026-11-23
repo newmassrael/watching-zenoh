@@ -47,24 +47,21 @@ use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
 use crate::prelude::*;
 use crate::result::{
-    ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
+    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, WireKey};
+use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
 /// (`Z_ERR_TRANSPORT_TX_FAILED`, which pico's put answers when its held transmit lock dropped the
-/// message), one made from inside the callback of a subscriber of the session it reaches pico's
-/// invalid-call error (`_Z_ERR_INVALID`, which a read task stopped from inside itself answers too),
-/// and any other refusal the generic error.
+/// message), and any other refusal the generic error.
 fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
     match sent {
         Ok(_) => Z_OK,
         Err(FanoutError::HeldConduit) => Z_ERR_TRANSPORT_TX_FAILED,
-        Err(FanoutError::InsideItsCallback) => Z_EINVAL,
         Err(_) => Z_ERR_GENERIC,
     }
 }
@@ -72,7 +69,7 @@ fn publish_code(sent: Result<usize, FanoutError>) -> ZResult {
 #[cfg(test)]
 mod publish_code_tests {
     use super::publish_code;
-    use crate::result::{Z_EINVAL, Z_ERR_GENERIC, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
+    use crate::result::{Z_ERR_GENERIC, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
     use wz_capi_port::FanoutError;
 
     /// A publication dropped behind a held conduit answers pico's code for a failed send; one the
@@ -89,7 +86,6 @@ mod publish_code_tests {
             publish_code(Err(FanoutError::ExceedsCapacity)),
             Z_ERR_GENERIC
         );
-        assert_eq!(publish_code(Err(FanoutError::InsideItsCallback)), Z_EINVAL);
     }
 }
 
@@ -641,29 +637,61 @@ pub(crate) fn make_liveliness_callback(
 pub(crate) fn make_subscriber_callback(
     closure: Arc<CClosure>,
 ) -> impl FnMut(&dyn SampleView) + Send + 'static {
-    move |view: &dyn SampleView| {
-        let call = match closure.call {
-            Some(f) => f,
-            None => return,
-        };
-        // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
-        let mut marshal = unsafe { SampleMarshal::lent(view) };
-        // Bind AFTER the move out of `lent` — the marshal is at its final
-        // address only here. See `SampleMarshal::bind`.
-        marshal.bind();
-        let sample_ptr = marshal.as_loaned();
-        // SAFETY: `call` is the C callback; `marshal` outlives the call and the
-        // borrowed sample is valid only for its duration (pico contract).
-        // `context` travels with the drive dispatch. A panic unwinding OUT of
-        // the C callback across this `extern "C"` boundary is UB and would tear
-        // down the drive thread, so it is caught here — the drive loop survives
-        // a misbehaving callback.
-        let ctx = closure.context.0;
-        let _in_callback = crate::ffi::InCallback::enter();
-        let _ = crate::ffi::catch(|| unsafe {
-            call(sample_ptr, ctx);
-        });
+    move |view: &dyn SampleView| hand_sample(&closure, view)
+}
+
+/// Hand `view` to the C callback of `closure`, marshalled into the borrowed `z_loaned_sample_t`
+/// it reads for the length of the call.
+fn hand_sample(closure: &CClosure, view: &dyn SampleView) {
+    let call = match closure.call {
+        Some(f) => f,
+        None => return,
+    };
+    // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+    let mut marshal = unsafe { SampleMarshal::lent(view) };
+    // Bind AFTER the move out of `lent` — the marshal is at its final
+    // address only here. See `SampleMarshal::bind`.
+    marshal.bind();
+    let sample_ptr = marshal.as_loaned();
+    // SAFETY: `call` is the C callback; `marshal` outlives the call and the
+    // borrowed sample is valid only for its duration (pico contract).
+    // `context` travels with the drive dispatch. A panic unwinding OUT of
+    // the C callback across this `extern "C"` boundary is UB and would tear
+    // down the drive thread, so it is caught here — the drive loop survives
+    // a misbehaving callback.
+    let ctx = closure.context.0;
+    let _in_callback = crate::ffi::InCallback::enter();
+    let _ = crate::ffi::catch(|| unsafe {
+        call(sample_ptr, ctx);
+    });
+}
+
+/// A C subscriber's closure as the engine holds it: the closure moved into one allocation at the
+/// declaration, its address the context of a raw callback ([`SubscriberSink::raw`]). The engine
+/// calls it through a shared borrow, from any thread and from inside itself, as zenoh-pico calls a
+/// subscription's callback with no lock held (`session/subscription.c`,
+/// `_z_trigger_subscriptions_impl`); it lets go of it once, after its last call, which drops the
+/// closure: its C `drop(context)` runs and its latch opens.
+fn subscriber_sink(closure: CClosure) -> SubscriberSink {
+    /// # Safety
+    /// `context` is the closure `subscriber_sink` moved into its allocation, not yet dropped.
+    unsafe fn call(context: *mut c_void, view: &dyn SampleView) {
+        // SAFETY: the caller's contract.
+        let closure = unsafe { &*context.cast::<CClosure>().cast_const() };
+        hand_sample(closure, view);
     }
+    /// # Safety
+    /// As `call`'s, and nothing calls it again.
+    unsafe fn release(context: *mut c_void) {
+        // SAFETY: the caller's contract: the allocation is `subscriber_sink`'s, given back once.
+        drop(unsafe { Box::from_raw(context.cast::<CClosure>()) });
+    }
+    let context = Box::into_raw(Box::new(closure)).cast::<c_void>();
+    // SAFETY: `call` reads the closure behind `context` through a shared borrow, which a C
+    // closure admits from any thread and from inside itself (pico calls it so, and `CClosure` is
+    // `Sync` for this plane); `release` gives the allocation back once, which the engine does
+    // after the last call.
+    unsafe { SubscriberSink::raw(call, context, Some(release)) }
 }
 
 /// pico `z_timestamp_t` (`protocol/core.h:116-120`), 32 B measured:
@@ -2990,13 +3018,12 @@ unsafe fn declare_subscriber_with(
     // A session that holds no more subscribers, its table at the limit it opened under or its
     // declaration ids spent, refuses the subscriber as pico refuses an entity it cannot hold;
     // the engine dropped the sink, so the closure's drop has run.
-    let closure = Arc::new(cclosure);
     let Some(id) = engine.declare_subscriber_on_wire(
         ke,
         wire,
         subscriber_origin(options),
         retraction,
-        Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>),
+        subscriber_sink(cclosure),
     ) else {
         return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };

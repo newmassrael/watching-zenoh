@@ -223,7 +223,7 @@ mod stalled_link {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use wz_capi_port::{FanoutError, SessionDrive, SessionEngine, WireKey};
+    use wz_capi_port::{FanoutError, SessionDrive, SessionEngine, SubscriberSink, WireKey};
     use wz_session_core::locality::Locality;
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::publish_options::PublishOptions;
@@ -531,14 +531,14 @@ mod stalled_link {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(move || {
+            {
                 let into = Arc::clone(&into);
-                Box::new(move |sample: &dyn SampleView| {
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
                     if sample.payload() == b"beside" {
                         into.fetch_add(1, Ordering::SeqCst);
                     }
                 })
-            }),
+            },
         );
         SessionDrive::start_read_task(&*reading).expect("the reading client's read task starts");
         let started = Instant::now();

@@ -177,13 +177,10 @@ impl NodeGroup {
             .map_err(|_| NodeGroupError::Refused("the join could not be announced"))?;
 
         let heard = Arc::clone(&copy);
-        let sink: SubscriberSink = Arc::new(move || {
-            let heard = Arc::clone(&heard);
-            Box::new(move |sample: &dyn SampleView| {
-                if let Ok(event) = decode_net_event(sample.payload()) {
-                    heard.heard(event);
-                }
-            })
+        let sink = SubscriberSink::shared(move |sample: &dyn SampleView| {
+            if let Ok(event) = decode_net_event(sample.payload()) {
+                heard.heard(event);
+            }
         });
         let subscriber = engine
             .declare_subscriber_on_wire(&event_key, WireKey::literal(), Locality::Any, None, sink)

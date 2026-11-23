@@ -1229,7 +1229,10 @@ fn a_captured_offer_copies_the_rows_callback_and_queues_nothing() {
     use alloc::sync::Arc;
 
     let lane = SharedLane::new(lane(64, 4));
-    let callback = Arc::new(LiveCallback::new(Box::new(|_: &dyn SampleView| {})));
+    let callback = Arc::new(LiveCallback::new(
+        wz_capi_port::SubscriberSink::shared(|_: &dyn SampleView| {}),
+        true,
+    ));
     // SAFETY (each call): this thread is the lane's one writer.
     unsafe { lane.capture() };
     unsafe { lane.offer_to(3, Some(&callback), &filled(8, 1)) };
@@ -1369,16 +1372,17 @@ type Noted = std::sync::Arc<std::sync::Mutex<Vec<(u8, u8, usize)>>>;
 /// byte and where its payload lies.
 fn noting(tag: u8, seen: &Noted) -> crate::engine::SubscriberCallback {
     let seen = seen.clone();
-    alloc::sync::Arc::new(crate::engine::LiveCallback::new(Box::new(
-        move |sample: &dyn SampleView| {
+    alloc::sync::Arc::new(crate::engine::LiveCallback::new(
+        wz_capi_port::SubscriberSink::shared(move |sample: &dyn SampleView| {
             let payload = sample.payload();
             seen.lock().unwrap().push((
                 tag,
                 payload.first().copied().unwrap_or(0),
                 payload.as_ptr() as usize,
             ));
-        },
-    )))
+        }),
+        true,
+    ))
 }
 
 /// The samples of a datagram a link lends, offered while the lane holds nothing, are held in the
