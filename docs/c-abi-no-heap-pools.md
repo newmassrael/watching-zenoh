@@ -616,7 +616,7 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
 units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, U14 in part, U15's scouting delivery,
-the peer-written tables of section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
+the peer-written tables of section 4.5, the links' reassembly of section 4.9 and the hosts' half of U11), read from the source and to be confirmed by the symbol diff of the library, and the
 unit that takes each away:
 
 | what | where | taken away by |
@@ -636,6 +636,8 @@ unit that takes each away:
 | a scouting window's actions, its Scout, the first locator and the ignored record, and its read buffer | `wz-session-core` `scouting_host.rs`; `wz-capi-coop` `scout.rs`, `scout_datagram.rs` | U15's remainder: the window's state in a place of its holder, its buffers lent |
 | the wait of a session on the program's time base (an `Arc` for each `ClockMoves::moved`) | `wz-capi-pico` `time_base.rs`; `wz-capi-coop` `ClockMoves` | U15's remainder: a wait that borrows the time base |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
+| the OS layer of a host library without `std` (`os-posix`, `os-windows`): a thread's start record, its boxed body and its end flag (the read task's and a reception supervisor's polling task's), the start record of each `z_task_init` on Windows, and the list of sockets each wait over several links named to the system | `wz-host-sync` `lib.rs` (`spawn_fn`), `wz-capi-port` `os.rs` (`sys::spawn`), `wz-capi-pico` `os/windows.rs` (`task_spawn`), `wz-runtime-posix` `net.rs` and `windows/mod.rs` (`wait_ready_among`) | done (U11, the hosts' half, one structure on both systems): a thread's body and the word its end sets lie in a record of a static pool of `wz_host_sync::THREADS`, given back at the join or, for a thread dropped unjoined, when its body returns, a spawn past them refused as one the system refuses; a program's task takes its function and argument from the spawning frame, which waits until it has; a wait's set lies on the waiting stack, `WAIT_SET_SOCKETS` sockets as zenoh-pico's Windows wait is an `fd_set` of 64 there, a wait over more the bounded look. The locks and condition variables were one word of their owner's already, with no system object of their own, and a thread's stack is the system's, as zenoh-pico's tasks' are |
+| a host link's waits handed to the session: the boxed duplicate of its socket (`FdReadiness`, `SocketReadiness`) that each dial and each accepted link makes, the `Arc` the engine makes of it, and a wait for room as well (`AndRoom::of`) for each wait on a link that owes a write; the scouting window's list of its members' sockets for each wait (`ScoutMembers::wait`, `wait_readable_any`) | `wz-runtime-posix` `net.rs`, `windows/mod.rs`, `scouting.rs`; `wz-runtime-coop` `session_drive.rs`; `wz-capi-coop` `engine.rs` | U10's and U11's remainder: the wait a value the link lends (`SessionDatagramLink::readiness`) and not a box, the set of the session's waits kept in its arena; the window's under U15 |
 
 ## 8. The decisions this design rests on
 
