@@ -1828,8 +1828,6 @@ pub mod sorted_chunks;
 // Open-debt item 924, step 5 — the arithmetic a holder's memory report shares.
 // Undocumented on this line for the reason the module above gives.
 #[cfg(feature = "alloc")]
-// Totality debt TD-120 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod heap_account;
 
 // The earliest instant a front-trimmed list holds, kept as its rows come and go,
