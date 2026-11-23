@@ -460,9 +460,9 @@ impl<'a> PublishOptions<'a> {
 
     /// R233 — extract the wire-encoder-facing metadata bundle so an engine can hand it to the
     /// Push builder without the lower module learning about [`Locality`] / [`Reliability`] /
-    /// [`SampleKind`] (those stay on the dispatch-time surface). Clones each owned slot — the
-    /// expected publish path performs one extraction per publish call so the allocation cost is
-    /// amortised against the wire frame's existing copies.
+    /// [`SampleKind`] (those stay on the dispatch-time surface). The timestamp, the encoding and the
+    /// attachment are lent from these options; only a timestamp stack, in a build that has one, is
+    /// copied.
     ///
     /// R311y309 — every field is threaded through its OWN gate. The wire ENCODER already drops
     /// an un-composed field at its SSOT gate-point, so gating here is redundant for the bytes —
