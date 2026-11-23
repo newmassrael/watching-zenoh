@@ -659,7 +659,9 @@ impl GroupKeyexprs {
 
     /// Send every owed answer through `producer`, with the lock let go: a push may wait for room.
     fn answer(&self, producer: &crate::multicast_pipeline::MulticastTxProducer) {
-        let answers = self.state().take_answers();
+        let mut answers = Vec::new();
+        self.state()
+            .take_answers(|reply| answers.push(reply.to_item()));
         for item in answers {
             let _ = producer.push(item);
         }

@@ -3745,3 +3745,109 @@ mod lent_emit_tests {
         assert_eq!(sent, heap);
     }
 }
+
+/// A group's declaration written from its parts is the bytes its owned builder builds, framed as the
+/// owned one is.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-declare"
+))]
+mod group_declarations_written_from_parts {
+    use super::*;
+    use crate::declare_form::{GroupDeclaration, GroupKey};
+
+    /// The bytes `body` writes.
+    fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        bytes
+    }
+
+    /// Every kind this build has a declaration plane of.
+    fn kinds() -> Vec<GroupDeclaration> {
+        let mut kinds = Vec::new();
+        #[cfg(feature = "declare-subscriber")]
+        kinds.push(GroupDeclaration::Subscriber);
+        #[cfg(feature = "declare-queryable")]
+        kinds.push(GroupDeclaration::Queryable { complete: true });
+        #[cfg(feature = "declare-queryable")]
+        kinds.push(GroupDeclaration::Queryable { complete: false });
+        #[cfg(feature = "liveliness-token")]
+        kinds.push(GroupDeclaration::Token);
+        kinds
+    }
+
+    /// The keys a group names: a literal, an alias with a suffix, an alias alone, and a multi-byte
+    /// id.
+    fn keys() -> [GroupKey<'static>; 4] {
+        [
+            GroupKey {
+                mapping_id: 0,
+                suffix: Some("demo/group/a"),
+            },
+            GroupKey {
+                mapping_id: 7,
+                suffix: Some("/**"),
+            },
+            GroupKey {
+                mapping_id: 7,
+                suffix: None,
+            },
+            GroupKey {
+                mapping_id: 300,
+                suffix: Some("/x"),
+            },
+        ]
+    }
+
+    /// A retraction written from its parts is `build_group_retraction`'s bytes (the
+    /// `build_undeclare_*_on_wire` form, the key in its `ext_keyexpr`), counted as long as it is,
+    /// and framed as a declaration. Turned red by a retraction that names its key apart from the
+    /// owned one, or by one that drops the key.
+    #[test]
+    fn a_group_retraction_written_from_its_parts_is_its_builders_bytes() {
+        let mut compared = 0usize;
+        for what in kinds() {
+            for key in keys() {
+                let owned = crate::declare_build::build_group_retraction(what, 5, key)
+                    .expect("an owned retraction");
+                let expected = written(&crate::frame_encode::declare_body(&owned));
+                let (bytes, size, framing) = multicast_tx_group_retraction(what, 5, key, |m| {
+                    (written(m.body), m.size, m.framing)
+                })
+                .expect("a retraction written from its parts");
+                assert_eq!(bytes, expected, "{what:?} on {key:?}");
+                assert_eq!(size, expected.len());
+                assert_eq!(
+                    framing,
+                    MulticastTxFraming::Control {
+                        qos: crate::declare_ext_qos::read_declare_qos(&owned),
+                    }
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, kinds().len() * keys().len());
+    }
+
+    /// An announcement written from its parts is `build_group_announcement`'s bytes. Turned red by a
+    /// writer that announces another id, key or queryable info than the owned builder.
+    #[test]
+    fn a_group_announcement_written_from_its_parts_is_its_builders_bytes() {
+        let mut compared = 0usize;
+        for what in kinds() {
+            for key in keys() {
+                let owned = crate::declare_build::build_group_announcement(what, 5, key)
+                    .expect("an owned announcement");
+                let expected = written(&crate::frame_encode::declare_body(&owned));
+                let bytes = multicast_tx_group_announcement(what, 5, key, |m| written(m.body))
+                    .expect("an announcement written from its parts");
+                assert_eq!(bytes, expected, "{what:?} on {key:?}");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, kinds().len() * keys().len());
+    }
+}

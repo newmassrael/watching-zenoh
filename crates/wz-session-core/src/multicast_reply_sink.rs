@@ -368,11 +368,12 @@ impl GroupKeyexprAnswers {
         });
     }
 
-    /// Every owed answer, in the order it is sent, and none owed after: each declared keyexpr
-    /// that meets the interest's key, then the final when nothing else ends the interest. The
-    /// engine queues them on the group, with its own lock let go when a push may wait for room.
-    pub fn take_answers(&mut self) -> alloc::vec::Vec<MulticastTxItem> {
-        let mut answers = alloc::vec::Vec::new();
+    /// Every owed answer handed to `each`, in the order it is sent, lent for the call, and none
+    /// owed after: each declared keyexpr that meets the interest's key, then the final when nothing
+    /// else ends the interest. An engine whose reply backing does not wait puts each on the group
+    /// at once; one whose push may wait for room keeps a copy ([`MulticastTxReply::to_item`]) and
+    /// queues it with its own lock let go.
+    pub fn take_answers(&mut self, mut each: impl FnMut(MulticastTxReply<'_>)) {
         for ask in core::mem::take(&mut self.owed) {
             for (mapping_id, keyexpr) in &self.declared {
                 if ask.restriction.as_deref().is_some_and(|restriction| {
@@ -385,20 +386,15 @@ impl GroupKeyexprAnswers {
                     *mapping_id,
                     keyexpr,
                 ) {
-                    answers.push(MulticastTxItem::DeclareReply {
-                        declare: alloc::boxed::Box::new(declare),
-                    });
+                    each(MulticastTxReply::DeclareReply(&declare));
                 }
             }
             if ask.ends {
-                answers.push(MulticastTxItem::DeclareReply {
-                    declare: alloc::boxed::Box::new(
-                        crate::declare_build::build_declare_final_reply(ask.interest_id),
-                    ),
-                });
+                each(MulticastTxReply::DeclareReply(
+                    &crate::declare_build::build_declare_final_reply(ask.interest_id),
+                ));
             }
         }
-        answers
     }
 }
 
@@ -480,14 +476,12 @@ mod tests {
         let mut owed = false;
         crate::driver_loop::deliver_frame(&frame, |event| owed = answers.asked(&event));
         assert!(owed);
-        let replies: Vec<_> = answers
-            .take_answers()
-            .into_iter()
-            .map(|item| match item {
-                MulticastTxItem::DeclareReply { declare } => *declare,
-                _ => panic!("an answer is a declaration reply"),
-            })
-            .collect();
+        let mut replies = Vec::new();
+        answers.take_answers(|reply| match reply {
+            MulticastTxReply::DeclareReply(declare) => replies.push(declare.clone()),
+            #[allow(unreachable_patterns)]
+            _ => panic!("an answer is a declaration reply"),
+        });
         assert_eq!(
             replies,
             [
@@ -495,6 +489,8 @@ mod tests {
                 build_declare_final_reply(42),
             ]
         );
-        assert!(answers.take_answers().is_empty(), "an answer is taken once");
+        let mut again = 0usize;
+        answers.take_answers(|_| again += 1);
+        assert_eq!(again, 0, "an answer is taken once");
     }
 }
