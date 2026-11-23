@@ -249,7 +249,7 @@ impl SessionEngine for SharedSession {
 
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
@@ -257,7 +257,7 @@ impl SessionEngine for SharedSession {
     ) -> Option<SubId> {
         SharedSession::declare_subscriber_on_wire(
             self,
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             allowed_origin,
             retraction,
@@ -269,8 +269,8 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_subscriber(self, id)
     }
 
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
-        SharedSession::acquire_keyexpr(self, keyexpr)
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
+        SharedSession::acquire_keyexpr(self, keyexpr.to_owned())
     }
 
     fn release_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
@@ -284,22 +284,32 @@ impl SessionEngine for SharedSession {
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
     ) -> MatchId {
-        SharedSession::declare_plane_matching_listener(self, plane, keyexpr, sink, count_local)
+        SharedSession::declare_plane_matching_listener(
+            self,
+            plane,
+            keyexpr.to_owned(),
+            sink,
+            count_local,
+        )
     }
 
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
     ) -> Option<MatchId> {
         Some(SharedSession::declare_matching_listener_in(
-            self, plane, keyexpr, sink, locality,
+            self,
+            plane,
+            keyexpr.to_owned(),
+            sink,
+            locality,
         ))
     }
 
@@ -321,12 +331,12 @@ impl SessionEngine for SharedSession {
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
     ) -> Option<FilterId> {
-        SharedSession::declare_write_filter(self, plane, keyexpr, wire, ask, count_local)
+        SharedSession::declare_write_filter(self, plane, keyexpr.to_owned(), wire, ask, count_local)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {
@@ -371,7 +381,7 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "queryable")]
     fn declare_queryable_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -379,7 +389,7 @@ impl SessionEngine for SharedSession {
         sink: wz_capi_port::QueryableSink,
     ) -> Option<wz_capi_port::QblId> {
         self.declare_port_queryable_on_links(
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             complete,
             allowed_origin,
@@ -414,13 +424,13 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Option<wz_capi_port::TokenId> {
         SharedSession::declare_liveliness_token_on_wire(
             self,
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             crate::runtime::session::LivelinessOptions::new()
                 .with_retraction_naming_the_key(retraction.is_some()),
@@ -449,7 +459,7 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         sink: wz_capi_port::LivelinessSink,
@@ -457,7 +467,13 @@ impl SessionEngine for SharedSession {
         // `#[non_exhaustive]`: built from its default and narrowed.
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
-        SharedSession::declare_liveliness_subscriber_on_wire(self, keyexpr, wire, options, sink)
+        SharedSession::declare_liveliness_subscriber_on_wire(
+            self,
+            keyexpr.to_owned(),
+            wire,
+            options,
+            sink,
+        )
     }
 
     #[cfg(feature = "query")]
@@ -526,7 +542,7 @@ impl SessionEngine for SharedSession {
 
     fn declare_subscriber_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         links: LinkRestriction,
@@ -535,7 +551,7 @@ impl SessionEngine for SharedSession {
     ) -> Result<Option<SubId>, LinksNotHonoured> {
         Ok(SharedSession::declare_subscriber_on_links(
             self,
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             allowed_origin,
             links,
@@ -548,7 +564,7 @@ impl SessionEngine for SharedSession {
     #[allow(clippy::too_many_arguments)]
     fn declare_queryable_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -557,7 +573,7 @@ impl SessionEngine for SharedSession {
         sink: wz_capi_port::QueryableSink,
     ) -> Result<Option<wz_capi_port::QblId>, LinksNotHonoured> {
         Ok(self.declare_port_queryable_on_links(
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             complete,
             allowed_origin,
@@ -570,14 +586,14 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_token_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
     ) -> Result<Option<wz_capi_port::TokenId>, LinksNotHonoured> {
         Ok(SharedSession::declare_liveliness_token_on_links(
             self,
-            keyexpr,
+            keyexpr.to_owned(),
             wire,
             crate::runtime::session::LivelinessOptions::new()
                 .with_retraction_naming_the_key(retraction.is_some()),
@@ -588,7 +604,7 @@ impl SessionEngine for SharedSession {
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_subscriber_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         links: LinkRestriction,
@@ -598,7 +614,12 @@ impl SessionEngine for SharedSession {
         let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
         options.history = history;
         Ok(SharedSession::declare_liveliness_subscriber_on_links(
-            self, keyexpr, wire, options, links, sink,
+            self,
+            keyexpr.to_owned(),
+            wire,
+            options,
+            links,
+            sink,
         ))
     }
 

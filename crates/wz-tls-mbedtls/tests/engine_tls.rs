@@ -203,7 +203,7 @@ fn hearing(session: &Engine) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::new()));
     let into = heard.clone();
     session.declare_subscriber_on_wire(
-        "demo/t/**".to_owned(),
+        "demo/t/**",
         WireKey::literal(),
         Locality::Any,
         None,

@@ -1479,7 +1479,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let wire = key.wire(&*engine);
         let released = cclosure.release_latch();
         let Some(id) = engine.declare_liveliness_subscriber_on_wire(
-            ke,
+            &ke,
             wire,
             history,
             crate::liveliness::sample_sink(cclosure),

@@ -115,7 +115,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener.declare_subscriber_on_wire(
-        "demo/l/**".to_owned(),
+        "demo/l/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -153,7 +153,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     // face, and ends when both Finals are in.
     for (peer, text) in [(&first, &b"a-first"[..]), (&second, &b"a-second"[..])] {
         peer.declare_queryable_on_wire(
-            "demo/g/**".to_owned(),
+            "demo/g/**",
             WireKey::literal(),
             false,
             Locality::Any,
@@ -329,7 +329,7 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     listener.declare_subscriber_on_wire(
-        "demo/u/**".to_owned(),
+        "demo/u/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -428,7 +428,7 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/s/**".to_owned(),
+        "demo/s/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -507,7 +507,7 @@ fn a_read_after_a_step_that_left_input_held_takes_the_session_once() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/s/**".to_owned(),
+        "demo/s/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -579,7 +579,7 @@ fn a_lone_stream_link_is_waited_on_in_its_read_and_a_listener_polls() {
     let heard = Arc::new(AtomicUsize::new(0));
     let count = heard.clone();
     peer.declare_subscriber_on_wire(
-        "demo/rt/**".to_owned(),
+        "demo/rt/**",
         WireKey::literal(),
         Locality::Any,
         None,

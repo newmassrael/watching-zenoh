@@ -135,7 +135,7 @@ impl TokenState {
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
         let Some(id) = session.engine.declare_liveliness_token_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             key.wire(&*session.engine),
             Some(key.retraction_key(&*session.engine)),
         ) else {
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let wire = key.wire(&*engine);
         let released = cclosure.release_latch();
         let Some(id) =
-            engine.declare_liveliness_subscriber_on_wire(ke, wire, history, sample_sink(cclosure))
+            engine.declare_liveliness_subscriber_on_wire(&ke, wire, history, sample_sink(cclosure))
         else {
             // The session holds no more liveliness subscribers: its table is full or its ids are
             // spent. The sink was dropped with the refusal.
@@ -676,7 +676,7 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
         let wire = key.wire(&**engine).keeping(anchor);
         keep_for_close(cclosure.release_latch());
         match engine.declare_liveliness_subscriber_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             wire,
             history,
             sample_sink(cclosure),

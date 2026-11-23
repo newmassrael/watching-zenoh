@@ -5204,7 +5204,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
@@ -5220,11 +5220,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         let lane = self.samples.clone();
         let registration = core.registry.borrow_mut().app.subscribers.register_sink(
-            &keyexpr,
+            keyexpr,
             allowed_origin,
             // SAFETY: the registry hands its sinks a sample under the session's lock.
             BoxedSink::new(move |sample: &dyn SampleView| unsafe { lane.offer_sample(id, sample) }),
@@ -5333,14 +5333,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.deliver();
     }
 
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId> {
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         let mut core = self.live()?;
         let core = &mut core.0;
-        if let Some(entry) = core
-            .keyexprs
-            .iter_mut()
-            .find(|e| e.keyexpr == keyexpr.as_str())
-        {
+        if let Some(entry) = core.keyexprs.iter_mut().find(|e| e.keyexpr == keyexpr) {
             entry.holds += 1;
             return Some(entry.id);
         }
@@ -5349,7 +5345,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if core.keyexprs.free_slots() == 0 {
             return None;
         }
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         // The id space is the wire's `ExprId`; once it is spent the counter rests at 0, the
         // literal's id, and every further declaration is refused rather than re-issuing a live
         // id.
@@ -5368,7 +5364,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // made while a link is down, or that a replay has not reached, is sent in its turn.
         let taken = core.announce_or_undo(
             Kind::Keyexpr,
-            |actions| actions.send_declare_keyexpr(id, &keyexpr).is_ok(),
+            |actions| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
             |actions| actions.send_undeclare_kexpr(id),
         );
         if !taken {
@@ -5377,7 +5373,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // And each group told the session's keyexprs, as a link is.
         #[cfg(feature = "group")]
         for group in &core.groups {
-            group.announce_keyexpr(id, &keyexpr);
+            group.announce_keyexpr(id, keyexpr);
         }
         core.next_mapping = id.wrapping_add(1);
         keep(
@@ -5428,7 +5424,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         // The session's own subscribers count with `local-subscriber` and its own queryables with
         // `local-queryable`, and nothing of its own does otherwise: zenoh-pico's default build
@@ -5449,7 +5445,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return 0;
         }
         // So does a key longer than its row holds.
-        let Some(key) = core.row_key(&keyexpr) else {
+        let Some(key) = core.row_key(keyexpr) else {
             return 0;
         };
         // A listener whose Interest the session has no id left for is not declared, as a closed
@@ -5457,10 +5453,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if !self.acquire_interest(
             core,
             plane,
-            &keyexpr,
+            keyexpr,
             &InterestForm {
                 mapping_id: 0,
-                suffix: Some(keyexpr.clone()),
+                suffix: Some(keyexpr.to_owned()),
                 aggregate: false,
             },
         ) {
@@ -5468,8 +5464,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         }
         let id = core.next_match;
         core.next_match += 1;
-        let local = count_local && Self::local_matches(core, plane, &keyexpr);
-        let now = Self::peer_matches(core, plane, &keyexpr) || local;
+        let local = count_local && Self::local_matches(core, plane, keyexpr);
+        let now = Self::peer_matches(core, plane, keyexpr) || local;
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
@@ -5478,13 +5474,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let mut registry = core.registry.borrow_mut();
             match plane {
                 FilterPlane::Subscribers => registry.watch_publishers(
-                    PublisherCriterion::new(&keyexpr, counted(plane, count_local)),
+                    PublisherCriterion::new(keyexpr, counted(plane, count_local)),
                     local,
                     report,
                 ),
                 #[cfg(any(feature = "query", feature = "queryable"))]
                 FilterPlane::Queryables { complete_required } => registry.watch_queriers(
-                    QuerierCriterion::new(&keyexpr, counted(plane, count_local), complete_required),
+                    QuerierCriterion::new(keyexpr, counted(plane, count_local), complete_required),
                     local,
                     report,
                 ),
@@ -5545,7 +5541,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         wire: &WireKey,
         ask: Option<InterestForm>,
         // See `declare_matching_listener`: the session's own subscribers count with
@@ -5575,14 +5571,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So is a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         // The id this filter spent of its own, when it spent one: its Interest's, when it is the
         // first to hold it, or the one taken for a filter that sends none.
         let mut spent = None;
         let held = match &ask {
             Some(form) => {
                 let before = core.interests.len();
-                let held = self.acquire_interest(core, plane, &keyexpr, form);
+                let held = self.acquire_interest(core, plane, keyexpr, form);
                 if held && core.interests.len() > before {
                     spent = core.interests.last().map(|hold| hold.interest_id);
                 }
@@ -5615,7 +5611,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         {
             if let Some(interest_id) = spent.or_else(|| self.next_entity_id().map(u64::from)) {
                 for group in &core.groups {
-                    group.ask_filter(id, interest_id, plane, &keyexpr, wire);
+                    group.ask_filter(id, interest_id, plane, keyexpr, wire);
                 }
             }
         }
@@ -5803,7 +5799,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "queryable")]
     fn declare_queryable_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -5818,7 +5814,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
@@ -5829,7 +5825,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .app
             .queryables
             .register_sink(
-                &keyexpr,
+                keyexpr,
                 allowed_origin,
                 complete,
                 BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
@@ -6272,7 +6268,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
@@ -6285,13 +6281,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         core.registry
             .borrow_mut()
             .app
             .local_tokens
-            .register(u64::from(id), &keyexpr)
+            .register(u64::from(id), keyexpr)
             .ok()?;
         let entry = TokenEntry {
             id,
@@ -6343,7 +6339,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     #[cfg(feature = "liveliness")]
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
@@ -6358,7 +6354,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return None;
         }
         // So does a key longer than its row holds.
-        let key = core.row_key(&keyexpr)?;
+        let key = core.row_key(keyexpr)?;
         let id = self.next_entity_id()?;
         lock(&self.targets).push((
             TargetKey::Liveliness(id),
@@ -6374,7 +6370,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         unsafe { self.samples.held() }.rehearse();
         let registered = core.registry.borrow_mut().register_liveliness_subscriber(
             u64::from(id),
-            &keyexpr,
+            keyexpr,
             history,
             liveliness::sample_sink(id, &self.samples),
         );

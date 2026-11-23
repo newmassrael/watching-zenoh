@@ -2679,7 +2679,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
         // hold; the engine dropped the sink, so the closure's drop has run.
         let Some(id) =
-            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
+            engine.declare_subscriber_on_wire(&ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             })
@@ -2768,10 +2768,16 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         drop(key);
         // No handle will undeclare this one, so the session's close waits for it.
         state.keep_background(cclosure.release_latch());
-        match engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        }) {
+        match engine.declare_subscriber_on_wire(
+            &ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            },
+        ) {
             Some(_) => Z_OK,
             // As the owned form above refuses it.
             None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,

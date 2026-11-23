@@ -145,7 +145,7 @@ fn hear(engine: &Engine, pattern: &str, wire: WireKey) -> Arc<Mutex<Vec<String>>
     let into = heard.clone();
     engine
         .declare_subscriber_on_wire(
-            pattern.to_owned(),
+            pattern,
             wire,
             Locality::Any,
             None,
@@ -227,7 +227,7 @@ fn counts_a_subscriber_declared_by_id(ids: Option<SharedKeyIds>, form: KeyWireFo
         listener
             .declare_write_filter(
                 FilterPlane::Subscribers,
-                key.to_owned(),
+                key,
                 &WireKey::literal(),
                 None,
                 false,
@@ -272,7 +272,7 @@ fn a_get_by_a_shared_id_and_the_rest_is_answered_where_the_dictionary_is_held() 
     let into = asked.clone();
     client
         .declare_queryable_on_wire(
-            "lab/q/**".to_owned(),
+            "lab/q/**",
             WireKey::literal(),
             false,
             Locality::Any,
@@ -462,7 +462,7 @@ fn reply_key_under(
         .expect("the session opens");
     engine
         .declare_queryable_on_wire(
-            "lab/q/**".to_owned(),
+            "lab/q/**",
             WireKey::literal(),
             false,
             Locality::Any,
@@ -503,11 +503,11 @@ fn a_reply_under_the_declared_form_names_its_key_whole() {
 fn the_session_declares_no_key_expression_under_an_id_of_the_dictionary() {
     let held = Arc::new(KeyIds::new([(1, "lab/one"), (2, "lab/two")]).expect("valid"));
     let (with, _) = listener(Some(held), KeyWireForm::Shared);
-    assert_eq!(with.acquire_keyexpr("lab/x".to_owned()), Some(3));
-    assert_eq!(with.acquire_keyexpr("lab/y".to_owned()), Some(4));
+    assert_eq!(with.acquire_keyexpr("lab/x"), Some(3));
+    assert_eq!(with.acquire_keyexpr("lab/y"), Some(4));
     let (without, _) = listener(None, KeyWireForm::Declared);
     assert_eq!(
-        without.acquire_keyexpr("lab/x".to_owned()),
+        without.acquire_keyexpr("lab/x"),
         Some(1),
         "CONTROL: without a dictionary the first id is 1"
     );
@@ -579,7 +579,7 @@ fn interest_keys_under(
     let engine =
         open_keyed(super::config(&router), ids, policy_of(form)).expect("the session opens");
     let declared = engine
-        .acquire_keyexpr(ASKED.to_owned())
+        .acquire_keyexpr(ASKED)
         .expect("a session with ids left declares");
     ask(&engine, declared);
     super::until(&engine, "the peer to see the Interest", || {
@@ -593,7 +593,7 @@ fn filter_by(engine: &Engine, declared: ExprId) {
     engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            ASKED.to_owned(),
+            ASKED,
             &WireKey::aliased(declared, None),
             Some(InterestForm {
                 mapping_id: declared,
@@ -637,12 +637,7 @@ fn tokens_by(engine: &Engine, declared: ExprId) {
             as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
     });
     engine
-        .declare_liveliness_subscriber_on_wire(
-            ASKED.to_owned(),
-            WireKey::aliased(declared, None),
-            false,
-            sink,
-        )
+        .declare_liveliness_subscriber_on_wire(ASKED, WireKey::aliased(declared, None), false, sink)
         .expect("the engine has liveliness");
 }
 

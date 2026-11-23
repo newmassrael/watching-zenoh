@@ -245,7 +245,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// hold being handed out again.
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
@@ -257,7 +257,7 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: its mapping id, or
     /// `None` when the session has no id left to give.
-    fn acquire_keyexpr(&self, keyexpr: String) -> Option<ExprId>;
+    fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId>;
 
     /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
     fn release_keyexpr(&self, mapping_id: ExprId);
@@ -275,7 +275,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
     ) -> MatchId;
@@ -288,7 +288,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
     ) -> Option<MatchId> {
@@ -324,7 +324,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     fn declare_write_filter(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
@@ -378,7 +378,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// provided answer, and from a session that has handed out every entity id.
     fn declare_queryable_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -422,7 +422,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// handed out every entity id.
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
@@ -443,7 +443,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// liveliness in this build, which is the provided answer.
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
@@ -521,7 +521,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// nothing is declared.
     fn declare_subscriber_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         allowed_origin: Locality,
         links: LinkRestriction,
@@ -537,7 +537,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     fn declare_queryable_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -560,7 +560,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// the nodes behind those links only.
     fn declare_liveliness_token_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
@@ -573,7 +573,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// interest is declared to the nodes behind those links only.
     fn declare_liveliness_subscriber_on_link_set(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         wire: WireKey,
         history: bool,
         links: LinkRestriction,

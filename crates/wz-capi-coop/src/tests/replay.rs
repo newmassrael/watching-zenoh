@@ -18,7 +18,7 @@ use crate::CoopConfig;
 fn subscribe(engine: &Engine, key: &str) -> SubId {
     engine
         .declare_subscriber_on_wire(
-            key.to_owned(),
+            key,
             WireKey::literal(),
             Locality::Any,
             None,

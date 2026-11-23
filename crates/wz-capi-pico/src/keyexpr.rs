@@ -347,7 +347,7 @@ impl DeclaredKeyexpr {
         }
         // A session that holds no more declarations, its table at the limit it opened under or
         // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
-        let Some(id) = shared.acquire_keyexpr(literal[..prefix_len].to_owned()) else {
+        let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {

@@ -154,7 +154,7 @@ impl WriteFilter {
         let ask = interest_form(&shared, session.mode, key, &wire);
         let keyexpr = key.literal().to_owned();
         let id = shared
-            .declare_write_filter(plane, keyexpr.clone(), &wire, ask, count_local)
+            .declare_write_filter(plane, &keyexpr, &wire, ask, count_local)
             .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
         Ok(Self {
             shared,
@@ -173,7 +173,7 @@ impl WriteFilter {
     pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> (Arc<Engine>, MatchId) {
         let id = self.shared.declare_matching_listener(
             self.plane,
-            self.keyexpr.clone(),
+            &self.keyexpr,
             sink,
             self.count_local,
         );

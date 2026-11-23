@@ -10239,7 +10239,7 @@ mod face_up_order_tests {
         });
         let limited = SessionEngine::declare_subscriber_on_link_set(
             engine,
-            "wz/link/sub".to_owned(),
+            "wz/link/sub",
             WireKey::literal(),
             Locality::Any,
             LinkRestriction::only([2]).expect("one slot"),

@@ -135,7 +135,7 @@ impl AdvancedPublisherPlane for CPlane {
                 .engine
                 .declare_write_filter(
                     FilterPlane::Subscribers,
-                    keyexpr.to_owned(),
+                    keyexpr,
                     &WireKey::literal(),
                     Some(InterestForm {
                         mapping_id: 0,
@@ -175,7 +175,7 @@ impl AdvancedPublisherPlane for CPlane {
         let id = self
             .engine
             .declare_queryable_on_wire(
-                keyexpr.to_owned(),
+                keyexpr,
                 WireKey::literal(),
                 false,
                 Locality::Any,
@@ -192,7 +192,7 @@ impl AdvancedPublisherPlane for CPlane {
     fn declare_token(&self, keyexpr: &str) -> Result<Token, AdvancedPublisherError> {
         let id = self
             .engine
-            .declare_liveliness_token_on_wire(keyexpr.to_owned(), WireKey::literal(), None)
+            .declare_liveliness_token_on_wire(keyexpr, WireKey::literal(), None)
             .ok_or_else(|| Self::refusal("liveliness token"))?;
         Ok(Token {
             engine: Arc::clone(&self.engine),

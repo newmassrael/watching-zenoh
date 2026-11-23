@@ -247,7 +247,7 @@ impl SessionEngine for RouterState {
 
     fn declare_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
@@ -258,7 +258,7 @@ impl SessionEngine for RouterState {
         // One callback for the node's one data plane, where a registry mints one for each face.
         let host = self
             .forwarder
-            .host_subscriber_from(&keyexpr, allowed_origin, sink());
+            .host_subscriber_from(keyexpr, allowed_origin, sink());
         self.engine
             .subscriptions
             .lock()
@@ -283,7 +283,7 @@ impl SessionEngine for RouterState {
         }
     }
 
-    fn acquire_keyexpr(&self, _keyexpr: String) -> Option<wz_session_core::wire_id::ExprId> {
+    fn acquire_keyexpr(&self, _keyexpr: &str) -> Option<wz_session_core::wire_id::ExprId> {
         // A node names every key whole: there is no alias to hold.
         None
     }
@@ -297,7 +297,7 @@ impl SessionEngine for RouterState {
     fn declare_matching_listener(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         count_local: bool,
     ) -> MatchId {
@@ -308,7 +308,7 @@ impl SessionEngine for RouterState {
         };
         self.watch_matching(
             plane_of(plane),
-            &keyexpr,
+            keyexpr,
             origin,
             Box::new(move |matching| sink(matching)),
         )
@@ -317,13 +317,13 @@ impl SessionEngine for RouterState {
     fn declare_matching_listener_in(
         &self,
         plane: FilterPlane,
-        keyexpr: String,
+        keyexpr: &str,
         sink: MatchingSink,
         locality: Locality,
     ) -> Option<MatchId> {
         Some(self.watch_matching(
             plane_of(plane),
-            &keyexpr,
+            keyexpr,
             locality,
             Box::new(move |matching| sink(matching)),
         ))
@@ -350,7 +350,7 @@ impl SessionEngine for RouterState {
     fn declare_write_filter(
         &self,
         _plane: FilterPlane,
-        _keyexpr: String,
+        _keyexpr: &str,
         _wire: &WireKey,
         _ask: Option<InterestForm>,
         _count_local: bool,
@@ -396,7 +396,7 @@ impl SessionEngine for RouterState {
 
     fn declare_queryable_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         complete: bool,
         allowed_origin: Locality,
@@ -406,7 +406,7 @@ impl SessionEngine for RouterState {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id()?;
         let host = self.forwarder.host_queryable_from(
-            &keyexpr,
+            keyexpr,
             complete,
             allowed_origin,
             Box::new(sink(self.query_holder())),
@@ -433,13 +433,13 @@ impl SessionEngine for RouterState {
 
     fn declare_liveliness_token_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
     ) -> Option<TokenId> {
         // The id first, so a session with none left declares nothing.
         let id = self.engine.entity_id()?;
-        let host = self.declare_token(&keyexpr);
+        let host = self.declare_token(keyexpr);
         self.engine
             .tokens
             .lock()
@@ -462,14 +462,14 @@ impl SessionEngine for RouterState {
 
     fn declare_liveliness_subscriber_on_wire(
         &self,
-        keyexpr: String,
+        keyexpr: &str,
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
     ) -> Option<SubId> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id()?;
-        let face = self.liveliness.subscribe(&keyexpr, history, sink());
+        let face = self.liveliness.subscribe(keyexpr, history, sink());
         self.engine
             .subscriptions
             .lock()

@@ -837,7 +837,7 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -958,7 +958,7 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1002,7 +1002,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1069,7 +1069,7 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1123,7 +1123,7 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     let declares_before = router.seen(|s| s.declares);
     let id = engine
         .declare_subscriber_on_wire(
-            "demo/**".to_owned(),
+            "demo/**",
             WireKey::literal(),
             Locality::Any,
             None,
@@ -1268,7 +1268,7 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/x".to_owned(),
+            "demo/x",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1340,14 +1340,14 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let (sink, told) = heard();
     let kept = Arc::downgrade(&sink);
     assert_eq!(
-        engine.declare_matching_listener(plane, "demo/q".to_owned(), sink, false),
+        engine.declare_matching_listener(plane, "demo/q", sink, false),
         0
     );
     assert!(kept.upgrade().is_none(), "the refused sink is not kept");
     assert_eq!(
         engine.declare_write_filter(
             plane,
-            "demo/q".to_owned(),
+            "demo/q",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1360,12 +1360,7 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     );
     let (sink, subscribers) = heard();
     assert_ne!(
-        engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/q".to_owned(),
-            sink,
-            false
-        ),
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/q", sink, false),
         0,
         "CONTROL: the subscribers' plane is held"
     );
@@ -1405,22 +1400,16 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
         complete_required: true,
     };
     let (sink, any) = heard();
-    let any_id = engine.declare_matching_listener(any_plane, "demo/q".to_owned(), sink, false);
+    let any_id = engine.declare_matching_listener(any_plane, "demo/q", sink, false);
     let (sink, complete) = heard();
-    engine.declare_matching_listener(complete_plane, "demo/q".to_owned(), sink, false);
+    engine.declare_matching_listener(complete_plane, "demo/q", sink, false);
     let complete_filter = engine
-        .declare_write_filter(
-            complete_plane,
-            "demo/q".to_owned(),
-            &WireKey::literal(),
-            ask(),
-            false,
-        )
+        .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
         .expect("a session with ids left declares");
     let subscriber_filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/q".to_owned(),
+            "demo/q",
             &WireKey::literal(),
             ask(),
             false,
@@ -1500,7 +1489,7 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1514,7 +1503,7 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/x".to_owned(),
+            "demo/x",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1573,7 +1562,7 @@ fn a_stepped_session_keeps_its_lease() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1623,7 +1612,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     let arrived = Arc::new(Mutex::new(None));
     let stamp = arrived.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1714,13 +1703,13 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
     let engine = open(&router);
 
     let id = engine
-        .acquire_keyexpr("demo/named".to_owned())
+        .acquire_keyexpr("demo/named")
         .expect("a key expression the link takes");
     let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let record = seen.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/named".to_owned(),
+        "demo/named",
         WireKey::aliased(id, None),
         Locality::Any,
         None,

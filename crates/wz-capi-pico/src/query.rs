@@ -1225,7 +1225,7 @@ pub(crate) fn declare_queryable_on(
     let id = session
         .engine
         .declare_queryable_on_wire(
-            keyexpr,
+            &keyexpr,
             key.wire(&*session.engine),
             complete,
             allowed_origin,

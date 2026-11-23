@@ -109,7 +109,7 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
     let into = Arc::clone(&heard);
     second
         .declare_subscriber_on_wire(
-            "demo/host-group/**".to_owned(),
+            "demo/host-group/**",
             WireKey::literal(),
             Locality::Any,
             None,

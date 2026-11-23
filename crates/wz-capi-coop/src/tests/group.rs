@@ -330,7 +330,7 @@ fn subscribe(engine: &Engine, keyexpr: &str) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let into = Arc::clone(&heard);
     engine
         .declare_subscriber_on_wire(
-            keyexpr.to_owned(),
+            keyexpr,
             WireKey::literal(),
             Locality::Any,
             None,
@@ -411,7 +411,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
     let filter = first
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/group/x".to_owned(),
+            "demo/group/x",
             &WireKey::literal(),
             None,
             false,
@@ -423,7 +423,7 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
     );
     let subscriber = second
         .declare_subscriber_on_wire(
-            "demo/group/**".to_owned(),
+            "demo/group/**",
             WireKey::literal(),
             Locality::Any,
             None,
@@ -514,7 +514,7 @@ mod asked {
     fn serve(engine: &Engine, keyexpr: &str, payload: &'static [u8]) {
         engine
             .declare_queryable_on_wire(
-                keyexpr.to_owned(),
+                keyexpr,
                 WireKey::literal(),
                 false,
                 Locality::Remote,
@@ -586,7 +586,7 @@ mod asked {
         let slot = Arc::clone(&kept);
         second
             .declare_queryable_on_wire(
-                "demo/group/**".to_owned(),
+                "demo/group/**",
                 WireKey::literal(),
                 false,
                 Locality::Remote,
@@ -756,12 +756,7 @@ mod alive {
             })
         });
         let id = engine
-            .declare_liveliness_subscriber_on_wire(
-                keyexpr.to_owned(),
-                WireKey::literal(),
-                history,
-                sink,
-            )
+            .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
             .expect("the engine has liveliness");
         (id, heard)
     }
@@ -775,7 +770,7 @@ mod alive {
         let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let _token = first
-            .declare_liveliness_token_on_wire("demo/alive/one".to_owned(), WireKey::literal(), None)
+            .declare_liveliness_token_on_wire("demo/alive/one", WireKey::literal(), None)
             .expect("the engine has liveliness");
         let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
@@ -846,7 +841,7 @@ mod mapped {
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
         until_members_know_each_other(&first, &second);
         let id = first
-            .acquire_keyexpr("demo/mapped/q".to_owned())
+            .acquire_keyexpr("demo/mapped/q")
             .expect("a session with ids left declares a keyexpr");
         eventually("the declaration to leave", || {
             carried(&network, 1, b"mapped/q")
@@ -899,7 +894,7 @@ mod mapped {
         let filter = first
             .declare_write_filter(
                 FilterPlane::Subscribers,
-                "demo/mapped/a".to_owned(),
+                "demo/mapped/a",
                 &WireKey::literal(),
                 None,
                 false,
@@ -922,7 +917,7 @@ mod mapped {
         let first = open_mapped(&network, 1).expect("the first joins");
         SessionDrive::start_read_task(&*first).expect("the first's read task starts");
         let id = first
-            .acquire_keyexpr("demo/mapped/b".to_owned())
+            .acquire_keyexpr("demo/mapped/b")
             .expect("a session with ids left declares a keyexpr");
         let second = open_mapped(&network, 2).expect("the second joins");
         SessionDrive::start_read_task(&*second).expect("the second's read task starts");
@@ -1971,7 +1966,7 @@ mod in_place {
             session
                 .declare_write_filter(
                     FilterPlane::Subscribers,
-                    key.to_owned(),
+                    key,
                     &WireKey::literal(),
                     None,
                     false,
