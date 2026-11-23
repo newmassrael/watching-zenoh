@@ -684,6 +684,30 @@ impl ApplicationLayerObserver {
             .register_sink(keyexpr_pattern, allowed_origin, sink)
     }
 
+    /// [`Self::register_subscriber`] for a callback, heard from every origin: what a program that
+    /// holds the observer itself registers a subscriber with.
+    pub fn subscribe(
+        &mut self,
+        keyexpr_pattern: &str,
+        callback: impl FnMut(&dyn crate::sink::SampleView) + Send + 'static,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.subscribe_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
+    }
+
+    /// [`Self::register_subscriber`] for a callback that hears what `allowed_origin` admits.
+    pub fn subscribe_with_locality(
+        &mut self,
+        keyexpr_pattern: &str,
+        allowed_origin: crate::locality::Locality,
+        callback: impl FnMut(&dyn crate::sink::SampleView) + Send + 'static,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.register_subscriber(
+            keyexpr_pattern,
+            allowed_origin,
+            crate::sink::BoxedSink::new(callback),
+        )
+    }
+
     /// Retire local subscription `id`, and stage what its going owes this observer's peer (the
     /// retraction of an aggregate it alone stood for): both halves in one step, as
     /// [`SubscriberRegistry::unregister`] does. Whether it was registered.
@@ -3532,6 +3556,12 @@ mod accessor_tests {
         assert!(observer.unregister_subscriber(id));
         assert!(!observer.unregister_subscriber(id));
         assert_eq!(observer.read_app(|app| app.subscribers.len()), 0);
+        let local = observer
+            .subscribe_with_locality("demo/b", crate::locality::Locality::SessionLocal, |_| {})
+            .unwrap();
+        let any = observer.subscribe("demo/b", |_| {}).unwrap();
+        assert_ne!(local, any);
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 2);
     }
 
     /// The face half is the observer's own peer side: nothing pending on a fresh observer, and the
