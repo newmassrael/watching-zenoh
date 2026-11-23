@@ -1252,12 +1252,85 @@ where
         // `MAX_ENCODED_BYTES`, which sizes a vector's first reservation and is
         // exceeded by any payload larger than it.
         let want = mtu;
+        // Whether the queue lent a slot: one that did and was refused the frame is a frame past
+        // the batch, which is cut into a chain of fragments written into slots of their own.
+        let mut lent = false;
         let mut fill = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
+            lent = true;
             crate::frame_encode::encode_frame_envelope_into(slot, sn, flags, ext_qos, &body).is_ok()
                 && crate::tx_buf::TxBuf::len(slot) <= mtu
         };
         if queue.enqueue_lent(priority, reliable, sn, want, &mut fill) {
             return PushOutcome::Pushed;
+        }
+        // A build that cuts no chain sends a frame past the batch as the heap path does.
+        #[cfg(not(feature = "transport-fragmentation"))]
+        let _ = lent;
+        #[cfg(feature = "transport-fragmentation")]
+        if lent {
+            use crate::frame_encode::{
+                encoded_body_len, write_fragment, BodyEncoder, FragmentBody, FragmentPlan,
+                FragmentSpan,
+            };
+            let encode: &BodyEncoder<'_> = &body;
+            // A message whose encoder refuses it takes the heap path below, which answers it.
+            if let Ok(body_len) = encoded_body_len(encode) {
+                let mut plan = FragmentPlan::new(body_len, mtu, sn, tx_sn.mask(), ext_qos);
+                let mut emitted = 0usize;
+                while let Some(span) = plan.next_span() {
+                    // Each fragment past the first asks for room and takes the conduit's next
+                    // SN, as the heap chain below does; one with no room stops the chain with
+                    // the drop marker, on the SN it would have taken.
+                    let span = if emitted > 0 && !has_room(queue, &mut deadline) {
+                        FragmentSpan::stop(span.sn)
+                    } else {
+                        span
+                    };
+                    if emitted > 0 {
+                        tx_sn.mint(priority, reliable);
+                    }
+                    let mut write = |slot: &mut crate::tx_buf::SliceTxBuf<'_>| {
+                        write_fragment(
+                            slot,
+                            &span,
+                            FragmentBody::Encoded(encode),
+                            reliable,
+                            ext_qos,
+                        )
+                        .is_ok()
+                    };
+                    if !queue.enqueue_lent(priority, reliable, span.sn, mtu, &mut write) {
+                        // A queue whose lend this fragment did not fit builds it on the heap.
+                        let mut bytes = Vec::new();
+                        if write_fragment(
+                            &mut bytes,
+                            &span,
+                            FragmentBody::Encoded(encode),
+                            reliable,
+                            ext_qos,
+                        )
+                        .is_ok()
+                        {
+                            enqueue_wire(
+                                queue,
+                                params,
+                                MulticastTxDatagram {
+                                    priority,
+                                    reliable,
+                                    sn: span.sn,
+                                    bytes,
+                                },
+                            );
+                        }
+                    }
+                    if span.drop_marker {
+                        return PushOutcome::Congested;
+                    }
+                    emitted += 1;
+                    deadline.next_fragment();
+                }
+                return PushOutcome::Pushed;
+            }
         }
     }
     let frame = crate::frame_encode::encode_frame_envelope(sn, flags, worst_case, ext_qos, &body);
@@ -2721,6 +2794,8 @@ mod lend_tests {
         heap: Vec<(Vec<u8>, u64)>,
         offers: usize,
         refused: usize,
+        /// How many more asks for room are answered with room.
+        room_left: usize,
     }
 
     impl Lending {
@@ -2732,12 +2807,17 @@ mod lend_tests {
                 heap: Vec::new(),
                 offers: 0,
                 refused: 0,
+                room_left: usize::MAX,
             }
         }
     }
 
     impl MulticastTxQueue for Lending {
         fn wait_for_room(&mut self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+            if self.room_left == 0 {
+                return RoomAnswer::at_once(LinkRoom::Congested);
+            }
+            self.room_left -= 1;
             RoomAnswer::at_once(LinkRoom::Free)
         }
 
@@ -2841,12 +2921,12 @@ mod lend_tests {
         );
     }
 
-    /// A frame past the group's batch is NOT sent from a slot: every offer is
-    /// refused and the message is fragmented from the heap, the very chain the
-    /// emit returns, its SNs ring-consecutive from the one minted for the lend.
+    /// A frame past the group's batch is cut into a chain whose every fragment is written into a
+    /// slot of its own: the very chain the emit returns, its SNs ring-consecutive from the one
+    /// minted for the frame, and nothing built on the heap.
     #[cfg(feature = "transport-fragmentation")]
     #[test]
-    fn a_frame_past_the_batch_is_fragmented_from_the_heap() {
+    fn a_frame_past_the_batch_is_fragmented_into_lent_slots() {
         let params = params(256, false);
         let payload = [0xA5u8; 1_000];
         let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
@@ -2861,16 +2941,41 @@ mod lend_tests {
             ),
             &mut queue,
         );
-        assert!(
-            queue.lent.is_empty(),
-            "no slot holds a frame past the batch"
-        );
-        assert!(queue.refused >= 1);
-        let chain: Vec<Vec<u8>> = queue.heap.iter().map(|(b, _)| b.clone()).collect();
+        assert!(queue.heap.is_empty(), "no fragment was built on the heap");
+        let chain: Vec<Vec<u8>> = queue.lent.iter().map(|(_, b, _)| b.clone()).collect();
         assert!(chain.len() > 2, "the message fragments");
         assert_eq!(chain, emitted(put(&payload, Priority::DEFAULT), &params));
-        let sns: Vec<u64> = queue.heap.iter().map(|(_, sn)| *sn).collect();
+        let sns: Vec<u64> = queue.lent.iter().map(|(_, _, sn)| *sn).collect();
         assert_eq!(sns, (0..chain.len() as u64).collect::<Vec<_>>());
+    }
+
+    /// A lent chain that finds no room before a fragment stops with the drop marker, itself
+    /// written into a lent slot on the SN the fragment would have taken, and is a congestion drop.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_lent_chain_out_of_room_ends_with_a_lent_drop_marker() {
+        let params = params(256, false);
+        let payload = [0xA5u8; 1_000];
+        let mut tx = MulticastTxConduits::new(mask_from_res(params.seq_num_res));
+        let mut queue = Lending::new(1_472, 65_600);
+        // The frame's ask and the second fragment's are answered with room, the third's not.
+        queue.room_left = 2;
+        let outcome = multicast_tx_push(
+            put(&payload, Priority::DEFAULT),
+            &mut tx,
+            &params,
+            &TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
+            &mut queue,
+        );
+        assert_eq!(outcome, PushOutcome::Congested);
+        assert!(queue.heap.is_empty());
+        let sns: Vec<u64> = queue.lent.iter().map(|(_, _, sn)| *sn).collect();
+        assert_eq!(sns, [0, 1, 2], "two fragments and the marker");
+        let (_, marker, _) = queue.lent.last().expect("the marker");
+        assert!(marker.len() < 16, "the marker carries no payload");
     }
 
     /// The SN walk through the lend is the heap path's: consecutive pushes mint
