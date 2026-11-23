@@ -27,6 +27,7 @@
 //! it and leaves no end waiting.
 
 use alloc::sync::Arc;
+use core::mem::ManuallyDrop;
 
 use wz_session_core::bounded::{BoundedVec, Lent};
 
@@ -217,16 +218,19 @@ impl PendingGet {
 struct LegEnd {
     leg: u64,
     timed_out: Option<RequestId>,
-    callback: Arc<ReplyCallback>,
+    /// Moved into the leg's end as the entry is dropped, so the end is its holder from then on.
+    callback: ManuallyDrop<Arc<ReplyCallback>>,
     plane: Arc<GetPlane>,
 }
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
+        // SAFETY: this is the one drop of `self`, and nothing reads the field after it.
+        let callback = unsafe { ManuallyDrop::take(&mut self.callback) };
         self.plane.ended.lock().note(Ended {
             leg: self.leg,
             timed_out: self.timed_out,
-            callback: Arc::clone(&self.callback),
+            callback,
         });
     }
 }
@@ -269,7 +273,7 @@ impl LegSink {
             end: LegEnd {
                 leg,
                 timed_out: None,
-                callback: Arc::clone(callback),
+                callback: ManuallyDrop::new(Arc::clone(callback)),
                 plane: Arc::clone(plane),
             },
         }
