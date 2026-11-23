@@ -110,8 +110,8 @@ impl TxBuf for alloc::vec::Vec<u8> {
 
     fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
         let at = alloc::vec::Vec::len(self);
-        self.resize(at + n, 0);
-        Ok(Some(&mut self[at..]))
+        self.resize(at.saturating_add(n), 0);
+        Ok(self.get_mut(at..))
     }
 }
 
@@ -137,7 +137,7 @@ impl<'a> SliceTxBuf<'a> {
 
     /// Room left.
     pub fn remaining(&self) -> usize {
-        self.storage.len() - self.len
+        self.storage.len().saturating_sub(self.len)
     }
 }
 
@@ -147,7 +147,8 @@ impl TxBuf for SliceTxBuf<'_> {
     }
 
     fn as_slice(&self) -> &[u8] {
-        &self.storage[..self.len]
+        // `len` only moves to the end of a window found in `storage`.
+        self.storage.get(..self.len).unwrap_or_default()
     }
 
     fn truncate(&mut self, len: usize) {
@@ -157,22 +158,25 @@ impl TxBuf for SliceTxBuf<'_> {
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        if self.remaining() < bytes.len() {
-            return Err(CodecError::BufferOverflow);
-        }
-        let end = self.len + bytes.len();
-        self.storage[self.len..end].copy_from_slice(bytes);
+        // A write past the end finds no window, and is refused whole.
+        let end = self.len.saturating_add(bytes.len());
+        let into = self
+            .storage
+            .get_mut(self.len..end)
+            .ok_or(CodecError::BufferOverflow)?;
+        into.copy_from_slice(bytes);
         self.len = end;
         Ok(())
     }
 
     fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
-        if self.remaining() < n {
-            return Err(CodecError::BufferOverflow);
-        }
-        let start = self.len;
-        self.len += n;
-        Ok(Some(&mut self.storage[start..start + n]))
+        let end = self.len.saturating_add(n);
+        let window = self
+            .storage
+            .get_mut(self.len..end)
+            .ok_or(CodecError::BufferOverflow)?;
+        self.len = end;
+        Ok(Some(window))
     }
 }
 
@@ -427,7 +431,7 @@ impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B> {
     }
 
     fn position(&self) -> usize {
-        self.buf.len() - self.start
+        self.buf.len().saturating_sub(self.start)
     }
 }
 

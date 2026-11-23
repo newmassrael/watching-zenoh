@@ -1200,8 +1200,6 @@ pub mod send_gate;
 /// [`tx_buf::SliceTxBuf`] is the fixed form a pool slot's storage is. No
 /// allocation and no runtime, so it is unconditional; only the `Vec` impl
 /// needs `alloc`.
-// Totality debt TD-068 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod tx_buf;
 
 /// A slot a link lent for one outbound frame, as a [`tx_buf::TxBuf`]: the
