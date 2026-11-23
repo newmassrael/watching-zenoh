@@ -24,7 +24,10 @@ feature set and checks four facts about it:
                  `sha256:<64 hex>` its build script wrote, read out of the binary's bytes) is
                  the digest `wz_config.conformance_statement` gives the case's feature set
                  (the end-to-end check that a library states the configuration it was built
-                 with, read from its own bytes). Every case is a build
+                 with, read from its own bytes). Where the case's ABI makes the digest's door
+                 a capability (`conformance-digest`, `deploy/wz-config.toml`) and the case's
+                 features leave it out, the library carries NO digest, and one it carries is
+                 the finding: a door the features do not name was linked. Every case is a build
                  whose configuration is known, so each is also the end-to-end witness that a
                  library states the build it is.
 
@@ -1595,6 +1598,20 @@ def stated_digest(case: Case | StatementCase, features: set[str]) -> str:
                                    dict(getattr(case, "env", ())), {})["digest"]
 
 
+#: The capability whose door answers the conformance digest (`wz_ext_conformance_digest`).
+DIGEST_CAPABILITY = "conformance-digest"
+
+
+def digest_door(case: Case | StatementCase, features: set[str]) -> bool:
+    """Whether the case's library has the door that carries the conformance digest. Where the
+    declaration makes the door a capability of the case's ABI, the case's features decide; on an
+    ABI the capability does not name, every build has the door."""
+    cap = wz_config.load_decl()["caps"].get(DIGEST_CAPABILITY)
+    if cap is None or case_abi(case) not in cap["abis"]:
+        return True
+    return DIGEST_CAPABILITY in features
+
+
 # The fifth fact for the builds the size cases do not make: the build script reads limits and
 # policies from the environment and the zenoh-c layout arm from a feature, and every size case
 # builds with none of them stated and no arm on. Without these, that reading is held only by unit
@@ -1622,10 +1639,11 @@ class StatementCase:
 
 STATEMENT_CASES: tuple[StatementCase, ...] = (
     StatementCase("statement-pico-stated", "wz-capi-pico", "libwz_capi_pico.so",
-                  "engine-coop,link-udp",
+                  "engine-coop,link-udp,conformance-digest",
                   (("WZ_LIMIT_MAX_SUBSCRIPTIONS", "32"), ("WZ_POLICY_SN_RESOLUTION", "bits-16")),
-                  note="the pico client on the cooperative engine (pico-client-coop's features) "
-                       "with a limit and a policy stated off their defaults"),
+                  note="the pico client on the cooperative engine (pico-client-coop's features "
+                       "and the digest's door, which the pico preset leaves out) with a limit and "
+                       "a policy stated off their defaults"),
     StatementCase("statement-capic-shm-arm", "wz-capi-c", "libwz_capi_c.so",
                   "default,zenoh-c-shared-memory",
                   (("WZ_LIMIT_MAX_QUERYABLES", "24"), ("WZ_POLICY_MULTICAST_LOOPBACK", "off")),
@@ -1653,11 +1671,15 @@ def build_statement_case(case: StatementCase, base: Mapping[str, str]) -> tuple[
 
 
 def grade_statement(case: StatementCase, got: tuple[str, ...], stated: str,
-                    unstated: str) -> list[str]:
+                    unstated: str, door: bool = True) -> list[str]:
     """The findings for a statement case; empty when it passes. `unstated` is the digest of the
     same features with nothing stated. A case equal to it would state nothing the size cases do
-    not, and its pass would hold nothing."""
+    not, and its pass would hold nothing; so would a case whose features leave the digest's door
+    out (`door` false), which builds no digest to read."""
     findings: list[str] = []
+    if not door:
+        findings.append(f"{case.id}: its features leave out `{DIGEST_CAPABILITY}`, so its library "
+                        f"has no door to carry the digest this case exists to read")
     if stated == unstated:
         findings.append(f"{case.id}: its environment states nothing the defaults do not, so it "
                         f"holds no reading the size cases do not hold")
@@ -1671,12 +1693,19 @@ def grade_statement(case: StatementCase, got: tuple[str, ...], stated: str,
     return findings
 
 
-def grade(case: Case, got: Measured, stated: str | None = None) -> list[str]:
+def grade(case: Case, got: Measured, stated: str | None = None, door: bool = True) -> list[str]:
     """The findings for one case; empty when it passes. Pure, so the selftest can drive it.
     `stated` is the digest the case's conformance statement gives; None skips that fact (the
-    selftest's synthetic cases have no statement)."""
+    selftest's synthetic cases have no statement). `door` is whether the case's build has the
+    door that carries it (`digest_door`): without it the library must carry no digest at all."""
     findings: list[str] = []
-    if stated is not None and got.digests != (stated,):
+    if stated is not None and not door and got.digests:
+        findings.append(
+            f"{case.id}: the library carries the conformance digest(s) {list(got.digests)}, and its "
+            f"features leave out `{DIGEST_CAPABILITY}`, the capability of the door that carries "
+            f"one: something links the door the feature set does not name."
+        )
+    if stated is not None and door and got.digests != (stated,):
         findings.append(
             f"{case.id}: the library carries the conformance digest(s) {list(got.digests) or 'none'}, "
             f"and the statement of its feature set is {stated}. The build script "
@@ -2443,9 +2472,11 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             continue
         got = build(case, env, prefixes)
         stated = stated_digest(case, case_features(case))
+        door = digest_door(case, case_features(case))
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
-              f"{', '.join(got.digests) or 'none'} (statement {stated})")
+              f"{', '.join(got.digests) or 'none'} "
+              f"({f'statement {stated}' if door else f'no door: {DIGEST_CAPABILITY} is off'})")
         ref, ref_findings = report_reference(case, got, env, prefixes)
         # In either mode: a figure read from a library that holds a path is no figure, so it is
         # neither graded against a ceiling row nor printed as one.
@@ -2460,7 +2491,7 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             measured_rows[case.id] = ceiling_row(reading, debt if isinstance(debt, str) else None)
         if measure_only:
             continue
-        for finding in grade(case, got, stated):
+        for finding in grade(case, got, stated, door):
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
         if reading is None:
@@ -2492,7 +2523,7 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
               f"(statement {stated}, with nothing stated {unstated})")
         if measure_only:
             continue
-        for finding in grade_statement(case, got, stated, unstated):
+        for finding in grade_statement(case, got, stated, unstated, digest_door(case, features)):
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
     sized = sum(1 for c in CASES if not only or c.id in only)
@@ -2504,7 +2535,8 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             print(f"    {format_row(case_id, row)}{',' if n < len(measured_rows) else ''}")
     if rc == 0 and not measure_only:
         print(f"  capability-cost: {sized} case(s) within budget, absent where absent, present "
-              f"where present, each carrying its statement's digest; {ceilinged} pico case(s) "
+              f"where present, each carrying its statement's digest where it has the door and "
+              f"none where it has not; {ceilinged} pico case(s) "
               f"under their zenoh-pico ceiling; {statements} build(s) with stated limits, "
               f"policies or arm carrying theirs")
     return rc
@@ -2766,6 +2798,19 @@ def cmd_selftest() -> int:
     expect("a library carrying another digest, none, or two is a finding",
            len(grade(case, with_digest, b)) == 1 and len(grade(case, clean, a)) == 1
            and len(grade(case, Measured(900, clean.symbols, 3, (a, b)), a)) == 1)
+    expect("a library without the digest's door passes carrying none, and carrying its "
+           "statement's or any other digest is a finding",
+           grade(case, clean, a, door=False) == []
+           and len(grade(case, with_digest, a, door=False)) == 1
+           and len(grade(case, Measured(900, clean.symbols, 3, (b,)), a, door=False)) == 1)
+    digest_cap = wz_config.load_decl()["caps"].get(DIGEST_CAPABILITY, {})
+    expect("the digest's door is a capability of the pico ABI and not of the zenoh-c one, so a "
+           "pico case's features decide it and every zenoh-c case has it",
+           "pico" in digest_cap.get("abis", []) and "c" not in digest_cap.get("abis", [])
+           and digest_door(by_id["pico-default"], case_features(by_id["pico-default"]))
+           and not digest_door(by_id["pico-client"], case_features(by_id["pico-client"]))
+           and digest_door(by_id["capic-client"], case_features(by_id["capic-client"]))
+           and all(digest_door(s, case_features(s)) for s in STATEMENT_CASES))
     expect("a case's statement follows its features and its ABI",
            stated_digest(by_id["pico-client"], case_features(by_id["pico-client"]))
            == stated_digest(by_id["pico-client-small"], case_features(by_id["pico-client-small"]))
@@ -2792,7 +2837,8 @@ def cmd_selftest() -> int:
            "that states nothing",
            grade_statement(s0, (a,), a, b) == [] and len(grade_statement(s0, (b,), a, b)) == 1
            and len(grade_statement(s0, (), a, b)) == 1
-           and len(grade_statement(s0, (a,), a, a)) == 1)
+           and len(grade_statement(s0, (a,), a, a)) == 1
+           and len(grade_statement(s0, (), a, b, door=False)) == 2)
     inherited = statement_env(s0, {"WZ_LIMIT_MAX_KEYEXPR_BYTES": "999", "RUSTFLAGS": "-Cx"})
     expect("a statement case builds with its own limits and policies, none of the shell's, in "
            "the environment it was handed",
