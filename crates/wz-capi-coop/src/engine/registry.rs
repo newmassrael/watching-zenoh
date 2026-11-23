@@ -1961,6 +1961,45 @@ mod tests {
             .peers_declare(FilterPlane::Subscribers, "demo/dial/2"));
     }
 
+    /// A MEASUREMENT of the bytes one set of face tables takes, by table, and of the header of a lent
+    /// table and of a key arena's handle, which every table of a set repeats: what a shrink of the
+    /// set is read from. It asserts only that the tables printed add up to no more than the set.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_face_sets_bytes_by_table() {
+        use core::mem::{size_of, size_of_val};
+
+        let mut held = held(1);
+        let set = face(&mut held.registry, DIAL_FACE);
+        let peer = &set.peer;
+        let tables = [
+            ("peer.subscribers", size_of_val(&peer.subscribers)),
+            (
+                "peer.remote_subscribers",
+                size_of_val(&peer.remote_subscribers),
+            ),
+            (
+                "peer.remote_queryables",
+                size_of_val(&peer.remote_queryables),
+            ),
+            ("peer.tokens", size_of_val(&peer.tokens)),
+            ("peer.replies", size_of_val(&peer.replies)),
+            ("peer.finals", size_of_val(&peer.finals)),
+            ("gets.replies", size_of_val(&set.gets.replies)),
+        ];
+        std::println!("face set: {} B", size_of_val(&*set));
+        for (table, bytes) in tables {
+            std::println!("  {table}: {bytes} B");
+        }
+        std::println!(
+            "  a lent table's header: {} B; a key arena's handle: {} B",
+            size_of::<BoundedVec<u8, 1, Lent>>(),
+            size_of::<LentKeys>()
+        );
+        let printed: usize = tables.iter().map(|(_, bytes)| bytes).sum();
+        assert!(printed <= size_of_val(&*set));
+    }
+
     /// A walk over the faces reads the sets the faces hold and no other: of the sixteen sets the
     /// open lent, a walk over three faces reads three, and says so before it starts.
     #[test]
