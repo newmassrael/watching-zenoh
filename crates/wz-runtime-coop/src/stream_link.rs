@@ -1771,7 +1771,10 @@ mod tests {
                 assert!(pool.in_use() <= 2);
             }
         }
-        assert_eq!(got, [vec![to_a[2..].to_vec()], vec![to_b[2..].to_vec()]]);
+        assert_eq!(
+            got,
+            [std::vec![to_a[2..].to_vec()], std::vec![to_b[2..].to_vec()]]
+        );
         assert_eq!(pool.in_use(), 0);
     }
 
