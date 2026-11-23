@@ -141,8 +141,11 @@ where
         now_ms: u64,
         on_event: &mut dyn EventSink,
     ) {
-        let mut forward = |event: IterationEvent<'_, '_>| on_event.event(event);
-        crate::drive::report_outcome_reassembling(outcome, self, actions, now_ms, &mut forward);
+        // One observer type for both reports, so the report a receive in place reaches through a
+        // compressed batch is the same instance (`report_outcome_in_place`).
+        let forward: &mut dyn FnMut(IterationEvent<'_, '_>) =
+            &mut |event: IterationEvent<'_, '_>| on_event.event(event);
+        crate::drive::report_outcome_reassembling(outcome, self, actions, now_ms, forward);
     }
 
     #[cfg(all(feature = "alloc", feature = "rx-in-place"))]
@@ -153,8 +156,11 @@ where
         now_ms: u64,
         on_event: &mut dyn EventSink,
     ) {
-        let mut forward = |event: IterationEvent<'_, '_>| on_event.event(event);
-        crate::drive::report_outcome_in_place(outcome, self, actions, now_ms, &mut forward);
+        // The observer type the reassembling dispatch's hand-off reports through too, so the two
+        // reach one instance of the report.
+        let forward: &mut dyn FnMut(IterationEvent<'_, '_>) =
+            &mut |event: IterationEvent<'_, '_>| on_event.event(event);
+        crate::drive::report_outcome_in_place(outcome, self, actions, now_ms, forward);
     }
 
     #[cfg(feature = "rx-in-place")]

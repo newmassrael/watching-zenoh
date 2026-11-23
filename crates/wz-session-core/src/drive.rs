@@ -2252,13 +2252,11 @@ where
         match event {
             IterationEvent::Poll(outcome) => {
                 let on_event = &mut *self.on_event;
-                report_outcome_in_place(
-                    outcome,
-                    self.reasm,
-                    self.actions,
-                    self.now_ms,
-                    &mut |event: IterationEvent<'_, '_>| on_event.event(event),
-                )
+                // A trait object, the observer type every caller of the report hands it, so the
+                // report is one instance however many receives reach it.
+                let forward: &mut dyn FnMut(IterationEvent<'_, '_>) =
+                    &mut |event: IterationEvent<'_, '_>| on_event.event(event);
+                report_outcome_in_place(outcome, self.reasm, self.actions, self.now_ms, forward)
             }
             other => self.on_event.event(other),
         }
