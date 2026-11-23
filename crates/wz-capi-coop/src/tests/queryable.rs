@@ -171,3 +171,58 @@ fn a_query_past_the_finals_held_is_refused_without_a_final() {
         "three Finals for the three queries held, none for the refused one"
     );
 }
+
+/// A query's replies go out as its callback makes them, more of them than the build's
+/// `MAX_PENDING_REPLIES`, as nothing stages them; one whose payload is past the session's
+/// `MAX_REPLY_PAYLOAD_BYTES` is refused to the callback and not sent, and the Final follows the
+/// last reply sent. A kept query's late reply goes out the same way. The CONTROL is the replies
+/// under the bound, each reaching the router.
+#[test]
+fn replies_go_out_as_they_are_made_with_no_count_and_the_payload_bound() {
+    use wz_session_core::query_sink::ReplyError;
+
+    let limits =
+        super::entity_tables::lowered(|l| l.select_max_reply_payload_bytes(Quota::at_most(16)));
+    let router = Router::start(CatchAll::None);
+    let engine = super::entity_tables::open_under(&router, limits);
+    let many = wz_session_core::caps::MAX_PENDING_REPLIES + 2;
+    let refused: Arc<Mutex<Option<Result<(), ReplyError>>>> = Arc::default();
+    let kept: Arc<Mutex<Option<Box<dyn HeldQuery>>>> = Arc::default();
+    let (refusal, slot) = (refused.clone(), kept.clone());
+    declare(&engine, "demo/r/**", move |holder, query, out| {
+        for _ in 0..many {
+            out.reply_keyed(query.keyexpr(), b"small")
+                .expect("a reply under the bound");
+        }
+        *refusal.lock().unwrap() = Some(out.reply_keyed(query.keyexpr(), &[0u8; 17]));
+        *slot.lock().unwrap() = Some(holder.hold_query(query));
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    router.send(Command::Query(1, "demo/r/a"));
+    until(&engine, "every reply under the bound", || {
+        router.seen(|s| s.answers.len()) >= many
+    });
+    assert_eq!(
+        *refused.lock().unwrap(),
+        Some(Err(ReplyError::PayloadTooLarge)),
+        "a payload past the bound is refused to the callback"
+    );
+    let held = kept.lock().unwrap().take().expect("the kept query");
+    held.reply(&mut |out| {
+        out.reply_keyed("demo/r/a", b"later")
+            .expect("a reply on the query's own key");
+    });
+    drop(held);
+    until(&engine, "the late reply and the final", || {
+        router.seen(|s| s.answers.len()) >= many + 2
+    });
+    let mut expected = vec!["reply"; many + 1];
+    expected.push("final");
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        expected,
+        "every reply under the bound, none past it, then the final"
+    );
+}

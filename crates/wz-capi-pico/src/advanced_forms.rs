@@ -110,7 +110,7 @@ impl PicoSubscriberForms {
         let carrier = match entity {
             Entity::Subscriber => self.base.share(),
             Entity::LatePublishers | Entity::Heartbeat | Entity::Token => {
-                self.base.extended(keyexpr.to_owned())
+                self.base.extended(keyexpr)
             }
         };
         let (key, announced) = match entity {
@@ -209,8 +209,7 @@ mod tests {
             hlc: NodeHlc::default(),
             time: crate::last_timestamp::SessionTime::new(),
         };
-        let forms =
-            PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key.to_owned()));
+        let forms = PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key));
         (shared, forms)
     }
 

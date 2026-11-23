@@ -33,6 +33,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
 use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LinksNotHonoured, LivelinessSink, MatchId,
@@ -273,6 +274,14 @@ pub trait SessionEngine: Send + Sync + 'static {
 
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
+
+    /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
+    /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
+    /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
+    /// their own.
+    fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        None
+    }
 
     /// Tell `sink` whether anything a write filter on `plane` counts matches `keyexpr`, now and
     /// each time that changes: a peer's subscriber, or its queryable (only a complete one when

@@ -3408,13 +3408,37 @@ mod read_task_start_codes {
     }
 }
 
+/// A session that listens on a port of the loopback the system picks, opened from a config as a
+/// program opens one: it opens with no peer, so a test of the cooperative engine needs no other
+/// node. Its owner lets go of it with `z_session_drop`.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+pub(crate) fn listening_on_loopback() -> z_owned_session_t {
+    use crate::config::{z_config_default, z_config_loan_mut, z_config_move, zp_config_insert};
+    // SAFETY: every pointer is to a live owned value of this frame, and the open consumes the
+    // config.
+    unsafe {
+        let mut config: z_owned_config_t = core::mem::zeroed();
+        assert_eq!(z_config_default(&mut config), Z_OK);
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut config),
+                Z_CONFIG_LISTEN_KEY,
+                c"tcp/127.0.0.1:0".as_ptr()
+            ),
+            Z_OK
+        );
+        let mut session = z_owned_session_t::null_value();
+        assert_eq!(
+            z_open(&mut session, z_config_move(&mut config), core::ptr::null()),
+            Z_OK
+        );
+        session
+    }
+}
+
 #[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
 mod session_place_tests {
     use super::*;
-    use crate::abi::z_owned_config_t;
-    use crate::config::{
-        z_config_default, z_config_loan_mut, z_config_move, zp_config_insert, Z_CONFIG_LISTEN_KEY,
-    };
 
     /// A copy of an owned session kept past `z_session_drop`, while the session's memory still
     /// stands (here a hold on the engine the test keeps, as a declared entity keeps one), finds the
@@ -3425,21 +3449,7 @@ mod session_place_tests {
         // SAFETY: every pointer is to a live owned value of this frame, and the copy is read only
         // while the engine the test holds keeps the session's arena standing.
         unsafe {
-            let mut config: z_owned_config_t = core::mem::zeroed();
-            assert_eq!(z_config_default(&mut config), Z_OK);
-            assert_eq!(
-                zp_config_insert(
-                    z_config_loan_mut(&mut config),
-                    Z_CONFIG_LISTEN_KEY,
-                    c"tcp/127.0.0.1:0".as_ptr()
-                ),
-                Z_OK
-            );
-            let mut session = z_owned_session_t::null_value();
-            assert_eq!(
-                z_open(&mut session, z_config_move(&mut config), core::ptr::null()),
-                Z_OK
-            );
+            let mut session = listening_on_loopback();
             let engine = engine_of(
                 session_handle(z_session_loan(&session)).expect("an open session has its handle"),
             );

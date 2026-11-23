@@ -54,7 +54,7 @@ use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
-use crate::keyexpr::DeclaredKeyexpr;
+use crate::keyexpr::{DeclaredKeyexpr, KeyText};
 use crate::prelude::*;
 use crate::result::{ZResult, Z_ERR_SYSTEM_OUT_OF_MEMORY};
 use crate::session::{engine_of, Engine, PicoSessionHandle};
@@ -124,9 +124,10 @@ impl PicoSession {
 pub(crate) struct WriteFilter {
     shared: Arc<Engine>,
     id: FilterId,
-    /// What the filter counts, and on which key: what each of its listeners counts.
+    /// What the filter counts, and on which key: what each of its listeners counts. The key is
+    /// the entity's own, shared: a block of the session's key arena where it keeps one.
     plane: FilterPlane,
-    keyexpr: String,
+    keyexpr: KeyText,
     count_local: bool,
     listeners: Mutex<Vec<MatchId>>,
 }
@@ -152,9 +153,9 @@ impl WriteFilter {
         // the key, or the literal when nothing covers it.
         let wire = key.wire(Arc::as_ref(&shared));
         let ask = interest_form(&shared, session.mode, key, &wire);
-        let keyexpr = key.literal().to_owned();
+        let keyexpr = key.share_text();
         let id = shared
-            .declare_write_filter(plane, &keyexpr, &wire, ask, count_local)
+            .declare_write_filter(plane, keyexpr.as_str(), &wire, ask, count_local)
             .ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
         Ok(Self {
             shared,
@@ -173,7 +174,7 @@ impl WriteFilter {
     pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> (Arc<Engine>, MatchId) {
         let id = self.shared.declare_matching_listener(
             self.plane,
-            &self.keyexpr,
+            self.keyexpr.as_str(),
             sink,
             self.count_local,
         );

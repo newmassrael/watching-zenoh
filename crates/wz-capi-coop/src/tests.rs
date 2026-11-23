@@ -2232,6 +2232,7 @@ mod faces;
 mod get;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group;
+mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;

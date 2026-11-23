@@ -60,9 +60,9 @@ use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    PeerIdentity, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
-    StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyAsk,
+    KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
+    SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 #[cfg(feature = "ticker")]
 use wz_capi_port::{Tick, TickerId};
@@ -126,13 +126,17 @@ use wz_session_mcu::dial::parse_listen_locator;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
-    query::{CoopHolder, QueryPlane},
+    query::{CoopHolder, Onward, QueryPlane},
     wz_capi_port::{QblId, QueryCallback, QueryableSink},
     wz_session_core::query::QueryableId,
+    wz_session_core::query_sink::ReplyError,
     wz_session_core::query_sink::{BoxedQuerySink, QueryView},
-    wz_session_core::reply_stage::{ReplyBounds, ReplyStage},
+    wz_session_core::reply_stage::ReplyParts,
     wz_session_core::response_sink::ResponseSink,
 };
+
+#[cfg(feature = "local-queryable")]
+use wz_session_core::reply_stage::ReplyStage;
 
 #[cfg(feature = "queryable")]
 mod query;
@@ -640,7 +644,7 @@ pub(crate) fn derived_zid(
 
 /// One session the program steps; see the module doc.
 pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    core: Mutex<Confined<Core<L, C>>>,
+    core: CoreLock<L, C>,
     /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
     /// (`congestion_control/drop/wait_before_drop`), and whether the queue profile has it ask at
@@ -648,11 +652,6 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     rooms: Arc<LinkRooms>,
     wait_before_drop_us: u64,
     held_drop: HeldDrop,
-    /// The bounds the replies of the session's queryables are staged under, taken from the
-    /// limits its open resolved: a callback answers outside the session's lock, into a stage of
-    /// its own held as the session's tables are.
-    #[cfg(feature = "queryable")]
-    reply_bounds: ReplyBounds,
     /// The face a publish holding the session sends on now, [`NOT_SENDING`] while none does
     /// ([`SendingOn`]): the face pico's profile drops a droppable publish on, as against the
     /// session's other faces, which it is still sent to, and a session held by a read step, a
@@ -779,6 +778,70 @@ impl Takes {
 
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
+
+/// The session's state behind its one lock. Every hold of it goes through here, and tells the
+/// session's key arena that the lock is held for as long as it is
+/// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
+/// key let go of after the lock (a row taken out of a table and dropped outside it) fails a debug
+/// build at once instead of racing a reader that holds the lock.
+struct CoreLock<L: SessionLinks + 'static, C: ClockSource + 'static>(Mutex<Confined<Core<L, C>>>);
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
+    /// `core` behind the lock, its key arena guarded by it from now on.
+    fn new(core: Core<L, C>) -> Self {
+        core.keys.guard_by_owner_lock();
+        Self(Mutex::new(Confined(core)))
+    }
+
+    fn lock(&self) -> CoreGuard<'_, L, C> {
+        CoreGuard::taken(self.0.lock())
+    }
+
+    fn try_lock(&self) -> Option<CoreGuard<'_, L, C>> {
+        self.0.try_lock().map(CoreGuard::taken)
+    }
+
+    /// The state with no lock, the engine being let go of: the key arena is marked held for the
+    /// rest of the engine's drop, which drops every row that keeps a key.
+    fn dropping(&mut self) -> &mut Core<L, C> {
+        let core = &mut self.0.get_mut().0;
+        core.keys.owner_lock_taken();
+        core
+    }
+}
+
+/// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
+struct CoreGuard<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
+    guard: MutexGuard<'a, Confined<Core<L, C>>>,
+}
+
+impl<'a, L: SessionLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
+    fn taken(guard: MutexGuard<'a, Confined<Core<L, C>>>) -> Self {
+        guard.0.keys.owner_lock_taken();
+        Self { guard }
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Deref for CoreGuard<'_, L, C> {
+    type Target = Confined<Core<L, C>>;
+
+    fn deref(&self) -> &Confined<Core<L, C>> {
+        &self.guard
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard<'_, L, C> {
+    fn deref_mut(&mut self) -> &mut Confined<Core<L, C>> {
+        &mut self.guard
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
+    fn drop(&mut self) {
+        // Before the lock is let go of, which the guard's own drop does after this body.
+        self.guard.0.keys.owner_lock_released();
+    }
+}
 
 /// The waits for room of the session's faces that are up, each with its face, kept outside
 /// [`Core`] so that a publish that finds the session held asks them with nothing of it held. Each
@@ -954,7 +1017,9 @@ enum ToPublish<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
 // inside it: no clone of any of them is ever handed out of the lock (deliveries leave as bytes
 // of the delivery lane and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc`
 // moves with the `Core` when another thread takes the lock, and none is used by two threads at
-// once.
+// once. A key of the session's key arena handed out of it to an object of the program
+// (`HeldKey`, `SessionKeys`) is shared and let go of only under this lock, and read outside it
+// only for its text, which nothing writes while the key is held.
 unsafe impl<T> Send for Confined<T> {}
 
 /// The id space of one link: the key expressions this session declared to it, read through the
@@ -1088,7 +1153,7 @@ type QueryableCallback = Arc<Mutex<QueryCallback>>;
 /// lane published is handed on to the deliveries (`SharedLane`), so nothing the session wrote
 /// under its lock waits for another hold to be handed out.
 struct LiveCore<'a, L: SessionLinks + 'static, C: ClockSource + 'static> {
-    core: MutexGuard<'a, Confined<Core<L, C>>>,
+    core: CoreGuard<'a, L, C>,
     lane: &'a SharedLane,
 }
 
@@ -1589,27 +1654,52 @@ struct InterestHold {
     plane: FilterPlane,
     keyexpr: RowKey,
     interest_id: u64,
+    /// How the Interest names its key. The rest of the key it names is no copy of its own when it
+    /// is a tail of `keyexpr` (`suffix_at`), which it is for every form the ABI asks with.
     form: InterestForm,
+    /// Where in `keyexpr` the rest of the key the form names begins: the whole key for a form that
+    /// names no declaration, what follows the declared prefix for one that does. `None` when the
+    /// form keeps a rest of its own, or names none.
+    suffix_at: Option<usize>,
     holds: usize,
 }
 
 impl InterestHold {
+    /// The rest of the key the form names.
+    fn suffix(&self) -> Option<&str> {
+        match self.suffix_at {
+            Some(at) => self.keyexpr.get(at..),
+            None => self.form.suffix.as_deref(),
+        }
+    }
+
     /// Send this Interest over `actions`, for what is declared now and what is declared later,
     /// naming its key as the link's key-wire form says: whether the link took it.
     fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let form = interest_on_link(actions, &self.keyexpr, &self.form);
+        let linked = interest_on_link(actions, &self.keyexpr, &self.form);
+        let (aggregate, mapping_id, suffix) = match &linked {
+            Cow::Borrowed(form) => (form.aggregate, form.mapping_id, self.suffix()),
+            Cow::Owned(form) => (form.aggregate, form.mapping_id, form.suffix.as_deref()),
+        };
         actions
             .send_interest_kinds(
                 self.interest_id,
                 kinds(self.plane),
                 /* current */ true,
                 /* future */ true,
-                form.aggregate,
-                form.mapping_id,
-                form.suffix.as_deref(),
+                aggregate,
+                mapping_id,
+                suffix,
             )
             .is_ok()
     }
+}
+
+/// Where in `keyexpr` a form's rest of the key, `suffix`, begins, when it is a tail of it.
+fn suffix_place(keyexpr: &str, suffix: Option<&str>) -> Option<usize> {
+    let suffix = suffix?;
+    let at = keyexpr.len().checked_sub(suffix.len())?;
+    keyexpr.ends_with(suffix).then_some(at)
 }
 
 struct MatchEntry {
@@ -1866,12 +1956,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `keyexpr` as a row keeps it, in the session's key arena; `None` past the session's
     /// `MAX_KEYEXPR_BYTES` the arena was lent with, or when the key arena has no room for it: a
     /// key the session cannot hold is refused, never cut short, and the declaration with it,
-    /// before an id is taken or anything is sent.
+    /// before an id is taken or anything is sent. A text the arena keeps already, whoever holds it
+    /// (a row of the session's record, a table of the registry, an object of the program), is that
+    /// block shared ([`KeySpace::kept`]), so a key the session's declarations and the program's
+    /// objects name alike takes one block, whichever of them came first.
     fn row_key(&self, keyexpr: &str) -> Option<RowKey> {
         if !self.keys.holds_key(keyexpr.len()) {
             return None;
         }
-        self.keys.key(keyexpr).ok()
+        self.keys
+            .kept(keyexpr)
+            .or_else(|| self.keys.key(keyexpr).ok())
     }
 
     /// The dial role's face, which the session holds for its whole life.
@@ -3568,16 +3663,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
         let handed_at_most = core.config.tx_queue.sizes;
-        #[cfg(feature = "queryable")]
-        let reply_bounds = ReplyBounds::of(&resolve_limits(&core.config));
         let arena_bytes = core.arena.bytes();
         Ok(Arc::new_cyclic(|this| Self {
-            core: Mutex::new(Confined(core)),
+            core: CoreLock::new(core),
             rooms,
             wait_before_drop_us,
             held_drop,
-            #[cfg(feature = "queryable")]
-            reply_bounds,
             sending_on: AtomicU64::new(NOT_SENDING),
             handed: Mutex::new(VecDeque::new()),
             owed: AtomicBool::new(false),
@@ -3625,7 +3716,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// engine's state, which nothing else can take before the open returns the engine.
     #[inline(never)]
     fn open_links(&self) -> Result<(), OpenError> {
-        let mut held = lock(&self.core);
+        let mut held = self.core.lock();
         let core = &mut held.0;
         core.listen_on_config()?;
         core.join_groups()?;
@@ -3653,10 +3744,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.arena_bytes
     }
 
+    /// What the session's key arena holds now, closed or not.
+    #[cfg(test)]
+    pub(crate) fn key_counts(&self) -> wz_session_core::key_arena::KeyCounts {
+        self.core.lock().0.keys.counts()
+    }
+
     /// The samples the session's delivery lane did not hand a subscriber, by why
     /// (`crate::lane`).
     pub fn lane_counts(&self) -> LaneCounts {
-        let _session = lock(&self.core);
+        let _session = self.core.lock();
         // SAFETY: the session's lock is held (`_session`).
         unsafe { self.samples.held() }.counts()
     }
@@ -3818,7 +3915,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// test of the cost of one read step counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn clock_reads(&self) -> usize {
-        lock(&self.core).0.clock_reads.get()
+        self.core.lock().0.clock_reads.get()
     }
 
     /// How many samples the session's delivery lane handed on to the deliveries since the open:
@@ -3848,7 +3945,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// sample counts.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
-        lock(&self.core).0.registry.borrow().push_dispatches()
+        self.core.lock().0.registry.borrow().push_dispatches()
     }
 
     /// Whether the peer of every established link has been told every declaration the session
@@ -3866,7 +3963,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let guard = lock(&self.core);
+        let guard = self.core.lock();
         #[cfg(test)]
         self.takes.core.fetch_add(1, Ordering::Relaxed);
         if self.closed.load(Ordering::Acquire) {
@@ -4240,7 +4337,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 Target::Queryable(cb) if *t == TargetKey::Queryable(id) => Some(cb.clone()),
                 _ => None,
             });
-        let mut replies = ReplyStage::held_to(self.reply_bounds);
+        let mut onward = Onward::to(self, generation);
         if let Some(callback) = callback {
             let _answering =
                 query::Answering::enter(self as *const Self as usize, generation, query.rid());
@@ -4253,11 +4350,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 query.keyexpr(),
                 query.parameters(),
                 query.qos(),
-                &mut replies,
+                &mut onward,
             );
             (lock(&callback))(query, &mut responder);
         }
-        self.answer(generation, query.rid(), replies, true);
+        self.answer(generation, query.rid(), true);
     }
 
     /// A build with no queryable is handed no query.
@@ -4669,48 +4766,68 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         ));
     }
 
-    /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
-    /// of one hold on its Final, sending the Final when it was owed and this was the last hold.
-    /// Nothing is sent on a link that is no longer the session's. On a group, what was sent is
-    /// written by this call, on the calling thread.
+    /// One reply to the query that came in under `generation`, as its queryable makes it: onto
+    /// the query's link, written into the link's transmit slot under the session's lock, or to the
+    /// session's own get. Refused, sending nothing, when its payload or its attachment is longer
+    /// than the session's `MAX_REPLY_PAYLOAD_BYTES`; dropped, as a lost link drops it, when the
+    /// session is closed or the query's link is no longer the session's.
     #[cfg(feature = "queryable")]
-    fn answer(
-        &self,
-        generation: u64,
-        rid: wz_session_core::wire_id::RequestId,
-        replies: ReplyStage,
-        release: bool,
-    ) {
+    fn send_reply(&self, generation: u64, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
+        let Some(core) = self.live() else {
+            return Ok(());
+        };
+        let (payload, attachment) = parts.bounded_lengths();
+        let most = core.0.config.limits.max_reply_payload_bytes();
+        if !most.admits(payload) || !most.admits(attachment) {
+            return Err(ReplyError::PayloadTooLarge);
+        }
+        // The session's own get is answered to its pending entry, which is the registry's, and
+        // handed out when the answer ends (`Self::answer`).
+        #[cfg(feature = "local-queryable")]
+        if generation == query::LOCAL_QUERY {
+            let reply = wz_session_core::query::QueryReply::from_parts(&parts);
+            core.0
+                .registry
+                .borrow_mut()
+                .local
+                .replies
+                .deliver_local_reply(&reply.into());
+            return Ok(());
+        }
+        if let Some(route) = core.0.answer_route(generation) {
+            route.send_reply_parts(parts);
+        }
+        Ok(())
+    }
+
+    /// The answer to the query `rid` on the link of `generation` is over for now, its replies
+    /// sent as they were made ([`Self::send_reply`]): with `release`, let go of one hold on its
+    /// Final, sending the Final when it was owed and this was the last hold. Nothing is sent on a
+    /// link that is no longer the session's. On a group, what the replies staged there is written by
+    /// this call, on the calling thread.
+    #[cfg(feature = "queryable")]
+    fn answer(&self, generation: u64, rid: wz_session_core::wire_id::RequestId, release: bool) {
         let Some(core) = self.live() else {
             return;
         };
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let mut registry = core.0.registry.borrow_mut();
-            let gets = &mut registry.local;
-            for reply in replies {
-                gets.replies.deliver_local_reply(&reply.into());
-            }
             if release && lock(&self.plane.holds).release(generation, rid).is_some() {
-                gets.replies.deliver_local_final(rid);
+                core.0
+                    .registry
+                    .borrow_mut()
+                    .local
+                    .replies
+                    .deliver_local_final(rid);
             }
-            drop(registry);
             drop(core);
             self.deliver();
             return;
         }
-        let route = core.0.answer_route(generation);
-        if let Some(route) = route {
-            for reply in replies {
-                if let Ok(response) = reply.into_response() {
-                    route.send_response(response);
-                }
-            }
-        }
         if release {
             let due = lock(&self.plane.holds).release(generation, rid);
-            if let (Some(qos), Some(route)) = (due, route) {
+            if let (Some(qos), Some(route)) = (due, core.0.answer_route(generation)) {
                 route.send_response_final(rid, qos);
             }
         }
@@ -4835,11 +4952,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(interest_id) = self.next_entity_id() else {
             return false;
         };
+        // The rest of the key the form names is read from the row's own key, not copied.
+        let suffix_at = suffix_place(keyexpr, form.suffix.as_deref());
         let hold = InterestHold {
             plane,
             keyexpr: key,
             interest_id: u64::from(interest_id),
-            form: form.clone(),
+            form: InterestForm {
+                mapping_id: form.mapping_id,
+                suffix: if suffix_at.is_some() {
+                    None
+                } else {
+                    form.suffix.clone()
+                },
+                aggregate: form.aggregate,
+            },
+            suffix_at,
             holds: 1,
         };
         core.announce(Kind::Interest, |actions| hold.send(actions));
@@ -4944,7 +5072,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             qos,
         };
         let query = opts.loopback_query();
-        let mut staged = ReplyStage::held_to(self.reply_bounds);
+        // The session's queryables only copy a query out and hold its Final (`QueryPlane::arrive`),
+        // so none stages a reply here: the stage the registry is handed has no room.
+        let mut staged = ReplyStage::<Lent>::default();
         let mut registry = core.registry.borrow_mut();
         self.plane.asking_locally(|| {
             registry.app.queryables.local_query_with_value(
@@ -4956,9 +5086,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             )
         });
         let gets = &mut registry.local;
-        for reply in staged {
-            gets.replies.deliver_local_reply(&reply.into());
-        }
         lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos);
         if own.release().is_some() {
             gets.replies.deliver_local_final(rid);
@@ -5052,7 +5179,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// a filtered put counts. Read under the lock, uncounted as a take.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn peer_looks(&self) -> usize {
-        lock(&self.core).0.registry.borrow().peer_looks()
+        self.core.lock().0.registry.borrow().peer_looks()
     }
 
     /// Tell every matching listener on the subscribers' plane that counts the session's own
@@ -5126,7 +5253,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     fn now_ms(&self) -> u64 {
         // The session's own clock, which is what its deadlines and its jobs run on. Read under the
         // session's lock, which nothing here holds while a callback runs.
-        lock(&self.core).0.clock.now_us() / 1000
+        self.core.lock().0.clock.now_us() / 1000
     }
 
     fn next_entity_id(&self) -> Option<EntityId> {
@@ -5407,7 +5534,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.live_subs.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::LiveSub, at);
-            let entry = core.live_subs.remove(at);
+            let mut entry = core.live_subs.remove(at);
             // The groups asked for it are told the asking ended.
             #[cfg(feature = "group")]
             for group in &core.groups {
@@ -5421,6 +5548,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 actions.send_interest_final(u64::from(id));
             }
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         #[cfg(feature = "liveliness")]
@@ -5433,7 +5562,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.subscribers.iter().position(|s| s.id == id)?;
             let links = core.retract(Kind::Subscriber, at);
-            let entry = core.subscribers.remove(at);
+            let mut entry = core.subscribers.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -5454,6 +5583,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             Self::reevaluate_subscriber_matching(core);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Subscriber(id));
@@ -5536,6 +5667,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 group.retract_keyexpr(mapping_id);
             }
         }
+    }
+
+    fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        Some(self)
     }
 
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
@@ -6372,7 +6507,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.queryables.iter().position(|q| q.id == id)?;
             let links = core.retract(Kind::Queryable, at);
-            let entry = core.queryables.remove(at);
+            let mut entry = core.queryables.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -6386,6 +6521,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
             Self::reevaluate_queryable_matching(core);
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         let callback = self.take_target(TargetKey::Queryable(id));
@@ -6448,7 +6585,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             let at = core.tokens.iter().position(|t| t.id == id)?;
             let links = core.retract(Kind::Token, at);
-            let entry = core.tokens.remove(at);
+            let mut entry = core.tokens.remove(at);
             #[cfg(feature = "group")]
             core.retract_from_groups(id);
             core.registry
@@ -6459,6 +6596,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             for actions in links {
                 entry.retract(&actions);
             }
+            // Under the lock, as the row is dropped after it (`KeyRef::let_go`).
+            entry.keyexpr.let_go();
             Some(entry)
         });
         // Its key may hold a declaration whose release reaches the session: after the lock.
@@ -6542,6 +6681,41 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 }
 
+/// The keys the C ABI's objects hold, in the session's key arena, all through one body. A closed
+/// session makes no key and gives no block back: its close emptied the record, and its arena is
+/// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
+/// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
+/// lets go of, under the lock, does not wait on it.
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
+    #[inline(never)]
+    fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
+        let Some(core) = self.live() else {
+            return match ask {
+                KeyAsk::Hold(_) => Err(KeyNotHeld::Closed),
+                // SAFETY: the session is closed, so its arena makes no key and gives no block
+                // back, and a release after the close hands nothing to the arena (below).
+                KeyAsk::Share(key) => Ok(Some(unsafe { key.uncounted() })),
+                KeyAsk::Release(_) => Ok(None),
+            };
+        };
+        let core = &core.0;
+        match ask {
+            KeyAsk::Hold(text) if !core.keys.holds_key(text.len()) => Err(KeyNotHeld::TooLong),
+            KeyAsk::Hold(text) => core
+                .row_key(text)
+                .map(|key| Some(HeldKey::of(key)))
+                .ok_or(KeyNotHeld::NoRoom),
+            // SAFETY: the session's lock is held (`core`), and the key is its arena's.
+            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&core.keys) })),
+            KeyAsk::Release(key) => {
+                // SAFETY: as a share.
+                unsafe { key.release(&core.keys) };
+                Ok(None)
+            }
+        }
+    }
+}
+
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     for CoopEngine<L, C>
 {
@@ -6560,7 +6734,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // from the read task itself stops nothing and leaves the thread to see the session
         // closed.
         let _ = self.stop_reader();
-        let mut guard = lock(&self.core);
+        let mut guard = self.core.lock();
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -6859,7 +7033,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
-        self.core.get_mut().0.end_links();
+        self.core.dropping().end_links();
     }
 }
 
@@ -6967,5 +7141,30 @@ mod clock_moves_tests {
             ended_by_clock_moves(IdleWait::Sleep(7), None),
             IdleWait::Sleep(7)
         ));
+    }
+}
+
+#[cfg(test)]
+mod interest_form_tests {
+    //! Where an Interest's rest of the key lies in the key its row keeps.
+    use super::suffix_place;
+
+    /// A form that names no declaration names the whole key, one that names a declared prefix the
+    /// rest after it: each a tail of the row's key, found where it begins. A rest that is not a tail,
+    /// or none, has no place, and the form keeps its own.
+    #[test]
+    fn a_forms_rest_of_the_key_is_found_in_the_rows_key() {
+        assert_eq!(suffix_place("demo/if/key", Some("demo/if/key")), Some(0));
+        assert_eq!(
+            suffix_place("demo/if/key", Some("/key")),
+            Some("demo/if".len())
+        );
+        assert_eq!(
+            suffix_place("demo/if/key", Some("")),
+            Some("demo/if/key".len())
+        );
+        assert_eq!(suffix_place("demo/if/key", Some("/other")), None);
+        assert_eq!(suffix_place("demo", Some("demo/longer")), None);
+        assert_eq!(suffix_place("demo/if/key", None), None);
     }
 }

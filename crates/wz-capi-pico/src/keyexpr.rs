@@ -11,10 +11,11 @@
 
 use alloc::sync::{Arc, Weak};
 use core::ffi::{c_char, c_void, CStr};
+use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::WireKey;
+use wz_capi_port::{HeldKey, KeyAsk, KeyNotHeld, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::WhatAmI;
 
@@ -126,6 +127,113 @@ impl Drop for WireDeclaration {
     }
 }
 
+/// A key's text as an object of this ABI keeps it: a block of its session's key arena when the
+/// session keeps one, which a key of the same text anywhere in the session shares, or a copy of its
+/// own: a key made with no session, for an engine that keeps no key arena, or for a closed
+/// session.
+///
+/// Its text is read from the handle with no branch and no lock. Holding, sharing and letting go of
+/// it are one out-of-line body each for every object that keeps a key, and each reaches the
+/// engine through its one door for keys ([`SessionKeys::key`](wz_capi_port::SessionKeys::key)).
+pub(crate) struct KeyText {
+    /// Taken only by the drop.
+    key: ManuallyDrop<HeldKey>,
+    /// The engine whose key arena holds `key`, kept for as long as it does; `None` for a copy
+    /// of its own.
+    engine: Option<Arc<Engine>>,
+}
+
+impl KeyText {
+    /// `text` as a copy of its own.
+    pub(crate) fn owned(text: &str) -> Self {
+        Self {
+            key: ManuallyDrop::new(HeldKey::own(text)),
+            engine: None,
+        }
+    }
+
+    /// `text` kept for an object of `shared`'s session: in its key arena when it keeps one, and
+    /// refused as zenoh-pico refuses what its heap cannot hold (`_Z_ERR_SYSTEM_OUT_OF_MEMORY`) when
+    /// the arena has no room, or with `Z_EINVAL` when it is longer than the session's
+    /// `MAX_KEYEXPR_BYTES`; a copy of its own for a session with no key arena or a closed one,
+    /// which keeps nothing more.
+    #[inline(never)]
+    pub(crate) fn of_session(shared: &Arc<Engine>, text: &str) -> Result<Self, ZResult> {
+        let refused = match shared.key_arena().map(|keys| keys.key(KeyAsk::Hold(text))) {
+            Some(Ok(Some(key))) => {
+                return Ok(Self {
+                    key: ManuallyDrop::new(key),
+                    engine: Some(shared.clone()),
+                })
+            }
+            Some(Err(why)) => refusal_of(why),
+            _ => None,
+        };
+        match refused {
+            Some(code) => Err(code),
+            None => Ok(Self::owned(text)),
+        }
+    }
+
+    /// The key.
+    pub(crate) fn as_str(&self) -> &str {
+        self.key.as_str()
+    }
+
+    /// Another holder of the same text: one more holder of the block for a key of the arena, a
+    /// copy for one of its own.
+    #[inline(never)]
+    pub(crate) fn share(&self) -> Self {
+        if let Some(engine) = &self.engine {
+            // An engine that keeps no key arena made no key of one; a copy reads the same.
+            if let Some(Ok(Some(key))) = engine
+                .key_arena()
+                .map(|keys| keys.key(KeyAsk::Share(&self.key)))
+            {
+                return Self {
+                    key: ManuallyDrop::new(key),
+                    engine: Some(engine.clone()),
+                };
+            }
+        }
+        Self::owned(self.as_str())
+    }
+
+    /// Whether the text is a block of the session's key arena.
+    #[cfg(test)]
+    fn is_session(&self) -> bool {
+        self.engine.is_some()
+    }
+}
+
+impl Drop for KeyText {
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: the key is taken here, once, and the field is not read again.
+        let key = unsafe { ManuallyDrop::take(&mut self.key) };
+        match self.engine.take() {
+            Some(engine) => {
+                if let Some(keys) = engine.key_arena() {
+                    let _ = keys.key(KeyAsk::Release(key));
+                }
+            }
+            // SAFETY: with no engine the key is a copy of its own (`Self::owned`), freed here once.
+            None => unsafe { key.free_own() },
+        }
+    }
+}
+
+/// The code a key the session kept no room for is refused with, as zenoh-pico refuses what its heap
+/// cannot hold; `None` for a closed session, whose object keeps a copy of its own as it keeps
+/// nothing more.
+fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
+    match why {
+        KeyNotHeld::TooLong => Some(Z_EINVAL),
+        KeyNotHeld::NoRoom => Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
+        KeyNotHeld::Closed => None,
+    }
+}
+
 /// Behind a `z_owned_keyexpr_t` handle, and held by every entity for its own
 /// key: the OWNED literal plus the declaration that covers a prefix of it, if
 /// any — pico's `_z_declared_keyexpr_t` (`{ _declaration, _inner }`).
@@ -136,26 +244,39 @@ impl Drop for WireDeclaration {
 /// storage and keeps the owned keyexpr past it — so a borrow here would be a
 /// dangling read waiting for a caller that frees first.
 ///
-/// `z_owned_keyexpr_t::_start` points into this `String`'s HEAP buffer, which
-/// is stable when the `Box` moves (the same distinction `crate::bytes`
-/// documents for `StringState`).
+/// `z_owned_keyexpr_t::_start` points at the key's text where it is kept, a block
+/// of the session's key arena or a `String`'s heap buffer, either of which is
+/// stable when the `Box` moves (the same distinction `crate::bytes` documents for
+/// `StringState`).
 pub(crate) struct DeclaredKeyexpr {
-    literal: String,
+    literal: KeyText,
     declaration: Option<Arc<WireDeclaration>>,
 }
 
 impl DeclaredKeyexpr {
     /// A key with no declaration.
-    pub(crate) fn literal_only(literal: String) -> Self {
+    pub(crate) fn literal_only(literal: &str) -> Self {
         Self {
-            literal,
+            literal: KeyText::owned(literal),
             declaration: None,
         }
     }
 
     /// The literal key.
     pub(crate) fn literal(&self) -> &str {
-        &self.literal
+        self.literal.as_str()
+    }
+
+    /// Another holder of the declaration that covers a prefix of the key, if any, without the
+    /// key's text: what keeps the declaration on the session for something that names the key by
+    /// it.
+    pub(crate) fn declaration_hold(&self) -> Option<Arc<WireDeclaration>> {
+        self.declaration.clone()
+    }
+
+    /// Another holder of the literal key's text, without the declaration.
+    pub(crate) fn share_text(&self) -> KeyText {
+        self.literal.share()
     }
 
     /// A borrow of this key in the loaned layout, carrying the declaration so a
@@ -163,8 +284,8 @@ impl DeclaredKeyexpr {
     /// does. Valid while `self` stays at its address.
     pub(crate) fn loaned(&self) -> z_loaned_keyexpr_t {
         z_loaned_keyexpr_t {
-            _start: self.literal.as_ptr(),
-            _len: self.literal.len(),
+            _start: self.literal().as_ptr(),
+            _len: self.literal().len(),
             _handle: self as *const Self as *mut c_void,
             _mapping: 0,
         }
@@ -174,7 +295,7 @@ impl DeclaredKeyexpr {
     /// `_z_declared_keyexpr_copy`, which clones the refcount.
     pub(crate) fn share(&self) -> Self {
         Self {
-            literal: self.literal.clone(),
+            literal: self.literal.share(),
             declaration: self.declaration.clone(),
         }
     }
@@ -188,13 +309,13 @@ impl DeclaredKeyexpr {
     /// the joined text, which can in principle rewrite the seam, and a
     /// declaration naming bytes the key no longer starts with would put the
     /// wrong key on the wire.
-    pub(crate) fn extended(&self, literal: String) -> Self {
+    pub(crate) fn extended(&self, literal: &str) -> Self {
         let declaration = self.declaration.clone().filter(|d| {
             literal.get(..d.prefix_len).is_some()
-                && literal.get(..d.prefix_len) == self.literal.get(..d.prefix_len)
+                && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
         });
         Self {
-            literal,
+            literal: KeyText::owned(literal),
             declaration,
         }
     }
@@ -221,7 +342,7 @@ impl DeclaredKeyexpr {
         // turns a broken invariant into the literal rather than a panic.
         match self
             .declared_on(shared)
-            .and_then(|d| Some((d, self.literal.get(d.prefix_len..)?)))
+            .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
         {
             Some((d, rest)) => {
                 let anchor: Arc<dyn Send + Sync> = d.clone();
@@ -250,7 +371,7 @@ impl DeclaredKeyexpr {
             return None;
         }
         self.declared_on(shared)
-            .filter(|d| d.prefix_len == self.literal.len())
+            .filter(|d| d.prefix_len == self.literal().len())
             .map(|d| d.id)
     }
 
@@ -288,7 +409,7 @@ impl DeclaredKeyexpr {
         if wire.mapping_id == 0 {
             RetractionKey {
                 mapping_id: 0,
-                suffix: self.literal.clone(),
+                suffix: self.literal().to_owned(),
             }
         } else {
             RetractionKey {
@@ -339,19 +460,27 @@ impl DeclaredKeyexpr {
                 return Ok(existing.share());
             }
         }
+        // The key is kept before anything is declared, so one the session's key arena has no room
+        // for is refused having sent nothing; a declaration that covers it whole finds its block
+        // and shares it.
+        let text = KeyText::of_session(shared, literal)?;
         // pico `_z_keyexpr_declare_prefix`: an empty prefix declares nothing.
         // Its multicast skip has no counterpart here — this ABI's sessions are
         // unicast.
         if prefix_len == 0 {
-            return Ok(Self::literal_only(literal.to_owned()));
+            return Ok(Self {
+                literal: text,
+                declaration: None,
+            });
         }
         // A session that holds no more declarations, its table at the limit it opened under or
-        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing.
+        // its ids spent, refuses as pico refuses one it cannot hold, having sent nothing; the key
+        // goes back with `text`.
         let Some(id) = shared.acquire_keyexpr(&literal[..prefix_len]) else {
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
         Ok(Self {
-            literal: literal.to_owned(),
+            literal: text,
             declaration: Some(Arc::new(WireDeclaration {
                 session: Arc::downgrade(shared),
                 id,
@@ -790,8 +919,8 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// whole-key declaration from a prefix one.
 unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) {
     let boxed = Box::new(key);
-    let start = boxed.literal.as_ptr();
-    let len = boxed.literal.len();
+    let start = boxed.literal().as_ptr();
+    let len = boxed.literal().len();
     *dst = z_owned_keyexpr_t {
         _start: start,
         _len: len,
@@ -850,7 +979,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         if !fits(&text) {
             return Z_EINVAL;
         }
-        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
+        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(&text));
         Z_OK
     })
 }
@@ -877,10 +1006,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
         match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
-                store_owned_keyexpr(
-                    keyexpr,
-                    DeclaredKeyexpr::literal_only(canon.as_str().to_owned()),
-                );
+                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon.as_str()));
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
@@ -916,10 +1042,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
             Ok(canon) if !fits(canon.as_str()) => Z_EINVAL,
             Ok(canon) => {
                 *len = canon.as_str().len();
-                store_owned_keyexpr(
-                    keyexpr,
-                    DeclaredKeyexpr::literal_only(canon.as_str().to_owned()),
-                );
+                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(canon.as_str()));
                 Z_OK
             }
             Err(_) => Z_ERR_INVALID,
@@ -977,7 +1100,7 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         };
         let key = match declared_of(src) {
             Some(declared) => declared.share(),
-            None => DeclaredKeyexpr::literal_only(text.to_owned()),
+            None => DeclaredKeyexpr::literal_only(text),
         };
         store_owned_keyexpr(dst, key);
         Z_OK
@@ -1066,8 +1189,8 @@ pub unsafe extern "C" fn z_keyexpr_concat(
 /// `left` must be null or a live loaned keyexpr.
 unsafe fn extended_from(left: *const z_loaned_keyexpr_t, literal: &str) -> DeclaredKeyexpr {
     match declared_of(left) {
-        Some(declared) => declared.extended(literal.to_owned()),
-        None => DeclaredKeyexpr::literal_only(literal.to_owned()),
+        Some(declared) => declared.extended(literal),
+        None => DeclaredKeyexpr::literal_only(literal),
     }
 }
 
@@ -1555,5 +1678,223 @@ mod bound_tests {
                 z_keyexpr_drop(z_keyexpr_move(key));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod key_text_tests {
+    //! How a key the session's key arena kept no room for is refused.
+    use super::*;
+
+    /// A key past the session's bound is a value it cannot take, one the arena has no room for is
+    /// out of memory, and a closed session's object keeps a copy of its own.
+    #[test]
+    fn a_key_the_arena_refuses_answers_picos_code() {
+        assert_eq!(refusal_of(KeyNotHeld::TooLong), Some(Z_EINVAL));
+        assert_eq!(
+            refusal_of(KeyNotHeld::NoRoom),
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+        assert_eq!(refusal_of(KeyNotHeld::Closed), None);
+    }
+
+    /// A key made with no session is a copy of its own, read and shared as one.
+    #[test]
+    fn a_key_with_no_session_is_a_copy_of_its_own() {
+        let key = DeclaredKeyexpr::literal_only("demo/own/key");
+        assert!(!key.literal.is_session());
+        let shared = key.share();
+        assert!(!shared.literal.is_session());
+        assert_ne!(
+            shared.literal().as_ptr(),
+            key.literal().as_ptr(),
+            "the share is a copy of its own"
+        );
+        drop(key);
+        assert_eq!(shared.literal(), "demo/own/key");
+        let loaned = shared.loaned();
+        assert_eq!(loaned._start, shared.literal().as_ptr());
+        assert_eq!(loaned._len, shared.literal().len());
+    }
+}
+
+// The cooperative engine, which keeps a key arena: a session the build opens as `z_open` opens it,
+// listening on the loopback, its engine the build's own `Engine`. The room a test needs is made by
+// filling the session's arena, as a program's own keys fill it, not by a smaller arena.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+mod arena_key_tests {
+    use super::*;
+    use crate::session::{
+        listening_on_loopback, z_close, z_owned_session_t, z_session_drop, z_session_loan,
+        z_session_loan_mut, z_session_move,
+    };
+    use wz_capi_port::SessionKeys;
+
+    /// A session that listens on a port of the loopback, opened as a program opens one, and the
+    /// engine it runs on.
+    fn listening() -> (z_owned_session_t, Arc<Engine>) {
+        let session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_of(handle.expect("an open session has its handle"));
+        (session, engine)
+    }
+
+    /// Close and let go of a session [`listening`] opened.
+    fn close(mut session: z_owned_session_t) {
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// The session's key arena, which the cooperative engine always keeps.
+    fn keys(engine: &Arc<Engine>) -> &dyn SessionKeys {
+        engine
+            .key_arena()
+            .expect("the cooperative engine keeps a key arena")
+    }
+
+    /// `text` held in the session's key arena, or why not.
+    fn hold(engine: &Arc<Engine>, text: &str) -> Result<HeldKey, KeyNotHeld> {
+        keys(engine)
+            .key(KeyAsk::Hold(text))
+            .map(|key| key.expect("a hold answers its key"))
+    }
+
+    /// Let go of `key`.
+    fn release(engine: &Arc<Engine>, key: HeldKey) {
+        assert!(matches!(keys(engine).key(KeyAsk::Release(key)), Ok(None)));
+    }
+
+    /// Keys of `len` bytes, each a text of its own and so a block of its own (a text the arena
+    /// keeps already is that block shared), held until the arena has no room for one more.
+    fn fill_with(engine: &Arc<Engine>, len: usize) -> Vec<HeldKey> {
+        let mut held = Vec::new();
+        loop {
+            match hold(engine, &format!("{:0>len$}", held.len())) {
+                Ok(key) => held.push(key),
+                Err(why) => {
+                    assert_eq!(
+                        why,
+                        KeyNotHeld::NoRoom,
+                        "only the arena's room ends the fill"
+                    );
+                    return held;
+                }
+            }
+        }
+    }
+
+    /// Fill the key arena with keys of `len` bytes, and what is left past them with keys of one
+    /// byte, the shortest block, until no key at all has room; then give back the `room` keys of
+    /// `len` bytes held last. The arena is left with the room of `room` such keys and none for any
+    /// other: a key no longer than `len` takes one of those blocks or is refused.
+    fn fill_leaving(engine: &Arc<Engine>, len: usize, room: usize) -> Vec<HeldKey> {
+        let mut held = fill_with(engine, len);
+        assert!(
+            held.len() >= room,
+            "the arena holds {room} keys of {len} bytes"
+        );
+        let shortest = fill_with(engine, 1);
+        for key in held.split_off(held.len() - room) {
+            release(engine, key);
+        }
+        held.extend(shortest);
+        held
+    }
+
+    /// Give back every key [`fill_leaving`] held.
+    fn give_back(engine: &Arc<Engine>, held: Vec<HeldKey>) {
+        for key in held {
+            release(engine, key);
+        }
+    }
+
+    /// Whether the session's key arena has room for one more key of `len` bytes, asked and let go.
+    fn room_for(engine: &Arc<Engine>, len: usize) -> bool {
+        match hold(engine, &"k".repeat(len)) {
+            Ok(key) => {
+                release(engine, key);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A key the session declares whole and the declaration's own row keep one block between them,
+    /// the row finding the key's text in the arena, so with room for two such keys one is left
+    /// after it. Its share reads
+    /// it after the first holder is gone.
+    #[test]
+    fn a_whole_declaration_and_its_key_take_one_block() {
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 2);
+        let key = DeclaredKeyexpr::declare(&engine, "demo/pk/a1", None).expect("declared");
+        assert!(key.literal.is_session());
+        assert_eq!(key.literal(), "demo/pk/a1");
+        assert!(room_for(&engine, 10), "one block is left");
+        let shared = key.share();
+        drop(key);
+        assert_eq!(shared.literal(), "demo/pk/a1", "the share reads the key");
+        let second = DeclaredKeyexpr::declare(&engine, "demo/pk/b2", None).expect("the last block");
+        assert!(!room_for(&engine, 10), "the two blocks are taken");
+        drop((shared, second));
+        assert!(room_for(&engine, 10), "and given back with their holders");
+        give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key declared by its prefix is kept before anything is declared: with room for the key
+    /// and not for the prefix's row, the declaration is refused with pico's out of memory and the
+    /// key's block goes back.
+    #[test]
+    fn a_prefix_declaration_the_arena_cannot_hold_leaves_nothing() {
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 1);
+        assert_eq!(
+            DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/pk/**", None).err(),
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+        assert!(engine.keyexpr_declarations().is_empty(), "nothing declared");
+        assert!(room_for(&engine, 10), "the key's block went back");
+        give_back(&engine, held);
+        close(session);
+    }
+
+    /// Keys declared and let go of, many times past the room the arena has left, each take the
+    /// block the one before gave back.
+    #[test]
+    fn declarations_past_the_arena_take_the_blocks_given_back() {
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 1);
+        for round in 0..10 {
+            let text = format!("demo/pk/c{round}");
+            let key = DeclaredKeyexpr::declare(&engine, &text, None).expect("the block given back");
+            assert_eq!(key.literal(), text);
+        }
+        assert!(engine.keyexpr_declarations().is_empty());
+        assert!(room_for(&engine, 10));
+        give_back(&engine, held);
+        close(session);
+    }
+
+    /// A key past the session's `MAX_KEYEXPR_BYTES` is a value it cannot take; after the close a
+    /// key is a copy of its own, and one held from before still reads.
+    #[test]
+    fn a_key_too_long_is_invalid_and_a_closed_sessions_key_is_a_copy() {
+        let (mut session, engine) = listening();
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            KeyText::of_session(&engine, &"k".repeat(longest + 1)).err(),
+            Some(Z_EINVAL)
+        );
+        let held = KeyText::of_session(&engine, "demo/a").expect("a short key");
+        assert!(held.is_session());
+        // SAFETY: the session is live and owned here.
+        let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(closed, Z_OK);
+        let copy = KeyText::of_session(&engine, "demo/b").expect("a copy of its own");
+        assert!(!copy.is_session());
+        assert_eq!(held.share().as_str(), "demo/a");
+        close(session);
     }
 }

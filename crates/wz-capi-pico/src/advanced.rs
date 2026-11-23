@@ -1073,7 +1073,7 @@ unsafe fn declare_subscriber_state(
         &PicoSession::of(handle),
         declared_of(keyexpr)
             .map(DeclaredKeyexpr::share)
-            .unwrap_or_else(|| DeclaredKeyexpr::literal_only(ke.clone())),
+            .unwrap_or_else(|| DeclaredKeyexpr::literal_only(&ke)),
     ));
     let opts = advanced_subscriber_options(options).with_declaration_forms(forms);
     let engine = engine_of(handle);

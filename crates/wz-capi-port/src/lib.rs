@@ -66,6 +66,7 @@ pub mod decl_watch;
 mod drive;
 mod engine;
 pub mod group;
+pub mod held_key;
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -89,6 +90,7 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
+pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
 pub use query::{
     HeldQuery, NoRoomToHold, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback,
