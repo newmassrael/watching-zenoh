@@ -772,12 +772,17 @@ pub(crate) struct KeptHello {
     hello: HelloState,
     array: StringArrayState,
     views: [z_loaned_string_t; caps::SCOUT_HELLO_LOCATORS],
-    text: [u8; KEPT_HELLO_TEXT],
+    text: KeptHelloText,
 }
 
-/// The bytes of locator text a kept hello holds.
+/// The locator text a kept hello holds: `SCOUT_HELLO_LOCATORS` locators of the build's
+/// `MAX_LOCATOR_LEN` bytes each, as much as a window's row holds.
 #[cfg(wz_process_pools)]
-const KEPT_HELLO_TEXT: usize = caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN;
+type KeptHelloText = [u8; caps::SCOUT_HELLO_LOCATORS * caps::MAX_LOCATOR_LEN];
+
+/// The bytes of [`KeptHelloText`].
+#[cfg(wz_process_pools)]
+const KEPT_HELLO_TEXT: usize = core::mem::size_of::<KeptHelloText>();
 
 #[cfg(wz_process_pools)]
 impl KeptHello {

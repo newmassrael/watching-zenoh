@@ -132,6 +132,34 @@ fn a_table_holds_its_rows_and_refuses_one_more() {
     assert_eq!(seen, expected);
 }
 
+/// A table held to a shorter `MAX_LOCATOR_LEN` than the build's keeps a locator of that length
+/// and skips, counting it, one a byte longer; a cleared table keeps the bound its creator stated.
+/// Turned red by a row that reads the build's length in place of the table's.
+#[test]
+fn a_table_keeps_locators_to_the_length_its_runtime_limits_state() {
+    let mut limits = RuntimeLimits::defaults();
+    if limits
+        .select_max_locator_len(crate::limit_binding::Quota::at_most(18))
+        .is_err()
+    {
+        // A build that fixes `MAX_LOCATOR_LEN` states no other value to hold the table to.
+        return;
+    }
+    let mut table = alloc::boxed::Box::new(HelloTable::new());
+    table.limit_to(limits.max_locator_len_held());
+    table.clear();
+    let fits = "tcp/10.0.0.1:74470";
+    let long = "tcp/10.0.0.1:744700";
+    assert_eq!((fits.len(), long.len()), (18, 19));
+    let locator_len = table.locator_len;
+    let row = table.staged();
+    row.reset(0x09, None, [0x42u8].into());
+    row.keep(fits, locator_len);
+    row.keep(long, locator_len);
+    assert_eq!(row.locators().collect::<Vec<_>>(), [fits]);
+    assert_eq!(row.skipped_locators(), 1);
+}
+
 /// A Hello decoded into a row in place, with no heap, is the row of the Hello the host's decoder
 /// makes, and a Hello naming a zero zid is no row, as it is no scouted Hello.
 #[test]
@@ -146,11 +174,12 @@ fn a_row_decoded_with_no_heap_is_the_scouted_hellos_row() {
         wire.extend_from_slice(&hello.encode_to_vec());
         wire
     };
+    let locator_len = RuntimeLimits::BUILD.max_locator_len_held();
     let mut row = HelloRow::EMPTY;
-    assert!(!row.decode_into(&hello_of(&[0, 0])));
+    assert!(!row.decode_into(&hello_of(&[0, 0]), locator_len));
     let wire = hello_of(&[0, 0x01]);
     let scouted = decode_scouted_hello(&wire).expect("a Hello naming a zid");
-    assert!(row.decode_into(&wire));
+    assert!(row.decode_into(&wire, locator_len));
     assert_eq!(row, HelloRow::of(&scouted));
     let mut table = alloc::boxed::Box::new(HelloTable::new());
     assert!(table.push(&row));
