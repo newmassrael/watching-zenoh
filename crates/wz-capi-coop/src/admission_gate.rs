@@ -215,8 +215,7 @@ mod tests {
         let into = heard.clone();
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 "demo/**",
                 Locality::Any,
                 BoxedSink::new(move |sample: &dyn SampleView| {

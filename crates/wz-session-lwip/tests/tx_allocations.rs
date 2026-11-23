@@ -225,7 +225,7 @@ struct Side {
     /// The socket driver the actions send through, which the refusal tests take
     /// every slot from.
     #[cfg(feature = "tx-lend-only")]
-    sink: Rc<dyn wz_session_core::link::BoxedLinkDriver>,
+    sink: wz_runtime_coop::link_cells::CellRc<dyn wz_session_core::link::BoxedLinkDriver>,
     pump: LwipSessionLink<Rc<LwipLink>>,
 }
 

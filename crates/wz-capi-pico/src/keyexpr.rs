@@ -493,7 +493,7 @@ fn non_wild_prefix(literal: &str) -> &str {
 /// checked view constructors and the checked owned constructor.
 fn is_pico_canon(text: &str) -> bool {
     // Judged without writing the canonical form, so a view of a key allocates nothing.
-    wz_session_core::keyexpr_canon::is_canonical(
+    wz_session_core::keyexpr_canon::is_canon(
         text,
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     )

@@ -332,7 +332,7 @@ struct Pair {
     /// so the acceptor's SN gate admits it as the initiator's next frame.
     initiator: Rc<SessionLinkActions<CoopRuntime<Frozen>, CoopTime<Frozen>>>,
     /// The initiator's socket: what the measured frames are sent from.
-    initiator_sink: Rc<dyn BoxedLinkDriver>,
+    initiator_sink: wz_runtime_coop::link_cells::CellRc<dyn BoxedLinkDriver>,
     /// Every Put the subscriber was handed, in order. Its capacity is reserved
     /// before anything is measured, so recording a delivery does not itself
     /// allocate.
@@ -396,8 +396,7 @@ impl Pair {
         let seen = delivered.clone();
         observer
             .borrow_mut()
-            .subscribers
-            .register_sink(
+            .register_subscriber(
                 KEY,
                 Locality::Any,
                 BoxedSink::new(move |sample| {
@@ -859,6 +858,7 @@ mod query_and_reply {
         // Through the sink form, which both backings have.
         pair.observer
             .borrow_mut()
+            .face()
             .replies
             .register_sink(
                 RID,
@@ -926,22 +926,23 @@ mod query_and_reply {
         let got: Arc<Mutex<Vec<Handed>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
         let into = got.clone();
         // Through the sink form, which both backings have.
-        pair.observer
-            .borrow_mut()
-            .queryables
-            .register_sink(
-                KEY,
-                Locality::Any,
-                false,
-                wz_session_core::query_sink::BoxedQuerySink::new(move |view, _out| {
-                    into.lock().expect("not poisoned").push(record(
-                        &[],
-                        view.keyexpr(),
-                        view.rid(),
-                    ));
-                }),
-            )
-            .expect("register the queryable");
+        pair.observer.borrow_mut().with_app(|app_half| {
+            app_half
+                .queryables
+                .register_sink(
+                    KEY,
+                    Locality::Any,
+                    false,
+                    wz_session_core::query_sink::BoxedQuerySink::new(move |view, _out| {
+                        into.lock().expect("not poisoned").push(record(
+                            &[],
+                            view.keyexpr(),
+                            view.rid(),
+                        ));
+                    }),
+                )
+                .expect("register the queryable")
+        });
         // A frame as wide as the widest measured one, first: the observer's
         // staging buffers for replies and Finals keep the capacity they grew
         // to, so what follows measures queries and not a first growth.

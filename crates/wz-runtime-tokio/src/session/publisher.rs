@@ -264,12 +264,13 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             let locality = self.options.allowed_destination;
-            obs.remote_subscribers.has_matching_for(
+            obs.face_ref().remote_subscribers.has_matching_for(
                 &wz_session_core::declare::subscriber::PublisherCriterion::new(
                     &self.keyexpr,
                     locality,
                 ),
-            ) || (locality.allows_local() && obs.subscribers.has_local_matching(&self.keyexpr))
+            ) || (locality.allows_local()
+                && obs.read_app(|app| app.subscribers.has_local_matching(&self.keyexpr)))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
@@ -351,18 +352,21 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 // gated on this publisher's own locality, exactly as the
                 // poll gates it.
                 let local = self.options.allowed_destination.allows_local()
-                    && obs.subscribers.has_local_matching(&self.keyexpr);
+                    && obs.read_app(|app| app.subscribers.has_local_matching(&self.keyexpr));
                 // R311y797 — the watch now STORES the locality it was
                 // seeded under, so every later re-evaluation applies the
                 // same gate the seed and the poll do.
-                obs.remote_subscribers.declare_matching_listener_seeded(
-                    wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        &self.keyexpr,
-                        self.options.allowed_destination,
-                    ),
-                    local,
-                    sink,
-                )
+                obs.with_parts(|app, face| {
+                    app.remote_subscribers.declare_matching_listener_seeded(
+                        &*face.remote_subscribers,
+                        wz_session_core::declare::subscriber::PublisherCriterion::new(
+                            &self.keyexpr,
+                            self.options.allowed_destination,
+                        ),
+                        local,
+                        sink,
+                    )
+                })
             });
             // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
             // BY. Without it the watch is registered against a registry the
@@ -407,7 +411,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 let Some(interest_id) = self.session.actions().alloc_next_interest_id() else {
                     cell.kill();
                     R::with_mutex_mut(&self.session.observer, |obs| {
-                        obs.remote_subscribers.undeclare_matching_listener(id)
+                        obs.with_app(|app| app.remote_subscribers.undeclare_matching_listener(id))
                     });
                     return Err(MatchingListenerError::IdsExhausted);
                 };
@@ -450,7 +454,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                     // never asked to feed.
                     cell.kill();
                     R::with_mutex_mut(&self.session.observer, |obs| {
-                        obs.remote_subscribers.undeclare_matching_listener(id)
+                        obs.with_app(|app| app.remote_subscribers.undeclare_matching_listener(id))
                     });
                     return Err(MatchingListenerError::Wire(e));
                 }
@@ -610,9 +614,13 @@ impl<R: SessionRuntime, T: TimeSource> PublisherAliased<R, T> {
         #[cfg(feature = "declare-subscriber")]
         let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             let locality = self.options.allowed_destination;
-            (locality.allows_remote() && obs.remote_subscribers.has_matching(&_effective_keyexpr))
+            (locality.allows_remote()
+                && obs
+                    .face_ref()
+                    .remote_subscribers
+                    .has_matching(&_effective_keyexpr))
                 || (locality.allows_local()
-                    && obs.subscribers.has_local_matching(&_effective_keyexpr))
+                    && obs.read_app(|app| app.subscribers.has_local_matching(&_effective_keyexpr)))
         });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;

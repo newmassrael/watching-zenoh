@@ -36,7 +36,7 @@ use wz_admin::adminspace::{AdminLink, AdminSession};
 use wz_session_core::caps;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
-use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
+use wz_session_core::query::{QueryPeer, QueryReply, QueryableRegistry, ReplyBody};
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed, AdminHost, AdminQuerySink, FixedNodeIdentity, FixedNodeStatus,
@@ -181,7 +181,8 @@ fn the_whole_admin_surface_is_served_by_one_get_with_zero_allocations() {
     let mut peers = session();
     let messages = [get(1, "@/a1b2/peer/**")];
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
             &messages,
             peers.subscribers.mapping_spaces(),
             &mut peers.replies,
@@ -251,14 +252,16 @@ fn a_leg_past_the_reply_buffer_is_refused_counted_and_typed_while_the_others_are
     let wildcard = [get(1, "@/a1b2/peer/**")];
     let config_only = [get(2, "@/a1b2/peer/config")];
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
             &wildcard,
             a.subscribers.mapping_spaces(),
             &mut a.replies,
             &mut a.finals,
         );
         // A second session asks the leg that fits, after the first was refused.
-        registry.dispatch_messages(
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
             &config_only,
             b.subscribers.mapping_spaces(),
             &mut b.replies,

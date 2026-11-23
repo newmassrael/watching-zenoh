@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use wz_session_core::caps;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::query::QueryableRegistry;
+use wz_session_core::query::{QueryPeer, QueryableRegistry};
 use wz_session_core::query_sink::{QuerySink, QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
 use wz_session_core::request_build::RequestQueryBuilder;
@@ -149,7 +149,13 @@ fn the_reply_past_pending_replies_is_refused_counted_and_costs_the_heap_nothing(
     let (mut reg, seen) = registry(vec![b"x".to_vec(); n + 1]);
     let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
     let aliases = no_aliases();
-    reg.dispatch_messages(&[request(1)], &aliases, &mut replies, &mut finals);
+    QueryPeer::default().dispatch_messages(
+        &mut reg,
+        &[request(1)],
+        &aliases,
+        &mut replies,
+        &mut finals,
+    );
     let seen = seen.lock().expect("not poisoned");
     let mut want: Vec<Result<(), ReplyError>> = vec![Ok(()); n];
     want.push(Err(ReplyError::StagingFull));
@@ -176,7 +182,13 @@ fn a_payload_past_reply_payload_bytes_is_refused_not_truncated() {
     let (mut reg, seen) = registry(vec![vec![7u8; max], vec![7u8; max + 1], vec![7u8; max * 4]]);
     let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
     let aliases = no_aliases();
-    reg.dispatch_messages(&[request(1)], &aliases, &mut replies, &mut finals);
+    QueryPeer::default().dispatch_messages(
+        &mut reg,
+        &[request(1)],
+        &aliases,
+        &mut replies,
+        &mut finals,
+    );
     let seen = seen.lock().expect("not poisoned");
     assert_eq!(
         (
@@ -219,10 +231,22 @@ fn the_request_past_pending_finals_never_reaches_a_queryable_and_is_counted() {
     let aliases = no_aliases();
     let msgs: Vec<NetworkMessage> = (1..=n as u32 + 1).map(request).collect();
     for m in &msgs[..n] {
-        reg.dispatch_messages(std::slice::from_ref(m), &aliases, &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            std::slice::from_ref(m),
+            &aliases,
+            &mut replies,
+            &mut finals,
+        );
     }
     let (_, allocations) = allocations_during(|| {
-        reg.dispatch_messages(&msgs[n..], &aliases, &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
+            &msgs[n..],
+            &aliases,
+            &mut replies,
+            &mut finals,
+        );
     });
     let runs = seen.lock().expect("not poisoned").runs;
     assert_eq!(
@@ -233,7 +257,13 @@ fn the_request_past_pending_finals_never_reaches_a_queryable_and_is_counted() {
     // The Finals owed are the ones that were admitted, in order, and a drain makes room.
     let rids: Vec<u32> = finals.drain_owed().map(|(rid, _)| rid).collect();
     assert_eq!(rids, (1..=n as u32).collect::<Vec<_>>());
-    reg.dispatch_messages(&msgs[n..], &aliases, &mut replies, &mut finals);
+    QueryPeer::default().dispatch_messages(
+        &mut reg,
+        &msgs[n..],
+        &aliases,
+        &mut replies,
+        &mut finals,
+    );
     assert_eq!(
         finals.owed(),
         1,
@@ -248,7 +278,8 @@ fn one_session_with_full_tables_leaves_the_other_sessions_replies_and_finals_alo
     let (mut flooded_replies, mut flooded_finals) = (ReplyStage::new(), FinalStage::new());
     let (mut quiet_replies, mut quiet_finals) = (ReplyStage::new(), FinalStage::new());
     for rid in 1..=(caps::MAX_PENDING_FINALS as u32 + 4) {
-        reg.dispatch_messages(
+        QueryPeer::default().dispatch_messages(
+            &mut reg,
             &[request(rid)],
             &aliases,
             &mut flooded_replies,
@@ -256,7 +287,8 @@ fn one_session_with_full_tables_leaves_the_other_sessions_replies_and_finals_alo
         );
     }
     let runs_after_flood = seen.lock().expect("not poisoned").runs;
-    reg.dispatch_messages(
+    QueryPeer::default().dispatch_messages(
+        &mut reg,
         &[request(1)],
         &aliases,
         &mut quiet_replies,

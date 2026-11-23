@@ -190,6 +190,23 @@ pub mod key_arena;
 /// tables in them in a build with `peer-row-pools`; a build without it links none of it.
 pub mod row_pool;
 
+/// The callback a row of the session's tables owns, a C closure's three values or a Rust closure,
+/// and the latch its calls are counted on, so a row is let go of after its last call (P11).
+/// Unconditional, like [`slot_map`]: on a target with no atomic read-modify-write the latch is a
+/// count the tables' lock guards.
+pub mod row_callback;
+
+/// Fixed-capacity slot maps: rows named by generation-checked handles, pinned while a call of
+/// what they own runs, kept as the storage policy keeps a table. Unconditional, like [`bounded`];
+/// a build that holds no slot map links none of it.
+pub mod slot_map;
+
+/// The session's one table set (`docs/c-abi-l3-tables.md`): its key expression declarations,
+/// entities, Interests, write filters, matching listeners and pending gets, each in one row of one
+/// [`slot_map::SlotMap`]. Unconditional, like [`slot_map`]; no engine drives it yet, so no build
+/// links it.
+pub mod session_tables;
+
 /// Byte storage an image declares and a link borrows (`ByteCells`, `ByteBuf`): the buffers of a
 /// link stay in the image's `.bss` and the link holds a claim on them, so the link is a few words
 /// and moving it moves no bytes. Unconditional, like [`bounded`]: it needs no feature.
@@ -1469,12 +1486,16 @@ pub mod lent_control;
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 pub mod lent_response;
 
-/// A `get` written as the codec's BORROWED `Request` from the caller's own text, where
-/// `send_request_query` builds the owned mirror and so refuses on a node with no
-/// allocator. Byte-equal to the owned builder, which the module's tests hold for every
-/// combination its description can state.
+/// A `get` written into the slot its link lends from its borrowed description
+/// ([`query_parts::GetParts`]), with nothing allocated. Byte-equal to the owned builder, which
+/// the module's tests hold for every combination its description can state.
 #[cfg(all(feature = "storage-profile", feature = "codec-request"))]
 pub mod lent_request;
+
+/// What a `get` asks, every field borrowed: the one description a query is written from on a
+/// link, read from a program's options or from a session API's metadata.
+#[cfg(feature = "storage-profile")]
+pub mod query_parts;
 
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
@@ -1909,6 +1930,11 @@ pub mod query;
 /// one, where a reply or a request that does not fit is refused and counted.
 #[cfg(feature = "storage-profile")]
 pub mod reply_stage;
+
+/// What a consolidating get holds back, and the one rule it holds by: the owned replies of one get
+/// on the heap, or the rows of the session's one table of held replies, with no allocation.
+#[cfg(feature = "storage-profile")]
+pub mod reply_hold;
 
 /// Fixed-memory step S9a — every table a PEER writes, or that is owed to one
 /// peer, for ONE session: its keyexpr aliases, the declarations it made to us, its

@@ -446,6 +446,9 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { .. } => None,
         }
     }
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+        ReplyView::timestamp(self).map(crate::reply_stage::TimestampParts::of)
+    }
     fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
         match &self.body {
             InboundReplyBody::Put { payload, .. } => Some(payload),
@@ -504,12 +507,12 @@ impl InboundReply {
                     .put_encoding()
                     .map(|(id, schema)| (id, schema.map(<[u8]>::to_vec))),
                 source_info: view.source_info().cloned(),
-                timestamp: view.timestamp().cloned(),
+                timestamp: retained_timestamp(view),
             },
             ReplyKind::Del => InboundReplyBody::Del {
                 attachment: retained_attachment(view),
                 source_info: view.source_info().cloned(),
-                timestamp: view.timestamp().cloned(),
+                timestamp: retained_timestamp(view),
             },
             ReplyKind::Err => InboundReplyBody::Err {
                 encoding: view
@@ -527,6 +530,16 @@ impl InboundReply {
             stamp: ReplyStamp::of(view),
         }
     }
+}
+
+/// The timestamp a retained reply keeps, read from the parts every view answers with.
+#[cfg(feature = "alloc")]
+fn retained_timestamp(view: &dyn ReplyView) -> Option<crate::sample::TimestampHint> {
+    view.timestamp_parts()
+        .map(|stamp| crate::sample::TimestampHint {
+            time: stamp.time,
+            zid: stamp.zid.to_vec(),
+        })
 }
 
 /// The attachment a retained reply keeps: a second reference to the storage the
@@ -1341,7 +1354,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     ///   `peer_keyexpr_table` (the shared mapping populated by the
     ///   subscriber side's `absorb_declare` from inbound
     ///   `Declare(DeclKexpr)`). The composition rule mirrors
-    ///   [`crate::query::QueryableRegistry::dispatch_request`]:
+    ///   [`crate::query::QueryPeer::dispatch_request`]:
     ///   `id == 0` → suffix verbatim; `id != 0` → `table[id]` +
     ///   optional suffix. Un-resolvable mapping ids drop the
     ///   dispatch silently rather than firing on a partial keyexpr.
@@ -1895,7 +1908,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// Convenience adapter that pulls the `FramePayload.messages` out
     /// of an `IterationEvent::Poll(DriverLoopOutcome::FramePayload)`
     /// surface and forwards to [`Self::dispatch_messages`]. Mirror
-    /// of [`crate::query::QueryableRegistry::dispatch_iteration_event`]
+    /// of [`crate::query::QueryPeer::dispatch_iteration_event`]
     /// for the z_get-side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
     ///

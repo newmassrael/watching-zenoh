@@ -46,6 +46,7 @@ use core::cell::RefCell;
 
 use wz_admin::admin_config_space::write_config_space_pattern;
 use wz_admin::adminspace::admin_queryable_key;
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -75,7 +76,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     local: &'a CoopLocalSet<C>,
     links: Rc<L>,
@@ -117,7 +118,7 @@ where
     L: SessionLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
-    A: FnMut(Rc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
+    A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Rc<McuActions<C>>,
 {
     /// A node that listens on `listen_port`, answers as `identity`, applies
     /// writes to `control` and reports through `status`, over the network `links`.
@@ -772,16 +773,19 @@ mod tests {
         )
         .expect("two places take the config subscriber");
         let mut observer = node.observer().borrow_mut();
-        std::assert_eq!(observer.subscribers.len(), 1, "the config subscriber");
+        std::assert_eq!(
+            observer.read_app(|app| app.subscribers.len()),
+            1,
+            "the config subscriber"
+        );
         observer
-            .subscribers
-            .register("test/a", |_| {})
+            .subscribe("test/a", |_| {})
             .expect("under the quota");
         std::assert_eq!(
-            observer.subscribers.register("test/b", |_| {}).err(),
+            observer.subscribe("test/b", |_| {}).err(),
             Some(RegisterError::TableFull)
         );
-        std::assert_eq!(observer.subscribers.len(), 2);
+        std::assert_eq!(observer.read_app(|app| app.subscribers.len()), 2);
 
         // CONTROL: the build's limits take the subscriber the stated ones refused.
         let control_runtime = runtime.clone();
@@ -807,10 +811,9 @@ mod tests {
         let mut observer = control.observer().borrow_mut();
         for key in ["test/a", "test/b"] {
             observer
-                .subscribers
-                .register(key, |_| {})
+                .subscribe(key, |_| {})
                 .expect("the build's limits take it");
         }
-        std::assert_eq!(observer.subscribers.len(), 3);
+        std::assert_eq!(observer.read_app(|app| app.subscribers.len()), 3);
     }
 }

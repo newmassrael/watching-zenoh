@@ -134,7 +134,6 @@ fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger
 #[test]
 #[ignore = "a measurement: prints the parts of a link task's cell"]
 fn print_the_parts_of_a_link_tasks_cell() {
-    use alloc::rc::Rc;
     use core::mem::size_of;
     use wz_runtime_coop::reassembly_rx::SessionReassembly;
     use wz_runtime_coop::session_drive::{SessionDatagramLink, SessionDriveConfig, SessionPump};
@@ -150,7 +149,7 @@ fn print_the_parts_of_a_link_tasks_cell() {
     use crate::engine::FaceDispatch;
 
     type C = PosixClock;
-    type Link = Rc<dyn SessionDatagramLink>;
+    type Link = wz_runtime_coop::link_cells::CellRc<dyn SessionDatagramLink>;
     type Router = RouterLend<SessionReassembly>;
     let cell = link_task_bytes::<C>();
     let pump = size_of::<SessionPump<C, Link, dyn BoxedLinkDriver, Router>>();

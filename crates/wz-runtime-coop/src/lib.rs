@@ -281,6 +281,11 @@ pub mod udp_link;
 #[cfg(feature = "session-unicast")]
 pub mod link_storage;
 
+// The cells a session's links' drivers live in, each named by counted handles as an `Rc` would
+// name it, lent from the session's arena: a link taken after the open takes no memory of the heap.
+#[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+pub mod link_cells;
+
 // The session's link over a byte stream (TCP), written once for every stack with BSD-style
 // sockets under a cooperative loop, as the datagram link is: a platform supplies the socket
 // (`stream_link::StreamSocket`), and the batch framing and the driver are here.

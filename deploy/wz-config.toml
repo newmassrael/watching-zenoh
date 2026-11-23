@@ -3155,7 +3155,7 @@ reason = "No key of upstream's configuration bounds it: wz holds the replies of 
 
 [limit.pico_preset]
 value = 2
-reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to."
+reason = "zenoh-pico sends a reply as it is made, with no stage; its examples and API tests reply once to each query, and its queryable API test holds two queries it replies to. The same count of rows holds back what the session's consolidating gets keep of their replies (`reply_hold::HeldReplies`), each row the room of one reply's payload and key (`MAX_REPLY_PAYLOAD_BYTES` and `MAX_KEYEXPR_BYTES`, 1,024 and 256 bytes here): two rows are about 2.6 KB of the session's arena, where zenoh-pico holds each reply of a `Latest` get in an allocation of its own (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h` @ `typedef struct _z_pending_reply_t {`)."
 
 [[limit]]
 id = "MAX_PENDING_FINALS"
@@ -4042,13 +4042,18 @@ The most bytes one link of a transport the program supplies queues in either
 direction: what the program handed in and the session has not read, and what a
 session that cannot wait handed over and the program has not taken. Past it the
 program's bytes are refused with nothing taken, and the program is told when the
-session has read the queue down to half. Read only by a build with the
-app-transport capability.
+session has read the queue down to half. The link takes storage of the bound
+when it opens, and a call that hands in more than the bound at once is refused.
+Read only by a build with the app-transport capability.
 '''
 
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: a transport the program supplies is a wz capability."
+
+[limit.pico_preset]
+value = 2050
+reason = "zenoh-pico reads a link into one buffer of one batch and queues nothing in front of it (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._zbuf = _z_zbuf_make(zbuf_size);`). The preset holds one batch of the preset's PICO_UNICAST_BATCH_BYTES and PICO_MULTICAST_BATCH_BYTES (2,048) with the two bytes of a stream's length before it: the most the session reads of a link at once and the most a writer that cannot wait hands over. A link's storage, taken at its open, is that and one datagram's head and locator."
 
 [[limit]]
 id = "EVENT_RING_SLOTS"

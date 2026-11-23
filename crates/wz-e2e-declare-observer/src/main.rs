@@ -79,17 +79,20 @@ fn main() -> ExitCode {
                 .observer()
                 .lock()
                 .expect("observer mutex poisoned")
-                .remote_subscribers
-                .on_subscriber_declared(move |decl| {
-                    log::info!(
-                        "{BINARY}: REMOTE SUBSCRIBER DECLARED observe='{}' \
+                .with_app(|app_half| {
+                    app_half
+                        .remote_subscribers
+                        .on_subscriber_declared(move |decl| {
+                            log::info!(
+                                "{BINARY}: REMOTE SUBSCRIBER DECLARED observe='{}' \
                          keyexpr='{}' sub_id={}",
-                        observe_for_callback,
-                        decl.keyexpr(),
-                        decl.id(),
-                    );
-                })
-                .map_err(std::io::Error::other)?;
+                                observe_for_callback,
+                                decl.keyexpr(),
+                                decl.id(),
+                            );
+                        })
+                        .map_err(std::io::Error::other)
+                })?;
             // No RAII handle / wire-emitting Drop: a pure observer holds
             // nothing across the drive loop. The unit hold is dropped
             // first at teardown (a no-op) exactly like a declare handle.

@@ -19,7 +19,12 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+// The port a stack listens on is shared by its links; the tests share a channel's answer.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    any(test, feature = "udp-listen")
+))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
@@ -112,7 +117,7 @@ pub enum IpDriver<
 /// (`Rc<dyn BoxedLinkDriver>`), so the slot profile's one type for every link, [`IpDriver`], would
 /// be a second dispatch under the first there.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub type HeapLink = Rc<dyn SessionDatagramLink>;
+pub type HeapLink = crate::link_cells::CellRc<dyn SessionDatagramLink>;
 
 /// `driver` opened as the session shell holds a link: the session's actions send through it and
 /// its loop pumps it, the one object behind both.
@@ -121,10 +126,10 @@ pub(crate) fn heap_link<K>(driver: K) -> OpenedLink<HeapLink>
 where
     K: BoxedLinkDriver + SessionDatagramLink + 'static,
 {
-    let driver = Rc::new(driver);
+    let driver = crate::link_cells::CellRc::boxed(driver);
     OpenedLink {
-        sink: driver.clone(),
-        pump: driver,
+        sink: driver.clone().into_sink(),
+        pump: driver.into_link(),
     }
 }
 
@@ -653,7 +658,7 @@ where
     }
 
     /// A link of these is shared already: the pump is the handle the sink is a clone of.
-    fn share_pump(pump: Self::Pump) -> Rc<dyn SessionDatagramLink> {
+    fn share_pump(pump: Self::Pump) -> crate::link_cells::CellRc<dyn SessionDatagramLink> {
         pump
     }
 }
@@ -1756,7 +1761,9 @@ mod tests {
 
     /// The kind of link a heap stack opened, as the link names it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-    fn kind(link: &Rc<dyn BoxedLinkDriver>) -> Option<wz_session_core::link::LinkKind> {
+    fn kind(
+        link: &crate::link_cells::CellRc<dyn BoxedLinkDriver>,
+    ) -> Option<wz_session_core::link::LinkKind> {
         link.link_subject().and_then(|subject| subject.kind)
     }
 

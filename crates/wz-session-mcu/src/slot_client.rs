@@ -29,7 +29,7 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::bounded::{BoundedVec, CapacityFull};
+use wz_session_core::bounded::{BoundedVec, CapacityFull, Storage};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::{BoxedLinkDriver, LinkDropCause};
@@ -983,6 +983,7 @@ pub struct DocumentSinks;
 
 impl ObserverSinks for DocumentSinks {
     type Subscriber = LatestSink;
+    type Tables<P: Storage> = SubscriberTable<Self::Subscriber, P>;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;

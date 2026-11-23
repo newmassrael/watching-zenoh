@@ -188,14 +188,20 @@ impl<P: Storage> ReplyAcceptanceStored<P> {
     /// neither upstream performs and would swallow the error a caller is
     /// waiting on.
     pub(crate) fn admits(&self, reply: &dyn ReplyView) -> bool {
-        let Some(keyexpr) = &self.keyexpr else {
-            return true;
-        };
-        if reply.kind() == ReplyKind::Err {
-            return true;
-        }
-        reply_keyexpr_intersects(keyexpr, reply.keyexpr())
+        admits_reply(self.keyexpr.as_deref(), reply)
     }
+}
+
+/// Whether a get whose replies must intersect `gate` admits `reply`, `None` being pico's
+/// `_anyke`: the rule of [`ReplyAcceptanceStored::admits`], over a key however the get keeps it.
+pub(crate) fn admits_reply(gate: Option<&str>, reply: &dyn ReplyView) -> bool {
+    let Some(keyexpr) = gate else {
+        return true;
+    };
+    if reply.kind() == ReplyKind::Err {
+        return true;
+    }
+    reply_keyexpr_intersects(keyexpr, reply.keyexpr())
 }
 
 /// Does a reply keyed `reply` belong to a query asked under `query_keyexpr`?

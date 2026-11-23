@@ -133,8 +133,7 @@ async fn wz_to_wz_over_unixsock_reaches_established_and_delivers_put() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -314,8 +313,7 @@ async fn wz_accepts_a_session_over_unixsock_via_the_bind_endpoint_seam() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),

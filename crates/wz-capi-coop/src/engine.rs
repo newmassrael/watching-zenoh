@@ -75,6 +75,7 @@ use wz_runtime_coop::faces::{
     Dial, DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
     Moved,
 };
+use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
@@ -2049,11 +2050,6 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             self.plane
                 .arriving
                 .store(self.generation, Ordering::Release);
-            // The application's queryables serve every face, so this face's session states its
-            // own answer to a query it cannot resolve before its frame is dispatched.
-            registry
-                .app
-                .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
             // A query by an id of the shared dictionary is kept, so its replies mirror its key
             // form.
             #[cfg(feature = "shared-key-ids")]
@@ -2086,11 +2082,6 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             registry.dispatch_push(face, event, actions);
             return;
         }
-        // The application's tables serve every face: this face's session states its own answer
-        // to a query it cannot resolve before its frame is dispatched, as one with queryables does.
-        registry
-            .app
-            .set_unanswerable_final(actions.params.policy.query_unanswerable_final());
         registry.dispatch(face, event, actions);
         #[cfg(any(
             feature = "remote-declaration-watch",
@@ -2107,7 +2098,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
         C,
-        Rc<dyn SessionDatagramLink>,
+        CellRc<dyn SessionDatagramLink>,
         RouterLend<SessionReassembly>,
         RouterLend<SessionReassembly>,
         FaceDispatch<C>,
@@ -2382,6 +2373,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.registry
             .borrow_mut()
             .install_own_mapping_space(face, own_space);
+        // The answer the face's session gives a query of its peer whose key it cannot resolve:
+        // the session's policy, stated for each link the face is opened over.
+        self.registry
+            .borrow_mut()
+            .set_unanswerable_final(face, actions.params.policy.query_unanswerable_final());
         // The key ids every node shares, on both sides of the link before it carries anything:
         // the link's actions, with the key-wire form stated for the endpoint it was dialled to or
         // taken on, so what is sent over it names its keys in that form, and the face's tables,
@@ -2425,17 +2421,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         );
         #[cfg(feature = "listen")]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link: Rc<dyn SessionDatagramLink> = Rc::new(unsafe {
+        let link = CellRc::boxed(unsafe {
             LaneGate::new(
                 AdmissionGate::new(pump, actions.clone(), admitted.clone()),
                 self.lane.clone(),
                 room,
             )
-        });
+        })
+        .into_link();
         #[cfg(not(feature = "listen"))]
         // SAFETY: a link is made under the session's lock, and its gate asked by the step alone.
-        let link: Rc<dyn SessionDatagramLink> =
-            Rc::new(unsafe { LaneGate::new(pump, self.lane.clone(), room) });
+        let link =
+            CellRc::boxed(unsafe { LaneGate::new(pump, self.lane.clone(), room) }).into_link();
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let dispatch = FaceDispatch {
@@ -2905,8 +2902,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         for join in self.config.groups.clone() {
             let id = self.links.next_face_id();
             // The tables first: the group's task dispatches to them from its first step. They are
-            // the face's for as long as the session holds the group, across its joins.
+            // the face's for as long as the session holds the group, across its joins, and answer
+            // a query whose key they cannot resolve by the session's policy.
             self.registry.borrow_mut().add_face(id);
+            self.registry
+                .borrow_mut()
+                .set_unanswerable_final(id, self.policy.query_unanswerable_final());
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
             if let Some(ids) = &self.key_ids {
@@ -2962,13 +2963,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
         #[cfg(feature = "queryable")]
-        let dispatch = group::dispatch(
-            self.registry.clone(),
-            id,
-            self.policy,
-            self.plane.clone(),
-            generation,
-        );
+        let dispatch = group::dispatch(self.registry.clone(), id, self.plane.clone(), generation);
         #[cfg(not(feature = "queryable"))]
         let dispatch = group::dispatch(self.registry.clone(), id);
         // The group is handed a record of its datagrams only while the delivery lane has the room
@@ -6621,10 +6616,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             } else {
                 (wire.mapping_id, wire.suffix.as_deref())
             };
-            if actions
-                .send_request_query_with_meta(rid, mapping_id, suffix, &opts.query_metadata())
-                .is_err()
-            {
+            // The query is written from the options where they lie, with nothing copied.
+            let sent = match wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix) {
+                Some(key) => actions
+                    .send_get_parts(wz_session_core::query_parts::GetParts {
+                        rid,
+                        key,
+                        query: opts.query_parts(),
+                    })
+                    .is_ok(),
+                None => false,
+            };
+            if !sent {
                 // Nothing went out: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
                     tables.gets.replies.unregister(rid);
@@ -6705,7 +6708,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 _ => continue,
             }
             self.hold_leg(leg_id, leg());
-            if !group.ask(rid, keyexpr, wire, &opts.query_metadata()) {
+            if !group.ask(rid, keyexpr, wire, opts.query_parts()) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.registry.borrow_mut().face_mut(face) {
                     tables.gets.replies.unregister(rid);

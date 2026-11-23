@@ -1239,7 +1239,7 @@ mod tests {
     fn a_stack_with_no_link_left_makes_the_dial_exhausted_and_not_refused() {
         struct NoLinks;
         impl SessionLinks for NoLinks {
-            type Pump = Rc<crate::memory::MemoryEnd>;
+            type Pump = wz_runtime_coop::link_cells::CellRc<crate::memory::MemoryEnd>;
             type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
             fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)

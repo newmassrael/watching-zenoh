@@ -37,9 +37,9 @@
 //!
 //! ```text
 //! let mut observer = ApplicationLayerObserver::new();
-//! observer.subscribers.register("home/temp", on_temp)?;
-//! observer.queryables.register("metrics/**", on_metric)?;
-//! observer.replies.register(rid, expected_finals, on_reply, on_final)?;
+//! observer.subscribe("home/temp", on_temp)?;
+//! observer.with_app(|app| app.queryables.register("metrics/**", on_metric))?;
+//! observer.face().replies.register(rid, expected_finals, on_reply, on_final)?;
 //! // … later, inside the drive_session observer closure:
 //! observer.dispatch(event, &actions);
 //! ```
@@ -59,9 +59,9 @@
 //!   (`wz_runtime_tokio::pubsub::SubscriberRegistry`,
 //!   `wz_runtime_tokio::reply::ReplyRegistry`, etc. — each a re-export
 //!   shell over this crate's modules) when they need the types for
-//!   non-bundled usage. The bundle exposes its fields as `pub` so
-//!   application code can call `register` directly on each contained
-//!   registry without indirection.
+//!   non-bundled usage. The bundle hands out its two halves (the
+//!   application's tables and the peer's, `with_app` / `face` and their
+//!   kin) so application code calls `register` on each table itself.
 //!
 //! ## Dispatch flow
 //!
@@ -71,8 +71,8 @@
 //!    registry. The subscriber registry runs FIRST so any
 //!    `Declare(DeclKexpr)` body in the same frame populates the
 //!    peer_keyexpr_table before the consumer registries read it.
-//! 2. **Drain** — `flush_pending(&actions)` walks `pending_replies` +
-//!    `pending_final_rids` (populated by the queryable side during
+//! 2. **Drain** — `flush_pending(&actions)` walks the peer tables' staged
+//!    replies and owed `Final`s (populated by the queryable side during
 //!    fan-out) and emits each through the action layer. Order is
 //!    preserved on the wire: every Reply for rid R precedes the
 //!    matching ResponseFinal for R (zenoh-pico's z_get correlator
@@ -102,254 +102,51 @@
 //! `query-queryable`, so a `codec-declare`-on / `query-queryable`-off
 //! subset composes the observer with the queryable slot elided.
 
-// R311dz — `LivelinessRegistry` gates on `liveliness-token`; without it
-// the observer slot for the peer Decl/UndeclToken arm is elided. The
-// type lives in this crate's `declare::liveliness` (codec-declare-gated)
-// module after the R311do-dq registry migration.
+// The observer's halves are the slot profile's tables; what is named here is what the halves'
+// borrowed forms (`ObserverApp`, `ObserverFace`) spell out, each under the feature of its table.
 #[cfg(feature = "liveliness-token")]
 use crate::declare::liveliness::LivelinessRegistry;
-// R283 — declarer-side held-token registry + the inbound-Interest
-// responder. Gated on `liveliness-token` (the declarer feature) alongside
-// the peer-side `LivelinessRegistry`. R311hn (Track 2) — the staging
-// buffer is now a no-heap `BoundedVec<DeclResponseItem>` (was
-// `Vec<DeclareOwned>`); the registry + its no-heap response surface
-// compile without `alloc`.
-#[cfg(feature = "liveliness-token")]
-use crate::bounded::BoundedVec;
-#[cfg(feature = "liveliness-token")]
-use crate::caps;
-#[cfg(feature = "liveliness-token")]
-use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
-// R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
-// and lives under the `codec-declare`-gated `declare` module, so the
-// `liveliness_subscribers` field + this import gate on
-// `liveliness-subscriber` (which now implies `codec-declare`). With the
-// observer no longer `codec-declare`-gated as a whole (R311ek), the
-// previously-unconditional field would otherwise reference a type that
-// does not exist in a `codec-declare`-off subset. The codec-agnostic
-// callback surface (`LivelinessSample` etc.) lives in the always-present
-// `declare::liveliness_sample` module so the
-// `Session::declare_liveliness_subscriber{_aliased}` Result-form
-// signatures still compile regardless of feature state; only the
-// registry slot (and its dispatch / Drop access) follow the feature.
-#[cfg(feature = "liveliness-subscriber")]
-use crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
-// liveliness-get — the requester-side pending-get registry. Gated on
-// `liveliness-get` (which implies `codec-declare`); the field + this
-// import + the dispatch fan in `dispatch_event` follow the feature, the
-// `Session::liveliness_get` Result-form surface returns
-// `Err(FeatureDisabled)` in the feature-OFF build without touching the
-// field. Reuses the `crate::reply_sink::BoxedReplySink` delivery seam
-// (the get surface is reply-shaped).
 #[cfg(feature = "liveliness-get")]
 use crate::declare::liveliness_get::LivelinessGetRegistry;
-// R310 — peer-side declare observer registries gate on the matching
-// application-layer declare-* feature. Without the feature the
-// observer slot for that wire arm is elided entirely; inbound
-// Decl/Undecl frames still decode at the codec layer but the fan-out
-// to user callbacks is absent (the application can't have registered
-// callbacks against a type that does not exist in its build).
-#[cfg(feature = "declare-queryable")]
-use crate::declare::queryable::RemoteQueryableRegistry;
-#[cfg(feature = "declare-subscriber")]
-use crate::declare::subscriber::RemoteSubscriberRegistry;
+#[cfg(feature = "liveliness-token")]
+use crate::declare::local_token::LocalTokenRegistry;
 use crate::driver_loop::IterationEvent;
-use crate::pubsub::SubscriberRegistry;
-#[cfg(feature = "switchboard")]
-use crate::switchboard::{EventInjector, SwitchboardRegistry};
-// R311r — `QueryReply` is the codec-agnostic accumulator (always
-// compiled, alloc-bound); it backs the `pending_replies` staging buffer
-// + the `pending_reply_count` accessor regardless of feature state. The
-// `QueryableRegistry` field, by contrast, is the `Request` / `Query`
-// dispatch surface and gates on `query-queryable` (which implies
-// codec-request + codec-response) — a build without it composes the
-// observer with the queryable slot elided. (Pre-R311dz the field was
-// type-ungated in the AP crate because the AP-side `query` shell only
-// re-exported `QueryableRegistry` under codec-request; the migration
-// makes the consumer-feature gate explicit so a codec-declare-on /
-// query-queryable-off subset compiles.)
 use crate::owed_replies::OwedReplies;
+use crate::peer_tables::PeerTables;
 #[cfg(feature = "query-queryable")]
 use crate::query::QueryableRegistry;
-use crate::reply_stage::{FinalStage, ReplyStage};
-#[cfg(feature = "query-queryable")]
-use crate::reply_stage::{FinalStaging, ReplyStaging};
-// R311dy — `ReplyRegistry` stays always-compiled (alloc): its loopback
-// delivery + timeout sweep are codec-agnostic, mirroring
-// `SubscriberRegistry`. The dispatch fan-out + wire-emit drain stay
-// cfg-gated inside the registry / `flush_pending`.
 use crate::reply::ReplyRegistry;
-// R311dz-pre — the actions-drain phase (`flush_pending` / `dispatch`) is
-// generic over the `ResponseSink` IoC trait rather than the concrete
-// tokio `SessionLinkActions<R, T>`. This is what let the observer
-// migrate here without dragging in the tokio actions layer
-// (`wz-runtime-tokio::session_glue`). `SessionLinkActions` impls
-// `ResponseSink` in wz-runtime-tokio so existing call sites
-// (`observer.dispatch(event, &actions)`) resolve `S = SessionLinkActions
-// <R, T>` by inference, unchanged.
+use crate::reply_stage::FinalStage;
+// The drains are generic over the sink traits, so the AP's `SessionLinkActions` and an MCU sink
+// drive the same observer.
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+use crate::slot_observer::{Requesters, SlotObserver};
+#[cfg(feature = "switchboard")]
+use crate::switchboard::{EventInjector, SwitchboardRegistry};
 
-/// Six-registry application-layer dispatch bundle. See module-level
-/// docs for the rationale and dispatch flow.
+/// The application-layer dispatch of one session, in its two halves (`docs/c-abi-l3-tables.md`,
+/// section 7): what the program registers (the slot observer's tables, [`SlotObserver`]) and what
+/// this session's peer writes and is owed ([`PeerTables`]) with the gets the session asked of it
+/// ([`Requesters`]). See the module-level docs for the dispatch flow.
 pub struct ApplicationLayerObserver {
-    /// Local pub/sub callbacks + peer keyexpr table (the table is
-    /// populated by inbound `Declare(DeclKexpr|UndeclKexpr)` records
-    /// and shared by every consumer registry for keyexpr resolution).
-    pub subscribers: SubscriberRegistry<crate::sink::BoxedSink>,
-    /// R311gi gc-2c — the statechart switchboard: the keyexpr -> SCXML
-    /// domain-event injection table. A SEPARATE inbound adapter from the
-    /// data-callback `subscribers` (gc-2a): its
-    /// [`dispatch_switchboard`](Self::dispatch_switchboard) fan-out
-    /// threads the engine ingress port (`EventInjector`) rather than
-    /// storing a callback, so statechart injection stays decoupled from
-    /// the data-callback path. Gated on `switchboard` (⇒ `codec-push`,
-    /// since it reacts to inbound Push samples).
-    #[cfg(feature = "switchboard")]
-    pub switchboard: SwitchboardRegistry,
-    /// Inbound `Request(Query)` → responder callbacks (acceptor /
-    /// queryable side). The `pending_replies` / `pending_final_rids`
-    /// buffers below stage outbound records this registry emits
-    /// during fan-out.
-    ///
-    /// R311dz — gated on `query-queryable`. The type
-    /// (`QueryableRegistry`) is the `Request` / `Query` dispatch
-    /// surface and only exists when that consumer feature (⇒
-    /// codec-request + codec-response) is selected; a build without it
-    /// composes the observer with this slot elided. The type-ungated
-    /// `Session::declare_queryable{_aliased}` Result-form surface keeps
-    /// compiling because its feature-OFF branch returns
-    /// `Err(FeatureDisabled)` without ever touching this field, and the
-    /// `Queryable` RAII handle's `Drop` gates its unregister on the same
-    /// feature. The dispatch fan-out in [`Self::dispatch_event`] and the
-    /// wire-emit drain in [`Self::flush_pending`] stay cfg-gated so a
-    /// feature-OFF build elides the dispatch + drain paths entirely.
-    #[cfg(feature = "query-queryable")]
-    pub queryables: QueryableRegistry<crate::query_sink::BoxedQuerySink>,
-    /// Peer's outbound `DeclSubscriber` / `UndeclSubscriber` records.
-    ///
-    /// R310 — gated on `feature = "declare-subscriber"`.
-    #[cfg(feature = "declare-subscriber")]
-    pub remote_subscribers: RemoteSubscriberRegistry<
-        crate::decl_sink::BoxedDeclSink,
-        crate::decl_sink::BoxedUndeclSink,
+    /// What the program registers: its subscribers, queryables, tokens and liveliness
+    /// subscribers, the statechart switchboard and the listeners on what a peer declares.
+    app: SlotObserver,
+    /// What this session's peer declared, asked and is owed: its key aliases and interests, its
+    /// subscribers, queryables and tokens, the replies and `Final`s staged for its queries and the
+    /// answers staged for its liveliness interests.
+    peers: PeerTables,
+    /// The session's own gets pending on the peer: its queries, each reply passed through its
+    /// consolidation, and its liveliness snapshots.
+    requesters: Requesters<
+        crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>,
+        crate::reply_sink::BoxedReplySink,
     >,
-    /// Peer's outbound `DeclQueryable` / `UndeclQueryable` records.
-    ///
-    /// R310 — gated on `feature = "declare-queryable"`.
-    #[cfg(feature = "declare-queryable")]
-    pub remote_queryables:
-        RemoteQueryableRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
-    /// Peer's outbound `DeclToken` / `UndeclToken` records — the
-    /// liveliness signal layer.
-    #[cfg(feature = "liveliness-token")]
-    pub liveliness:
-        LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
-    /// R283 — DECLARER-side registry of wz's own held
-    /// `LivelinessToken`s. Populated by `Session::declare_token` and
-    /// emptied by `LivelinessToken::Drop`. Consulted only when an inbound
-    /// non-final liveliness Interest arrives, to stage the
-    /// interest-response (`Declare(DeclToken)` per matching held token +
-    /// a terminating `Declare(DeclFinal)`) into `Self::pending_declares`
-    /// during the fan phase; the drain phase flushes it through the sink.
-    /// The declarer-side mirror of [`Self::liveliness`] (which tracks the
-    /// PEER's tokens).
-    #[cfg(feature = "liveliness-token")]
-    pub local_tokens: LocalTokenRegistry,
-    /// R280 — local liveliness subscribers declared by
-    /// `Session::declare_liveliness_subscriber`. A keyexpr-filtered
-    /// counterpart to [`Self::liveliness`]: the generic-observer
-    /// registry fans EVERY peer `Decl*Token` into its callbacks, while
-    /// this registry routes only the peer tokens whose resolved keyexpr
-    /// matches a subscriber slot's pattern. Both registries receive the
-    /// same `IterationEvent` from [`Self::dispatch_event`]; they are
-    /// independent fan-out paths.
-    ///
-    /// R311ek — gated on `liveliness-subscriber`. The registry type
-    /// consumes `DeclareOwnedVariant`, so it only exists under
-    /// `codec-declare` (implied by the feature); a subset without the
-    /// feature composes the observer with this slot elided. The
-    /// `Session::declare_liveliness_subscriber{_aliased}` Result-form
-    /// surface still compiles regardless because its callback parameter
-    /// binds the codec-agnostic [`crate::declare::liveliness_sample`]
-    /// types and its feature-OFF branch returns `Err(FeatureDisabled)`
-    /// without touching this field. The dispatch fan-out in
-    /// [`Self::dispatch_event`] is gated on the same feature.
-    #[cfg(feature = "liveliness-subscriber")]
-    pub liveliness_subscribers:
-        LivelinessSubscriberRegistry<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
-    /// Requester-side pending liveliness GET (snapshot) queries declared
-    /// by `crate::session::Session::liveliness_get`. Each inbound
-    /// solicited `Declare(DeclToken)` (interest_id-tagged) fans to the
-    /// matching pending get's `on_reply`; the terminating
-    /// `Declare(DeclFinal)` fires `on_final` + removes the entry. A
-    /// declaration-plane sibling of [`Self::replies`] (the z_get reply
-    /// registry) — same reply-delivery seam, distinct correlation plane
-    /// (`interest_id` vs `Response.request_id`). Gated on `liveliness-get`
-    /// (implies `codec-declare`); the dispatch fan in
-    /// [`Self::dispatch_event`] gates on the same feature.
-    #[cfg(feature = "liveliness-get")]
-    pub liveliness_gets: LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
-    /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
-    /// callbacks (`z_get` consumer). Pending entries auto-unregister
-    /// when their matching `ResponseFinal` arrives.
-    ///
-    /// R311s — type-ungated. The struct is always present so the
-    /// type-ungated `Session::query` / `Querier` surface can register
-    /// pending entries regardless of `query-reply` feature state; the
-    /// feature-OFF build never enters the registration path (Session::query's
-    /// body is gated on `query-get` which implies `query-reply`).
-    ///
-    /// R311y321 — the sink is wrapped in a
-    /// [`ConsolidatingSink`](crate::reply_sink::ConsolidatingSink). The registry
-    /// stores ONE `C` for every pending, so the wrapper is universal and
-    /// `ConsolidationMode::None` (what `register` pins) is a passthrough. A
-    /// z_get that names a mode wraps its own sink and calls `register_sink`
-    /// directly — see `Session::query` in `wz-runtime-tokio`.
-    pub replies:
-        ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
     /// `QUERIER_MAX_PENDING_QUERIES` as the session's creator stated it: how many queries one
     /// querier declared on the session has in flight at once. The runtime that declares a querier
     /// reads it here ([`Self::querier_max_pending_queries`]) and holds the querier's places to it
-    /// in a [`crate::quota::Quota`]; the pending entries themselves are rows of `replies`.
+    /// in a [`crate::quota::Quota`]; the pending entries themselves are rows of the requesters.
     querier_max_pending_queries: crate::limits::QuerierMaxPendingQueriesHeld,
-    /// R311r — staging buffers are unconditional so the observer
-    /// struct shape is stable across consumer-feature subsets. The
-    /// drain side in [`Self::flush_pending`] stays cfg-gated on
-    /// `query-queryable` so wire-emit only runs when the queryable
-    /// dispatch path is in.
-    ///
-    /// S9a — a [`ReplyStage`]: rows that grow on the growable backing, and on the
-    /// fixed one a table of [`crate::caps::MAX_PENDING_REPLIES`] rows; on both held to
-    /// the quota [`Self::with_limits`] states, past which a reply is refused and counted.
-    pending_replies: ReplyStage,
-    /// R2595 — `(rid, qos)`: the terminator owed, and the QUERY's QoS it must
-    /// carry. The rid alone could not say what the final should read as, so
-    /// every final wz emitted read as DEFAULT.
-    ///
-    /// S9a — a [`FinalStage`], bounded by [`crate::caps::MAX_PENDING_FINALS`] on the
-    /// fixed backing and by the quota [`Self::with_limits`] states on both, where a
-    /// request that would need one more is refused.
-    pending_final_rids: FinalStage,
-    /// R283 — staging buffer for the declarer-side interest-response
-    /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
-    /// `local_tokens` during the fan phase (the `alloc` inbound-parse
-    /// path), drained through the borrowed
-    /// `ResponseSink::send_declare_token_reply` / `send_declare_final_reply` seam
-    /// during [`Self::flush_pending`]. Gated on `liveliness-token`
-    /// (unlike the unconditional reply buffers) because only the declarer
-    /// registry — itself feature-gated — ever stages into it. R311hn
-    /// (Track 2) — a no-heap [`BoundedVec`] of [`DeclResponseItem`]
-    /// (was `Vec<DeclareOwned>`), so the drain composes without `alloc`.
-    #[cfg(feature = "liveliness-token")]
-    pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
-    /// Inbound liveliness-token Interests whose reply chain `pending_declares`
-    /// could not take WHOLE, and which were therefore staged not at all
-    /// (`LocalTokenRegistry::respond_to_interest_borrowed` refuses rather than
-    /// truncate). Reachable where one frame's Interests share the buffer up to
-    /// a count: [`caps::MAX_PENDING_DECLARES`] items on the fixed backing, and
-    /// the quota [`Self::with_limits`] hands `local_tokens` on every backing.
-    #[cfg(feature = "liveliness-token")]
-    token_interest_chains_refused: u32,
     /// The interest-response chains owed to peers' QUERYABLE Interests, in stage
     /// order, drained through
     /// [`DeclareReplySink::send_declare_queryable_reply`]. Owned (see
@@ -367,7 +164,148 @@ pub struct ApplicationLayerObserver {
     /// drives this observer fires it where it sees the fact turn true, because the flag it turns
     /// on lives on the subscriber plane and the observers listen on all three.
     #[cfg(feature = "declarations-synced-event")]
-    pub declarations_final: crate::decl_sink::SyncedSinks,
+    declarations_final: crate::decl_sink::SyncedSinks,
+}
+
+/// The application half of an [`ApplicationLayerObserver`], to change: what the program registers
+/// on the session (its subscribers, queryables, tokens, liveliness subscribers, switchboard rows and
+/// the listeners on what a peer declares), apart from anything a peer writes.
+///
+/// Reached only through [`ApplicationLayerObserver::with_app`] and
+/// [`ApplicationLayerObserver::with_parts`], whose closures cannot keep a borrow of it past their
+/// return: a session whose application half is shared with the other faces of its node keeps that
+/// half behind a lock of its own, taken while the face's observer is held and let go before it
+/// (`docs/c-abi-l3-tables.md`, section 7: the face's observer first, the shared half second, never
+/// the reverse).
+pub struct ObserverApp<'a> {
+    /// The local subscriptions.
+    pub subscribers: &'a mut crate::pubsub::SubscriberTable<crate::sink::BoxedSink>,
+    /// The statechart switchboard.
+    #[cfg(feature = "switchboard")]
+    pub switchboard: &'a mut SwitchboardRegistry,
+    /// The local queryables.
+    #[cfg(feature = "query-queryable")]
+    pub queryables: &'a mut QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+    /// The listeners on the subscribers a peer declares, and the matching watches.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a mut crate::declare::subscriber::RemoteSubscriberTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the queryables a peer declares, and the matching watches.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a mut crate::declare::queryable::RemoteQueryableTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the tokens a peer declares.
+    #[cfg(feature = "liveliness-token")]
+    pub liveliness: &'a mut LivelinessRegistry<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The tokens the session holds.
+    #[cfg(feature = "liveliness-token")]
+    pub local_tokens: &'a mut LocalTokenRegistry,
+    /// The local liveliness subscribers.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub liveliness_subscribers:
+        &'a mut crate::declare::liveliness_subscriber::LivelinessSubscriberTable<
+            crate::declare::liveliness_sample::BoxedLivelinessSampleSink,
+        >,
+    /// The observers told that a peer ended its initial declarations.
+    #[cfg(feature = "declarations-synced-event")]
+    pub declarations_final: &'a mut crate::decl_sink::SyncedSinks,
+}
+
+/// The application half of an [`ApplicationLayerObserver`], to read ([`ObserverApp`]).
+pub struct ObserverAppRef<'a> {
+    /// The local subscriptions.
+    pub subscribers: &'a crate::pubsub::SubscriberTable<crate::sink::BoxedSink>,
+    /// The statechart switchboard.
+    #[cfg(feature = "switchboard")]
+    pub switchboard: &'a SwitchboardRegistry,
+    /// The local queryables.
+    #[cfg(feature = "query-queryable")]
+    pub queryables: &'a QueryableRegistry<crate::query_sink::BoxedQuerySink>,
+    /// The listeners on the subscribers a peer declares, and the matching watches.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a crate::declare::subscriber::RemoteSubscriberTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the queryables a peer declares, and the matching watches.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a crate::declare::queryable::RemoteQueryableTable<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
+    /// The listeners on the tokens a peer declares.
+    #[cfg(feature = "liveliness-token")]
+    pub liveliness:
+        &'a LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
+    /// The tokens the session holds.
+    #[cfg(feature = "liveliness-token")]
+    pub local_tokens: &'a LocalTokenRegistry,
+    /// The local liveliness subscribers.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub liveliness_subscribers:
+        &'a crate::declare::liveliness_subscriber::LivelinessSubscriberTable<
+            crate::declare::liveliness_sample::BoxedLivelinessSampleSink,
+        >,
+    /// The observers told that a peer ended its initial declarations.
+    #[cfg(feature = "declarations-synced-event")]
+    pub declarations_final: &'a crate::decl_sink::SyncedSinks,
+}
+
+/// The face half of an [`ApplicationLayerObserver`], to change: what the session's peer writes
+/// (its key aliases and interests, its subscribers, queryables and tokens) and the gets the session
+/// asked of it. It is the observer's own in every session, so it is borrowed directly
+/// ([`ApplicationLayerObserver::face`]).
+pub struct ObserverFace<'a> {
+    /// The peer's key aliases and the interests it asked.
+    pub subscribers: &'a mut crate::pubsub::SubscriberPeer,
+    /// What the peer's queries are judged by.
+    pub queries: &'a mut crate::query::QueryPeer,
+    /// The subscribers the peer declared.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a mut crate::declare::subscriber::RemoteSubscriberPeer,
+    /// The queryables the peer declared.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a mut crate::declare::queryable::RemoteQueryablePeer,
+    /// The tokens the peer declared.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub tokens: &'a mut crate::declare::liveliness_subscriber::PeerTokens,
+    /// The session's gets pending on the peer.
+    pub replies: &'a mut ReplyRegistry<
+        crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>,
+    >,
+    /// The session's liveliness gets pending on the peer.
+    #[cfg(feature = "liveliness-get")]
+    pub liveliness_gets: &'a mut LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
+}
+
+/// The face half of an [`ApplicationLayerObserver`], to read ([`ObserverFace`]).
+pub struct ObserverFaceRef<'a> {
+    /// The peer's key aliases and the interests it asked.
+    pub subscribers: &'a crate::pubsub::SubscriberPeer,
+    /// What the peer's queries are judged by.
+    pub queries: &'a crate::query::QueryPeer,
+    /// The subscribers the peer declared.
+    #[cfg(feature = "declare-subscriber")]
+    pub remote_subscribers: &'a crate::declare::subscriber::RemoteSubscriberPeer,
+    /// The queryables the peer declared.
+    #[cfg(feature = "declare-queryable")]
+    pub remote_queryables: &'a crate::declare::queryable::RemoteQueryablePeer,
+    /// The tokens the peer declared.
+    #[cfg(feature = "liveliness-subscriber")]
+    pub tokens: &'a crate::declare::liveliness_subscriber::PeerTokens,
+    /// The session's gets pending on the peer.
+    pub replies:
+        &'a ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
+    /// The session's liveliness gets pending on the peer.
+    #[cfg(feature = "liveliness-get")]
+    pub liveliness_gets: &'a LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -382,98 +320,10 @@ impl ApplicationLayerObserver {
     /// never from the build.
     pub fn with_limits(limits: &crate::limits::SessionLimits) -> Self {
         let mut observer = Self::new();
-        observer
-            .subscribers
-            .limit_to(limits.max_subscriptions_held());
-        observer
-            .subscribers
-            .limit_memo_to(limits.match_memo_slots());
-        // The longest key every table of the session stores: what it registers itself and what
-        // its peer declares.
-        let keys = limits.max_keyexpr_bytes_held();
-        observer.subscribers.limit_keys_to(keys);
-        observer.subscribers.limit_peer_keys_to(keys);
-        #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_keys_to(keys);
-        #[cfg(feature = "liveliness-token")]
-        observer.local_tokens.limit_keys_to(keys);
-        #[cfg(feature = "liveliness-subscriber")]
-        observer.liveliness_subscribers.limit_keys_to(keys);
-        #[cfg(feature = "liveliness-subscriber")]
-        observer.liveliness_subscribers.limit_peer_keys_to(keys);
-        observer.replies.limit_keys_to(keys);
-        #[cfg(feature = "declare-subscriber")]
-        observer.remote_subscribers.limit_peer_keys_to(keys);
-        #[cfg(feature = "declare-queryable")]
-        observer.remote_queryables.limit_peer_keys_to(keys);
-        #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_to(limits.max_queryables_held());
-        #[cfg(feature = "query-queryable")]
-        observer.queryables.limit_query_sizes_to(
-            limits.query_parameters_max_bytes_held(),
-            limits.query_attachment_max_bytes_held(),
-        );
-        #[cfg(feature = "declare-subscriber")]
-        observer
-            .subscribers
-            .limit_interests_to(limits.max_inbound_sub_interests_held());
-        #[cfg(feature = "declare-subscriber")]
-        observer
-            .subscribers
-            .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "declare-subscriber")]
-        observer
-            .remote_subscribers
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "declare-queryable")]
-        observer
-            .remote_queryables
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "liveliness-token")]
-        observer
-            .liveliness
-            .limit_observers_to(limits.max_decl_observers_held());
-        #[cfg(feature = "liveliness-token")]
-        observer
-            .local_tokens
-            .limit_to(limits.max_local_tokens_held());
-        #[cfg(feature = "liveliness-token")]
-        observer
-            .local_tokens
-            .limit_interest_replies_to(limits.max_pending_declares_held());
-        #[cfg(feature = "liveliness-subscriber")]
-        observer
-            .liveliness_subscribers
-            .limit_to(limits.max_liveliness_subscriptions_held());
-        #[cfg(feature = "liveliness-get")]
-        observer
-            .liveliness_gets
-            .limit_to(limits.max_pending_liveliness_gets_held());
-        observer.replies.limit_to(limits.max_pending_queries_held());
+        observer.app.limit_to(limits);
+        observer.peers.limit_to(limits);
+        observer.requesters.limit_to(limits);
         observer.querier_max_pending_queries = limits.querier_max_pending_queries_held();
-        // What the session's peer fills: the alias table on every build, and the declaration
-        // tables of each plane the build carries.
-        observer
-            .subscribers
-            .limit_peer_aliases_to(limits.max_peer_keyexpr_aliases_held());
-        #[cfg(feature = "declare-subscriber")]
-        observer
-            .remote_subscribers
-            .limit_peer_to(limits.max_remote_decls_held());
-        #[cfg(feature = "declare-queryable")]
-        observer
-            .remote_queryables
-            .limit_peer_to(limits.max_remote_decls_held());
-        #[cfg(feature = "liveliness-subscriber")]
-        observer
-            .liveliness_subscribers
-            .limit_peer_to(limits.max_remote_decls_held());
-        observer
-            .pending_replies
-            .limit_to(crate::reply_stage::ReplyBounds::of(limits));
-        observer
-            .pending_final_rids
-            .limit_to(limits.max_pending_finals_held());
         observer
     }
 
@@ -490,71 +340,194 @@ impl ApplicationLayerObserver {
     /// one query apart from this observer (a handler run outside its lock, a query held past its
     /// handler) holds that stage to them.
     pub const fn reply_bounds(&self) -> crate::reply_stage::ReplyBounds {
-        self.pending_replies.bounds()
+        self.peers.replies.bounds()
     }
 
-    /// New observer with empty registries, held to the build's limits. Callers register
-    /// callbacks on each contained registry directly
-    /// (`observer.subscribers.register(...)` etc.) before driving
-    /// the session loop; a registration a registry's quota refuses comes
-    /// back as [`RegisterError`](crate::registry_error::RegisterError).
+    /// Run `f` over the application half ([`ObserverApp`]), with this observer held: the one way
+    /// a caller changes what the program registered on the session.
+    pub fn with_app<Rt>(&mut self, f: impl FnOnce(ObserverApp<'_>) -> Rt) -> Rt {
+        f(self.parts_mut().0)
+    }
+
+    /// Run `f` over the application half, to read ([`Self::with_app`]).
+    pub fn read_app<Rt>(&self, f: impl FnOnce(ObserverAppRef<'_>) -> Rt) -> Rt {
+        f(self.parts_ref().0)
+    }
+
+    /// Run `f` over both halves at once: what a call that hands the peer's tables to a method of
+    /// the application's needs (a matching re-judgement, an answer to a peer's interest).
+    pub fn with_parts<Rt>(
+        &mut self,
+        f: impl FnOnce(ObserverApp<'_>, ObserverFace<'_>) -> Rt,
+    ) -> Rt {
+        let (app, face) = self.parts_mut();
+        f(app, face)
+    }
+
+    /// Run `f` over both halves at once, to read ([`Self::with_parts`]).
+    pub fn read_parts<Rt>(
+        &self,
+        f: impl FnOnce(ObserverAppRef<'_>, ObserverFaceRef<'_>) -> Rt,
+    ) -> Rt {
+        let (app, face) = self.parts_ref();
+        f(app, face)
+    }
+
+    /// The face half ([`ObserverFace`]), the observer's own in every session.
+    pub fn face(&mut self) -> ObserverFace<'_> {
+        self.parts_mut().1
+    }
+
+    /// The face half, to read ([`Self::face`]).
+    pub fn face_ref(&self) -> ObserverFaceRef<'_> {
+        self.parts_ref().1
+    }
+
+    /// Register a local subscription on `keyexpr_pattern` that hears what `allowed_origin`
+    /// admits, delivered to `sink`, and stage what it owes this observer's peer (a peer that holds
+    /// a future subscriber interest is told of it): both halves in one step, as
+    /// [`SubscriberTable::register_sink_for`](crate::pubsub::SubscriberTable::register_sink_for)
+    /// does.
+    pub fn register_subscriber(
+        &mut self,
+        keyexpr_pattern: &str,
+        allowed_origin: crate::locality::Locality,
+        sink: crate::sink::BoxedSink,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.app.subscribers.register_sink_for(
+            &mut self.peers.subscribers,
+            keyexpr_pattern,
+            allowed_origin,
+            sink,
+        )
+    }
+
+    /// [`Self::register_subscriber`] for a callback, heard from every origin: what a program that
+    /// holds the observer itself registers a subscriber with.
+    pub fn subscribe(
+        &mut self,
+        keyexpr_pattern: &str,
+        callback: impl FnMut(&dyn crate::sink::SampleView) + Send + 'static,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.subscribe_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
+    }
+
+    /// [`Self::register_subscriber`] for a callback that hears what `allowed_origin` admits.
+    pub fn subscribe_with_locality(
+        &mut self,
+        keyexpr_pattern: &str,
+        allowed_origin: crate::locality::Locality,
+        callback: impl FnMut(&dyn crate::sink::SampleView) + Send + 'static,
+    ) -> Result<crate::pubsub::SubscriptionId, crate::registry_error::RegisterError> {
+        self.register_subscriber(
+            keyexpr_pattern,
+            allowed_origin,
+            crate::sink::BoxedSink::new(callback),
+        )
+    }
+
+    /// Retire local subscription `id`, and stage what its going owes this observer's peer (the
+    /// retraction of an aggregate it alone stood for): both halves in one step, as
+    /// [`SubscriberTable::unregister_for`](crate::pubsub::SubscriberTable::unregister_for) does.
+    /// Whether it was registered.
+    pub fn unregister_subscriber(&mut self, id: crate::pubsub::SubscriptionId) -> bool {
+        self.app
+            .subscribers
+            .unregister_for(&mut self.peers.subscribers, id)
+    }
+
+    /// Both halves, borrowed apart.
+    fn parts_mut(&mut self) -> (ObserverApp<'_>, ObserverFace<'_>) {
+        let app = &mut self.app;
+        let peers = &mut self.peers;
+        let requesters = &mut self.requesters;
+        (
+            ObserverApp {
+                subscribers: &mut app.subscribers,
+                #[cfg(feature = "switchboard")]
+                switchboard: &mut app.switchboard,
+                #[cfg(feature = "query-queryable")]
+                queryables: &mut app.queryables,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: &mut app.remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: &mut app.remote_queryables,
+                #[cfg(feature = "liveliness-token")]
+                liveliness: &mut app.liveliness,
+                #[cfg(feature = "liveliness-token")]
+                local_tokens: &mut app.local_tokens,
+                #[cfg(feature = "liveliness-subscriber")]
+                liveliness_subscribers: &mut app.liveliness_subscribers,
+                #[cfg(feature = "declarations-synced-event")]
+                declarations_final: &mut self.declarations_final,
+            },
+            ObserverFace {
+                subscribers: &mut peers.subscribers,
+                queries: &mut peers.queries,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: &mut peers.remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: &mut peers.remote_queryables,
+                #[cfg(feature = "liveliness-subscriber")]
+                tokens: &mut peers.tokens,
+                replies: &mut requesters.replies,
+                #[cfg(feature = "liveliness-get")]
+                liveliness_gets: &mut requesters.liveliness_gets,
+            },
+        )
+    }
+
+    /// Both halves, borrowed apart, to read.
+    fn parts_ref(&self) -> (ObserverAppRef<'_>, ObserverFaceRef<'_>) {
+        let app = &self.app;
+        let peers = &self.peers;
+        let requesters = &self.requesters;
+        (
+            ObserverAppRef {
+                subscribers: &app.subscribers,
+                #[cfg(feature = "switchboard")]
+                switchboard: &app.switchboard,
+                #[cfg(feature = "query-queryable")]
+                queryables: &app.queryables,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: &app.remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: &app.remote_queryables,
+                #[cfg(feature = "liveliness-token")]
+                liveliness: &app.liveliness,
+                #[cfg(feature = "liveliness-token")]
+                local_tokens: &app.local_tokens,
+                #[cfg(feature = "liveliness-subscriber")]
+                liveliness_subscribers: &app.liveliness_subscribers,
+                #[cfg(feature = "declarations-synced-event")]
+                declarations_final: &self.declarations_final,
+            },
+            ObserverFaceRef {
+                subscribers: &peers.subscribers,
+                queries: &peers.queries,
+                #[cfg(feature = "declare-subscriber")]
+                remote_subscribers: &peers.remote_subscribers,
+                #[cfg(feature = "declare-queryable")]
+                remote_queryables: &peers.remote_queryables,
+                #[cfg(feature = "liveliness-subscriber")]
+                tokens: &peers.tokens,
+                replies: &requesters.replies,
+                #[cfg(feature = "liveliness-get")]
+                liveliness_gets: &requesters.liveliness_gets,
+            },
+        )
+    }
+
+    /// New observer with empty tables, held to the build's limits. Callers register through the
+    /// observer's halves ([`Self::with_app`], [`Self::subscribe`], [`Self::face`]) before driving
+    /// the session loop; a registration a table's quota refuses comes back as
+    /// [`RegisterError`](crate::registry_error::RegisterError).
     pub fn new() -> Self {
         Self {
-            subscribers: SubscriberRegistry::new(),
-            // R311gi gc-2c — switchboard table constructed only under the
-            // `switchboard` feature; empty until the app registers its
-            // keyexpr -> event rows (from wz-switchboard.yaml on AP).
-            #[cfg(feature = "switchboard")]
-            switchboard: SwitchboardRegistry::new(),
-            // R311dz — field gated on `query-queryable`; the registry is
-            // constructed only when the queryable dispatch path is in.
-            // The Queryable RAII handle's observer-side unregister-on-Drop
-            // is gated on the same feature so a feature-OFF build never
-            // references the absent field.
-            #[cfg(feature = "query-queryable")]
-            queryables: QueryableRegistry::new(),
-            #[cfg(feature = "declare-subscriber")]
-            remote_subscribers: RemoteSubscriberRegistry::new(),
-            #[cfg(feature = "declare-queryable")]
-            remote_queryables: RemoteQueryableRegistry::new(),
-            #[cfg(feature = "liveliness-token")]
-            liveliness: LivelinessRegistry::new(),
-            // R283 — declarer-side held-token registry constructed only
-            // under `liveliness-token`. Empty until `Session::declare_token`
-            // registers wz's first held token.
-            #[cfg(feature = "liveliness-token")]
-            local_tokens: LocalTokenRegistry::new(),
-            // R311ek — field gated on `liveliness-subscriber`; the
-            // registry is constructed only when that feature is in. The
-            // LivelinessSubscriber RAII handle's observer-side lookups
-            // (history_complete, unregister on Drop) are gated on the
-            // same feature so a feature-OFF build never references the
-            // absent field.
-            #[cfg(feature = "liveliness-subscriber")]
-            liveliness_subscribers: LivelinessSubscriberRegistry::new(),
-            // liveliness-get — requester-side pending-get registry,
-            // constructed only under `liveliness-get`. Empty until
-            // `Session::liveliness_get` registers the first snapshot
-            // query.
-            #[cfg(feature = "liveliness-get")]
-            liveliness_gets: LivelinessGetRegistry::new(),
-            // R311s — replies field is type-ungated; the registry is
-            // always constructed (empty) so the type-ungated query
-            // surface can register pending entries even though
-            // feature-OFF never reaches the registration path.
-            replies: ReplyRegistry::new(),
+            app: SlotObserver::new(),
+            peers: PeerTables::new(),
+            requesters: Requesters::new(),
             querier_max_pending_queries: crate::limit_binding::Limited::build_default(),
-            // R311r — staging buffers always allocated; drain path in
-            // flush_pending stays cfg-gated on query-queryable.
-            pending_replies: ReplyStage::new(),
-            pending_final_rids: FinalStage::new(),
-            // R283 — declarer interest-response staging buffer, gated on
-            // `liveliness-token` like its producer registry. R311hn — a
-            // no-heap `BoundedVec`.
-            #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::new(),
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
             #[cfg(all(
                 feature = "alloc",
                 feature = "query-queryable",
@@ -658,83 +631,26 @@ impl ApplicationLayerObserver {
     /// Always zero on the growable backing, where staging never refuses.
     #[cfg(feature = "liveliness-token")]
     pub fn token_interest_chains_refused(&self) -> u32 {
-        self.token_interest_chains_refused
+        self.peers.token_interest_chains_refused
     }
 
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
     /// the snapshot that session holds. An observer may serve more than one session (a unicast
-    /// session and the group it also joins), so the session says it before every dispatch, as
-    /// the slot profile's observer (`SlotObserverOf::set_unanswerable_final`) is told it.
+    /// session and the group it also joins), so the session says it before every dispatch, into
+    /// the observer's one face ([`crate::query::QueryPeer::set_unanswerable_final`]).
     pub fn set_unanswerable_final(&mut self, value: crate::policy::QueryUnanswerableFinal) {
-        #[cfg(feature = "query-queryable")]
-        self.queryables.set_unanswerable_final(value);
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = value;
+        self.peers.queries.set_unanswerable_final(value);
     }
 
-    /// Phase 1 — fan an [`IterationEvent`] into every contained
-    /// registry. The subscriber registry runs first so its
-    /// `absorb_declare` path updates `peer_keyexpr_table` BEFORE the
-    /// consumer registries read it for keyexpr resolution.
+    /// Phase 1 — fan an [`IterationEvent`] into every table, through the slot observer's fan
+    /// ([`SlotObserverOf::dispatch_event`](crate::slot_observer::SlotObserverOf::dispatch_event)) over this session's peer tables and requesters: the
+    /// subscriber side first, so a `DeclKexpr` binds before the planes that resolve through it.
+    /// A peer's QUERYABLE Interest is then staged against the queryables this session holds.
     ///
-    /// `event` is `Copy` (set up in R121j-5c-e2e-demo to support
-    /// multi-consumer dispatch); the same reference fans into each
-    /// registry at zero cost.
+    /// `event` is `Copy`; the same reference fans into each table at zero cost.
     pub fn dispatch_event(&mut self, event: IterationEvent<'_, '_>) {
-        // Subscribers FIRST — absorb DeclKexpr / UndeclKexpr into the
-        // peer_keyexpr_table so downstream consumers see a fresh
-        // mapping snapshot on the same iteration.
-        //
-        // R310.5b — the `peer_table` binding (and the getter call behind it) is
-        // itself gated on the consumer-features union. When no consumer arm is
-        // active (rare, e.g. preset-mcu-minimal-class with all declare-* /
-        // liveliness-* / query-queryable / query-reply off), the
-        // getter is not called and no `_peer_table` rebinding is
-        // needed. The prior `cfg(not(...)) let _peer_table = ...;`
-        // companion was a textbook miss — calling a getter only to
-        // discard its result and silence a lint is uglier than
-        // simply not calling it.
-        //
-        // R311y750 (carry N38) — this sentence used to NAME the getter as
-        // `peer_keyexpr_table()`, and had done so since R311y739 replaced that
-        // call with `mapping_spaces()` one line below. A comment naming a call
-        // its own function no longer makes is the expired-blocker class
-        // (`scripts/lib/expired_blocker_lint.py`) pointed at a method name.
-        self.subscribers.dispatch_iteration_event(event);
-        // R311dz — the `query-reply` arm of the AP crate translates to
-        // `any(codec-response, codec-response-final)` here: the z_get-side
-        // reply dispatch (`ReplyRegistry::dispatch_iteration_event`) is
-        // always-compiled and no-ops safely when neither response codec is
-        // in, so the consumer gate is exactly the response-codec presence.
-        #[cfg(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token",
-            feature = "liveliness-subscriber",
-            feature = "liveliness-get",
-            feature = "query-queryable",
-            feature = "codec-response",
-            feature = "codec-response-final",
-        ))]
-        // R311y739 — the fan hands over BOTH id spaces, not the peer's table.
-        // Every consumer below resolves keyexprs the same way the subscriber
-        // registry just did, so an `M=0` alias (an id WE declared, which zenoh
-        // PREFERS naming back at us) reaches the right table on every plane
-        // instead of only on the Push plane. The binding keeps its name: it is
-        // still the snapshot the subscribers registry refreshed this iteration.
-        let peer_table = self.subscribers.mapping_spaces();
-
-        // Consumer registries — all read the shared peer_table that
-        // the subscribers registry just updated. The queryable side
-        // also stages outbound replies/finals into our pending bufs
-        // so the drain phase can flush them through the action layer.
-        #[cfg(feature = "query-queryable")]
-        self.queryables.dispatch_iteration_event(
-            event,
-            peer_table,
-            &mut self.pending_replies,
-            &mut self.pending_final_rids,
-        );
+        self.app
+            .dispatch_event(&mut self.peers, &mut self.requesters, event);
         // A peer's QUERYABLE Interest is answered from the queryables this
         // session holds (see `QueryableRegistry::respond_to_queryable_interest`).
         // Staged here and drained with the other interest-response chains, so no
@@ -753,10 +669,10 @@ impl ApplicationLayerObserver {
             for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
                 if let crate::network_message::NetworkMessage::Interest(interest) = message {
                     Self::stage_queryable_interest(
-                        &self.queryables,
+                        &self.app.queryables,
                         &mut self.pending_queryable_replies,
                         interest,
-                        peer_table,
+                        self.peers.subscribers.mapping_spaces(),
                     );
                 }
             }
@@ -771,114 +687,13 @@ impl ApplicationLayerObserver {
         if let IterationEvent::InPlace(record) = event {
             if let Some(interest) = record.interest() {
                 Self::stage_queryable_interest_view(
-                    &self.queryables,
+                    &self.app.queryables,
                     &mut self.pending_queryable_replies,
                     interest,
-                    peer_table,
+                    self.peers.subscribers.mapping_spaces(),
                 );
             }
         }
-        // R311y788 — the remote-subscriber fan carries the SESSION-LOCAL
-        // half of the matching verdict. Both halves are sibling fields of
-        // this struct and the local one is read-only here, so the disjoint
-        // borrow is what lets the fact stay in one place instead of being
-        // mirrored into the remote registry. Without it an inbound remote
-        // undeclare re-evaluates a watch that a local subscriber is holding
-        // true and fires a false it should not.
-        #[cfg(feature = "declare-subscriber")]
-        {
-            let subscribers = &self.subscribers;
-            self.remote_subscribers
-                .dispatch_iteration_event_with_local(event, peer_table, &|c| {
-                    // R311y797 — the publisher's own locality gates the
-                    // local half here too, exactly as it does in the poll;
-                    // before this round the watch answered as if it were
-                    // `Any`.
-                    c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr)
-                });
-        }
-        // R311y797 — the queryable-plane twin of the fan just above: the
-        // remote-queryable dispatch carries the SESSION-LOCAL half of a
-        // querier's matching verdict, read from the sibling `queryables`
-        // field under a disjoint borrow. Without it an inbound remote
-        // undeclare flips a watch that a local queryable is holding true.
-        // The local half needs `query-queryable` (the table it reads); a
-        // build without it structurally has no local queryables, so the
-        // constant `false` is the honest answer rather than a stub.
-        #[cfg(all(feature = "declare-queryable", feature = "query-queryable"))]
-        {
-            let queryables = &self.queryables;
-            self.remote_queryables
-                .dispatch_iteration_event_with_local(event, peer_table, &|c| {
-                    c.locality.allows_local()
-                        && queryables.has_local_matching(&c.keyexpr, c.complete_required)
-                });
-        }
-        #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
-        self.remote_queryables
-            .dispatch_iteration_event(event, peer_table);
-        // A `Declare(DeclToken)` whose outer `interest_id` names a PENDING
-        // liveliness GET belongs to that GET and to no observer plane: zenoh
-        // answers the query and returns before the `remote_tokens` insert and
-        // before `execute_subscriber_callbacks`
-        // (`zenoh/src/api/session.rs:2609-2632`). wz fans one message into
-        // every registry in sequence rather than running early returns, so the
-        // rule rides in as a predicate over the sibling `liveliness_gets`
-        // field, taken under a disjoint borrow — the same shape R311y797 uses
-        // to hand the matching planes their local half.
-        //
-        // The predicate is per-ID, not per-solicitation. A history
-        // subscriber's own CURRENT replay is interest_id-tagged too and must
-        // still arrive; only an id a GET still owns is skipped.
-        #[cfg(all(feature = "liveliness-token", feature = "liveliness-get"))]
-        {
-            let gets = &self.liveliness_gets;
-            self.liveliness
-                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
-        }
-        #[cfg(all(feature = "liveliness-token", not(feature = "liveliness-get")))]
-        self.liveliness.dispatch_iteration_event(event, peer_table);
-        // R283 — declarer-side: stage an interest-response for each
-        // inbound non-final liveliness Interest. Reads peer_table for the
-        // Interest keyexpr resolution; stages into pending_declares (the
-        // drain phase flushes them through the sink). R311hn (Track 2) —
-        // `all(.., alloc)`-gated: this owned `InterestOwned`-consuming
-        // inbound parse resolves keyexprs through the peer `HashMap`
-        // (`alloc`). On the MCU no-heap profile the registry's borrowed
-        // `respond_to_interest_borrowed` is driven directly, not through
-        // this aggregate fan.
-        #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
-        {
-            let refused = self.local_tokens.dispatch_iteration_event(
-                event,
-                peer_table,
-                &mut self.pending_declares,
-            );
-            self.token_interest_chains_refused = self
-                .token_interest_chains_refused
-                .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
-        }
-        // Same claim, the other observer plane. This is the half with STATE:
-        // the registry's peer token table is wz's `remote_tokens`, so an
-        // unfiltered fan would also record a GET's answer as if the peer had
-        // announced it.
-        #[cfg(all(feature = "liveliness-subscriber", feature = "liveliness-get"))]
-        {
-            let gets = &self.liveliness_gets;
-            self.liveliness_subscribers
-                .dispatch_iteration_event_unclaimed(event, peer_table, &|id| gets.has_pending(id));
-        }
-        #[cfg(all(feature = "liveliness-subscriber", not(feature = "liveliness-get")))]
-        self.liveliness_subscribers
-            .dispatch_iteration_event(event, peer_table);
-        // liveliness-get — fan inbound solicited Declare(DeclToken/DeclFinal)
-        // replies into the pending-get registry, correlated by the outer
-        // interest_id. Reads peer_table for the reply keyexpr resolution.
-        #[cfg(feature = "liveliness-get")]
-        self.liveliness_gets
-            .dispatch_iteration_event(event, peer_table);
-        #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-        self.replies.dispatch_iteration_event(event, peer_table);
     }
 
     /// R311y521 — the LINK-LOSS hook: flush every remote liveliness token,
@@ -893,14 +708,7 @@ impl ApplicationLayerObserver {
     /// A no-op when `liveliness-subscriber` is compiled out — there is no
     /// registry to flush and no subscriber to tell.
     pub fn flush_liveliness_on_link_loss(&mut self) -> usize {
-        #[cfg(feature = "liveliness-subscriber")]
-        {
-            self.liveliness_subscribers.flush_peer_tokens_on_link_loss()
-        }
-        #[cfg(not(feature = "liveliness-subscriber"))]
-        {
-            0
-        }
+        self.app.flush_liveliness_on_link_loss(&mut self.peers)
     }
 
     /// R311y799 — the DECLARATION plane's twin of
@@ -926,43 +734,7 @@ impl ApplicationLayerObserver {
     /// `true` by a LOCAL subscriber or queryable must not be flipped by a
     /// remote link dying.
     pub fn flush_declarations_on_link_loss(&mut self) -> usize {
-        #[allow(unused_mut)]
-        let mut dropped = 0usize;
-        #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
-        {
-            let subscribers = &self.subscribers;
-            dropped =
-                dropped.saturating_add(self.remote_subscribers.flush_declarations_on_link_loss(
-                    &|c| c.locality.allows_local() && subscribers.has_local_matching(&c.keyexpr),
-                ));
-        }
-        #[cfg(all(
-            feature = "declare-queryable",
-            feature = "query-queryable",
-            feature = "codec-declare"
-        ))]
-        {
-            let queryables = &self.queryables;
-            dropped = dropped.saturating_add(
-                self.remote_queryables
-                    .flush_declarations_on_link_loss(&|c| {
-                        c.locality.allows_local()
-                            && queryables.has_local_matching(&c.keyexpr, c.complete_required)
-                    }),
-            );
-        }
-        #[cfg(all(
-            feature = "declare-queryable",
-            not(feature = "query-queryable"),
-            feature = "codec-declare"
-        ))]
-        {
-            dropped = dropped.saturating_add(
-                self.remote_queryables
-                    .flush_declarations_on_link_loss(&|_| false),
-            );
-        }
-        dropped
+        self.app.flush_declarations_on_link_loss(&mut self.peers)
     }
 
     /// R311gi gc-2c — fan an [`IterationEvent`] into the statechart
@@ -986,11 +758,7 @@ impl ApplicationLayerObserver {
         event: IterationEvent<'_, '_>,
         injector: &mut dyn EventInjector,
     ) -> usize {
-        self.switchboard.dispatch_iteration_event(
-            event,
-            self.subscribers.mapping_spaces(),
-            injector,
-        )
+        self.app.dispatch_switchboard(&self.peers, event, injector)
     }
 
     /// Phase 2 — drain the pending reply / final buffers through the
@@ -1069,7 +837,7 @@ impl ApplicationLayerObserver {
     }
 
     /// R311lr — drain the staged declarer-side liveliness interest-responses
-    /// (`pending_declares`) through a [`DeclareReplySink`]. The
+    /// (`peers.pending_declares`) through a [`DeclareReplySink`]. The
     /// `DeclareReplySink` sibling of [`Self::flush_query_replies`]: a consumer
     /// that replies to inbound liveliness Interests but drives neither the
     /// query-reply nor the liveliness-get-prune planes (the multicast reply
@@ -1105,7 +873,7 @@ impl ApplicationLayerObserver {
     /// The staged query replies alone, into `owed`: [`Self::flush_query_reply_bodies`] for a host
     /// that sends after it lets go of this observer (see [`Self::take_owed_replies`]).
     pub fn take_owed_reply_bodies(&mut self, owed: &mut OwedReplies) {
-        owed.take_replies_from(&mut self.pending_replies);
+        owed.take_replies_from(&mut self.peers.replies);
     }
 
     /// The declarations owed to peers' interests alone, resolved now and kept in `owed`:
@@ -1115,119 +883,33 @@ impl ApplicationLayerObserver {
         self.drain_declare_replies(&*owed);
     }
 
-    /// R311lq — drain the staged queryable data replies (`pending_replies`)
+    /// R311lq — drain the staged queryable data replies (`peers.replies`)
     /// through `send_response`. Does NOT touch the terminal rids (see
     /// [`Self::drain_query_finals`]); the Session-tier path drains data
     /// replies under the lock and defers the finals past the deferred-fire
     /// drain, so the two halves are separate primitives.
     fn drain_query_replies<S: ResponseSink>(&mut self, sink: &S) {
-        // The stage holds its replies as rows of an arena, on every storage policy, and
-        // hands them out as borrowed parts, which the sink writes where it can without
-        // building an owned record. A sink that can only take the owned form is served
-        // by the default of `send_reply_parts`, which builds it and skips a reply whose
-        // bounded field overflows (W3: the codec would reject it too). Measured on the
-        // AP, a reply staged and written from its parts costs less than half of one
-        // built as an owned record, converted, and encoded.
-        #[cfg(feature = "query-queryable")]
-        self.pending_replies
-            .drain_parts(|parts| sink.send_reply_parts(parts));
-        // Without `query-queryable` the staging buffer does not exist; the
-        // signature stays stable so the composing drains wire it
-        // unconditionally.
-        #[cfg(not(feature = "query-queryable"))]
-        let _ = sink;
+        self.app.drain_query_replies(&mut self.peers, sink);
     }
 
     /// R311lq — drain the staged queryable ResponseFinal rids
-    /// (`pending_final_rids`) through `send_response_final`. Pairs with
+    /// (`peers.finals`) through `send_response_final`. Pairs with
     /// [`Self::drain_query_replies`] to form the full reply chain; emitted
     /// last so every data Reply for rid R precedes the matching
     /// ResponseFinal for R.
     fn drain_query_finals<S: ResponseSink>(&mut self, sink: &S) {
-        #[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
-        for (rid, qos) in self.pending_final_rids.drain_owed() {
-            sink.send_response_final(rid, qos);
-        }
-        #[cfg(all(feature = "query-queryable", not(feature = "codec-response-final")))]
-        self.pending_final_rids.drain_owed().for_each(drop);
-        // `sink` is consumed only by the `send_response_final` loop above; in
-        // every other combo (no `query-queryable`, or `query-queryable` without
-        // `codec-response-final`) it is unused but the signature stays stable.
-        #[cfg(not(all(feature = "query-queryable", feature = "codec-response-final")))]
-        let _ = sink;
+        self.app.drain_query_finals(&mut self.peers, sink);
     }
 
     /// R311lq — drain the declarer-side interest-response staging buffer
-    /// (`pending_declares`) through a [`DeclareReplySink`].
+    /// (`peers.pending_declares`) through a [`DeclareReplySink`].
     ///
     /// R283 / R311hn — every staged `DeclResponseItem` is emitted in stage
     /// order, so each interest-response batch's `Token`s precede its
     /// terminating `Final`. The sink owns the encode (a `VecSink` on AP, a
     /// `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
     fn drain_declare_replies<S: DeclareReplySink>(&mut self, sink: &S) {
-        // R311y530 — the session-local SUBSCRIBER interest-response chain,
-        // drained through the same sink as the liveliness one but staged in the
-        // subscriber registry (which owns both tables the reply resolves
-        // against: the interest's own keyexpr for an AGGREGATE reply, and the
-        // subscription's for a concrete one).
-        #[cfg(feature = "declare-subscriber")]
-        for item in self.subscribers.take_staged_sub_interest_replies() {
-            match &item {
-                crate::pubsub::SubInterestReply::Final { interest_id } => {
-                    sink.send_declare_final_reply(*interest_id)
-                }
-                crate::pubsub::SubInterestReply::Aggregate { interest_id }
-                | crate::pubsub::SubInterestReply::Concrete { interest_id, .. } => {
-                    let interest_id = *interest_id;
-                    let mut announced_aggregate = false;
-                    if let Some((subscriber_id, keyexpr)) =
-                        self.subscribers.sub_interest_reply(&item)
-                    {
-                        sink.send_declare_subscriber_reply(subscriber_id, keyexpr, interest_id);
-                        announced_aggregate =
-                            matches!(item, crate::pubsub::SubInterestReply::Aggregate { .. });
-                    }
-                    // R2292 (open-debt item 627) — recorded AFTER the emit and
-                    // outside the borrow above, and only when the reply
-                    // actually left: the retraction this arms is allowed to
-                    // retract exactly what a peer was told.
-                    #[cfg(feature = "declare-undeclare")]
-                    if announced_aggregate {
-                        self.subscribers.mark_aggregate_announced(interest_id);
-                    }
-                    let _ = announced_aggregate;
-                }
-                // R2292 (open-debt item 627) — the aggregate declaration's own
-                // retraction, resolved against the SAME tables the declare arm
-                // reads and re-checked at send time (see
-                // `take_aggregate_retract`).
-                #[cfg(feature = "declare-undeclare")]
-                crate::pubsub::SubInterestReply::AggregateRetract { interest_id } => {
-                    if let Some(decl_id) = self.subscribers.take_aggregate_retract(*interest_id) {
-                        sink.send_undeclare_subscriber_reply(decl_id);
-                    }
-                }
-            }
-        }
-        #[cfg(feature = "liveliness-token")]
-        for item in core::mem::take(&mut self.pending_declares) {
-            match item {
-                DeclResponseItem::Token {
-                    token_id,
-                    interest_id,
-                } => {
-                    // Resolve the keyexpr from the registry (SSOT) at
-                    // drain; a token unregistered between stage and drain
-                    // is skipped (its chain's Final still terminates).
-                    if let Some(keyexpr) = self.local_tokens.keyexpr_for(token_id) {
-                        sink.send_declare_token_reply(token_id, keyexpr, interest_id);
-                    }
-                }
-                DeclResponseItem::Final { interest_id } => {
-                    sink.send_declare_final_reply(interest_id)
-                }
-            }
-        }
+        self.app.drain_declare_replies(&mut self.peers, sink);
         // The QUERYABLE interest-response chains, in stage order: each chain's
         // `Declared` items precede its `Final`.
         #[cfg(all(
@@ -1251,8 +933,6 @@ impl ApplicationLayerObserver {
                 }
             }
         }
-        #[cfg(not(any(feature = "liveliness-token", feature = "declare-subscriber")))]
-        let _ = sink;
     }
 
     /// R311lq — drain the terminated-get staging (inbound DeclFinal +
@@ -1261,12 +941,7 @@ impl ApplicationLayerObserver {
     /// reconnect. The sink no-ops when `session-reconnect` is off, so the
     /// drain is unconditional within the gate.
     fn drain_get_prunes<S: LivelinessGetPrune>(&mut self, sink: &S) {
-        #[cfg(feature = "liveliness-get")]
-        for interest_id in self.liveliness_gets.take_finalized() {
-            sink.prune_liveliness_get_interest(interest_id);
-        }
-        #[cfg(not(feature = "liveliness-get"))]
-        let _ = sink;
+        self.app.drain_get_prunes(&mut self.requesters, sink);
     }
 
     /// R311li — take the staged queryable ResponseFinal rids out of the
@@ -1278,7 +953,7 @@ impl ApplicationLayerObserver {
     /// MCU path).
     ///
     /// R311y336 — signature-stable, no `query-queryable` gate. The gate this
-    /// carried was gratuitous: `pending_final_rids` is an UNCONDITIONAL field
+    /// carried was gratuitous: `peers.finals` is an UNCONDITIONAL field
     /// (R311r made the staging buffers ungated precisely so the observer's
     /// shape is stable across consumer-feature subsets), so the body compiles
     /// in every subset and only the POPULATE side is gated. Without
@@ -1290,7 +965,7 @@ impl ApplicationLayerObserver {
     /// The table left behind keeps the quota [`Self::with_limits`] stated and the count of
     /// what it refused ([`FinalStage::take_owed`]).
     pub fn take_pending_final_rids(&mut self) -> FinalStage {
-        self.pending_final_rids.take_owed()
+        self.peers.finals.take_owed()
     }
 
     /// What the staged-reply table has refused since this observer was built, by
@@ -1298,7 +973,7 @@ impl ApplicationLayerObserver {
     /// [`Self::with_limits`] stated on either. All zero on the growable backing with no
     /// quota stated, which refuses nothing.
     pub fn reply_refusals(&self) -> crate::reply_stage::ReplyRefusals {
-        self.pending_replies.refusals()
+        self.peers.replies.refusals()
     }
 
     /// How many requests were refused because no `Final` could be owed for them
@@ -1306,7 +981,7 @@ impl ApplicationLayerObserver {
     /// quota [`Self::with_limits`] stated on either). All zero on the growable backing
     /// with no quota stated, which refuses nothing.
     pub fn request_refusals(&self) -> u32 {
-        self.pending_final_rids.refusals()
+        self.peers.finals.refusals()
     }
 
     /// Combined fan + drain — the production single-call form used
@@ -1329,7 +1004,7 @@ impl ApplicationLayerObserver {
     ///
     /// R311r — type-ungated alongside the underlying buffer.
     pub fn pending_reply_count(&self) -> usize {
-        self.pending_replies.len()
+        self.peers.replies.len()
     }
 
     /// Number of `ResponseFinal` rids currently staged for the next
@@ -1338,7 +1013,7 @@ impl ApplicationLayerObserver {
     ///
     /// R311r — type-ungated alongside the underlying buffer.
     pub fn pending_final_count(&self) -> usize {
-        self.pending_final_rids.len()
+        self.peers.finals.len()
     }
 }
 
@@ -1360,16 +1035,16 @@ mod tests {
     #[test]
     fn new_observer_starts_empty() {
         let observer = ApplicationLayerObserver::new();
-        assert_eq!(observer.subscribers.len(), 0);
+        assert_eq!(observer.app.subscribers.len(), 0);
         #[cfg(feature = "query-queryable")]
-        assert_eq!(observer.queryables.len(), 0);
+        assert_eq!(observer.app.queryables.len(), 0);
         #[cfg(feature = "declare-subscriber")]
-        assert_eq!(observer.remote_subscribers.on_decl_len(), 0);
+        assert_eq!(observer.app.remote_subscribers.on_decl_len(), 0);
         #[cfg(feature = "declare-queryable")]
-        assert_eq!(observer.remote_queryables.on_decl_len(), 0);
+        assert_eq!(observer.app.remote_queryables.on_decl_len(), 0);
         #[cfg(feature = "liveliness-token")]
-        assert_eq!(observer.liveliness.on_decl_len(), 0);
-        assert_eq!(observer.replies.len(), 0);
+        assert_eq!(observer.app.liveliness.on_decl_len(), 0);
+        assert_eq!(observer.requesters.replies.len(), 0);
         #[cfg(feature = "query-queryable")]
         assert_eq!(observer.pending_reply_count(), 0);
         #[cfg(feature = "query-queryable")]
@@ -1382,8 +1057,7 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
         observer
-            .subscribers
-            .register("anything", move |_p| {
+            .subscribe("anything", move |_p| {
                 f.fetch_add(1, Ordering::SeqCst);
             })
             .expect("no quota is stated on this table");
@@ -1532,8 +1206,7 @@ mod tests {
             let fired = Arc::new(AtomicUsize::new(0));
             let fired_cb = fired.clone();
             observer
-                .subscribers
-                .register("home/temp", move |_push| {
+                .subscribe("home/temp", move |_push| {
                     fired_cb.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
@@ -1566,6 +1239,7 @@ mod tests {
             let fired = Arc::new(AtomicUsize::new(0));
             let fired_cb = fired.clone();
             observer
+                .app
                 .remote_subscribers
                 .on_subscriber_declared(move |decl| {
                     assert_eq!(decl.id(), 7);
@@ -1619,13 +1293,13 @@ mod tests {
 
             let s = sub_fired.clone();
             observer
-                .subscribers
-                .register("a", move |_p| {
+                .subscribe("a", move |_p| {
                     s.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
             let rs = r_sub_fired.clone();
             observer
+                .app
                 .remote_subscribers
                 .on_subscriber_declared(move |_d| {
                     rs.fetch_add(1, Ordering::SeqCst);
@@ -1633,6 +1307,7 @@ mod tests {
                 .expect("no quota is stated on this table");
             let rq = r_q_fired.clone();
             observer
+                .app
                 .remote_queryables
                 .on_queryable_declared(move |_d| {
                     rq.fetch_add(1, Ordering::SeqCst);
@@ -1640,6 +1315,7 @@ mod tests {
                 .expect("no quota is stated on this table");
             let l = l_fired.clone();
             observer
+                .app
                 .liveliness
                 .on_token_declared(move |_d| {
                     l.fetch_add(1, Ordering::SeqCst);
@@ -1728,6 +1404,7 @@ mod tests {
             let mut own: HashMap<crate::wire_id::ExprId, alloc::string::String> = HashMap::new();
             own.insert(7, "ours/x".to_string());
             observer
+                .peers
                 .subscribers
                 .set_own_mapping_space(std::sync::Arc::new(own));
 
@@ -1744,15 +1421,13 @@ mod tests {
             let theirs_fired = Arc::new(AtomicUsize::new(0));
             let o = ours_fired.clone();
             observer
-                .subscribers
-                .register("ours/x", move |_p| {
+                .subscribe("ours/x", move |_p| {
                     o.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
             let t = theirs_fired.clone();
             observer
-                .subscribers
-                .register("theirs/x", move |_p| {
+                .subscribe("theirs/x", move |_p| {
                     t.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
@@ -1761,16 +1436,19 @@ mod tests {
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
             let s1 = seen.clone();
             observer
+                .app
                 .remote_subscribers
                 .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
             let s2 = seen.clone();
             observer
+                .app
                 .remote_queryables
                 .on_queryable_declared(move |d| s2.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
             let s3 = seen.clone();
             observer
+                .app
                 .liveliness
                 .on_token_declared(move |d| s3.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
@@ -1828,8 +1506,7 @@ mod tests {
             let fired = Arc::new(AtomicUsize::new(0));
             let f = fired.clone();
             observer
-                .subscribers
-                .register("theirs/x", move |_p| {
+                .subscribe("theirs/x", move |_p| {
                     f.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("no quota is stated on this table");
@@ -1837,6 +1514,7 @@ mod tests {
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
             let s1 = seen.clone();
             observer
+                .app
                 .remote_subscribers
                 .on_subscriber_declared(move |d| s1.lock().unwrap().push(d.keyexpr().to_string()))
                 .expect("no quota is stated on this table");
@@ -1925,6 +1603,7 @@ mod tests {
             // the helper's accessor goes back to 0.
             let mut observer = ApplicationLayerObserver::new();
             observer
+                .app
                 .queryables
                 .register("home/temp", |_query, responder| {
                     responder.reply(b"21.0");
@@ -1968,8 +1647,8 @@ mod tests {
             // calls flush_pending(&actions) which drains through the
             // outbound link; the integration tests cover that path
             // end-to-end. Here we exercise just the accessor lifecycle.
-            observer.pending_replies.clear();
-            observer.pending_final_rids.clear();
+            observer.peers.replies.clear();
+            observer.peers.finals.clear();
             assert_eq!(observer.pending_reply_count(), 0);
             assert_eq!(observer.pending_final_count(), 0);
         }
@@ -2046,8 +1725,10 @@ mod tests {
             let sub_fired = Arc::new(AtomicUsize::new(0));
             let s = sub_fired.clone();
             observer
+                .app
                 .liveliness_subscribers
                 .register(
+                    &observer.peers.tokens,
                     SUB_INTEREST,
                     "k/**",
                     history,
@@ -2059,6 +1740,7 @@ mod tests {
             let get_fired = Arc::new(AtomicUsize::new(0));
             let g = get_fired.clone();
             observer
+                .requesters
                 .liveliness_gets
                 .register_get(
                     GET_INTEREST,
@@ -2150,6 +1832,7 @@ mod tests {
                 Arc::new(Mutex::new(alloc::vec::Vec::new()));
             let s = seen.clone();
             f.observer
+                .app
                 .liveliness
                 .on_token_declared(move |d| {
                     use alloc::string::ToString;
@@ -2294,12 +1977,13 @@ mod sub_interest_reply_tests {
     fn staged(aggregate: bool) -> (ApplicationLayerObserver, crate::pubsub::SubscriptionId) {
         let mut observer = ApplicationLayerObserver::new();
         let id = observer
-            .subscribers
-            .register("reenter/**", |_| {})
+            .subscribe("reenter/**", |_| {})
             .expect("no quota is stated on this table");
         let count = observer
+            .app
             .subscribers
             .respond_to_subscriber_interest_borrowed(
+                &mut observer.peers.subscribers,
                 INTEREST,
                 Some("reenter/**"),
                 aggregate,
@@ -2331,8 +2015,7 @@ mod sub_interest_reply_tests {
     fn a_member_interest_on_its_own_alias_is_answered() {
         let mut observer = ApplicationLayerObserver::new();
         observer
-            .subscribers
-            .register("demo/mc/**", |_| {})
+            .subscribe("demo/mc/cross", |_| {})
             .expect("no quota is stated on this table");
         let kexpr = crate::declare_build::build_declare_kexpr(1, "demo/mc/cross")
             .expect("a literal key builds");
@@ -2366,7 +2049,7 @@ mod sub_interest_reply_tests {
                 .iter()
                 .map(|(_, key, interest)| (key.clone(), *interest))
                 .collect::<Vec<_>>(),
-            alloc::vec![("demo/mc/**".to_string(), 3)],
+            alloc::vec![("demo/mc/cross".to_string(), 3)],
             "the matching subscription is the answer"
         );
         assert_eq!(
@@ -2379,7 +2062,7 @@ mod sub_interest_reply_tests {
     #[test]
     fn an_aggregate_reply_is_not_emitted_once_its_subscription_is_undeclared() {
         let (mut observer, id) = staged(/*aggregate=*/ true);
-        assert!(observer.subscribers.unregister(id));
+        assert!(observer.unregister_subscriber(id));
 
         let sink = RecordingSink::default();
         observer.flush_declare_replies(&sink);
@@ -2424,7 +2107,7 @@ mod sub_interest_reply_tests {
     #[test]
     fn a_concrete_reply_is_not_emitted_once_its_subscription_is_undeclared() {
         let (mut observer, id) = staged(/*aggregate=*/ false);
-        assert!(observer.subscribers.unregister(id));
+        assert!(observer.unregister_subscriber(id));
 
         let sink = RecordingSink::default();
         observer.flush_declare_replies(&sink);
@@ -2465,11 +2148,17 @@ mod sub_interest_reply_tests {
 
         for aggregate in [true, false] {
             let (mut observer, id) = staged(aggregate);
-            assert!(observer.subscribers.unregister(id));
+            assert!(observer.unregister_subscriber(id));
 
-            let items = observer.subscribers.take_staged_sub_interest_replies();
+            let items = observer
+                .peers
+                .subscribers
+                .take_staged_sub_interest_replies();
             for item in items.iter() {
-                let resolved = observer.subscribers.sub_interest_reply(item);
+                let resolved = observer
+                    .peers
+                    .subscribers
+                    .sub_interest_reply(&observer.app.subscribers, item);
                 match item {
                     SubInterestReply::Aggregate { .. } => {
                         reached_aggregate += 1;
@@ -2553,7 +2242,7 @@ mod sub_interest_reply_tests {
         );
         let announced_id = announced[0].0;
 
-        assert!(observer.subscribers.unregister(id));
+        assert!(observer.unregister_subscriber(id));
         observer.flush_declare_replies(&sink);
 
         assert_eq!(
@@ -2576,21 +2265,21 @@ mod sub_interest_reply_tests {
     /// the guard: deleting it leaves this green, because the drain-time one
     /// still catches the item. That check is a pressure filter with its own
     /// red in `an_unrelated_unregister_stages_no_aggregate_retraction`.
-    #[cfg(feature = "declare-undeclare")]
+    #[cfg(all(feature = "declare-undeclare", feature = "keyexpr-wildcard-double"))]
     #[test]
     fn an_aggregate_declaration_survives_while_another_subscription_matches() {
         let mut observer = ApplicationLayerObserver::new();
         let first = observer
-            .subscribers
-            .register("reenter/a", |_| {})
+            .subscribe("reenter/a", |_| {})
             .expect("no quota is stated on this table");
         let _second = observer
-            .subscribers
-            .register("reenter/b", |_| {})
+            .subscribe("reenter/b", |_| {})
             .expect("no quota is stated on this table");
         let staged_count = observer
+            .app
             .subscribers
             .respond_to_subscriber_interest_borrowed(
+                &mut observer.peers.subscribers,
                 INTEREST,
                 Some("reenter/**"),
                 /*aggregate=*/ true,
@@ -2611,7 +2300,7 @@ mod sub_interest_reply_tests {
              thing under test"
         );
 
-        assert!(observer.subscribers.unregister(first));
+        assert!(observer.unregister_subscriber(first));
         observer.flush_declare_replies(&sink);
 
         assert!(
@@ -2641,18 +2330,18 @@ mod sub_interest_reply_tests {
     fn an_unrelated_unregister_stages_no_aggregate_retraction() {
         let mut observer = ApplicationLayerObserver::new();
         let unrelated = observer
-            .subscribers
-            .register("elsewhere/a", |_| {})
+            .subscribe("elsewhere/a", |_| {})
             .expect("no quota is stated on this table");
         let _matching = observer
-            .subscribers
-            .register("reenter/a", |_| {})
+            .subscribe("reenter/a", |_| {})
             .expect("no quota is stated on this table");
         observer
+            .app
             .subscribers
             .respond_to_subscriber_interest_borrowed(
+                &mut observer.peers.subscribers,
                 INTEREST,
-                Some("reenter/**"),
+                Some("reenter/a"),
                 /*aggregate=*/ true,
                 /*current=*/ true,
                 /*future=*/ true,
@@ -2667,10 +2356,11 @@ mod sub_interest_reply_tests {
              measuring the wrong one"
         );
 
-        assert!(observer.subscribers.unregister(unrelated));
+        assert!(observer.unregister_subscriber(unrelated));
 
         assert!(
             observer
+                .peers
                 .subscribers
                 .take_staged_sub_interest_replies()
                 .is_empty(),
@@ -2701,7 +2391,7 @@ mod sub_interest_reply_tests {
              `unregister` has nothing to react to"
         );
 
-        assert!(observer.subscribers.unregister(id));
+        assert!(observer.unregister_subscriber(id));
         observer.flush_declare_replies(&sink);
 
         assert!(
@@ -2732,14 +2422,15 @@ mod sub_interest_reply_tests {
     fn one_session_never_announces_two_things_under_one_id() {
         let mut observer = ApplicationLayerObserver::new();
         let sub = observer
-            .subscribers
-            .register("reenter/a", |_| {})
+            .subscribe("reenter/a", |_| {})
             .expect("no quota is stated on this table");
         observer
+            .app
             .subscribers
             .respond_to_subscriber_interest_borrowed(
+                &mut observer.peers.subscribers,
                 INTEREST,
-                Some("reenter/**"),
+                Some("reenter/a"),
                 /*aggregate=*/ true,
                 /*current=*/ true,
                 /*future=*/ true,
@@ -2827,6 +2518,7 @@ mod history_replay_is_peer_scoped {
         // A token THIS session holds, matching the pattern the subscriber
         // will declare. Upstream would not replay it; neither may wz.
         observer
+            .app
             .local_tokens
             .register(41, "live/mine")
             .expect("register a locally held token");
@@ -2834,8 +2526,10 @@ mod history_replay_is_peer_scoped {
         let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let f = fired.clone();
         observer
+            .app
             .liveliness_subscribers
             .register(
+                &observer.peers.tokens,
                 9,
                 "live/**",
                 true, // history: the replay fires inside `register`
@@ -2863,7 +2557,8 @@ mod history_replay_is_peer_scoped {
     fn a_peer_token_is_replayed_to_the_same_history_subscriber() {
         let mut observer = ApplicationLayerObserver::new();
         // Same shape as the local token above, but arriving over the wire.
-        observer.liveliness_subscribers.dispatch_declare(
+        observer.app.liveliness_subscribers.dispatch_declare(
+            &mut observer.peers.tokens,
             &crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
                 decl_token_nonlocal(41, 0, Some("live/theirs")),
             ),
@@ -2873,8 +2568,10 @@ mod history_replay_is_peer_scoped {
         let fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let f = fired.clone();
         observer
+            .app
             .liveliness_subscribers
             .register(
+                &observer.peers.tokens,
                 9,
                 "live/**",
                 true,
@@ -2999,6 +2696,7 @@ mod queryable_interest_reply_tests {
     fn a_queryable_interest_is_answered_with_the_queryable_and_a_final() {
         let mut observer = ApplicationLayerObserver::new();
         let id = observer
+            .app
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table")
@@ -3050,6 +2748,7 @@ mod queryable_interest_reply_tests {
         };
         let mut observer = ApplicationLayerObserver::new();
         let id = observer
+            .app
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table")
@@ -3073,6 +2772,7 @@ mod queryable_interest_reply_tests {
     fn an_interest_no_queryable_reaches_is_answered_with_a_final_alone() {
         let mut observer = ApplicationLayerObserver::new();
         observer
+            .app
             .queryables
             .register("other/key", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -3095,15 +2795,18 @@ mod queryable_interest_reply_tests {
     fn an_aggregate_interest_is_answered_once_under_the_interests_key() {
         let mut observer = ApplicationLayerObserver::new();
         let first = observer
+            .app
             .queryables
             .register("demo/**", |_q, _out| {})
             .expect("no quota is stated on this table")
             .as_u64();
         observer
+            .app
             .queryables
             .register("demo/a", |_q, _out| {})
             .expect("no quota is stated on this table");
         observer
+            .app
             .queryables
             .register("elsewhere/x", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -3123,11 +2826,13 @@ mod queryable_interest_reply_tests {
     fn a_plain_interest_gets_one_reply_per_match_and_an_aggregate_merges_completeness() {
         let mut observer = ApplicationLayerObserver::new();
         let a = observer
+            .app
             .queryables
             .register("demo/*", |_q, _out| {})
             .expect("no quota is stated on this table")
             .as_u64();
         let b = observer
+            .app
             .queryables
             .register_sink(
                 "demo/b",
@@ -3159,6 +2864,7 @@ mod queryable_interest_reply_tests {
     fn a_local_only_queryable_is_not_declared_to_a_peer() {
         let mut observer = ApplicationLayerObserver::new();
         observer
+            .app
             .queryables
             .register_with_locality("lat", Locality::SessionLocal, |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -3175,6 +2881,7 @@ mod queryable_interest_reply_tests {
     fn only_a_current_queryables_interest_is_answered() {
         let mut observer = ApplicationLayerObserver::new();
         observer
+            .app
             .queryables
             .register("lat", |_q, _out| {})
             .expect("no quota is stated on this table");
@@ -3210,5 +2917,71 @@ mod queryable_interest_reply_tests {
             .all(|wire| !wire.starts_with("queryable")));
         let cancel = NetworkMessage::Interest(crate::interest_build::build_interest_final(13));
         assert!(answer(&mut observer, cancel).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    /// A session that shares nothing: the application half is a view of the observer's own tables,
+    /// so what is registered through it is what the observer holds.
+    #[test]
+    fn the_application_half_is_the_observers_own_tables() {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer
+            .with_app(|app| app.subscribers.register("demo/a", |_| {}))
+            .unwrap();
+        assert_eq!(observer.app.subscribers.len(), 1);
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 1);
+        assert!(observer.with_app(|app| app.subscribers.unregister(id)));
+        assert!(observer.app.subscribers.is_empty());
+    }
+
+    /// Registering through the observer reaches the same table as the half does, and retiring an
+    /// id it does not hold says so.
+    #[test]
+    fn a_subscriber_registered_on_the_observer_is_in_the_application_half() {
+        let mut observer = ApplicationLayerObserver::new();
+        let id = observer
+            .register_subscriber(
+                "demo/b",
+                crate::locality::Locality::Any,
+                crate::sink::BoxedSink::new(|_| {}),
+            )
+            .unwrap();
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 1);
+        assert!(observer.unregister_subscriber(id));
+        assert!(!observer.unregister_subscriber(id));
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 0);
+        let local = observer
+            .subscribe_with_locality("demo/b", crate::locality::Locality::SessionLocal, |_| {})
+            .unwrap();
+        let any = observer.subscribe("demo/b", |_| {}).unwrap();
+        assert_ne!(local, any);
+        assert_eq!(observer.read_app(|app| app.subscribers.len()), 2);
+    }
+
+    /// The face half is the observer's own peer side: nothing pending on a fresh observer, and the
+    /// two halves borrowed together read the same tables as each alone.
+    #[test]
+    fn the_face_half_is_the_observers_own_peer_side() {
+        let mut observer = ApplicationLayerObserver::new();
+        assert_eq!(observer.face().replies.len(), 0);
+        assert_eq!(
+            observer.face_ref().replies.len(),
+            observer.requesters.replies.len()
+        );
+        let both = observer.read_parts(|app, face| (app.subscribers.len(), face.replies.len()));
+        assert_eq!(both, (0, 0));
+        let (registered, pending) = observer.with_parts(|app, face| {
+            (
+                app.subscribers.register("demo/c", |_| {}).is_ok(),
+                face.replies.len(),
+            )
+        });
+        assert!(registered);
+        assert_eq!(pending, 0);
+        assert_eq!(observer.app.subscribers.len(), 1);
     }
 }

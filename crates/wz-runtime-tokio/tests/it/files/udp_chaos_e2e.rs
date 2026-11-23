@@ -228,8 +228,7 @@ async fn udp_lossy_fragment_chain_aborts_then_channel_recovers() {
     {
         let delivered = delivered.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 delivered.lock().unwrap().push(sample.payload().to_vec());
             })
@@ -466,8 +465,7 @@ async fn udp_duplicate_fragment_strands_then_channel_recovers() {
     {
         let delivered = delivered.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 delivered.lock().unwrap().push(sample.payload().to_vec());
             })
@@ -687,8 +685,7 @@ async fn udp_reordered_fragment_aborts_then_channel_recovers() {
     {
         let delivered = delivered.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 delivered.lock().unwrap().push(sample.payload().to_vec());
             })

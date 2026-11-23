@@ -112,8 +112,7 @@ async fn unicast_put_metadata_propagates_over_the_wire() {
     {
         let captured = captured.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 let mut c = captured.lock().unwrap();
                 c.encoding = sample.encoding().cloned();

@@ -172,7 +172,7 @@ pub fn peer_region(extensions: &[ExtEntryOwned]) -> Result<Option<RegionName>, R
 }
 
 /// [`peer_region`] over the entries a chain yields, held or read where its message lies
-/// (`crate::inbound::ExtChainRef`): the name is read where its bytes lie.
+/// (`crate::inbound::ExtChainRead`): the name is read where its bytes lie.
 pub fn peer_region_in<E: crate::ext_view::ExtEntryView>(
     extensions: impl IntoIterator<Item = E>,
 ) -> Result<Option<RegionName>, RegionNameError> {

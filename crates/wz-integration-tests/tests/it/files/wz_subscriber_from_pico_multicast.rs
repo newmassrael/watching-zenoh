@@ -153,8 +153,7 @@ async fn wz_subscriber_admits_pico_multicast_push() {
         let fired = fired.clone();
         let captured = captured.clone();
         observer
-            .subscribers
-            .register(KEY, move |sample| {
+            .subscribe(KEY, move |sample| {
                 assert_eq!(sample.keyexpr(), KEY, "delivered keyexpr matches");
                 *captured.lock().expect("captured lock") = sample.payload().to_vec();
                 fired.fetch_add(1, Ordering::SeqCst);

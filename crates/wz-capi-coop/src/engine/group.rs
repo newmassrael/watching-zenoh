@@ -68,9 +68,11 @@ use {
 };
 #[cfg(feature = "query")]
 use {
-    wz_session_core::metadata::QueryMetadata,
-    wz_session_core::request_build::build_request_query_with_meta,
+    wz_session_core::lent_request::RequestWriter,
+    wz_session_core::multicast_tx::MulticastTxEncoded,
+    wz_session_core::query_parts::{GetParts, QueryParts},
     wz_session_core::wire_id::RequestId,
+    wz_session_mcu::group_drive::LentPushRefused,
 };
 
 #[allow(unused_imports)]
@@ -455,6 +457,19 @@ impl GroupFace {
         outcome
     }
 
+    /// [`Self::push`] of a message written straight into the group's stage, with nothing owned:
+    /// refused, with nothing taken, when it is pushed from inside another push's wait for room,
+    /// which a message lent for the call cannot outlast.
+    #[cfg(feature = "query")]
+    fn push_encoded(
+        &self,
+        message: &MulticastTxEncoded<'_>,
+    ) -> Result<PushOutcome, LentPushRefused> {
+        let outcome = self.tx.push_encoded(message, self)?;
+        self.write_staged();
+        Ok(outcome)
+    }
+
     /// Write what the group's stage holds on the group's socket, on this thread, until the stage
     /// is empty or the socket has no room; what it refuses is offered again first at the next
     /// write, the face's or the task's. Whatever the session puts on the stage outside the group's
@@ -571,34 +586,48 @@ impl GroupFace {
         rid
     }
 
-    /// Ask the group the query `rid` on `keyexpr`, named to the peers as `wire`, with the slots
-    /// `meta` states. The key is named as a put on the group names it: by the declaration the
+    /// Ask the group the query `rid` on `keyexpr`, named to the peers as `wire`, asking what
+    /// `query` states. The key is named as a put on the group names it: by the declaration the
     /// group was told when it is told the session's keyexprs, and in full otherwise
-    /// (`GroupDeclarations::key`). Built by the session core's request builder, as a link's
-    /// query is, and sent reliably on the group, as zenoh-pico sends one on its multicast
-    /// transport. `false` when the query cannot be built, and nothing is pushed.
+    /// (`GroupDeclarations::key`). Written straight into the group's stage by the writer a link's
+    /// query is written by, and sent reliably on the group, as zenoh-pico sends one on its
+    /// multicast transport; a query that starts a timestamp stack, which that writer does not
+    /// carry, is built and queued owned. `false` when nothing was queued: the key names none,
+    /// the query cannot be written, or it was asked from inside another push's wait.
     #[cfg(feature = "query")]
     pub(super) fn ask(
         &self,
         rid: RequestId,
         keyexpr: &str,
         wire: &WireKey,
-        meta: &QueryMetadata,
+        query: QueryParts<'_>,
     ) -> bool {
         let key = self.join.declarations.key(keyexpr, wire);
         let Some(key) = wz_session_core::wire_key::WireKey::from_parts(key.mapping_id, key.suffix)
         else {
             return false;
         };
-        match build_request_query_with_meta(rid, key, meta) {
-            Ok(request) => {
-                self.push(MulticastTxItem::Request {
-                    request: alloc::boxed::Box::new(request),
-                });
-                true
-            }
-            Err(_) => false,
-        }
+        let parts = GetParts { rid, key, query };
+        let Some(writer) = RequestWriter::new(parts) else {
+            return match parts.owned_request() {
+                Ok(request) => {
+                    self.push(MulticastTxItem::Request {
+                        request: alloc::boxed::Box::new(request),
+                    });
+                    true
+                }
+                Err(_) => false,
+            };
+        };
+        let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| writer.encode(sink);
+        let size = wz_session_core::tx_buf::encoded_len(&body);
+        let message = MulticastTxEncoded {
+            qos: query.qos,
+            reliable: true,
+            size,
+            body: &body,
+        };
+        self.push_encoded(&message).is_ok()
     }
 
     /// The face the group's tables are in.
@@ -1131,7 +1160,6 @@ pub(super) struct GroupPut<'a> {
 pub(super) fn dispatch(
     registry: Rc<RefCell<Registry>>,
     face: FaceId,
-    policy: SessionPolicy,
     plane: alloc::sync::Arc<super::query::QueryPlane>,
     generation: u64,
 ) -> impl FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static {
@@ -1140,9 +1168,6 @@ pub(super) fn dispatch(
     move |event, replies| {
         let mut registry = registry.borrow_mut();
         plane.arriving.store(generation, Ordering::Release);
-        registry
-            .app
-            .set_unanswerable_final(policy.query_unanswerable_final());
         registry.dispatch_event(face, event);
         registry.flush_pending_replies(face, replies);
         for (rid, qos) in registry.take_pending_final_rids(face) {

@@ -1570,58 +1570,70 @@ fn install_observer_callbacks(
     // substring searches still match because the original text appears
     // verbatim after the env_logger prefix.
     if remote_log_spec.on_remote_subscriber {
-        observer_lock
-            .remote_subscribers
-            .on_subscriber_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .remote_subscribers
-            .on_subscriber_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     if remote_log_spec.on_remote_queryable {
-        observer_lock
-            .remote_queryables
-            .on_queryable_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .remote_queryables
-            .on_queryable_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_queryables
+                .on_queryable_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .remote_queryables
+                .on_queryable_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     if remote_log_spec.on_remote_liveliness {
-        observer_lock
-            .liveliness
-            .on_token_declared(|decl| {
-                log::info!(
-                    "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                    decl.id(),
-                    decl.keyexpr(),
-                );
-            })
-            .map_err(io::Error::other)?;
-        observer_lock
-            .liveliness
-            .on_token_undeclared(|id| {
-                log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
-            })
-            .map_err(io::Error::other)?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .liveliness
+                .on_token_declared(|decl| {
+                    log::info!(
+                        "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                        decl.id(),
+                        decl.keyexpr(),
+                    );
+                })
+                .map_err(io::Error::other)
+        })?;
+        observer_lock.with_app(|app_half| {
+            app_half
+                .liveliness
+                .on_token_undeclared(|id| {
+                    log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
+                })
+                .map_err(io::Error::other)
+        })?;
     }
     // observer_lock drops here; subsequent users (drive_session
     // dispatch closure, Session::publish loopback branch) re-lock
@@ -3568,11 +3580,11 @@ pub(crate) async fn run_demo(
     #[cfg(feature = "switchboard")]
     {
         let mut obs = observer.lock().expect("observer mutex poisoned");
-        wz_ap_demo_app::register_bindings(&mut obs.switchboard);
+        obs.with_app(|app| wz_ap_demo_app::register_bindings(app.switchboard));
         log::info!(
             "wz-ap-demo: switchboard registered ({} rows from wz-ap-demo-app's \
              sidecar); app machine = sensor_monitor",
-            obs.switchboard.len()
+            obs.read_app(|app| app.switchboard.len())
         );
     }
     #[cfg(feature = "switchboard")]
@@ -3614,7 +3626,7 @@ pub(crate) async fn run_demo(
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let now_ms = sweep_clock.now_monotonic_ms();
-                let _ = obs.replies.sweep_timed_out(now_ms);
+                let _ = obs.face().replies.sweep_timed_out(now_ms);
                 // F3 — the liveliness-get pending table has the same
                 // deadline contract as the reply registry (registered with
                 // an absolute timeout, swept here so an unanswered get
@@ -3624,8 +3636,8 @@ pub(crate) async fn run_demo(
                 // contract: every staging site drains where it stages; a
                 // deferred drain could overflow the staging across
                 // un-flushed ticks and permanently re-leak a cache entry).
-                let _ = obs.liveliness_gets.sweep_timed_out(now_ms);
-                for interest_id in obs.liveliness_gets.take_finalized() {
+                let _ = obs.face().liveliness_gets.sweep_timed_out(now_ms);
+                for interest_id in obs.face().liveliness_gets.take_finalized() {
                     actions_for_sweep.prune_liveliness_get_interest(interest_id);
                 }
             }

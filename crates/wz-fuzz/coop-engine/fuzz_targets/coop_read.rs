@@ -99,7 +99,7 @@ impl SessionLinks for Links {
 
     fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Feed>, LinkOpenError> {
         Ok(OpenedLink {
-            sink: Rc::new(Nowhere),
+            sink: wz_runtime_coop::link_cells::heap_sink(Nowhere),
             pump: Feed(self.0.clone()),
         })
     }

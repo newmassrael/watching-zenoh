@@ -51,11 +51,13 @@ mod enforcement {
         };
         for index in 0..admitted {
             observer
-                .subscribers
-                .register(&std::format!("bound/sub/{index}"), |_| {})
+                .subscribe(&std::format!("bound/sub/{index}"), |_| {})
                 .expect("no quota is stated");
         }
-        assert_eq!(observer.subscribers.len(), admitted);
+        assert_eq!(
+            observer.read_app(|app_half| app_half.subscribers.len()),
+            admitted
+        );
     }
 
     /// `MAX_SUBSCRIPTIONS` stated as two: the third registration is refused as a full table, and
@@ -72,22 +74,19 @@ mod enforcement {
         stated.expect("two is inside the domain");
         let mut observer = ApplicationLayerObserver::with_limits(&limits);
         let first = observer
-            .subscribers
-            .register("bound/a", |_| {})
+            .subscribe("bound/a", |_| {})
             .expect("under the quota");
         let second = observer
-            .subscribers
-            .register("bound/b", |_| {})
+            .subscribe("bound/b", |_| {})
             .expect("under the quota");
         assert_eq!(
-            observer.subscribers.register("bound/c", |_| {}),
+            observer.subscribe("bound/c", |_| {}),
             Err(RegisterError::TableFull)
         );
-        assert_eq!(observer.subscribers.len(), 2);
-        assert!(observer.subscribers.unregister(first));
+        assert_eq!(observer.read_app(|app_half| app_half.subscribers.len()), 2);
+        assert!(observer.unregister_subscriber(first));
         let third = observer
-            .subscribers
-            .register("bound/c", |_| {})
+            .subscribe("bound/c", |_| {})
             .expect("a place is free under the quota");
         assert_eq!(third.entity_id(), second.entity_id() + 1);
     }
@@ -433,14 +432,16 @@ mod enforcement {
         index: usize,
     ) -> Result<(), RegisterError> {
         let key = std::format!("bound/queryable/{index}");
-        observer.queryables.register(&key, |_, _| {}).map(|_| ())
+        observer.with_app(|app_half| app_half.queryables.register(&key, |_, _| {}).map(|_| ()))
     }
 
     /// `MAX_QUERYABLES` with nothing stated.
     #[cfg(feature = "query-queryable")]
     #[test]
     fn max_queryables_with_nothing_stated_admits_what_the_build_admitted() {
-        admits_what_the_build_admitted(caps::MAX_QUERYABLES, queryable, |o| o.queryables.len());
+        admits_what_the_build_admitted(caps::MAX_QUERYABLES, queryable, |o| {
+            o.read_app(|app_half| app_half.queryables.len())
+        });
     }
 
     /// `MAX_QUERYABLES` stated as two: the third is refused, and the refusal takes no
@@ -453,24 +454,31 @@ mod enforcement {
             MaxQueryables::DOMAIN.is_singleton(),
             |limits| {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
-                let first = observer
-                    .queryables
-                    .register("bound/a", |_, _| {})
-                    .expect("under the quota");
-                let second = observer
-                    .queryables
-                    .register("bound/b", |_, _| {})
-                    .expect("under the quota");
+                let first = observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/a", |_, _| {})
+                        .expect("under the quota")
+                });
+                let second = observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/b", |_, _| {})
+                        .expect("under the quota")
+                });
                 assert_eq!(
-                    observer.queryables.register("bound/c", |_, _| {}),
+                    observer
+                        .with_app(|app_half| app_half.queryables.register("bound/c", |_, _| {})),
                     Err(RegisterError::TableFull)
                 );
-                assert_eq!(observer.queryables.len(), 2);
-                assert!(observer.queryables.unregister(first));
-                let third = observer
-                    .queryables
-                    .register("bound/c", |_, _| {})
-                    .expect("a place is free under the quota");
+                assert_eq!(observer.read_app(|app_half| app_half.queryables.len()), 2);
+                assert!(observer.with_app(|app_half| app_half.queryables.unregister(first)));
+                let third = observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/c", |_, _| {})
+                        .expect("a place is free under the quota")
+                });
                 assert_eq!(third.as_u64(), second.as_u64() + 1);
             },
         );
@@ -482,6 +490,7 @@ mod enforcement {
     ) -> Result<(), RegisterError> {
         let rid = u32::try_from(index).expect("a test index");
         observer
+            .face()
             .replies
             .register(
                 rid,
@@ -498,7 +507,7 @@ mod enforcement {
     #[test]
     fn max_pending_queries_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_PENDING_QUERIES, pending_query, |o| {
-            o.replies.len()
+            o.face_ref().replies.len()
         });
     }
 
@@ -513,10 +522,11 @@ mod enforcement {
                     limits,
                     pending_query,
                     |o, index| {
-                        o.replies
+                        o.face()
+                            .replies
                             .unregister(u32::try_from(index).expect("a test index"))
                     },
-                    |o| o.replies.len(),
+                    |o| o.face_ref().replies.len(),
                 )
             },
         );
@@ -527,10 +537,12 @@ mod enforcement {
         observer: &mut ApplicationLayerObserver,
         _: usize,
     ) -> Result<(), RegisterError> {
-        observer
-            .remote_subscribers
-            .on_subscriber_declared(|_| {})
-            .map(|_| ())
+        observer.with_app(|app_half| {
+            app_half
+                .remote_subscribers
+                .on_subscriber_declared(|_| {})
+                .map(|_| ())
+        })
     }
 
     /// `MAX_DECL_OBSERVERS` with nothing stated.
@@ -538,7 +550,7 @@ mod enforcement {
     #[test]
     fn max_decl_observers_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_DECL_OBSERVERS, decl_observer, |o| {
-            o.remote_subscribers.on_decl_len()
+            o.read_app(|app_half| app_half.remote_subscribers.on_decl_len())
         });
     }
 
@@ -554,10 +566,13 @@ mod enforcement {
                     limits,
                     decl_observer,
                     |o, index| {
-                        o.remote_subscribers
-                            .remove_subscriber_declared_sink(index as u64)
+                        o.with_app(|app_half| {
+                            app_half
+                                .remote_subscribers
+                                .remove_subscriber_declared_sink(index as u64)
+                        })
                     },
-                    |o| o.remote_subscribers.on_decl_len(),
+                    |o| o.read_app(|app_half| app_half.remote_subscribers.on_decl_len()),
                 )
             },
         );
@@ -570,10 +585,12 @@ mod enforcement {
     ) -> Result<(), RegisterError> {
         let key = std::format!("bound/liveliness/{index}");
         let sink = crate::declare::liveliness_sample::BoxedLivelinessSampleSink::new(|_| {});
-        observer
-            .liveliness_subscribers
-            .register(index as u64, &key, false, sink)
-            .map(|_| ())
+        observer.with_parts(|app_half, face_half| {
+            app_half
+                .liveliness_subscribers
+                .register(&mut *face_half.tokens, index as u64, &key, false, sink)
+                .map(|_| ())
+        })
     }
 
     /// `MAX_LIVELINESS_SUBSCRIPTIONS` with nothing stated.
@@ -583,7 +600,7 @@ mod enforcement {
         admits_what_the_build_admitted(
             caps::MAX_LIVELINESS_SUBSCRIPTIONS,
             liveliness_subscriber,
-            |o| o.liveliness_subscribers.slot_count(),
+            |o| o.read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
         );
     }
 
@@ -598,8 +615,12 @@ mod enforcement {
                 refuses_the_third(
                     limits,
                     liveliness_subscriber,
-                    |o, index| o.liveliness_subscribers.unregister(index as u64),
-                    |o| o.liveliness_subscribers.slot_count(),
+                    |o, index| {
+                        o.with_app(|app_half| {
+                            app_half.liveliness_subscribers.unregister(index as u64)
+                        })
+                    },
+                    |o| o.read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
                 )
             },
         );
@@ -611,10 +632,12 @@ mod enforcement {
         index: usize,
     ) -> Result<(), RegisterError> {
         let key = std::format!("bound/token/{index}");
-        observer
-            .local_tokens
-            .register(index as u64, &key)
-            .map(|_| ())
+        observer.with_app(|app_half| {
+            app_half
+                .local_tokens
+                .register(index as u64, &key)
+                .map(|_| ())
+        })
     }
 
     /// `MAX_LOCAL_TOKENS` with nothing stated.
@@ -622,7 +645,7 @@ mod enforcement {
     #[test]
     fn max_local_tokens_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_LOCAL_TOKENS, local_token, |o| {
-            o.local_tokens.len()
+            o.read_app(|app_half| app_half.local_tokens.len())
         });
     }
 
@@ -637,8 +660,10 @@ mod enforcement {
                 refuses_the_third(
                     limits,
                     local_token,
-                    |o, index| o.local_tokens.unregister(index as u64),
-                    |o| o.local_tokens.len(),
+                    |o, index| {
+                        o.with_app(|app_half| app_half.local_tokens.unregister(index as u64))
+                    },
+                    |o| o.read_app(|app_half| app_half.local_tokens.len()),
                 )
             },
         );
@@ -650,6 +675,7 @@ mod enforcement {
         index: usize,
     ) -> Result<(), RegisterError> {
         observer
+            .face()
             .liveliness_gets
             .register_get(index as u64, None, |_| {}, |_| {})
             .map(|_| ())
@@ -660,7 +686,7 @@ mod enforcement {
     #[test]
     fn max_pending_liveliness_gets_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_PENDING_LIVELINESS_GETS, liveliness_get, |o| {
-            o.liveliness_gets.len()
+            o.face_ref().liveliness_gets.len()
         });
     }
 
@@ -675,8 +701,8 @@ mod enforcement {
                 refuses_the_third(
                     limits,
                     liveliness_get,
-                    |o, index| o.liveliness_gets.unregister(index as u64),
-                    |o| o.liveliness_gets.len(),
+                    |o, index| o.face().liveliness_gets.unregister(index as u64),
+                    |o| o.face_ref().liveliness_gets.len(),
                 )
             },
         );
@@ -760,13 +786,24 @@ mod enforcement {
         index: usize,
     ) -> Result<(), RegisterError> {
         let refused = observer
+            .face_ref()
             .subscribers
             .interest_staging_refusals()
             .future_interests;
-        observer
-            .subscribers
-            .respond_to_subscriber_interest_borrowed(index as u64, None, false, false, true);
+        observer.with_parts(|app_half, face_half| {
+            app_half
+                .subscribers
+                .respond_to_subscriber_interest_borrowed(
+                    &mut *face_half.subscribers,
+                    index as u64,
+                    None,
+                    false,
+                    false,
+                    true,
+                )
+        });
         let now = observer
+            .face_ref()
             .subscribers
             .interest_staging_refusals()
             .future_interests;
@@ -782,7 +819,7 @@ mod enforcement {
     #[test]
     fn max_inbound_sub_interests_with_nothing_stated_admits_what_the_build_admitted() {
         admits_what_the_build_admitted(caps::MAX_INBOUND_SUB_INTERESTS, future_interest, |o| {
-            o.subscribers.peer().interest_count()
+            o.face_ref().subscribers.interest_count()
         });
     }
 
@@ -797,32 +834,60 @@ mod enforcement {
             MaxInboundSubInterests::DOMAIN.is_singleton(),
             |limits| {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
-                let subscribers = &mut observer.subscribers;
                 for interest in 0..3 {
-                    subscribers.respond_to_subscriber_interest_borrowed(
-                        interest, None, false, false, true,
-                    );
+                    sub_interest(&mut observer, interest, false, true);
                 }
-                assert_eq!(subscribers.peer().interest_count(), 2);
+                assert_eq!(observer.face_ref().subscribers.interest_count(), 2);
                 assert_eq!(
-                    subscribers.interest_staging_refusals(),
+                    observer.face_ref().subscribers.interest_staging_refusals(),
                     crate::pubsub::SubInterestRefusals {
                         future_interests: 1,
                         ..Default::default()
                     }
                 );
                 // The two rows took the ids 1 and 2; the refused interest took none.
-                let id = subscribers
-                    .register("bound/a", |_| {})
+                let id = observer
+                    .subscribe("bound/a", |_| {})
                     .expect("no quota on subscriptions is stated");
                 assert_eq!(id.as_u64(), 3);
                 // The peer cancels its first interest: the place it held is taken again.
-                subscribers.respond_to_subscriber_interest_borrowed(0, None, false, false, false);
-                subscribers.respond_to_subscriber_interest_borrowed(3, None, false, false, true);
-                assert_eq!(subscribers.peer().interest_count(), 2);
-                assert_eq!(subscribers.interest_staging_refusals().future_interests, 1);
+                sub_interest(&mut observer, 0, false, false);
+                sub_interest(&mut observer, 3, false, true);
+                assert_eq!(observer.face_ref().subscribers.interest_count(), 2);
+                assert_eq!(
+                    observer
+                        .face_ref()
+                        .subscribers
+                        .interest_staging_refusals()
+                        .future_interests,
+                    1
+                );
             },
         );
+    }
+
+    /// A subscriber interest of the session's peer, `interest_id`, asking for the subscribers that
+    /// stand now (`current`) and those to come (`future`), answered by the observer: how many
+    /// declarations it staged.
+    #[cfg(feature = "declare-subscriber")]
+    fn sub_interest(
+        observer: &mut ApplicationLayerObserver,
+        interest_id: u64,
+        current: bool,
+        future: bool,
+    ) -> usize {
+        observer.with_parts(|app_half, face_half| {
+            app_half
+                .subscribers
+                .respond_to_subscriber_interest_borrowed(
+                    &mut *face_half.subscribers,
+                    interest_id,
+                    None,
+                    false,
+                    current,
+                    future,
+                )
+        })
     }
 
     /// One frame of queries on `bound/reply`, one for each request id of `rids`, as a peer
@@ -877,14 +942,16 @@ mod enforcement {
     #[test]
     fn max_pending_replies_with_nothing_stated_admits_what_the_build_admitted() {
         let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
-        observer
-            .queryables
-            .register("bound/reply", |_, responder| {
-                for _ in 0..=caps::MAX_PENDING_REPLIES {
-                    responder.reply(b"r");
-                }
-            })
-            .expect("no quota is stated on the queryables");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("bound/reply", |_, responder| {
+                    for _ in 0..=caps::MAX_PENDING_REPLIES {
+                        responder.reply(b"r");
+                    }
+                })
+                .expect("no quota is stated on the queryables")
+        });
         crate::driver_loop::deliver_frame(&queries(0..1), |event| observer.dispatch_event(event));
         let refused = usize::from(crate::bounded::ENFORCES_CAPACITY);
         assert_eq!(
@@ -914,15 +981,17 @@ mod enforcement {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
                 let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
                 let told = Arc::clone(&answers);
-                observer
-                    .queryables
-                    .register("bound/reply", move |_, responder| {
-                        let mut seen = told.lock().expect("not poisoned");
-                        for _ in 0..3 {
-                            seen.push(responder.try_reply(b"r"));
-                        }
-                    })
-                    .expect("no quota is stated on the queryables");
+                observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/reply", move |_, responder| {
+                            let mut seen = told.lock().expect("not poisoned");
+                            for _ in 0..3 {
+                                seen.push(responder.try_reply(b"r"));
+                            }
+                        })
+                        .expect("no quota is stated on the queryables")
+                });
                 crate::driver_loop::deliver_frame(&queries(0..1), |event| {
                     observer.dispatch_event(event)
                 });
@@ -987,13 +1056,30 @@ mod enforcement {
         {
             let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
             for interest in 0..admitted as u64 {
-                observer
-                    .subscribers
-                    .respond_to_subscriber_interest_borrowed(interest, None, false, true, false);
+                observer.with_parts(|app_half, face_half| {
+                    app_half
+                        .subscribers
+                        .respond_to_subscriber_interest_borrowed(
+                            &mut *face_half.subscribers,
+                            interest,
+                            None,
+                            false,
+                            true,
+                            false,
+                        )
+                });
             }
-            assert_eq!(observer.subscribers.interest_staging_refusals().chains, 0);
             assert_eq!(
                 observer
+                    .face_ref()
+                    .subscribers
+                    .interest_staging_refusals()
+                    .chains,
+                0
+            );
+            assert_eq!(
+                observer
+                    .face()
                     .subscribers
                     .take_staged_sub_interest_replies()
                     .len(),
@@ -1008,10 +1094,12 @@ mod enforcement {
                 { caps::MAX_PENDING_DECLARES },
             > = crate::bounded::BoundedVec::new();
             for interest in 0..admitted as u64 {
-                observer
-                    .local_tokens
-                    .respond_to_interest_borrowed(None, interest, &mut pending)
-                    .expect("no quota is stated");
+                observer.read_app(|app_half| {
+                    app_half
+                        .local_tokens
+                        .respond_to_interest_borrowed(None, interest, &mut pending)
+                        .expect("no quota is stated")
+                });
             }
             assert_eq!(pending.len(), admitted);
         }
@@ -1030,60 +1118,83 @@ mod enforcement {
                 #[cfg(feature = "declare-subscriber")]
                 {
                     let mut observer = ApplicationLayerObserver::with_limits(limits);
-                    let subscribers = &mut observer.subscribers;
-                    subscribers
-                        .register("bound/a", |_| {})
+                    observer
+                        .subscribe("bound/a", |_| {})
                         .expect("no quota on subscriptions is stated");
+                    assert_eq!(sub_interest(&mut observer, 1, true, false), 1);
+                    assert_eq!(sub_interest(&mut observer, 2, true, false), 0);
                     assert_eq!(
-                        subscribers
-                            .respond_to_subscriber_interest_borrowed(1, None, false, true, false),
+                        observer
+                            .face_ref()
+                            .subscribers
+                            .interest_staging_refusals()
+                            .chains,
                         1
                     );
-                    assert_eq!(
-                        subscribers
-                            .respond_to_subscriber_interest_borrowed(2, None, false, true, false),
-                        0
-                    );
-                    assert_eq!(subscribers.interest_staging_refusals().chains, 1);
-                    let staged = subscribers.take_staged_sub_interest_replies();
+                    let staged = observer
+                        .face()
+                        .subscribers
+                        .take_staged_sub_interest_replies();
                     assert_eq!(staged.len(), 2);
                     assert!(matches!(
                         staged.last(),
                         Some(crate::pubsub::SubInterestReply::Final { interest_id: 1 })
                     ));
+                    assert_eq!(sub_interest(&mut observer, 3, true, false), 1);
                     assert_eq!(
-                        subscribers
-                            .respond_to_subscriber_interest_borrowed(3, None, false, true, false),
-                        1
+                        observer
+                            .face()
+                            .subscribers
+                            .take_staged_sub_interest_replies()
+                            .len(),
+                        2
                     );
-                    assert_eq!(subscribers.take_staged_sub_interest_replies().len(), 2);
                 }
                 #[cfg(feature = "liveliness-token")]
                 {
                     let mut observer = ApplicationLayerObserver::with_limits(limits);
-                    observer
-                        .local_tokens
-                        .register(1, "bound/token")
-                        .expect("no quota on tokens is stated");
+                    observer.with_app(|app_half| {
+                        app_half
+                            .local_tokens
+                            .register(1, "bound/token")
+                            .expect("no quota on tokens is stated")
+                    });
                     let mut pending: crate::bounded::BoundedVec<
                         crate::declare::local_token::DeclResponseItem,
                         { caps::MAX_PENDING_DECLARES },
                     > = crate::bounded::BoundedVec::new();
-                    let tokens = &observer.local_tokens;
                     assert_eq!(
-                        tokens
-                            .respond_to_interest_borrowed(None, 1, &mut pending)
+                        observer
+                            .read_app(|app_half| {
+                                app_half.local_tokens.respond_to_interest_borrowed(
+                                    None,
+                                    1,
+                                    &mut pending,
+                                )
+                            })
                             .expect("two places take the chain"),
                         1
                     );
-                    assert!(tokens
-                        .respond_to_interest_borrowed(None, 2, &mut pending)
+                    assert!(observer
+                        .read_app(|app_half| {
+                            app_half.local_tokens.respond_to_interest_borrowed(
+                                None,
+                                2,
+                                &mut pending,
+                            )
+                        })
                         .is_err());
                     assert_eq!(pending.len(), 2);
                     pending.clear();
                     assert_eq!(
-                        tokens
-                            .respond_to_interest_borrowed(None, 3, &mut pending)
+                        observer
+                            .read_app(|app_half| {
+                                app_half.local_tokens.respond_to_interest_borrowed(
+                                    None,
+                                    3,
+                                    &mut pending,
+                                )
+                            })
                             .expect("the drained places take the chain"),
                         1
                     );
@@ -1176,10 +1287,13 @@ mod enforcement {
         let declare = wz_session_core_test_support::declare_envelope_decl_kexpr(
             wz_session_core_test_support::decl_kexpr(id, &declared_key("alias", id)),
         );
-        observer.subscribers.dispatch(
-            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(declare)),
-            crate::sample::Reliability::Reliable,
-        );
+        observer.with_parts(|app_half, face_half| {
+            app_half.subscribers.dispatch(
+                &mut *face_half.subscribers,
+                &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(declare)),
+                crate::sample::Reliability::Reliable,
+            )
+        });
     }
 
     #[cfg(feature = "codec-declare")]
@@ -1187,15 +1301,18 @@ mod enforcement {
         let undeclare = wz_session_core_test_support::declare_envelope_undecl_kexpr(
             wz_session_core_test_support::undecl_kexpr(id),
         );
-        observer.subscribers.dispatch(
-            &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(undeclare)),
-            crate::sample::Reliability::Reliable,
-        );
+        observer.with_parts(|app_half, face_half| {
+            app_half.subscribers.dispatch(
+                &mut *face_half.subscribers,
+                &crate::network_message::NetworkMessage::Declare(std::boxed::Box::new(undeclare)),
+                crate::sample::Reliability::Reliable,
+            )
+        });
     }
 
     #[cfg(feature = "codec-declare")]
     fn alias_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
-        let peer = observer.subscribers.peer();
+        let peer = observer.face_ref().subscribers;
         (peer.alias_count(), peer.alias_refusals())
     }
 
@@ -1225,12 +1342,12 @@ mod enforcement {
                     alias(&mut observer, id);
                 }
                 assert_eq!(
-                    observer.subscribers.resolve_inbound_mapping(3),
+                    observer.face_ref().subscribers.resolve_inbound_mapping(3),
                     None,
                     "the refused alias names nothing"
                 );
                 assert_eq!(
-                    observer.subscribers.resolve_inbound_mapping(2),
+                    observer.face_ref().subscribers.resolve_inbound_mapping(2),
                     Some(declared_key("alias", 2))
                 );
             },
@@ -1246,9 +1363,13 @@ mod enforcement {
                 Some(&declared_key("subscriber", id)),
             ),
         );
-        observer
-            .remote_subscribers
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "declare-subscriber")]
@@ -1256,14 +1377,18 @@ mod enforcement {
         let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
             wz_session_core_test_support::undecl_subscriber(id),
         );
-        observer
-            .remote_subscribers
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.remote_subscribers.dispatch_declare(
+                &mut *face_half.remote_subscribers,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "declare-subscriber")]
     fn remote_subscriber_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
-        let peer = observer.remote_subscribers.peer();
+        let peer = observer.face_ref().remote_subscribers;
         (peer.declared_count(), peer.refusals())
     }
 
@@ -1276,9 +1401,13 @@ mod enforcement {
                 Some(&declared_key("queryable", id)),
             ),
         );
-        observer
-            .remote_queryables
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "declare-queryable")]
@@ -1286,14 +1415,18 @@ mod enforcement {
         let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclQueryable(
             wz_session_core_test_support::undecl_queryable(id),
         );
-        observer
-            .remote_queryables
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.remote_queryables.dispatch_declare(
+                &mut *face_half.remote_queryables,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "declare-queryable")]
     fn remote_queryable_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
-        let peer = observer.remote_queryables.peer();
+        let peer = observer.face_ref().remote_queryables;
         (peer.declared_count(), peer.refusals())
     }
 
@@ -1302,9 +1435,13 @@ mod enforcement {
         let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohDeclToken(
             wz_session_core_test_support::decl_token(id, 0, Some(&declared_key("token", id))),
         );
-        observer
-            .liveliness_subscribers
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "liveliness-subscriber")]
@@ -1312,16 +1449,20 @@ mod enforcement {
         let body = crate::transport_profile::owned::DeclareOwnedVariant::CodecZenohUndeclToken(
             wz_session_core_test_support::undecl_token(id),
         );
-        observer
-            .liveliness_subscribers
-            .dispatch_declare(&body, &no_aliases());
+        observer.with_parts(|app_half, face_half| {
+            app_half.liveliness_subscribers.dispatch_declare(
+                &mut *face_half.tokens,
+                &body,
+                &no_aliases(),
+            )
+        });
     }
 
     #[cfg(feature = "liveliness-subscriber")]
     fn peer_token_tally(observer: &ApplicationLayerObserver) -> (usize, u32) {
         (
-            observer.liveliness_subscribers.peer_token_count(),
-            observer.liveliness_subscribers.peer_token_refusals(),
+            observer.face_ref().tokens.count(),
+            observer.face_ref().tokens.refusals(),
         )
     }
 
@@ -1408,10 +1549,12 @@ mod enforcement {
     #[test]
     fn max_pending_finals_with_nothing_stated_admits_what_the_build_admitted() {
         let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
-        observer
-            .queryables
-            .register("bound/reply", |_, _| {})
-            .expect("no quota is stated on the queryables");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("bound/reply", |_, _| {})
+                .expect("no quota is stated on the queryables")
+        });
         let past = u32::try_from(caps::MAX_PENDING_FINALS + 1).expect("a test count");
         crate::driver_loop::deliver_frame(&queries(0..past), |event| {
             observer.dispatch_event(event)
@@ -1444,13 +1587,15 @@ mod enforcement {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
                 let ran = Arc::new(AtomicUsize::new(0));
                 let runs = Arc::clone(&ran);
-                observer
-                    .queryables
-                    .register("bound/reply", move |_, responder| {
-                        runs.fetch_add(1, Ordering::Relaxed);
-                        responder.reply(b"r");
-                    })
-                    .expect("no quota is stated on the queryables");
+                observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/reply", move |_, responder| {
+                            runs.fetch_add(1, Ordering::Relaxed);
+                            responder.reply(b"r");
+                        })
+                        .expect("no quota is stated on the queryables")
+                });
                 crate::driver_loop::deliver_frame(&queries(0..3), |event| {
                     observer.dispatch_event(event)
                 });
@@ -1523,14 +1668,16 @@ mod enforcement {
         let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
         let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
         let told = Arc::clone(&answers);
-        observer
-            .queryables
-            .register("bound/reply", move |_, responder| {
-                let past = std::vec![b'r'; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
-                let answer = responder.try_reply(&past[..]);
-                told.lock().expect("not poisoned").push(answer);
-            })
-            .expect("no quota is stated on the queryables");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("bound/reply", move |_, responder| {
+                    let past = std::vec![b'r'; caps::MAX_REPLY_PAYLOAD_BYTES + 1];
+                    let answer = responder.try_reply(&past[..]);
+                    told.lock().expect("not poisoned").push(answer);
+                })
+                .expect("no quota is stated on the queryables")
+        });
         crate::driver_loop::deliver_frame(&queries(0..1), |event| observer.dispatch_event(event));
         let fixed = crate::bounded::ENFORCES_CAPACITY;
         let answer = if fixed {
@@ -1564,14 +1711,16 @@ mod enforcement {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
                 let answers = Arc::new(Mutex::new(std::vec::Vec::new()));
                 let told = Arc::clone(&answers);
-                observer
-                    .queryables
-                    .register("bound/reply", move |_, responder| {
-                        let mut seen = told.lock().expect("not poisoned");
-                        seen.push(responder.try_reply(b"abc"));
-                        seen.push(responder.try_reply(b"ab"));
-                    })
-                    .expect("no quota is stated on the queryables");
+                observer.with_app(|app_half| {
+                    app_half
+                        .queryables
+                        .register("bound/reply", move |_, responder| {
+                            let mut seen = told.lock().expect("not poisoned");
+                            seen.push(responder.try_reply(b"abc"));
+                            seen.push(responder.try_reply(b"ab"));
+                        })
+                        .expect("no quota is stated on the queryables")
+                });
                 crate::driver_loop::deliver_frame(&queries(0..1), |event| {
                     observer.dispatch_event(event)
                 });
@@ -1680,12 +1829,14 @@ mod enforcement {
         let mut observer = ApplicationLayerObserver::with_limits(limits);
         let ran = Arc::new(AtomicUsize::new(0));
         let runs = Arc::clone(&ran);
-        observer
-            .queryables
-            .register("bound/reply", move |_, _| {
-                runs.fetch_add(1, Ordering::Relaxed);
-            })
-            .expect("no quota is stated on the queryables");
+        observer.with_app(|app_half| {
+            app_half
+                .queryables
+                .register("bound/reply", move |_, _| {
+                    runs.fetch_add(1, Ordering::Relaxed);
+                })
+                .expect("no quota is stated on the queryables")
+        });
         (observer, ran)
     }
 
@@ -1720,7 +1871,10 @@ mod enforcement {
             observer.dispatch_event(event)
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
-        assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
+        assert_eq!(
+            observer.face_ref().queries.oversize_refusals(),
+            u32::from(refused)
+        );
         assert_eq!(
             observer.pending_final_count(),
             1,
@@ -1749,7 +1903,7 @@ mod enforcement {
                     1,
                     "the longer query ran nowhere"
                 );
-                assert_eq!(observer.queryables.oversize_refusals(), 1);
+                assert_eq!(observer.face_ref().queries.oversize_refusals(), 1);
                 assert_eq!(
                     observer.pending_final_count(),
                     2,
@@ -1774,7 +1928,10 @@ mod enforcement {
             observer.dispatch_event(event)
         });
         assert_eq!(ran.load(Ordering::Relaxed), usize::from(!refused));
-        assert_eq!(observer.queryables.oversize_refusals(), u32::from(refused));
+        assert_eq!(
+            observer.face_ref().queries.oversize_refusals(),
+            u32::from(refused)
+        );
         assert_eq!(
             observer.pending_final_count(),
             1,
@@ -1803,7 +1960,7 @@ mod enforcement {
                     1,
                     "the longer query ran nowhere"
                 );
-                assert_eq!(observer.queryables.oversize_refusals(), 1);
+                assert_eq!(observer.face_ref().queries.oversize_refusals(), 1);
                 assert_eq!(
                     observer.pending_final_count(),
                     2,
@@ -2253,14 +2410,13 @@ mod enforcement {
         let at_build = "k".repeat(caps::MAX_KEYEXPR_BYTES);
         let past_build = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
         assert_eq!(
-            observer.subscribers.register(&past_build, |_| {}).err(),
+            observer.subscribe(&past_build, |_| {}).err(),
             Some(RegisterError::KeyexprTooLong)
         );
         observer
-            .subscribers
-            .register(&at_build, |_| {})
+            .subscribe(&at_build, |_| {})
             .expect("a pattern of the build's length");
-        assert_eq!(observer.subscribers.len(), 1);
+        assert_eq!(observer.read_app(|app_half| app_half.subscribers.len()), 1);
         #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
         {
             use crate::lent_control::NamedKeyexpr;
@@ -2282,33 +2438,39 @@ mod enforcement {
             |limits| {
                 let mut observer = ApplicationLayerObserver::with_limits(limits);
                 let too_long = Some(RegisterError::KeyexprTooLong);
-                observer
-                    .subscribers
-                    .register("ab", |_| {})
-                    .expect("at the quota");
-                assert_eq!(observer.subscribers.register("abc", |_| {}).err(), too_long);
+                observer.subscribe("ab", |_| {}).expect("at the quota");
+                assert_eq!(observer.subscribe("abc", |_| {}).err(), too_long);
                 assert_eq!(
-                    observer.subscribers.len(),
+                    observer.read_app(|app_half| app_half.subscribers.len()),
                     1,
                     "a refusal keeps what is held"
                 );
                 #[cfg(feature = "query-queryable")]
                 {
                     assert_eq!(
-                        observer.queryables.register("abc", |_, _| {}).err(),
+                        observer.with_app(|app_half| app_half
+                            .queryables
+                            .register("abc", |_, _| {})
+                            .err()),
                         too_long
                     );
-                    assert!(observer.queryables.register("ab", |_, _| {}).is_ok());
-                    assert_eq!(observer.queryables.len(), 1);
+                    assert!(observer.with_app(|app_half| app_half
+                        .queryables
+                        .register("ab", |_, _| {})
+                        .is_ok()));
+                    assert_eq!(observer.read_app(|app_half| app_half.queryables.len()), 1);
                 }
                 #[cfg(feature = "liveliness-token")]
                 {
                     assert_eq!(
-                        observer.local_tokens.register(1, "abc"),
+                        observer.with_app(|app_half| app_half.local_tokens.register(1, "abc")),
                         Err(RegisterError::KeyexprTooLong)
                     );
-                    assert_eq!(observer.local_tokens.register(2, "ab"), Ok(true));
-                    assert_eq!(observer.local_tokens.len(), 1);
+                    assert_eq!(
+                        observer.with_app(|app_half| app_half.local_tokens.register(2, "ab")),
+                        Ok(true)
+                    );
+                    assert_eq!(observer.read_app(|app_half| app_half.local_tokens.len()), 1);
                 }
                 #[cfg(feature = "liveliness-subscriber")]
                 {
@@ -2316,22 +2478,26 @@ mod enforcement {
                         crate::declare::liveliness_sample::BoxedLivelinessSampleSink::new(|_| {})
                     };
                     assert_eq!(
-                        observer
+                        observer.with_parts(|app_half, face_half| app_half
                             .liveliness_subscribers
-                            .register(1, "abc", false, sink())
-                            .err(),
+                            .register(&mut *face_half.tokens, 1, "abc", false, sink())
+                            .err()),
                         too_long
                     );
                     assert_eq!(
-                        observer
+                        observer.with_parts(|app_half, face_half| app_half
                             .liveliness_subscribers
-                            .register(2, "ab", false, sink()),
+                            .register(&mut *face_half.tokens, 2, "ab", false, sink())),
                         Ok(true)
                     );
-                    assert_eq!(observer.liveliness_subscribers.slot_count(), 1);
+                    assert_eq!(
+                        observer.read_app(|app_half| app_half.liveliness_subscribers.slot_count()),
+                        1
+                    );
                 }
                 let asked = |observer: &mut ApplicationLayerObserver, rid: u32, keyexpr: &str| {
                     observer
+                        .face()
                         .replies
                         .register(
                             rid,
@@ -2345,7 +2511,7 @@ mod enforcement {
                 };
                 assert_eq!(asked(&mut observer, 1, "abc"), too_long);
                 assert_eq!(asked(&mut observer, 2, "ab"), None);
-                assert_eq!(observer.replies.len(), 1);
+                assert_eq!(observer.face_ref().replies.len(), 1);
                 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
                 {
                     use crate::lent_control::NamedKeyexpr;
@@ -2486,7 +2652,10 @@ mod enforcement {
         } else {
             caps::MATCH_MEMO_SLOTS
         };
-        assert_eq!(observer.subscribers.memo_slot_count(), build);
+        assert_eq!(
+            observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
+            build
+        );
     }
 
     /// `MATCH_MEMO_SLOTS` stated: the cache of a table that grows holds the stated count of
@@ -2506,7 +2675,10 @@ mod enforcement {
             } else {
                 other
             };
-            assert_eq!(observer.subscribers.memo_slot_count(), held);
+            assert_eq!(
+                observer.read_app(|app_half| app_half.subscribers.memo_slot_count()),
+                held
+            );
         }
     }
 }

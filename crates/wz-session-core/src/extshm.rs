@@ -1069,6 +1069,18 @@ pub struct ShmReceiveState {
 }
 
 impl ShmReceiveState {
+    /// A state of nothing negotiated, installed or counted, as `Default` makes it; `const`, so
+    /// a peer's side of the static policy that holds one can be a `static`.
+    pub const fn new() -> Self {
+        Self {
+            negotiated: false,
+            resolver: None,
+            handoff: None,
+            unnegotiated_drops: 0,
+            unresolved_drops: 0,
+        }
+    }
+
     /// Install the resolver. Shared, so the session hands the same one to every
     /// registry that receives a payload.
     pub fn set_resolver(&mut self, resolver: alloc::sync::Arc<dyn ShmResolver + Send + Sync>) {

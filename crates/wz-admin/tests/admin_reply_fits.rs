@@ -35,7 +35,7 @@ use wz_admin::admin_reply::{AdminReplyArena, AdminReplyRefusals};
 use wz_admin::adminspace::{AdminNodeFacts, AdminSession};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
+use wz_session_core::query::{QueryPeer, QueryReply, QueryableRegistry, ReplyBody};
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
 use wz_session_core::reply_stage::{FinalStage, FinalStaging, ReplyStage, ReplyStaging};
 use wz_session_core::request_build::RequestQueryBuilder;
@@ -170,7 +170,13 @@ fn an_admin_reply_of_exactly_the_bound_is_delivered_with_zero_allocations() {
     let messages = [get(1, "@/a1b2/peer")];
     let aliases = no_aliases();
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(&messages, &aliases, &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
+            &messages,
+            &aliases,
+            &mut replies,
+            &mut finals,
+        );
     });
     let staged = replies.nth(0).expect("the reply is staged");
     assert_eq!(
@@ -208,7 +214,13 @@ fn one_byte_more_is_refused_counted_and_answered_with_a_typed_error_at_zero_allo
     let messages = [get(1, "@/a1b2/peer")];
     let aliases = no_aliases();
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(&messages, &aliases, &mut replies, &mut finals);
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
+            &messages,
+            &aliases,
+            &mut replies,
+            &mut finals,
+        );
     });
     let refusals = arena.lock().unwrap().refusals();
     // Nothing the querier is handed is the root document, cut or whole.
@@ -259,7 +271,8 @@ fn a_refusal_leaves_the_session_and_the_others_served() {
     let (mut a_replies, mut a_finals) = (ReplyStage::new(), FinalStage::new());
     let (mut b_replies, mut b_finals) = (ReplyStage::new(), FinalStage::new());
 
-    registry.dispatch_messages(
+    QueryPeer::default().dispatch_messages(
+        &mut registry,
         &[get(1, "@/a1b2/peer")],
         &aliases,
         &mut a_replies,
@@ -270,8 +283,20 @@ fn a_refusal_leaves_the_session_and_the_others_served() {
     // The same session asks something that fits, and the next session too.
     let messages = [get(2, "@/a1b2/peer/config")];
     let (_, allocations) = allocations_during(|| {
-        registry.dispatch_messages(&messages, &aliases, &mut a_replies, &mut a_finals);
-        registry.dispatch_messages(&messages, &aliases, &mut b_replies, &mut b_finals);
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
+            &messages,
+            &aliases,
+            &mut a_replies,
+            &mut a_finals,
+        );
+        QueryPeer::default().dispatch_messages(
+            &mut registry,
+            &messages,
+            &aliases,
+            &mut b_replies,
+            &mut b_finals,
+        );
     });
     let config_of = |stage: &ReplyStage| -> Vec<String> {
         stage
