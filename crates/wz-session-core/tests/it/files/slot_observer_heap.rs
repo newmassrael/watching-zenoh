@@ -405,6 +405,7 @@ fn lent_peers(each: usize) -> PeerTables<Lent> {
         aliases: each,
         remote_decls: each,
         interests: each,
+        shared: true,
     };
     let bytes = PeerTables::<Lent>::arena_bytes(rows).expect("within the address space")
         + PeerPools::arena_bytes(pool_rows).expect("small pools")
