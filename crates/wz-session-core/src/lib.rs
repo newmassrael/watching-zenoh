@@ -2092,8 +2092,6 @@ pub mod ntp64;
 /// replication digest and aligner, are above the core since the server-layer
 /// split and turn it on; the third, `ext-pubsub-group-membership`, implies it.
 #[cfg(feature = "wire-bincode")]
-// Totality debt TD-129 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod wire_bincode;
 
 // R311y97 — `ext-pubsub-group-membership` (§5.25): the no_std data model

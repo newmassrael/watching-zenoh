@@ -69,7 +69,8 @@ impl<'a> Reader<'a> {
 
     /// The bytes not read yet.
     pub fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
+        // `pos` never passes the end.
+        self.buf.len().saturating_sub(self.pos)
     }
 
     /// The next `n` bytes, or [`WireError::UnexpectedEof`] when fewer remain.
