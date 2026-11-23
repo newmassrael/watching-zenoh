@@ -1692,10 +1692,8 @@ impl_handle_ownership7!(
 /// either way: after this call the caller's `z_owned_bytes_t` is spent.
 ///
 /// # Safety
-/// As [`read_moved_bytes`].
-// The doors that keep what they are moved (a reply, a get's value, an advanced put) take it;
-// the rest read it where it lies.
-#[cfg(any(feature = "advanced", feature = "query", feature = "queryable"))]
+/// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
+/// payload a constructor of this crate placed, or a BORROW of a live `ByteBuf`.
 pub(crate) unsafe fn take_moved_bytes(
     payload: *mut z_moved_bytes_t,
 ) -> Result<Option<ByteBuf>, NoRoom> {
@@ -1735,16 +1733,14 @@ impl core::ops::Deref for MovedBytes<'_> {
 }
 
 /// Take a moved payload for a call that reads it and keeps nothing of it (a put), nulling the
-/// source: `None` for a null one. A BORROW is not cloned: the call reads the bytes where the
-/// marshal that lent them holds them, which it outlives, so a put of a delivered sample's payload
-/// copies nothing and cannot be refused for want of room.
+/// source: `None` for a null one. Unlike [`take_moved_bytes`], a BORROW is not cloned: the call
+/// reads the bytes where the marshal that lent them holds them, which it outlives, so a put of a
+/// delivered sample's payload copies nothing and cannot be refused for want of room.
 ///
-/// Every arm nulls the source, so pico's consume-on-all-paths contract holds whatever the call
-/// answers.
+/// Every arm nulls the source, as [`take_moved_bytes`] does.
 ///
 /// # Safety
-/// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
-/// payload a constructor of this crate placed, or a BORROW of a live `ByteBuf`.
+/// As [`take_moved_bytes`].
 #[inline(never)]
 pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Option<MovedBytes<'a>> {
     if payload.is_null() {
@@ -1767,7 +1763,7 @@ pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Opti
 /// wire does not carry is owed. A borrowed payload is its marshal's, and is left to it.
 ///
 /// # Safety
-/// As [`read_moved_bytes`].
+/// As [`take_moved_bytes`].
 // Only a Del reply's options carry bytes the wire does not, so only a build that answers queries
 // has a caller.
 #[cfg(feature = "queryable")]
@@ -1791,7 +1787,7 @@ pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
 /// its marshal holds it, which this call outlives, and copied nowhere else.
 ///
 /// # Safety
-/// As [`read_moved_bytes`].
+/// As [`take_moved_bytes`].
 pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
     if payload.is_null() {
         return None;
