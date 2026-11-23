@@ -382,8 +382,14 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   (`hellos_refused`), and the rows are lent to the callback (`deliver_rows_in_upstream_order`).
   The table is never on a stack: the window holds a pointer to it
   (`ScoutingActions::over_table`), and the pico C ABI keeps the one table in the library's static
-  memory, claimed by one window at a time; a window that finds it claimed (another thread's scout,
-  or one asked from a scout's callback) is refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`. The Rust
+  memory, held by one window at a time. A window that finds it held by another thread's window
+  waits on a condition variable the holder signals when it lets go, at most its own budget
+  (`Condvar::wait_timeout_ms` of `wz-capi-port`), and runs on what is left; a budget spent
+  waiting is a window nobody answered (`Z_OK` with no Hello, or the open's
+  `_Z_ERR_SCOUT_NO_RESULTS`), so no scout fails because another thread scouts. A scout asked on
+  the holding thread, from inside a scout's callback, is refused at once with
+  `WZ_EXT_ERR_SCOUT_REENTERED`. The holder's mutex and condition variable are the kernel's, made
+  by the first scout of the process (U11's kernel objects). The Rust
   preset's window (`ScoutingActions::new`, the tokio engine) keeps zenoh's collection on the
   heap, with no bound. What a window still allocates: its actions (`Arc`), the
   Scout it stages (`Vec<u8>`), the first locator it captured (`String`), the record of ignored

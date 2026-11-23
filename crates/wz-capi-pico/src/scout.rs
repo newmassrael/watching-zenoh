@@ -117,17 +117,20 @@ mod window {
     use crate::config::ConfigState;
     use crate::result::ZResult;
     #[cfg(not(feature = "engine-tokio"))]
-    use crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    use crate::result::WZ_EXT_ERR_SCOUT_REENTERED;
 
     /// The process's one table of a cooperative window's Hellos: in the library's static memory,
-    /// reserved when it is built, never on a stack and never on the heap. A window claims it for
-    /// its run and its delivery; a window that finds it claimed, by another thread's scout or by
-    /// one asked from a scout's own callback, is refused with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, as a
-    /// scout zenoh-pico's heap cannot hold its list for is.
+    /// reserved when it is built, never on a stack and never on the heap. A window holds it for
+    /// its run and its delivery. A window that finds it held by another thread's window waits for
+    /// it, at most its own budget, on a condition variable the holder signals when it lets go; one
+    /// that finds it held by its own thread, a scout asked from inside a scout's callback, is
+    /// refused at once.
     #[cfg(not(feature = "engine-tokio"))]
     pub(in crate::scout) mod table {
         use core::cell::UnsafeCell;
+        use core::mem::MaybeUninit;
 
+        use wz_capi_port::os;
         use wz_capi_port::sync::Lock;
         use wz_session_core::scouting_host::HelloTable;
 
@@ -137,15 +140,106 @@ mod window {
         unsafe impl Sync for Region {}
 
         static TABLE: Region = Region(UnsafeCell::new(HelloTable::new()));
-        static CLAIMED: Lock<bool> = Lock::new(false);
+
+        /// Which thread holds the table, by its word, and the condition its waiters sleep on.
+        struct Holder {
+            thread: os::Mutex<Option<usize>>,
+            freed: os::Condvar,
+        }
+
+        /// Whether the holder is made yet.
+        enum Made {
+            No,
+            Making,
+            Yes,
+        }
+
+        /// The holder's place in static memory: the kernel's mutex and condition variable are made
+        /// at run time, so the first window that asks makes them, once.
+        struct HolderPlace {
+            made: Lock<Made>,
+            place: UnsafeCell<MaybeUninit<Holder>>,
+        }
+
+        // SAFETY: the place is written once, by the thread that moved `made` to `Making`, and read
+        // only once `made` reads `Yes`; the holder's own fields are a mutex and a condition
+        // variable.
+        unsafe impl Sync for HolderPlace {}
+
+        static HOLDER: HolderPlace = HolderPlace {
+            made: Lock::new(Made::No),
+            place: UnsafeCell::new(MaybeUninit::uninit()),
+        };
+
+        fn holder() -> &'static Holder {
+            loop {
+                let made = HOLDER.made.with(|made| match made {
+                    Made::No => {
+                        *made = Made::Making;
+                        None
+                    }
+                    Made::Making => Some(false),
+                    Made::Yes => Some(true),
+                });
+                match made {
+                    None => {
+                        // SAFETY: this thread alone moved `made` to `Making`, so it alone writes.
+                        unsafe {
+                            (*HOLDER.place.get()).write(Holder {
+                                thread: os::Mutex::new(None),
+                                freed: os::Condvar::new(),
+                            });
+                        }
+                        HOLDER.made.with(|made| *made = Made::Yes);
+                    }
+                    // Another thread makes the two kernel objects, once in the process's life.
+                    Some(false) => os::sleep_ms(1),
+                    // SAFETY: `Yes` is set only once the place is written, and it is never
+                    // written again.
+                    Some(true) => return unsafe { (*HOLDER.place.get()).assume_init_ref() },
+                }
+            }
+        }
+
+        /// Why a window has no table.
+        #[derive(Debug, PartialEq, Eq)]
+        pub(in crate::scout) enum Unclaimed {
+            /// The calling thread's own window holds it: a scout asked from a scout's callback.
+            Reentered,
+            /// Another thread's window held it for the whole of the caller's budget.
+            Expired,
+        }
 
         /// The table, held by one window at a time and given back when the claim is dropped.
         pub(in crate::scout) struct Claim(());
 
         impl Claim {
-            /// The table, or `None` while another window holds it.
-            pub(in crate::scout) fn take() -> Option<Self> {
-                CLAIMED.with(|claimed| (!core::mem::replace(claimed, true)).then_some(Self(())))
+            /// The table, waiting while another thread's window holds it, for at most `budget_ms`
+            /// as `now_ms` reads the time: the claim, and what is left of the budget.
+            pub(in crate::scout) fn within(
+                budget_ms: u64,
+                now_ms: impl Fn() -> u64,
+            ) -> Result<(Self, u64), Unclaimed> {
+                let me = os::current_word();
+                let holder = holder();
+                let start = now_ms();
+                let mut thread = holder.thread.lock();
+                loop {
+                    match *thread {
+                        None => {
+                            *thread = Some(me);
+                            let waited = now_ms().saturating_sub(start);
+                            return Ok((Self(()), budget_ms.saturating_sub(waited)));
+                        }
+                        Some(owner) if owner == me => return Err(Unclaimed::Reentered),
+                        Some(_) => {}
+                    }
+                    let waited = now_ms().saturating_sub(start);
+                    if waited >= budget_ms {
+                        return Err(Unclaimed::Expired);
+                    }
+                    thread = holder.freed.wait_timeout_ms(thread, budget_ms - waited).0;
+                }
             }
 
             /// The table the claim holds.
@@ -157,8 +251,23 @@ mod window {
 
         impl Drop for Claim {
             fn drop(&mut self) {
-                CLAIMED.with(|claimed| *claimed = false);
+                let holder = holder();
+                *holder.thread.lock() = None;
+                holder.freed.notify_all();
             }
+        }
+    }
+
+    /// The table for a window of `budget_ms` on `clock`, and what is left of the budget once it
+    /// is held; `None` when another thread's window held it for the whole budget, which is a window
+    /// nobody answered, and `WZ_EXT_ERR_SCOUT_REENTERED` for a scout asked from a scout's callback.
+    #[cfg(not(feature = "engine-tokio"))]
+    fn hold_table(clock: &Clock, budget_ms: u64) -> Result<Option<(table::Claim, u64)>, ZResult> {
+        use wz_capi_coop::ClockSource;
+        match table::Claim::within(budget_ms, || clock.now_us() / 1000) {
+            Ok(held) => Ok(Some(held)),
+            Err(table::Unclaimed::Expired) => Ok(None),
+            Err(table::Unclaimed::Reentered) => Err(WZ_EXT_ERR_SCOUT_REENTERED),
         }
     }
 
@@ -254,7 +363,9 @@ mod window {
         _limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
     ) -> Result<usize, ZResult> {
-        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(0);
+        };
         let delivered = wz_capi_coop::scout::run_scout::<crate::coop_host::Multicast, _>(
             clock,
             group,
@@ -280,7 +391,9 @@ mod window {
         _policy: &SessionPolicy,
         _limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
-        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(None);
+        };
         let first = wz_capi_coop::scout::scout_first::<crate::coop_host::Multicast, _>(
             clock,
             group,
@@ -308,7 +421,9 @@ mod window {
         limits: &SessionLimits,
         on_hello: impl FnMut(&HelloRow),
     ) -> Result<usize, ZResult> {
-        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(0);
+        };
         Ok(crate::coop_host::run_scout(
             clock,
             group,
@@ -334,7 +449,9 @@ mod window {
         _policy: &SessionPolicy,
         limits: &SessionLimits,
     ) -> Result<Option<ScoutedHello>, ZResult> {
-        let mut claim = table::Claim::take().ok_or(Z_ERR_SYSTEM_OUT_OF_MEMORY)?;
+        let Some((mut claim, budget_ms)) = hold_table(clock, budget_ms)? else {
+            return Ok(None);
+        };
         Ok(crate::coop_host::scout_first(
             clock,
             group,
@@ -1407,22 +1524,92 @@ mod tests {
         assert_eq!(seen, 1);
     }
 
-    /// The cooperative engine's table of Hellos is one, in the library's static memory: a second
-    /// window while one holds it is refused, and the table is given back, cleared by the next
-    /// window, when the claim is dropped. Turned red by a table claimed twice at once, or never
-    /// given back.
-    #[cfg(not(feature = "engine-tokio"))]
+    /// The cooperative engine's table of Hellos is one: a scout asked on the thread whose window
+    /// holds it is refused at once, another thread's waits for it and has it once it is given back,
+    /// with what is left of its budget, and one whose budget runs out first goes without. Turned red
+    /// by a table claimed twice at once, a re-entered scout that waits, or a waiter that is not woken.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
     #[test]
-    fn the_static_table_is_held_by_one_window_at_a_time() {
-        let held = window::table::Claim::take().expect("the table is free");
-        assert!(
-            window::table::Claim::take().is_none(),
-            "a second window is refused"
+    fn the_static_table_is_waited_for_and_refused_only_to_its_own_thread() {
+        use std::time::{Duration, Instant};
+
+        let epoch = Instant::now();
+        let now_ms = move || epoch.elapsed().as_millis() as u64;
+        let (held, _) = window::table::Claim::within(5_000, now_ms).expect("the table is had");
+        let started = Instant::now();
+        assert_eq!(
+            window::table::Claim::within(5_000, now_ms).err(),
+            Some(window::table::Unclaimed::Reentered)
         );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "refused at once"
+        );
+
+        let short = std::thread::spawn(move || {
+            window::table::Claim::within(30, now_ms).map(|(_, left)| left)
+        });
+        assert_eq!(
+            short.join().expect("the thread"),
+            Err(window::table::Unclaimed::Expired)
+        );
+
+        let waiter = std::thread::spawn(move || {
+            window::table::Claim::within(5_000, now_ms).map(|(_, left)| left)
+        });
+        std::thread::sleep(Duration::from_millis(50));
         drop(held);
-        assert!(
-            window::table::Claim::take().is_some(),
-            "the table is given back"
-        );
+        let left = waiter
+            .join()
+            .expect("the thread")
+            .expect("the table is given back");
+        assert!(left < 5_000, "the wait is taken from the budget");
+        assert!(left > 3_000, "the waiter was woken, not timed out");
+    }
+
+    /// Two threads that scout at once both complete: the second waits for the table the first
+    /// holds, within its own budget, and neither is refused. Over the host's sockets, on a group
+    /// nobody answers. Turned red by a scout refused because another thread scouts.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
+    #[test]
+    fn two_threads_that_scout_at_once_both_complete() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count_drop(context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn scout() -> (ZResult, usize) {
+            let mut cfg = ConfigState::default();
+            cfg.insert(Z_CONFIG_MULTICAST_LOCATOR_KEY, "udp/239.255.91.79:47479");
+            cfg.insert(Z_CONFIG_SCOUTING_TIMEOUT_KEY, "150");
+            let mut config = crate::abi::z_moved_config_t {
+                _this: crate::abi::z_owned_config_t {
+                    handle: Box::into_raw(Box::new(cfg)) as *mut c_void,
+                    _pad: [core::ptr::null_mut(); 3],
+                },
+            };
+            let drops = AtomicUsize::new(0);
+            let mut closure = z_moved_closure_hello_t {
+                _this: z_owned_closure_hello_t {
+                    context: &drops as *const AtomicUsize as *mut c_void,
+                    call: None,
+                    drop: Some(count_drop),
+                },
+            };
+            // SAFETY: both values are live locals, and `z_scout` consumes them.
+            let rc = unsafe { z_scout(&mut config, &mut closure, core::ptr::null()) };
+            (rc, drops.load(Ordering::SeqCst))
+        }
+
+        let first = std::thread::spawn(scout);
+        let second = std::thread::spawn(scout);
+        for scouted in [first, second] {
+            assert_eq!(
+                scouted.join().expect("the thread"),
+                (crate::result::Z_OK, 1),
+                "the scout completed and its drop ran once"
+            );
+        }
     }
 }
