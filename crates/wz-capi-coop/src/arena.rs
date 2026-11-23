@@ -328,9 +328,9 @@ pub struct ArenaPlan {
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
     /// The bytes of the cell each link's driver is placed in, none for a plan whose links place
-    /// theirs on the heap ([`Self::holding_links`]).
+    /// theirs on the heap ([`Self::holding_cells`]).
     link_cell_bytes: usize,
-    /// The bytes of the cell each link's gates are placed in ([`Self::holding_gates`]).
+    /// The bytes of the cell each link's gates are placed in ([`Self::holding_cells`]).
     gate_cell_bytes: usize,
 }
 
