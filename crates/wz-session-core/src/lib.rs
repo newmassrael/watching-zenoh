@@ -1105,8 +1105,6 @@ pub mod encoding;
 /// and the admin space (§5.23) reads it without the storage gate. Gated on
 /// `alloc` (it builds a `String`).
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-130 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod zid_hex;
 
 /// R311y50 — the SSOT JSON string-literal escaper shared by the hand-rolled
