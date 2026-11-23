@@ -25,9 +25,11 @@ use alloc::boxed::Box;
 #[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
 
+use core::task::Waker;
+
 use crate::app_link_table::{
-    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
-    ProgramSend,
+    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, LinkInterest,
+    ProgramEvent, ProgramOpen, ProgramSend,
 };
 use crate::limit_binding::Quota;
 #[cfg(target_has_atomic = "ptr")]
@@ -46,6 +48,23 @@ pub trait AppPort: Send + Sync {
     /// may hand bytes in again. A program that does not listen for it retries on its own.
     fn drained(&self, link: LinkHandle) {
         let _ = link;
+    }
+}
+
+/// A run of a link's remainder lent by [`AppTransport::offer_remainder`], given back when it is
+/// dropped, so a writer that unwinds out of its offer still gives it back.
+struct LentRemainder<'t> {
+    transport: &'t AppTransport,
+    link: LinkHandle,
+    taken: usize,
+}
+
+impl Drop for LentRemainder<'_> {
+    fn drop(&mut self) {
+        let effects = self
+            .transport
+            .with(|table| table.give_back_remainder(self.link, self.taken));
+        self.transport.perform(effects);
     }
 }
 
@@ -106,6 +125,38 @@ impl AppTransport {
                 Due::Wake(waker) => waker.wake(),
             }
         }
+    }
+
+    /// Whether what `interest` asks of `link` is there now, under the table's lock alone and never
+    /// the session's: [`AppLinkTable::wait_link`], whose waker is woken by the call of the program's
+    /// that brings it, outside the lock ([`Self::perform`]). A stale `link` answers `true` at once.
+    pub fn wait_link(&self, link: LinkHandle, interest: LinkInterest, waker: &Waker) -> bool {
+        self.with(|table| table.wait_link(link, interest, waker))
+    }
+
+    /// Offer `offer` the bytes `link` holds for the program, in place, with no lock held: the
+    /// front run of its remainder, lent until `offer` answers how many of them the program took
+    /// ([`AppLinkTable::lend_remainder`]), which then leave it. Nothing is copied. `None` when
+    /// nothing is held, or another writer is offering it now; otherwise what was taken and the
+    /// length of the run offered, which a writer that was given all of it asks again for the rest.
+    pub fn offer_remainder(
+        &self,
+        link: LinkHandle,
+        offer: impl FnOnce(&[u8]) -> usize,
+    ) -> Option<(usize, usize)> {
+        let (base, len) = self.with(|table| table.lend_remainder(link))?;
+        let mut lent = LentRemainder {
+            transport: self,
+            link,
+            taken: 0,
+        };
+        // SAFETY: `[base, base + len)` is the front run of the link's remainder, lent by the table
+        // until `give_back_remainder`, which the guard calls: until then the table writes no byte of
+        // it, frees neither its storage nor the row that holds it, and lends it to no one else
+        // (`AppLinkTable::lend_remainder`). The table outlives this call, which borrows `self`.
+        let bytes = unsafe { core::slice::from_raw_parts(base.as_ptr(), len) };
+        lent.taken = offer(bytes).min(len);
+        Some((lent.taken, len))
     }
 
     /// How many links the transport holds.

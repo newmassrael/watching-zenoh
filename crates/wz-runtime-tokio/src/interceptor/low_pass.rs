@@ -87,7 +87,7 @@ use wz_session_core::attachment::{
 use wz_session_core::ext_view::{query_value_payload_len, ExtEntryView};
 use wz_session_core::held_list::HeldList;
 use wz_session_core::keyexpr_match::keyexpr_includes;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::MessageRef;
 use wz_session_core::put_payload::payload_len as put_payload_len;
 
 use wz_session_core::link::{InterceptorLink, LinkSubject};
@@ -321,9 +321,9 @@ fn query_value_len<S: QueryExtEntryStorage>(
 /// ([`acl_action`](super::access_control)). Sizing them here keeps the two §5.16
 /// adapters symmetric on the same wire form and is strictly conservative (it can
 /// only drop more); leaving them unsized would be an asymmetry, not fidelity.
-fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> {
+fn message_size(msg: MessageRef<'_>) -> Option<(LowPassMessage, usize, usize)> {
     match msg {
-        NetworkMessage::Push(p) => match &p.body {
+        MessageRef::Push(p) => match &p.body {
             PushOwnedVariant::CodecZenohMsgPut(put) => Some((
                 LowPassMessage::Put,
                 put_payload_len(put),
@@ -339,7 +339,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             )),
             _ => None,
         },
-        NetworkMessage::Request(r) => match &r.body {
+        MessageRef::Request(r) => match &r.body {
             RequestOwnedVariant::CodecZenohQuery(query) => Some((
                 LowPassMessage::Query,
                 query_value_len(&query.extensions),
@@ -360,7 +360,7 @@ fn message_size(msg: &NetworkMessage) -> Option<(LowPassMessage, usize, usize)> 
             )),
             _ => None,
         },
-        NetworkMessage::Response(r) => match &r.body {
+        MessageRef::Response(r) => match &r.body {
             ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => Some((
                     LowPassMessage::Reply,
@@ -393,7 +393,7 @@ impl Interceptor for LowPassInterceptor {
         super::InterceptorKind::LowPass
     }
 
-    fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
+    fn intercept(&self, ctx: &dyn InterceptorContext, msg: MessageRef<'_>) -> bool {
         // A kind low-pass does not size is admitted (zenoh's early-return arms).
         let Some((message, payload, attachment)) = message_size(msg) else {
             return true;
@@ -410,6 +410,7 @@ impl Interceptor for LowPassInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::network_message::NetworkMessage;
 
     /// A rule governing every kind on both flows — what the deploy knob builds.
     fn rule(key_exprs: &[&str], max_payload_size: usize) -> LowPassRule {
@@ -574,12 +575,15 @@ mod tests {
         let put = NetworkMessage::Push(Box::new(
             build_push_literal("demo/x", b"1234").expect("build put"),
         ));
-        assert_eq!(message_size(&put), Some((LowPassMessage::Put, 4, 0)));
+        assert_eq!(message_size(put.view()), Some((LowPassMessage::Put, 4, 0)));
 
         let del = NetworkMessage::Push(Box::new(
             build_push_del_literal("demo/x").expect("build del"),
         ));
-        assert_eq!(message_size(&del), Some((LowPassMessage::Delete, 0, 0)));
+        assert_eq!(
+            message_size(del.view()),
+            Some((LowPassMessage::Delete, 0, 0))
+        );
 
         let query = NetworkMessage::Request(Box::new(
             build_request_query(
@@ -588,7 +592,10 @@ mod tests {
             )
             .expect("build query"),
         ));
-        assert_eq!(message_size(&query), Some((LowPassMessage::Query, 0, 0)));
+        assert_eq!(
+            message_size(query.view()),
+            Some((LowPassMessage::Query, 0, 0))
+        );
 
         let reply = NetworkMessage::Response(Box::new(
             build_response_reply(
@@ -598,7 +605,10 @@ mod tests {
             )
             .expect("build reply"),
         ));
-        assert_eq!(message_size(&reply), Some((LowPassMessage::Reply, 3, 0)));
+        assert_eq!(
+            message_size(reply.view()),
+            Some((LowPassMessage::Reply, 3, 0))
+        );
 
         // A kind low-pass does not size admits regardless of its bytes — zenoh
         // returns `Ok(())` for Declare / Interest / OAM / ResponseFinal
@@ -607,7 +617,7 @@ mod tests {
             wz_session_core::declare_build::build_declare_queryable(0, 0, Some("demo/q"))
                 .expect("build decl queryable"),
         ));
-        assert_eq!(message_size(&declare), None);
+        assert_eq!(message_size(declare.view()), None);
     }
 
     /// R3045 -- a Query whose value is in shared memory is sized by the buffer
@@ -631,7 +641,7 @@ mod tests {
         let message = messages.pop().expect("one message");
         assert!(messages.is_empty(), "the frame holds one message");
         assert_eq!(
-            message_size(&message),
+            message_size(message.view()),
             Some((LowPassMessage::Query, 1024, 0)),
             "the size is the logical length of the buffer the descriptor names"
         );
@@ -671,7 +681,7 @@ mod tests {
         .expect("one entry is within the chain's bound");
 
         let msg = NetworkMessage::Push(Box::new(push));
-        let (kind, payload, measured) = message_size(&msg).expect("a Put is sized");
+        let (kind, payload, measured) = message_size(msg.view()).expect("a Put is sized");
         assert_eq!(kind, LowPassMessage::Put);
         assert_eq!(payload, 4, "the payload half");
         assert_eq!(
@@ -712,7 +722,7 @@ mod tests {
         del.header |= 0x80; // the Z chain bit
 
         let msg = NetworkMessage::Push(Box::new(push));
-        let (kind, payload, measured) = message_size(&msg).expect("a Del is sized");
+        let (kind, payload, measured) = message_size(msg.view()).expect("a Del is sized");
         assert_eq!(kind, LowPassMessage::Delete);
         assert_eq!(payload, 0, "a Del carries no payload");
         assert_eq!(

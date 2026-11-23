@@ -659,7 +659,9 @@ impl GroupKeyexprs {
 
     /// Send every owed answer through `producer`, with the lock let go: a push may wait for room.
     fn answer(&self, producer: &crate::multicast_pipeline::MulticastTxProducer) {
-        let answers = self.state().take_answers();
+        let mut answers = Vec::new();
+        self.state()
+            .take_answers(|reply| answers.push(reply.to_item()));
         for item in answers {
             let _ = producer.push(item);
         }
@@ -1565,7 +1567,7 @@ fn leave_aggregated_subscriber(
 fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
     chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
     actions: &Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
-    msg: &wz_session_core::network_message::NetworkMessage,
+    msg: wz_session_core::network_message::MessageRef<'_>,
 ) -> bool {
     if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
         return true;
@@ -1599,7 +1601,7 @@ fn acl_admits_reply_egress<R: SessionRuntime, T: TimeSource>(
 fn acl_admits_group<R: SessionRuntime>(
     chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
     link: &wz_session_core::link::LinkSubject,
-    msg: &wz_session_core::network_message::NetworkMessage,
+    msg: wz_session_core::network_message::MessageRef<'_>,
 ) -> bool {
     if R::with_mutex_mut(chain_slot, |chain| chain.is_empty()) {
         return true;
@@ -1639,7 +1641,7 @@ impl<R: SessionRuntime, T: TimeSource> crate::interceptor::InterceptorContext
     // the field is not a cache and this context is not reused.
     fn full_keyexpr(
         &self,
-        _msg: &wz_session_core::network_message::NetworkMessage,
+        _msg: wz_session_core::network_message::MessageRef<'_>,
     ) -> Option<String> {
         self.keyexpr.clone()
     }
@@ -1717,10 +1719,10 @@ where
                 let chain = self.interceptors_egress.clone();
                 let bundle = Arc::downgrade(actions);
                 // A bundle that is gone has no reply left to send; deny is the safe answer.
-                Some(Box::new(move |msg| {
+                Some(Box::new(move |reply| {
                     bundle
                         .upgrade()
-                        .is_some_and(|actions| acl_admits_reply_egress(&chain, &actions, msg))
+                        .is_some_and(|actions| acl_admits_reply_egress(&chain, &actions, reply))
                 }))
             } else {
                 None
@@ -2158,7 +2160,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // and the peer sees nothing, which is what upstream's egress interceptor does at the
         // `Mux`.
         #[cfg(feature = "access-acl")]
-        if !self.acl_admits_egress(&msg) {
+        if !self.acl_admits_egress(msg.view()) {
             self.end_refused_ask(&msg);
             return Ok(());
         }
@@ -2292,7 +2294,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // reported an `Err` here would be the one place in this tree where a
         // denial is distinguishable from a delivery the network dropped.
         #[cfg(feature = "access-acl")]
-        if !self.acl_admits_egress(&msg) {
+        if !self.acl_admits_egress(msg.view()) {
             self.end_refused_ask(&msg);
             return Ok(None);
         }
@@ -2376,7 +2378,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// The verdict body is shared with the ingress twin; see
     /// [`Self::acl_admits_on`].
     #[cfg(feature = "access-acl")]
-    fn acl_admits_egress(&self, msg: &wz_session_core::network_message::NetworkMessage) -> bool {
+    fn acl_admits_egress(&self, msg: wz_session_core::network_message::MessageRef<'_>) -> bool {
         self.acl_admits_on(
             &self.interceptors_egress,
             msg,
@@ -2417,7 +2419,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             messages.retain(|msg| {
                 self.acl_admits_on(
                     &self.interceptors_ingress,
-                    msg,
+                    msg.view(),
                     crate::interceptor::InterceptorFlow::Ingress,
                 )
             });
@@ -2428,7 +2430,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             messages.retain_mut(|msg| {
                 let Some(qos) = self.overwritten_qos_on(
                     &self.interceptors_ingress,
-                    msg,
+                    msg.view(),
                     *reliable,
                     crate::interceptor::InterceptorFlow::Ingress,
                 ) else {
@@ -2470,7 +2472,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn acl_admits_on(
         &self,
         chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
-        msg: &wz_session_core::network_message::NetworkMessage,
+        msg: wz_session_core::network_message::MessageRef<'_>,
         flow: crate::interceptor::InterceptorFlow,
     ) -> bool {
         let empty = R::with_mutex_mut(chain_slot, |chain| chain.is_empty());
@@ -2513,7 +2515,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn governed_keyexpr(
         &self,
         actions: &Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
-        msg: &wz_session_core::network_message::NetworkMessage,
+        msg: wz_session_core::network_message::MessageRef<'_>,
         flow: crate::interceptor::InterceptorFlow,
     ) -> Option<String> {
         R::with_mutex_mut(&self.observer, |obs| {
@@ -2547,7 +2549,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn overwritten_qos_on(
         &self,
         chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
-        msg: &wz_session_core::network_message::NetworkMessage,
+        msg: wz_session_core::network_message::MessageRef<'_>,
         reliable: bool,
         flow: crate::interceptor::InterceptorFlow,
     ) -> Option<wz_session_core::sample::QosLevel> {
@@ -2582,7 +2584,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     > {
         match self.overwritten_qos_on(
             &self.interceptors_egress,
-            &msg,
+            msg.view(),
             reliable,
             crate::interceptor::InterceptorFlow::Egress,
         ) {
@@ -3327,7 +3329,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             let link = group_link.clone();
             Arc::new(move |msg| {
                 let link = link.get().unwrap_or(&transport::GROUP_LINK_UNKNOWN);
-                acl_admits_group::<R>(&chain, link, msg)
+                acl_admits_group::<R>(&chain, link, msg.view())
             })
         };
         // Open-debt item 913 — a member's interest is answered after a JOIN, as zenoh-pico
@@ -3779,7 +3781,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let link = self.transport.link.clone();
         Box::new(move |msg| {
             let link = link.get().unwrap_or(&transport::GROUP_LINK_UNKNOWN);
-            acl_admits_group::<R>(&chain, link, msg)
+            acl_admits_group::<R>(&chain, link, msg.view())
         })
     }
 

@@ -1135,6 +1135,34 @@ pub fn interest_propagated(mut interest: Interest<'_>) -> Interest<'_> {
     interest
 }
 
+/// An `Interest` asking for `kinds` exactly (`K` only when they name it) on the keyexpr `keyexpr`
+/// names, or on every key without one. [`crate::interest_build::build_interest_exact`], written in
+/// place: `LengthOutOfRange` for a suffix past its `u16` length, and `PresentIfMismatch` for neither
+/// CURRENT nor FUTURE, a Final, which holds no body.
+pub fn interest_exact<'a>(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    keyexpr: Option<(crate::wire_id::ExprId, Option<&'a str>)>,
+) -> Result<Interest<'a>, CodecError> {
+    let body = InterestBody {
+        header: interest_body_header(kinds, keyexpr.map(|(_, suffix)| suffix.is_some()), false),
+        keyexpr: keyexpr
+            .map(|(mapping_id, suffix)| local(mapping_id, suffix))
+            .transpose()?,
+    };
+    let Some(arm) = interest_body_arm(current, future, body) else {
+        return Err(CodecError::PresentIfMismatch);
+    };
+    Ok(Interest {
+        header: interest_header(current, future),
+        interest_id,
+        header_c_or_f: Some(arm),
+        extensions: None,
+    })
+}
+
 /// The `Interest` that cancels `interest_id` (no body).
 /// [`crate::interest_build::build_interest_final`], written in place.
 pub fn interest_final<'a>(interest_id: u64) -> Interest<'a> {
@@ -1723,6 +1751,36 @@ mod tests {
             0,
             Some("demo/key"),
         );
+    }
+
+    /// An interest asking for its kinds exactly is written as `build_interest_exact` builds it, with
+    /// a keyexpr of every shape and with none, and a Final asked for a body is refused by both.
+    /// Turned red by a writer that adds `K` to kinds that do not name it.
+    #[test]
+    fn an_exact_interest_is_written_as_its_builder_writes_it() {
+        use crate::interest_build::InterestKinds as K;
+        let mut compared = 0usize;
+        for kinds in [K::KEYEXPRS, K::TOKENS, K::SUBSCRIBERS, K::QUERYABLES] {
+            for (current, future) in [(true, false), (false, true), (true, true), (false, false)] {
+                let mut keyexprs: Vec<_> = keys().into_iter().map(Some).collect();
+                keyexprs.push(None);
+                for keyexpr in keyexprs {
+                    let built = ibuild::build_interest_exact(7, kinds, current, future, keyexpr);
+                    let lent = interest_exact(7, kinds, current, future, keyexpr);
+                    if !current && !future {
+                        assert_eq!(built.err(), Some(CodecError::PresentIfMismatch));
+                        assert_eq!(lent.err(), Some(CodecError::PresentIfMismatch));
+                        continue;
+                    }
+                    assert_eq!(
+                        lent.expect("written").encode_to_vec(),
+                        owned_interest(&built.expect("built")),
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, 4 * 3 * 7);
     }
 
     #[test]

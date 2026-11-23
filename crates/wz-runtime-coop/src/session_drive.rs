@@ -81,7 +81,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::{SessionEntropy, SessionHandle, SessionParts};
+use crate::session_runtime::{SessionEntropy, SessionHandle};
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -1227,6 +1227,26 @@ pub type DefaultRouter = InPlaceReassembly;
 #[cfg(not(feature = "reassembly"))]
 pub type DefaultRouter = ();
 
+/// What a [`SessionPump`] is built of besides the runtime it runs on, its receive and its
+/// engine, handed to every builder of a pump together: the session's link, its actions, the
+/// source it draws its handshake secrets from, its clock and its drive config.
+pub struct PumpFields<
+    C: ClockSource,
+    L,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
+    /// The link the session reads and writes.
+    pub link: L,
+    /// The link's actions.
+    pub actions: SessionHandle<C, D>,
+    /// The session's entropy source, which the engine's handshake binding holds.
+    pub entropy: SessionEntropy,
+    /// The session's clock.
+    pub clock: CoopTime<C>,
+    /// How the session is driven.
+    pub config: SessionDriveConfig,
+}
+
 /// One MCU session, ready to be advanced one iteration at a time.
 ///
 /// R2364 — extracted from `run_session`, whose body this used to be
@@ -1407,10 +1427,7 @@ impl<
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
-        link: L,
-        parts: SessionParts<C, D>,
-        clock: CoopTime<C>,
-        config: SessionDriveConfig,
+        fields: PumpFields<C, L, D>,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
     ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
@@ -1421,7 +1438,7 @@ impl<
         UnicastRx::init_in(rx, make_router)?;
         // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
         unsafe {
-            Self::build_in(place, runtime, link, parts, clock, config, |_| {});
+            Self::build_in(place, runtime, fields, |_| {});
             Some(place.assume_init_mut())
         }
     }
@@ -1446,10 +1463,13 @@ impl<
             Self::build_in(
                 &mut place,
                 runtime,
-                link,
-                SessionParts { actions, entropy },
-                clock,
-                config,
+                PumpFields {
+                    link,
+                    actions,
+                    entropy,
+                    clock,
+                    config,
+                },
                 |rx| {
                     let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
                 },
@@ -1477,13 +1497,16 @@ impl<
     unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
-        link: L,
-        parts: SessionParts<C, D>,
-        clock: CoopTime<C>,
-        config: SessionDriveConfig,
+        fields: PumpFields<C, L, D>,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
-        let SessionParts { actions, entropy } = parts;
+        let PumpFields {
+            link,
+            actions,
+            entropy,
+            clock,
+            config,
+        } = fields;
         let SessionDriveConfig {
             timeouts,
             role,
@@ -1837,10 +1860,7 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
-    link: L,
-    parts: SessionParts<C>,
-    clock: CoopTime<C>,
-    config: SessionDriveConfig,
+    fields: PumpFields<C, L>,
     make_router: M,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
@@ -1855,10 +1875,7 @@ where
     local.spawn_local_with(move || RouterSessionTask {
         place: Becomes::new(PumpParts {
             runtime,
-            link,
-            parts,
-            clock,
-            config,
+            fields,
             make_router,
         }),
         on_event,
@@ -1893,10 +1910,7 @@ type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn B
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 struct PumpParts<C: ClockSource + 'static, L, M> {
     runtime: CoopRuntime<C>,
-    link: L,
-    parts: SessionParts<C>,
-    clock: CoopTime<C>,
-    config: SessionDriveConfig,
+    fields: PumpFields<C, L>,
     make_router: M,
 }
 
@@ -1921,15 +1935,10 @@ where
         let built = this.place.build(|parts, slot| {
             let PumpParts {
                 runtime,
-                link,
-                parts,
-                clock,
-                config,
+                fields,
                 make_router,
             } = parts;
-            SessionPump::with_router_in(slot, runtime, link, parts, clock, config, |router| {
-                make_router.make_in(router)
-            })
+            SessionPump::with_router_in(slot, runtime, fields, |router| make_router.make_in(router))
         });
         // A pump its maker did not build in its place is no session to drive: the task ends.
         let Some(pump) = built else {
@@ -2381,10 +2390,13 @@ impl<
             SessionPump::build_in(
                 &mut *cell.pump.get(),
                 runtime,
-                link,
-                SessionParts { actions, entropy },
-                clock,
-                config,
+                PumpFields {
+                    link,
+                    actions,
+                    entropy,
+                    clock,
+                    config,
+                },
                 // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
                 #[cfg(feature = "reassembly")]
                 |rx| {
@@ -2570,7 +2582,7 @@ mod wake_budget_tests {
     #[cfg(feature = "session-unicast-accept")]
     use wz_session_core::driver_loop::DriverLoopOutcome;
 
-    use crate::session_runtime::{new_session_actions, SessionEntropy, SessionParts};
+    use crate::session_runtime::{new_session_actions, SessionEntropy};
     use crate::time::{ClockSource, CoopTime};
     use crate::CoopRuntime;
 
@@ -2843,16 +2855,16 @@ mod wake_budget_tests {
         let before = crate::link_cells::CellRc::handles(&actions);
         let task = spawn_session_with_router(
             &local,
-            Rc::clone(&link),
-            SessionParts {
+            PumpFields {
+                link: Rc::clone(&link),
                 actions: actions.clone(),
                 entropy,
-            },
-            clock,
-            SessionDriveConfig {
-                timeouts: SessionTimeouts::from_build(),
-                role: SessionRole::Acceptor,
-                max_iters: None,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
             },
             CountedRouter {
                 made: Rc::clone(&made),
@@ -2905,16 +2917,16 @@ mod wake_budget_tests {
         );
         let task = spawn_session_with_router(
             &local,
-            Rc::clone(&link),
-            SessionParts {
+            PumpFields {
+                link: Rc::clone(&link),
                 actions: actions,
                 entropy,
-            },
-            clock,
-            SessionDriveConfig {
-                timeouts: SessionTimeouts::from_build(),
-                role: SessionRole::Acceptor,
-                max_iters: None,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
             },
             lend.clone(),
             ignore as fn(IterationEvent<'_, '_>),
@@ -2964,16 +2976,16 @@ mod wake_budget_tests {
             let made = Rc::new(core::cell::Cell::new(0u32));
             let spawned = spawn_session_with_router(
                 &local,
-                Rc::new(Recording::default()),
-                SessionParts {
+                PumpFields {
+                    link: Rc::new(Recording::default()),
                     actions: actions,
                     entropy,
-                },
-                clock,
-                SessionDriveConfig {
-                    timeouts: SessionTimeouts::from_build(),
-                    role: SessionRole::Acceptor,
-                    max_iters: None,
+                    clock,
+                    config: SessionDriveConfig {
+                        timeouts: SessionTimeouts::from_build(),
+                        role: SessionRole::Acceptor,
+                        max_iters: None,
+                    },
                 },
                 CountedRouter {
                     made: Rc::clone(&made),
@@ -3047,16 +3059,16 @@ mod wake_budget_tests {
         let entropy = SessionEntropy::new(Counting(0));
         let task = spawn_session_with_router(
             &local,
-            Rc::new(Recording::default()),
-            SessionParts {
+            PumpFields {
+                link: Rc::new(Recording::default()),
                 actions: actions,
                 entropy,
-            },
-            clock,
-            SessionDriveConfig {
-                timeouts: SessionTimeouts::from_build(),
-                role: SessionRole::Acceptor,
-                max_iters: None,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
             },
             CountedRouter {
                 made: Rc::new(core::cell::Cell::new(0u32)),
