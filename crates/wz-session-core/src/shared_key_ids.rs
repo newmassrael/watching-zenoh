@@ -1935,7 +1935,7 @@ mod link_keys_tests {
 #[cfg(all(test, feature = "codec-response"))]
 mod reply_frame_tests {
     use crate::network_message::{parse_frame_payload, NetworkMessage};
-    use crate::response_build::{build_response_reply_literal, set_response_keyexpr_aliased};
+    use crate::response_build::{build_response_reply, set_response_keyexpr_aliased};
     use crate::wireexpr_resolve::id_and_suffix;
     use wz_codecs::wireexpr::WireexprOwnedVariant;
     use wz_codecs_test_support::TestWire;
@@ -1950,7 +1950,12 @@ mod reply_frame_tests {
 
     #[test]
     fn a_mirrored_reply_carries_the_id_and_the_rest_in_the_receivers_space() {
-        let mut response = build_response_reply_literal(7, "lab/rig/gamma", b"answer").unwrap();
+        let mut response = build_response_reply(
+            7,
+            crate::wire_key::WireKey::literal("lab/rig/gamma").expect("a literal key"),
+            b"answer",
+        )
+        .unwrap();
         set_response_keyexpr_aliased(&mut response, 40, Some("/gamma"), false).unwrap();
         let bytes = response.wire();
         assert_eq!(bytes[0] & 0x60, 0x20, "N set and M clear");
@@ -1964,7 +1969,12 @@ mod reply_frame_tests {
 
     #[test]
     fn a_mirrored_reply_by_the_id_alone_in_the_senders_space_has_no_rest() {
-        let mut response = build_response_reply_literal(7, "lab/rig/alpha", b"answer").unwrap();
+        let mut response = build_response_reply(
+            7,
+            crate::wire_key::WireKey::literal("lab/rig/alpha").expect("a literal key"),
+            b"answer",
+        )
+        .unwrap();
         set_response_keyexpr_aliased(&mut response, 41, None, true).unwrap();
         let bytes = response.wire();
         assert_eq!(bytes[0] & 0x60, 0x40, "N clear and M set");

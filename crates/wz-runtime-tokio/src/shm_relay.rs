@@ -691,10 +691,14 @@ mod tests {
     fn a_reply_with_the_payload(
         descriptor: &ShmDescriptor,
     ) -> wz_session_core::wire::ResponseOwned {
-        wz_session_core::response_build::ResponseReplyBuilder::new(5, 0, Some("demo/relay"), &[])
-            .shm_descriptor(*descriptor)
-            .build()
-            .expect("a reply that names the chunk")
+        wz_session_core::response_build::ResponseReplyBuilder::new(
+            5,
+            wz_session_core::wire_key::WireKey::literal("demo/relay").expect("a literal key"),
+            &[],
+        )
+        .shm_descriptor(*descriptor)
+        .build()
+        .expect("a reply that names the chunk")
     }
 
     /// THE ACCOUNT, for any kind of message: the descriptor carries one reference, the pass takes

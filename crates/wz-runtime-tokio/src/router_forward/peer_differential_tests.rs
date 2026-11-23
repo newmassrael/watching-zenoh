@@ -450,8 +450,11 @@ impl Node {
             }
             Step::ReplyErr(id, keyexpr, payload) => {
                 if let Some(rid) = self.last_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_err_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_err(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));
@@ -459,8 +462,11 @@ impl Node {
             }
             Step::Reply(id, keyexpr, payload) => {
                 if let Some(rid) = self.last_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_reply_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_reply(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));
@@ -478,8 +484,11 @@ impl Node {
             }
             Step::ReplyAfterFinal(id, keyexpr, payload) => {
                 if let Some(rid) = self.ended_request.get(id).copied() {
-                    let response = wz_session_core::response_build::build_response_reply_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_reply(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.deliver(*id, NetworkMessage::Response(Box::new(response)));

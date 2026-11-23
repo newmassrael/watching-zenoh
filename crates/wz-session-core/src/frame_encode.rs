@@ -1684,7 +1684,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     use crate::request_build::build_request_query;
     #[cfg(feature = "codec-response")]
-    use crate::response_build::build_response_reply_literal;
+    use crate::response_build::build_response_reply;
     #[cfg(feature = "codec-response-final")]
     use crate::response_final_build::build_response_final;
     #[cfg(feature = "codec-push")]
@@ -1836,7 +1836,12 @@ mod tests {
         }
         #[cfg(feature = "codec-response")]
         {
-            let response = build_response_reply_literal(42, "k", b"v").unwrap();
+            let response = build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap();
             assert_eq!(
                 encoded_len(&response_body(&response)),
                 wz_codecs::response::ResponseWire::measure(&response).len()
@@ -2111,12 +2116,22 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
-        let response = build_response_reply_literal(42, "k", b"v").unwrap();
+        let response = build_response_reply(
+            42,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            b"v",
+        )
+        .unwrap();
         let response_bytes = response.wire();
 
         let wire_reliable = encode_frame_with_response(
             0,
-            build_response_reply_literal(42, "k", b"v").unwrap(),
+            build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap(),
             true,
         );
         assert_eq!(
@@ -2133,7 +2148,12 @@ mod tests {
 
         let wire_best_effort = encode_frame_with_response(
             0,
-            build_response_reply_literal(42, "k", b"v").unwrap(),
+            build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap(),
             false,
         );
         assert_eq!(
@@ -2151,20 +2171,28 @@ mod tests {
     #[test]
     fn encode_frame_with_response_writes_what_the_projection_wrote_with_extensions() {
         let build = || {
-            crate::response_build::ResponseReplyBuilder::new(42, 0, Some("k/x"), b"payload")
-                .qos(crate::sample::QosLevel::DEFAULT.with_express(true))
-                .responder(&[1, 2, 3, 4], 9)
-                .build()
-                .unwrap()
+            crate::response_build::ResponseReplyBuilder::new(
+                42,
+                crate::wire_key::WireKey::literal("k/x").expect("a literal key"),
+                b"payload",
+            )
+            .qos(crate::sample::QosLevel::DEFAULT.with_express(true))
+            .responder(&[1, 2, 3, 4], 9)
+            .build()
+            .unwrap()
         };
         let want = build().wire();
         let frame = encode_frame_with_response(0, build(), true);
         assert!(
             want.len()
-                > build_response_reply_literal(42, "k/x", b"payload")
-                    .unwrap()
-                    .wire()
-                    .len(),
+                > build_response_reply(
+                    42,
+                    crate::wire_key::WireKey::literal("k/x").expect("a literal key"),
+                    b"payload"
+                )
+                .unwrap()
+                .wire()
+                .len(),
             "the extensions are on the wire, or this test compares nothing",
         );
         assert_eq!(&frame[2..], want.as_slice());

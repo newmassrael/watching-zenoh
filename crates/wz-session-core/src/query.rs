@@ -1002,25 +1002,20 @@ impl QueryReply {
                 #[cfg(feature = "pubsub-ts-stack")]
                 ts_stack,
             } => {
+                // A reply names its key by its text. An empty text names no key: the bound the
+                // wire puts on a key's length refuses it, as it refuses one past the bound.
+                let key = crate::wire_key::WireKeyBuf::literal(keyexpr_literal)
+                    .ok_or(CodecError::LengthOutOfRange)?;
                 let mut builder = match body {
-                    ReplyBody::Put(payload) => {
-                        ResponseReplyBuilder::from_owned(rid, 0, Some(keyexpr_literal), payload)
-                    }
+                    ReplyBody::Put(payload) => ResponseReplyBuilder::from_owned(rid, key, payload),
                     // R3062 -- as the descriptor when one was reserved, so the bytes are not
                     // copied into a builder that will not send them; as the buffer's bytes
                     // otherwise, which is what a face that cannot map the segment is owed.
                     #[cfg(feature = "transport-shm")]
                     ReplyBody::PutShared(handle) => match descriptor {
-                        Some(descriptor) => {
-                            ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[])
-                                .shm_descriptor(descriptor)
-                        }
-                        None => ResponseReplyBuilder::new(
-                            rid,
-                            0,
-                            Some(&keyexpr_literal),
-                            handle.bytes(),
-                        ),
+                        Some(descriptor) => ResponseReplyBuilder::from_owned(rid, key, Vec::new())
+                            .shm_descriptor(descriptor),
+                        None => ResponseReplyBuilder::new(rid, key.as_key(), handle.bytes()),
                     },
                     ReplyBody::Del => {
                         // The payload slot is unused on the Del path
@@ -1032,7 +1027,7 @@ impl QueryReply {
                         // R311y769: the payload is still the only thing the
                         // Del arm drops. The attachment threaded below now
                         // survives, under the Del body's own ext id.
-                        ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[]).reply_del()
+                        ResponseReplyBuilder::from_owned(rid, key, Vec::new()).reply_del()
                     }
                 };
                 // Thread the per-version value encoding (E-flag) + timestamp
@@ -1080,12 +1075,11 @@ impl QueryReply {
                 #[cfg(feature = "pubsub-ts-stack")]
                 ts_stack,
             } => {
-                let mut builder = crate::response_build::ResponseErrBuilder::new(
-                    rid,
-                    0,
-                    Some(&keyexpr_literal),
-                    &payload,
-                );
+                // As for a reply: an empty text names no key, and is refused by the key's bound.
+                let key = crate::wire_key::WireKey::literal(&keyexpr_literal)
+                    .ok_or(CodecError::LengthOutOfRange)?;
+                let mut builder =
+                    crate::response_build::ResponseErrBuilder::new(rid, key, &payload);
                 if let Some((id, schema)) = encoding {
                     builder = builder.encoding(id, schema.as_deref());
                 }
@@ -1337,7 +1331,7 @@ impl<'a> QueryResponder<'a> {
     /// asked under (zenoh's storage `get_matching_keys` reply per key).
     /// The wire echo already threads a per-record keyexpr through
     /// [`QueryReply::into_response`]
-    /// (`ResponseReplyBuilder::new(rid, 0, Some(keyexpr), payload)`), so
+    /// (`ResponseReplyBuilder` of the literal key), so
     /// this just stages the override literal rather than the bound one.
     /// A keyexpr the inbound query does not cover (`reply ⊆ query`) is
     /// refused with [`ReplyError::KeyExprNotMatch`] unless the query carried
@@ -1948,8 +1942,8 @@ fn responder_parts(responder: &Option<(heapless::Vec<u8, 16>, u32)>) -> Option<(
 /// adversarial review of R311y315 caught that overclaim before it froze.
 /// `query-reply-err` gates the QUERYABLE's application-level Err reply,
 /// i.e. this seam. It does NOT gate the Response(Err) codec:
-/// `response_build::{ResponseErrBuilder, build_response_err_literal,
-/// build_response_err_aliased, build_response_err_empty}` are
+/// `response_build::{ResponseErrBuilder, build_response_err,
+/// build_response_err_empty}` are
 /// `codec-response`-gated `pub` items, and
 /// `cargo test -p wz-session-core --no-default-features
 /// --features alloc,codec-response --lib response_build::tests::build_response_err`
@@ -5074,11 +5068,15 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         let via_chain = replies.pop().unwrap().into_response().unwrap().wire();
-        let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
-            .responder(&[0xBB; 1], 1)
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"hello",
+        )
+        .responder(&[0xBB; 1], 1)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "QueryResponder.with_responder → send_reply → into_response must equal the direct \
@@ -5132,12 +5130,16 @@ mod tests {
             );
             assert_eq!(response.header & 0x80, 0x80);
         }
-        let expected = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"after")
-            .responder(&[0xBB; 1], 1)
-            .ts_stack(&stack)
-            .build()
-            .unwrap()
-            .wire();
+        let expected = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"after",
+        )
+        .responder(&[0xBB; 1], 1)
+        .ts_stack(&stack)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(responses[1].clone().wire(), expected);
     }
 
@@ -5225,10 +5227,14 @@ mod tests {
         let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
         // ResponseReplyBuilder direct path with the same args.
-        let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("home/temp").expect("a literal key"),
+            b"hello",
+        )
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             response.wire(),
             via_builder,
@@ -5259,11 +5265,15 @@ mod tests {
             ts_stack: None,
         };
         let via_chain = reply.into_response().unwrap().wire();
-        let via_builder = ResponseReplyBuilder::new(42, 0, Some("demo/data"), b"v")
-            .source_info(&si)
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+            b"v",
+        )
+        .source_info(&si)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "QueryReply::into_response must thread source_info into \
@@ -5309,12 +5319,16 @@ mod tests {
         let via_chain = replies.pop().unwrap().into_response().unwrap().wire();
         // Match the direct builder with the SAME timestamp so the comparison
         // holds regardless of the `pubsub-timestamp` gate state.
-        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), b"v")
-            .timestamp(&ts)
-            .source_info(&si)
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            7,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+            b"v",
+        )
+        .timestamp(&ts)
+        .source_info(&si)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "reply_keyed_sourced → QueryResponder → into_response must emit the \
@@ -5361,12 +5375,16 @@ mod tests {
             _ => panic!("reply_del_sourced must stage a QueryReply::Reply"),
         }
         let via_chain = staged.into_response().unwrap().wire();
-        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
-            .reply_del()
-            .source_info(&si)
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            7,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+            &[],
+        )
+        .reply_del()
+        .source_info(&si)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "reply_del_sourced → QueryResponder → into_response must emit the \
@@ -5436,12 +5454,16 @@ mod tests {
             _ => panic!("reply_keyed_del_meta must stage a QueryReply::Reply"),
         }
         let via_chain = staged.into_response().unwrap().wire();
-        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
-            .reply_del()
-            .attachment(b"tombstone-meta")
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            7,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+            &[],
+        )
+        .reply_del()
+        .attachment(b"tombstone-meta")
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "the responder chain and the builder must emit the same bytes",
@@ -5515,13 +5537,17 @@ mod tests {
             _ => panic!("reply_keyed_del_sourced must stage a QueryReply::Reply"),
         }
         let via_chain = staged.into_response().unwrap().wire();
-        let via_builder = ResponseReplyBuilder::new(7, 0, Some("demo/data"), &[])
-            .reply_del()
-            .timestamp(&ts)
-            .source_info(&si)
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            7,
+            crate::wire_key::WireKey::literal("demo/data").expect("a literal key"),
+            &[],
+        )
+        .reply_del()
+        .timestamp(&ts)
+        .source_info(&si)
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             via_chain, via_builder,
             "reply_keyed_del_sourced → QueryResponder → into_response must emit \
@@ -5783,11 +5809,15 @@ mod tests {
             ts_stack: None,
         };
         let response = reply.into_response().unwrap();
-        let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
-            .reply_del()
-            .build()
-            .unwrap()
-            .wire();
+        let via_builder = ResponseReplyBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("clear/me").expect("a literal key"),
+            &[],
+        )
+        .reply_del()
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             response.wire(),
             via_builder,
@@ -5808,12 +5838,15 @@ mod tests {
             ts_stack: None,
         };
         let response = reply.into_response().unwrap();
-        let via_builder =
-            crate::response_build::ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
-                .encoding(4, Some(&b"schema_v1"[..]))
-                .build()
-                .unwrap()
-                .wire();
+        let via_builder = crate::response_build::ResponseErrBuilder::new(
+            42,
+            crate::wire_key::WireKey::literal("error/path").expect("a literal key"),
+            b"oops",
+        )
+        .encoding(4, Some(&b"schema_v1"[..]))
+        .build()
+        .unwrap()
+        .wire();
         assert_eq!(
             response
                 .wire(),

@@ -4297,21 +4297,29 @@ mod record_walk_tests {
         #[cfg(feature = "codec-response")]
         {
             records.push(
-                crate::response_build::ResponseReplyBuilder::new(9, 0, Some("r/1"), b"reply")
-                    .attachment(b"att")
-                    .build()
-                    .expect("build")
-                    .try_as_borrowed()
-                    .expect("a view")
-                    .encode_to_vec(),
+                crate::response_build::ResponseReplyBuilder::new(
+                    9,
+                    crate::wire_key::WireKey::literal("r/1").expect("a literal key"),
+                    b"reply",
+                )
+                .attachment(b"att")
+                .build()
+                .expect("build")
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec(),
             );
             records.push(
-                crate::response_build::ResponseErrBuilder::new(9, 0, Some("r/2"), b"oops")
-                    .build()
-                    .expect("build")
-                    .try_as_borrowed()
-                    .expect("a view")
-                    .encode_to_vec(),
+                crate::response_build::ResponseErrBuilder::new(
+                    9,
+                    crate::wire_key::WireKey::literal("r/2").expect("a literal key"),
+                    b"oops",
+                )
+                .build()
+                .expect("build")
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec(),
             );
         }
         let payload = records.concat();
@@ -4661,9 +4669,13 @@ mod record_walk_tests {
         let request = crate::request_build::RequestQueryBuilder::new(3, 0, Some("q/1"))
             .build()
             .expect("build");
-        let response = crate::response_build::ResponseReplyBuilder::new(3, 0, Some("q/1"), b"v")
-            .build()
-            .expect("build");
+        let response = crate::response_build::ResponseReplyBuilder::new(
+            3,
+            crate::wire_key::WireKey::literal("q/1").expect("a literal key"),
+            b"v",
+        )
+        .build()
+        .expect("build");
         let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
         let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
         let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
@@ -5529,9 +5541,13 @@ mod shared_decode_tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn a_reply_put_payload_is_a_range_of_the_lent_frame() {
-        let bytes = crate::response_build::build_response_reply_literal(7, "demo/q", PAYLOAD)
-            .expect("build a literal reply")
-            .wire();
+        let bytes = crate::response_build::build_response_reply(
+            7,
+            crate::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            PAYLOAD,
+        )
+        .expect("build a literal reply")
+        .wire();
         let frame = RxBytes::lend(bytes);
         let messages = parse_frame_payload_in(&frame).expect("the batch parses");
         let NetworkMessage::Response(response) = &messages[0] else {
@@ -5757,7 +5773,14 @@ mod mandatory_extension_rule_tests {
 
     #[test]
     fn a_response_defines_nothing_mandatory_and_its_reply_put_and_err_the_shm_marker() {
-        let reply = || crate::response_build::build_response_reply_literal(1, "k", b"v").unwrap();
+        let reply = || {
+            crate::response_build::build_response_reply(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap()
+        };
         every_header("response envelope", &[], |header| {
             let mut response = reply();
             response.extensions = Some(crate::held_list::one_entry(entry(header)));
@@ -5789,8 +5812,12 @@ mod mandatory_extension_rule_tests {
             NetworkMessage::Response(Box::new(response))
         });
         every_header("err body", SHM, |header| {
-            let mut response =
-                crate::response_build::build_response_err_literal(1, "k", b"e").unwrap();
+            let mut response = crate::response_build::build_response_err(
+                1,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"e",
+            )
+            .unwrap();
             match &mut response.body {
                 crate::wire::ResponseOwnedVariant::CodecZenohErr(err) => {
                     err.extensions = Some(crate::held_list::one_entry(entry(header)));

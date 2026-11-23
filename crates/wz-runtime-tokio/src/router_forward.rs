@@ -23772,9 +23772,9 @@ mod tests {
         assert_eq!(sink_hosting.frame_count(), 1);
         let forwarded = forwarded_request(&sink_hosting.frame_bytes(0));
         assert_eq!(literal_key(&forwarded.keyexpr), "ext/ns/zenoh/g");
-        let reply = wz_session_core::response_build::build_response_reply_literal(
+        let reply = wz_session_core::response_build::build_response_reply(
             forwarded.rid,
-            "ext/ns/zenoh/g",
+            wz_session_core::wire_key::WireKey::literal("ext/ns/zenoh/g").expect("a literal key"),
             b"hi",
         )
         .expect("response");
@@ -30759,9 +30759,12 @@ mod tests {
         let qid = forwarded_request(&sink_queryable.frame_bytes(0)).rid;
         assert!(heard.lock().unwrap().is_empty(), "nothing has answered yet");
 
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            qid,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"hi",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(0),
@@ -31129,9 +31132,12 @@ mod tests {
         assert_eq!(fwd.pending.guard().len(), 1, "one pending entry recorded");
 
         // C replies: the Response routes back to A, rid rewritten, entry kept.
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            qid,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"hi",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(1),
@@ -31164,9 +31170,12 @@ mod tests {
         assert!(fwd.pending.guard().is_empty(), "the final freed the entry");
 
         // A straggler Response after the final: the entry is gone, drops silently.
-        let straggler =
-            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"late")
-                .expect("build response");
+        let straggler = wz_session_core::response_build::build_response_reply(
+            qid,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"late",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(1),
@@ -31225,8 +31234,7 @@ mod tests {
 
         let response = wz_session_core::response_build::ResponseReplyBuilder::new(
             qid,
-            0,
-            Some("demo/q"),
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
             b"hi",
         )
         .qos(answered)
@@ -31273,9 +31281,12 @@ mod tests {
         assert_eq!(sink_client.frame_count(), 1, "the Query reached the client");
         let qid = forwarded_request(&sink_client.frame_bytes(0)).rid;
 
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"v")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            qid,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"v",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(1),
@@ -31317,9 +31328,12 @@ mod tests {
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
         fwd.tick();
         sink_a.reset();
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(42, "demo/q", b"x")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            42,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"x",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(1),
@@ -31435,9 +31449,12 @@ mod tests {
         assert_eq!(fwd.pending_len(), 1, "B's branch freed, C's remains");
 
         // C's reply AFTER B's final still routes (the fan is open).
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(qid_c, "demo/q", b"hi")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            qid_c,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"hi",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(2),
@@ -31533,9 +31550,12 @@ mod tests {
         assert_eq!(sink_p.frame_count(), 1, "routed to the peer queryable");
         let qid = forwarded_request(&sink_p.frame_bytes(0)).rid;
 
-        let response =
-            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"v")
-                .expect("build response");
+        let response = wz_session_core::response_build::build_response_reply(
+            qid,
+            wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+            b"v",
+        )
+        .expect("build response");
         forward_one(
             &fwd,
             FaceId(1),
@@ -33384,9 +33404,9 @@ mod tests {
         let qid = forwarded_request(&sink_h.frame_bytes(0)).rid;
         assert_eq!(fwd.pending_len(), 1, "the asked face owes an answer");
         sink_q.reset();
-        let forged = wz_session_core::response_build::build_response_reply_literal(
+        let forged = wz_session_core::response_build::build_response_reply(
             qid,
-            "demo/example",
+            wz_session_core::wire_key::WireKey::literal("demo/example").expect("a literal key"),
             b"forged",
         )
         .expect("build response");
@@ -33418,9 +33438,9 @@ mod tests {
         forward_one(&fwd, FaceId(1), request_best(42, "demo/example"));
         let qid = forwarded_request(&sink_h.frame_bytes(0)).rid;
         sink_q.reset();
-        let reply = wz_session_core::response_build::build_response_reply_literal(
+        let reply = wz_session_core::response_build::build_response_reply(
             qid,
-            "demo/example",
+            wz_session_core::wire_key::WireKey::literal("demo/example").expect("a literal key"),
             b"answer",
         )
         .expect("build response");
@@ -33736,9 +33756,12 @@ mod tests {
             qid: wz_session_core::wire_id::RequestId,
             conf_flags: u8,
         ) -> NetworkMessage {
-            let mut response =
-                wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
-                    .expect("build response");
+            let mut response = wz_session_core::response_build::build_response_reply(
+                qid,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                b"hi",
+            )
+            .expect("build response");
             let present =
                 wz_session_core::held_list::edit_chain(&mut response.extensions, |chain| {
                     set_ts_stack(chain, Some(&started(conf_flags)))

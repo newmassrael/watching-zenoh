@@ -514,7 +514,7 @@ mod tests {
         // zenoh's RequestBody has only a Query variant.
         use wz_session_core::declare_build::build_declare_queryable;
         use wz_session_core::request_build::build_request_query;
-        use wz_session_core::response_build::build_response_reply_literal;
+        use wz_session_core::response_build::build_response_reply;
 
         let query = NetworkMessage::Request(Box::new(
             build_request_query(1, 0, Some("demo/q")).expect("build query"),
@@ -525,7 +525,12 @@ mod tests {
         );
 
         let reply = NetworkMessage::Response(Box::new(
-            build_response_reply_literal(1, "demo/q", b"x").expect("build reply"),
+            build_response_reply(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                b"x",
+            )
+            .expect("build reply"),
         ));
         assert_eq!(
             acl_action(&reply),

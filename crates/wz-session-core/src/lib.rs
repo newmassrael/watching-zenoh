@@ -807,6 +807,10 @@ pub mod ext_admit;
 /// the width the wire carries.
 pub mod wire_id;
 
+/// The key expression a network message names, as the wire carries it, with no value for the id
+/// `0` and no text. Unconditional: the builders of every message that names a key take it.
+pub mod wire_key;
+
 /// The identity of a unicast datagram link: the one remote end it carries a
 /// session with, fixed once known, and the `InitSyn` header test that binds an
 /// accepting link. Every stack's datagram driver admits what it takes through
@@ -1850,8 +1854,6 @@ pub mod extmultilink;
 // precursor that lets `query.rs` (with its `codec-response`-gated
 // `QueryReply::into_response`) migrate into wz-session-core.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
-// Totality debt TD-081 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic, clippy::unreachable, clippy::arithmetic_side_effects)]
 pub mod response_build;
 
 // R311eh — Request-builder cluster (`build_request_query` + the five

@@ -18,8 +18,8 @@
 //! extensions) in arrays of its own.
 //!
 //! What it mirrors, and where each choice is: the envelope is
-//! [`crate::response_build::build_response_reply_literal`] /
-//! `build_response_err_literal` (the literal keyexpr, the `N` flag), the extensions on
+//! [`crate::response_build::build_response_reply`] /
+//! `build_response_err` of a literal key (the keyexpr inline, the `N` flag), the extensions on
 //! it are `stamp_envelope_extensions` (the QoS entry unless it is the default, then the
 //! responder, the chain bits set on every entry but the last), the Reply body is
 //! `ResponseReplyBuilder::build` (timestamp, encoding, then the source-info and the

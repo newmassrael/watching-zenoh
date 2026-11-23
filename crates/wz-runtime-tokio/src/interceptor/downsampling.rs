@@ -939,7 +939,7 @@ mod tests {
     fn message_kind_classifies_the_bodies_zenoh_throttles() {
         use wz_session_core::push_build::{build_push_del_literal, build_push_literal};
         use wz_session_core::request_build::build_request_query;
-        use wz_session_core::response_build::build_response_reply_literal;
+        use wz_session_core::response_build::build_response_reply;
 
         let push = NetworkMessage::Push(Box::new(
             build_push_literal("demo/x", b"1234").expect("build put"),
@@ -960,7 +960,12 @@ mod tests {
         assert_eq!(message_kinds(&query), &[DownsamplingMessage::Query]);
 
         let reply = NetworkMessage::Response(Box::new(
-            build_response_reply_literal(1, "demo/q", b"abc").expect("build reply"),
+            build_response_reply(
+                1,
+                wz_session_core::wire_key::WireKey::literal("demo/q").expect("a literal key"),
+                b"abc",
+            )
+            .expect("build reply"),
         ));
         assert_eq!(message_kinds(&reply), &[DownsamplingMessage::Reply]);
 
