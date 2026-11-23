@@ -89,7 +89,7 @@ pub mod sync;
 #[cfg(feature = "time-base")]
 pub mod time_base;
 pub mod tls_material;
-pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};

@@ -85,7 +85,7 @@ use crate::gossip::GossipPolicy;
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
-use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 #[cfg(feature = "group")]
 use wz_runtime_tokio::group::Member;
 use wz_runtime_tokio::locality::Locality;
@@ -6760,9 +6760,9 @@ impl SharedSession {
 
     /// Start a C declaration watch of `plane`: a listener on every face the registry holds now,
     /// and on every face that comes up later ([`Self::face_up`]), each handing what its peer
-    /// declares to `sink`. The port's [`DeclWatchRefused`] when this build hears no declaration
-    /// of `plane` or the session is closed; nothing is kept then, and `sink` is dropped outside
-    /// the lock.
+    /// declares to `sink`. Refused when this build hears no declaration of `plane`
+    /// ([`wz_capi_port::Refusal::NotBuilt`]) or the session is closed ([`wz_capi_port::Refusal::Closed`]); nothing is kept
+    /// then, and `sink` is dropped outside the lock.
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -6771,16 +6771,16 @@ impl SharedSession {
         &self,
         plane: DeclPlane,
         sink: DeclWatchSink,
-    ) -> Result<DeclWatchId, DeclWatchRefused> {
+    ) -> Result<DeclWatchId, wz_capi_port::Refusal> {
         if !hears_declarations_of(plane) {
-            return Err(DeclWatchRefused::PlaneNotBuilt);
+            return Err(wz_capi_port::Refusal::NotBuilt);
         }
         let mut guard = self.lock();
         // Read under the lock, so a close that has already let go of every declaration
         // (`clear_declarations`) is not given one to hold.
         if self.is_closed() {
             drop(guard);
-            return Err(DeclWatchRefused::SessionClosed);
+            return Err(wz_capi_port::Refusal::Closed);
         }
         guard.last_decl_watch_id = guard.last_decl_watch_id.wrapping_add(1);
         let id = guard.last_decl_watch_id;

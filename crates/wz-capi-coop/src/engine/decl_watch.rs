@@ -20,7 +20,8 @@ use alloc::sync::Arc;
 use crate::prelude::*;
 
 use wz_capi_port::os::Mutex;
-use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use wz_capi_port::Refusal as Declined;
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
@@ -173,7 +174,7 @@ pub(super) struct DeclWatches {
 
 impl DeclWatches {
     /// Have the observers of `plane` installed in `app`, unless a watch of that kind installed
-    /// them already. [`DeclWatchRefused::Full`] when the application layer's list of observers
+    /// them already. [`Declined::TableFull`] when the application layer's list of observers
     /// is at its bound; nothing is installed then.
     ///
     /// Whatever storage `P` the application's tables have: the session's registry holds them in
@@ -187,7 +188,7 @@ impl DeclWatches {
         &self,
         app: &mut SlotObserverOf<K, P>,
         plane: DeclPlane,
-    ) -> Result<(), DeclWatchRefused> {
+    ) -> Result<(), Declined> {
         let mut table = lock(&self.table);
         if table.observers.iter().any(|held| held.plane == plane) {
             return Ok(());
@@ -367,7 +368,7 @@ fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSi
     app: &mut SlotObserverOf<K, P>,
     plane: DeclPlane,
     staged: &Arc<Mutex<Vec<Staged>>>,
-) -> Result<Observers, DeclWatchRefused> {
+) -> Result<Observers, Declined> {
     let declared = declared_sink(plane, staged);
     let undeclared = undeclared_sink(plane, staged);
     let (declared, undeclared) = match plane {
@@ -375,12 +376,12 @@ fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSi
             let tables = &mut app.remote_subscribers;
             let declared = tables
                 .on_subscriber_declared_sink(declared)
-                .map_err(|_| DeclWatchRefused::Full)?;
+                .map_err(|_| Declined::TableFull)?;
             match tables.on_subscriber_undeclared_sink(undeclared) {
                 Ok(undeclared) => (declared, undeclared),
                 Err(_) => {
                     tables.remove_subscriber_declared_sink(declared);
-                    return Err(DeclWatchRefused::Full);
+                    return Err(Declined::TableFull);
                 }
             }
         }
@@ -389,33 +390,33 @@ fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSi
             let tables = &mut app.remote_queryables;
             let declared = tables
                 .on_queryable_declared_sink(declared)
-                .map_err(|_| DeclWatchRefused::Full)?;
+                .map_err(|_| Declined::TableFull)?;
             match tables.on_queryable_undeclared_sink(undeclared) {
                 Ok(undeclared) => (declared, undeclared),
                 Err(_) => {
                     tables.remove_queryable_declared_sink(declared);
-                    return Err(DeclWatchRefused::Full);
+                    return Err(Declined::TableFull);
                 }
             }
         }
         #[cfg(not(any(feature = "query", feature = "queryable")))]
-        DeclPlane::Queryables => return Err(DeclWatchRefused::PlaneNotBuilt),
+        DeclPlane::Queryables => return Err(Declined::NotBuilt),
         #[cfg(feature = "liveliness")]
         DeclPlane::Tokens => {
             let tables = &mut app.liveliness;
             let declared = tables
                 .on_token_declared_sink(declared)
-                .map_err(|_| DeclWatchRefused::Full)?;
+                .map_err(|_| Declined::TableFull)?;
             match tables.on_token_undeclared_sink(undeclared) {
                 Ok(undeclared) => (declared, undeclared),
                 Err(_) => {
                     tables.remove_token_declared_sink(declared);
-                    return Err(DeclWatchRefused::Full);
+                    return Err(Declined::TableFull);
                 }
             }
         }
         #[cfg(not(feature = "liveliness"))]
-        DeclPlane::Tokens => return Err(DeclWatchRefused::PlaneNotBuilt),
+        DeclPlane::Tokens => return Err(Declined::NotBuilt),
     };
     Ok(Observers {
         plane,
@@ -650,7 +651,7 @@ mod tests {
         let mut app = SlotObserver::new();
         assert_eq!(
             watches.observe(&mut app, DeclPlane::Queryables),
-            Err(DeclWatchRefused::PlaneNotBuilt)
+            Err(Declined::NotBuilt)
         );
         assert!(lock(&watches.table).observers.is_empty());
         watches

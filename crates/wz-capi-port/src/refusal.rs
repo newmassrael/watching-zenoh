@@ -27,7 +27,8 @@ pub enum Refusal {
     NoEntityId,
     /// The session is closed.
     Closed,
-    /// This build does not hold the plane the entity is declared on.
+    /// This build does not hold the plane the entity is declared on, or this engine does not carry
+    /// the kind of call at all (a declaration watch on an engine that watches no peer).
     NotBuilt,
     /// The call states what this engine does not carry out (a set of links, the one node a query
     /// is addressed to); taken without it, it would be something the caller did not ask for.

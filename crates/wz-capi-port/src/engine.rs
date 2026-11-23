@@ -32,7 +32,7 @@ use wz_session_core::session_zid::SessionZid;
 use wz_session_core::wire_id::{EntityId, ExprId};
 
 use crate::cancellation::CancellableFan;
-use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use crate::decl_watch::{DeclPlane, DeclWatchId, DeclWatchSink};
 use crate::held_key::SessionKeys;
 use crate::peers::PeerIdentity;
 use crate::{
@@ -143,15 +143,19 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Tell `sink` what the peers of the session declare and retract of the kind `plane` names,
     /// on every link the session holds and every link that comes up later, until
     /// [`Self::undeclare_decl_watch`] is called with the id answered ([`crate::decl_watch`]).
-    /// An engine that does not watch refuses by name, which is the provided answer: a watch that
-    /// was taken and never told anything would read as peers that declare nothing.
+    /// Refused, with `sink` let go of and nothing installed: [`Refusal::NotBuilt`] by an engine
+    /// that does not watch, which is the provided answer (a watch that was taken and never told
+    /// anything would read as peers that declare nothing), or by one built without the plane of
+    /// the kind asked for; [`Refusal::Closed`] on a closed session; [`Refusal::TableFull`] when the
+    /// session's table of observers of what a peer declares is at its bound
+    /// (`MAX_DECL_OBSERVERS`).
     fn declare_decl_watch(
         &self,
         plane: DeclPlane,
         sink: DeclWatchSink,
-    ) -> Result<DeclWatchId, DeclWatchRefused> {
+    ) -> Result<DeclWatchId, Refusal> {
         let _ = (plane, sink);
-        Err(DeclWatchRefused::NotProvided)
+        Err(Refusal::NotBuilt)
     }
 
     /// Stop the declaration watch `id` and let go of its sink: `true` when one was declared under

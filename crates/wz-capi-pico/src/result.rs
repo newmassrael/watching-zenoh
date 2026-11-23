@@ -239,6 +239,13 @@ pub(crate) enum Door {
         all(feature = "multicast-transport", not(feature = "multi-thread"))
     ))]
     Session,
+    /// A watch of what the peers declare (`wz_ext_decl_watch_declare`), wz's own door, which a
+    /// build without the declaration watch has none of.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    DeclWatch,
     /// A liveliness token, declared once its key is, which a build without liveliness has none of.
     #[cfg(feature = "liveliness")]
     Token,
@@ -291,6 +298,16 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
         },
         #[cfg(feature = "liveliness")]
         Door::Token => refusal_code(refusal, Door::Keyexpr),
+        // zenoh-pico has no such door: a closed session answers pico's code for one, and a table at
+        // its bound the code pico answers an entity it has no room for.
+        #[cfg(any(
+            feature = "remote-declaration-watch",
+            feature = "declarations-synced-event"
+        ))]
+        Door::DeclWatch => match refusal {
+            Refusal::Closed => Z_ERR_SESSION_CLOSED,
+            _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
+        },
         // pico answers a call on a session that is not open with `_Z_ERR_SESSION_CLOSED`
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `return _z_session_is_closed(zn) ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK;`), and has no other
@@ -414,6 +431,20 @@ mod tests {
             refusal_code(Refusal::NotBuilt, Door::Session),
             WZ_EXT_ERR_UNSUPPORTED
         );
+    }
+
+    /// A watch the engine or the build does not carry is wz's unsupported code, one on a closed
+    /// session pico's closed code, and one past the observers' table out of memory.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    #[test]
+    fn each_refusal_of_a_declaration_watch_answers_its_code() {
+        let at = |refusal| refusal_code(refusal, Door::DeclWatch);
+        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(at(Refusal::Closed), Z_ERR_SESSION_CLOSED);
+        assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
     }
 
     /// The same table at a matching listener's door.

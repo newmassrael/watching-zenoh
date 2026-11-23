@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchRefused, DeclWatchSink, SessionEngine};
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchSink, Refusal, SessionEngine};
 
 use super::{open, CatchAll, Router};
 
@@ -30,7 +30,7 @@ fn a_declaration_watch_is_refused_by_name_and_holds_nothing() {
     ] {
         assert_eq!(
             engine.declare_decl_watch(plane, Arc::clone(&sink)),
-            Err(DeclWatchRefused::NotProvided),
+            Err(Refusal::NotBuilt),
             "{plane:?}"
         );
     }
@@ -225,7 +225,7 @@ mod watched {
         assert_eq!(Arc::strong_count(&log.sink), 1);
         assert_eq!(
             engine.declare_decl_watch(DeclPlane::Subscribers, Arc::clone(&log.sink)),
-            Err(DeclWatchRefused::SessionClosed)
+            Err(Refusal::Closed)
         );
         assert_eq!(
             Arc::strong_count(&log.sink),
@@ -266,7 +266,7 @@ mod watched {
         let log = Log::new();
         assert_eq!(
             engine.declare_decl_watch(DeclPlane::Queryables, Arc::clone(&log.sink)),
-            Err(DeclWatchRefused::PlaneNotBuilt)
+            Err(Refusal::NotBuilt)
         );
         assert_eq!(Arc::strong_count(&log.sink), 1);
     }
@@ -279,7 +279,7 @@ mod watched {
         let log = Log::new();
         assert_eq!(
             engine.declare_decl_watch(DeclPlane::Tokens, Arc::clone(&log.sink)),
-            Err(DeclWatchRefused::PlaneNotBuilt)
+            Err(Refusal::NotBuilt)
         );
         assert_eq!(Arc::strong_count(&log.sink), 1);
     }

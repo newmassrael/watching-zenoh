@@ -181,7 +181,7 @@ mod decl_watch;
 ))]
 use {
     decl_watch::DeclWatches,
-    wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchRefused, DeclWatchSink},
+    wz_capi_port::{DeclPlane, DeclWatchId, DeclWatchSink},
 };
 
 #[cfg(feature = "connectivity")]
@@ -5557,12 +5557,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         &self,
         plane: DeclPlane,
         sink: DeclWatchSink,
-    ) -> Result<DeclWatchId, DeclWatchRefused> {
+    ) -> Result<DeclWatchId, Declined> {
         if !decl_watch::hears(plane) {
-            return Err(DeclWatchRefused::PlaneNotBuilt);
+            return Err(Declined::NotBuilt);
         }
         let Some(guard) = self.live() else {
-            return Err(DeclWatchRefused::SessionClosed);
+            return Err(Declined::Closed);
         };
         let core = &guard.0;
         let observed = self

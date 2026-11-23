@@ -36,14 +36,13 @@
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void};
 
-use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchRefused, DeclWatchSink};
+use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::session_zid::ZID_MAX;
 
 use crate::ffi::{catch, guarded, CClosure, InCallback, ReleaseLatch};
 use crate::prelude::Box;
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
+    refusal_code, Door, ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 
@@ -129,15 +128,6 @@ fn plane_of(entity: u8) -> Option<DeclPlane> {
         WZ_EXT_DECL_QUERYABLE => Some(DeclPlane::Queryables),
         WZ_EXT_DECL_TOKEN => Some(DeclPlane::Tokens),
         _ => None,
-    }
-}
-
-/// The pico code of a refused watch.
-fn code(refusal: DeclWatchRefused) -> ZResult {
-    match refusal {
-        DeclWatchRefused::NotProvided | DeclWatchRefused::PlaneNotBuilt => WZ_EXT_ERR_UNSUPPORTED,
-        DeclWatchRefused::SessionClosed => Z_ERR_SESSION_CLOSED,
-        DeclWatchRefused::Full => Z_ERR_SYSTEM_OUT_OF_MEMORY,
     }
 }
 
@@ -241,7 +231,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
                 (*watch)._val = Box::into_raw(state).cast::<c_void>();
                 Z_OK
             }
-            Err(refusal) => code(refusal),
+            Err(refusal) => refusal_code(refusal, Door::DeclWatch),
         }
     })
 }
@@ -306,17 +296,6 @@ mod tests {
         assert_eq!(plane_of(WZ_EXT_DECL_TOKEN), Some(DeclPlane::Tokens));
         assert_eq!(plane_of(3), None);
         assert_eq!(plane_of(u8::MAX), None);
-    }
-
-    #[test]
-    fn a_refusal_of_the_engine_and_of_the_build_is_unsupported_and_a_closed_session_is_closed() {
-        assert_eq!(code(DeclWatchRefused::NotProvided), WZ_EXT_ERR_UNSUPPORTED);
-        assert_eq!(
-            code(DeclWatchRefused::PlaneNotBuilt),
-            WZ_EXT_ERR_UNSUPPORTED
-        );
-        assert_eq!(code(DeclWatchRefused::SessionClosed), Z_ERR_SESSION_CLOSED);
-        assert_eq!(code(DeclWatchRefused::Full), Z_ERR_SYSTEM_OUT_OF_MEMORY);
     }
 
     #[test]

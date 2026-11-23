@@ -262,7 +262,7 @@ impl SessionEngine for SharedSession {
         &self,
         plane: wz_capi_port::DeclPlane,
         sink: wz_capi_port::DeclWatchSink,
-    ) -> Result<wz_capi_port::DeclWatchId, wz_capi_port::DeclWatchRefused> {
+    ) -> Result<wz_capi_port::DeclWatchId, Refusal> {
         SharedSession::declare_decl_watch(self, plane, sink)
     }
 
