@@ -6547,6 +6547,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// The one write of a Close of `reason` on this link, counted as the close it is: the
+    /// application's ([`Self::send_close_with_reason`]) and the session machine's
+    /// (`send_close_frame_with_reason`) alike, as zenoh-pico has one (`_z_unicast_send_close`).
+    ///
+    /// R311y839 — the S flag is derived, not literal: the close tears down ONE link, so it
+    /// announces a whole-session close only when no other link survives it
+    /// ([`Self::close_scope_is_session`]). R311y205 (transport-multilink) — it rides the link
+    /// being torn down, not the reliability-routed one. R2919 — and it queues BEHIND the data
+    /// already handed to the writer. A lend-only session writes its two bytes into a lent slot,
+    /// or refuses and counts it (the link is going down either way).
+    #[cfg(feature = "codec-close")]
+    fn write_close_on_this_link(&self, reason: u8) {
+        self.note_action(|t| t.send_close_frame_with_reason += 1);
+        #[cfg(not(feature = "tx-lend-only"))]
+        {
+            let bytes = encode_close(reason, self.close_scope_is_session());
+            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+        }
+        #[cfg(feature = "tx-lend-only")]
+        let _ = self.send_close_lent(reason);
+    }
+
     /// R121d — derive the SessionInitParams the Accepting side
     /// will emit on the outbound InitAck. Caps `seq_num_res`,
     /// `req_id_res`, and `batch_size` to `min(self.params.x,
@@ -16984,23 +17006,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // worker emit) must take the same pre-drain.
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            self.note_action(|t| t.send_close_frame_with_reason += 1);
-            // R311y839 — the S flag is derived, not literal: this path tears down
-            // ONE link, so it announces a whole-session close only when no other
-            // link survives it. See `close_scope_is_session`.
-            //
-            // R311y205 (transport-multilink) — CLOSE is per-link (targets the
-            // link this path is tearing down), not reliability-routed. R2919 —
-            // and it queues BEHIND the data already handed to the writer.
-            #[cfg(not(feature = "tx-lend-only"))]
-            {
-                let bytes = encode_close(reason as u8, self.close_scope_is_session());
-                self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
-            }
-            // Fixed-memory step S4 — two bytes written into a lent slot, or
-            // refused and counted.
-            #[cfg(feature = "tx-lend-only")]
-            let _ = self.send_close_lent(reason as u8);
+            self.write_close_on_this_link(reason as u8);
         }
         #[cfg(not(feature = "codec-close"))]
         let _ = reason;
@@ -17032,19 +17038,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            self.note_action(|t| t.send_keep_alive += 1);
-            let bytes = crate::handshake_encode::encode_keep_alive();
-            // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must
-            // ride the physical link this drive loop monitors (so that link's
-            // `last_outbound_at` is stamped and its peer's lease stays fresh), not
-            // the reliability-routed data link. `send_wire_this_link` bypasses the
-            // aggregation selector. R2919 — at `Priority::Control`, ahead of any
-            // queued data, as zenoh's tx task writes its keepalive.
-            //
-            // And not queued behind the data in a lane either: the keepalive is the one
-            // frame whose lateness costs the peer its lease, so it takes the link's urgent
-            // path ([`BoxedLinkDriver::send_urgent`]).
-            self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
+            self.send_keep_alive_apart(Reliability::Reliable);
         }
     }
 
@@ -17055,10 +17049,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `let message: TransportMessage = KeepAlive.into();`), whatever its main link carries.
     /// The open batches are not drained first: the keepalive carries no sequence number, and
     /// the frames it may pass are the other carriage's or the companion's own best-effort ones.
+    ///
+    /// The one write of a KeepAlive: [`Self::send_keep_alive`] is this for the reliable carriage
+    /// after the open batches are drained, as zenoh-pico's one transport-message send drains
+    /// them (`_z_transport_tx_send_t_msg_inner`).
     #[cfg(feature = "transport-keepalive")]
     pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
         self.note_action(|t| t.send_keep_alive += 1);
         let bytes = crate::handshake_encode::encode_keep_alive();
+        // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must ride the physical
+        // link this drive loop monitors (so that link's `last_outbound_at` is stamped and its
+        // peer's lease stays fresh), not the reliability-routed data link. R2919 — at
+        // `Priority::Control`, ahead of any queued data, as zenoh's tx task writes its
+        // keepalive. And not queued behind the data in a lane either: the keepalive is the one
+        // frame whose lateness costs the peer its lease, so it takes the link's urgent path
+        // ([`BoxedLinkDriver::send_urgent`]).
         self.send_wire_urgent_this_link(&bytes, class);
     }
 
@@ -18614,26 +18619,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     fn send_close_frame_with_reason(&mut self) {
         #[cfg(feature = "codec-close")]
         {
-            let a = &self.inner;
-            a.note_action(|t| t.send_close_frame_with_reason += 1);
             // Every transition into Closing stages a reason first; the
             // wire's own default answers an entry driven without one.
             let staged = R::with_mutex_mut(&self.link().close_reason, |r| *r);
-            let reason = staged.unwrap_or_default() as u8;
-            // R311y205 (transport-multilink) — the FSM `Closing` close rides the
-            // link whose drive loop reached Closing, and is not reliability-routed.
-            // R311y839 — and its SCOPE follows that: the sibling `release_link`
-            // action removes only this link, so the announcement says session only
-            // when this link was the session. See `close_scope_is_session`.
-            #[cfg(not(feature = "tx-lend-only"))]
-            {
-                let bytes = encode_close(reason, a.close_scope_is_session());
-                a.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
-            }
-            // Fixed-memory step S4 — the close is two bytes written into a lent
-            // slot, or refused and counted (the session is going down either way).
-            #[cfg(feature = "tx-lend-only")]
-            let _ = a.send_close_lent(reason);
+            // The close rides the link whose drive loop reached Closing, and its scope follows
+            // that: the sibling `release_link` action removes only this link.
+            self.inner
+                .write_close_on_this_link(staged.unwrap_or_default() as u8);
         }
     }
 
