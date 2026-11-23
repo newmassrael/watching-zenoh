@@ -752,6 +752,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/json5.rs` | S3 | |
 | `crates/wz-session-core/src/json5_lex.rs` | S3 | |
 | `crates/wz-session-core/src/key_allowance.rs` | S2 | |
+| `crates/wz-session-core/src/key_arena.rs` | S3 | |
 | `crates/wz-session-core/src/key_catalogue.rs` | S2 | |
 | `crates/wz-session-core/src/key_gate.rs` | S1 | |
 | `crates/wz-session-core/src/key_gate_open.rs` | S1 | |
