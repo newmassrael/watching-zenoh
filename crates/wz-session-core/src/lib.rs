@@ -1003,11 +1003,7 @@ pub mod publish_options;
 /// rules.
 #[cfg(feature = "alloc")]
 // Totality debt TD-108 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::expect_used,
-    clippy::unreachable,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used, clippy::unreachable)]
 pub mod query_options;
 
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a

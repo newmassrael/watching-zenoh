@@ -266,7 +266,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-099 | `wz-session-core` | `lent_control` | `expect_used`, `unreachable` | 4 | open |
 | TD-101 | `wz-session-core` | `serde_codec` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
-| TD-108 | `wz-session-core` | `query_options` | `expect_used`, `unreachable`, `arithmetic_side_effects` | 3 | open |
+| TD-108 | `wz-session-core` | `query_options` | `expect_used`, `unreachable` | 3 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `indexing_slicing`, `unreachable` | 3 | open |
 | TD-117 | `wz-session-core` | `ext_nodeid` | `expect_used`, `arithmetic_side_effects` | 2 | open |
 | TD-118 | `wz-session-core` | `extqos` | `arithmetic_side_effects` | 2 | open |
@@ -358,7 +358,10 @@ same: `encode_join` writes a beacon whose zid and SN body reach the codec's boun
 through `Bounded::new`, over a sink that cannot refuse. TD-042 (`serial_link`) keeps the
 two `expect`s of the handshake, which frames an `INIT` and an `INIT|ACK` of no payload through
 `encode_frame`: that answers a `Result` for any payload, and an empty one is always within the
-MTU. A frame of fixed bytes made when the build is compiled would pay them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+MTU. A frame of fixed bytes made when the build is compiled would pay them. TD-108
+(`query_options::loopback_query`) builds the loopback's Query through the wire's request
+builder and takes its body: a value form moves its callers in the cooperative engine and the
+tokio session, and is made with them. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
 TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
