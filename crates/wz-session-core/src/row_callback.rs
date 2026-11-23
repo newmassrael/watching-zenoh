@@ -10,73 +10,149 @@
 //! it ([`RowCallback::retire`]): no call begins after that, and the row is let go of, with its
 //! callback, by whoever sees the last call end: the undeclarer when none runs, else the call that
 //! ends last. The count of calls running and the retirement are one word kept in the row
-//! ([`CallLatch`]), so ending a call is one atomic operation and no allocation.
+//! ([`CallLatch`]): ending a call is one atomic operation and no allocation, or, on a target with no
+//! atomic read-modify-write of the word, a count changed with the tables held.
 //!
 //! Two forms implement [`RowCallback`]: the three values of a C closure, called where the row lies
 //! ([`CClosure`]), and, in a heap build, a Rust closure shared with the calls of it
 //! (`ArcCallback`).
 
 use core::ffi::c_void;
-#[cfg(target_has_atomic = "32")]
 use core::ptr::NonNull;
-#[cfg(target_has_atomic = "32")]
-use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Set in a latch once its row is retired.
-#[cfg(target_has_atomic = "32")]
 const RETIRED: u32 = 0x8000_0000;
 /// The count of calls running, below [`RETIRED`].
-#[cfg(target_has_atomic = "32")]
 const CALLS: u32 = !RETIRED;
 
-/// How many calls of a row's callback run, and whether the row was retired, in one word. Where the
-/// target has the atomic word.
+/// The word a latch counts in, read and changed as one step.
+trait Word {
+    /// The word now.
+    fn load(&self) -> u32;
+    /// Set the word to `next(now)` when that is `Some`, as one step: the word before, `Ok` when it
+    /// was changed.
+    fn update(&self, next: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32>;
+}
+
+/// The word where the target has an atomic read-modify-write of it: a call may end with no lock.
 #[cfg(target_has_atomic = "32")]
 #[derive(Debug, Default)]
-pub struct CallLatch(AtomicU32);
+struct AtomicWord(core::sync::atomic::AtomicU32);
 
 #[cfg(target_has_atomic = "32")]
+impl Word for AtomicWord {
+    fn load(&self) -> u32 {
+        self.0.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    fn update(&self, next: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32> {
+        use core::sync::atomic::Ordering;
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, next)
+    }
+}
+
+/// The word where the target has no atomic read-modify-write of it (ARMv6-M): changed only with
+/// the tables held, whose lock is the target's critical section, so every step is one already.
+#[cfg(any(not(target_has_atomic = "32"), test))]
+#[derive(Debug, Default)]
+struct HeldWord(core::cell::Cell<u32>);
+
+#[cfg(any(not(target_has_atomic = "32"), test))]
+impl Word for HeldWord {
+    fn load(&self) -> u32 {
+        self.0.get()
+    }
+
+    fn update(&self, mut next: impl FnMut(u32) -> Option<u32>) -> Result<u32, u32> {
+        let now = self.0.get();
+        match next(now) {
+            Some(changed) => {
+                self.0.set(changed);
+                Ok(now)
+            }
+            None => Err(now),
+        }
+    }
+}
+
+/// The latch's rules, over either word.
+#[derive(Debug, Default)]
+struct Counter<W>(W);
+
+impl<W: Word> Counter<W> {
+    fn begin(&self) -> bool {
+        self.0
+            .update(|now| {
+                (now & RETIRED == 0 && now & CALLS != CALLS).then_some(now.wrapping_add(1))
+            })
+            .is_ok()
+    }
+
+    fn end(&self) -> bool {
+        self.0.update(|now| Some(now.wrapping_sub(1))) == Ok(RETIRED | 1)
+    }
+
+    fn retire(&self) -> bool {
+        self.0
+            .update(|now| Some(now | RETIRED))
+            .is_ok_and(|before| before & CALLS == 0)
+    }
+
+    fn drained(&self) -> bool {
+        self.0.load() == RETIRED
+    }
+}
+
+/// The word of this target.
+#[cfg(target_has_atomic = "32")]
+type TargetWord = AtomicWord;
+/// The word of this target.
+#[cfg(not(target_has_atomic = "32"))]
+type TargetWord = HeldWord;
+
+/// How many calls of a row's callback run, and whether the row was retired, in one word: atomic
+/// where the target has an atomic read-modify-write of it, so a call ends with no lock; else
+/// a plain count changed only with the tables held ([`Self::ENDS_HELD`]).
+#[derive(Debug, Default)]
+pub struct CallLatch(Counter<TargetWord>);
+
 impl CallLatch {
+    /// Whether a call is ended with the tables held: on a target with no atomic read-modify-write
+    /// of the word, whose count the tables' lock guards.
+    pub const ENDS_HELD: bool = cfg!(not(target_has_atomic = "32"));
+
     /// No call running, not retired.
     pub const fn new() -> Self {
-        Self(AtomicU32::new(0))
+        #[cfg(target_has_atomic = "32")]
+        let word = AtomicWord(core::sync::atomic::AtomicU32::new(0));
+        #[cfg(not(target_has_atomic = "32"))]
+        let word = HeldWord(core::cell::Cell::new(0));
+        Self(Counter(word))
     }
 
     /// Count one more call: `false` once the row is retired, and past the most calls one word
     /// counts.
     pub fn begin(&self) -> bool {
-        let mut seen = self.0.load(Ordering::Acquire);
-        loop {
-            if seen & RETIRED != 0 || seen & CALLS == CALLS {
-                return false;
-            }
-            match self.0.compare_exchange_weak(
-                seen,
-                seen.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(now) => seen = now,
-            }
-        }
+        self.0.begin()
     }
 
     /// Count one call fewer: `true` when it was the last call of a retired row, whose letting go
-    /// is then the caller's. Called once for each [`Self::begin`] that returned `true`.
+    /// is then the caller's. Called once for each [`Self::begin`] that returned `true`, with the
+    /// tables held where [`Self::ENDS_HELD`].
     pub fn end(&self) -> bool {
-        self.0.fetch_sub(1, Ordering::AcqRel) == RETIRED | 1
+        self.0.end()
     }
 
     /// Retire the row: no call begins from here. `true` when no call runs, so the row may be let
     /// go of now; else the call that ends last says so ([`Self::end`]). Called once.
     pub fn retire(&self) -> bool {
-        self.0.fetch_or(RETIRED, Ordering::AcqRel) & CALLS == 0
+        self.0.retire()
     }
 
     /// Whether the row is retired and no call of it runs.
     pub fn drained(&self) -> bool {
-        self.0.load(Ordering::Acquire) == RETIRED
+        self.0.drained()
     }
 }
 
@@ -99,7 +175,7 @@ pub trait RowCallback {
     ///
     /// `call` was begun on a row that has not moved since, where [`Self::READS_ROW_IN_PLACE`]
     /// says a call reads it: a row is let go of only once its last call ended, so it is still in
-    /// its table.
+    /// its table. Where [`CallLatch::ENDS_HELD`] the tables are held, as they were at the begin.
     unsafe fn end(call: Self::Call) -> bool;
 
     /// Retire the row, with the tables held: `true` when no call of it runs, so it may be let go
@@ -149,7 +225,6 @@ called_while_held!(crate::slot_observer::NoSink);
 /// Neither `Send` nor `Sync`: whether a C program's context may be used from another thread is
 /// the program's, so a door that hands a closure to the tables of several threads wraps it in a
 /// type of its own and states why that is sound.
-#[cfg(target_has_atomic = "32")]
 pub struct CClosure<Call: Copy> {
     call: Call,
     context: *mut c_void,
@@ -157,7 +232,6 @@ pub struct CClosure<Call: Copy> {
     latch: CallLatch,
 }
 
-#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> CClosure<Call> {
     /// The closure `call`, `context`, `drop`.
     ///
@@ -175,7 +249,6 @@ impl<Call: Copy> CClosure<Call> {
     }
 }
 
-#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> Drop for CClosure<Call> {
     fn drop(&mut self) {
         if let Some(drop) = self.drop.take() {
@@ -187,7 +260,6 @@ impl<Call: Copy> Drop for CClosure<Call> {
 }
 
 /// A call of a [`CClosure`]: what the door calls, and where the latch the call ends on lies.
-#[cfg(target_has_atomic = "32")]
 pub struct CCall<Call> {
     /// The closure's `call`.
     pub call: Call,
@@ -196,7 +268,6 @@ pub struct CCall<Call> {
     latch: NonNull<CallLatch>,
 }
 
-#[cfg(target_has_atomic = "32")]
 impl<Call: Copy> RowCallback for CClosure<Call> {
     type Call = CCall<Call>;
 
@@ -223,17 +294,17 @@ impl<Call: Copy> RowCallback for CClosure<Call> {
 
 /// A Rust closure and the latch of its calls, shared with every call of it: the form a callback of
 /// a heap build takes, whose table may move its rows while a call runs.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub struct ArcCallback<F>(alloc::sync::Arc<Shared<F>>);
 
 /// What an [`ArcCallback`] and its calls share.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub struct Shared<F> {
     latch: CallLatch,
     callback: F,
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<F> Shared<F> {
     /// The closure.
     pub fn callback(&self) -> &F {
@@ -241,7 +312,7 @@ impl<F> Shared<F> {
     }
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<F> ArcCallback<F> {
     /// `callback`, with no call running.
     pub fn new(callback: F) -> Self {
@@ -252,7 +323,7 @@ impl<F> ArcCallback<F> {
     }
 }
 
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 impl<F> RowCallback for ArcCallback<F> {
     type Call = alloc::sync::Arc<Shared<F>>;
 
@@ -274,7 +345,7 @@ impl<F> RowCallback for ArcCallback<F> {
     }
 }
 
-#[cfg(all(test, target_has_atomic = "32"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -285,15 +356,15 @@ mod tests {
     }
 
     /// A retired latch begins no call, and exactly one party is told it may let the row go: the
-    /// retirer when no call ran, else the call that ends last.
-    #[test]
-    fn the_last_to_leave_a_retired_row_lets_it_go() {
-        let idle = CallLatch::new();
+    /// retirer when no call ran, else the call that ends last. The same rules over the atomic word
+    /// and the held one.
+    fn the_last_to_leave_a_retired_row_lets_it_go<W: Word + Default>() {
+        let idle = Counter::<W>::default();
         assert!(idle.retire(), "no call runs: the retirer lets it go");
         assert!(idle.drained());
         assert!(!idle.begin(), "a retired row begins no call");
 
-        let busy = CallLatch::new();
+        let busy = Counter::<W>::default();
         assert!(busy.begin() && busy.begin());
         assert!(!busy.retire(), "two calls run: not the retirer's");
         assert!(!busy.drained());
@@ -301,9 +372,20 @@ mod tests {
         assert!(busy.end(), "the last call of a retired row lets it go");
         assert!(busy.drained());
 
-        let live = CallLatch::new();
+        let live = Counter::<W>::default();
         assert!(live.begin());
         assert!(!live.end(), "a live row is let go of by nobody");
+    }
+
+    #[cfg(target_has_atomic = "32")]
+    #[test]
+    fn the_atomic_latch_lets_a_retired_row_go_at_its_last_call() {
+        the_last_to_leave_a_retired_row_lets_it_go::<AtomicWord>();
+    }
+
+    #[test]
+    fn the_held_latch_lets_a_retired_row_go_at_its_last_call() {
+        the_last_to_leave_a_retired_row_lets_it_go::<HeldWord>();
     }
 
     /// The C form hands a call its `call` and `context`, and runs `drop(context)` once, when it
@@ -334,7 +416,7 @@ mod tests {
     }
 
     /// The Rust form's call holds the closure itself, so the row may move while it runs.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr", target_has_atomic = "32"))]
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     #[test]
     fn a_rust_closures_call_holds_the_closure() {
         let row = ArcCallback::new(|x: u32| x + 1);

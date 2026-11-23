@@ -202,8 +202,8 @@ pub mod row_pool;
 
 /// The callback a row of the session's tables owns, a C closure's three values or a Rust closure,
 /// and the latch its calls are counted on, so a row is let go of after its last call (P11).
-/// Unconditional, like [`slot_map`]; the latched forms exist where the target has the atomic
-/// word their latch is.
+/// Unconditional, like [`slot_map`]: on a target with no atomic read-modify-write the latch is a
+/// count the tables' lock guards.
 pub mod row_callback;
 
 /// Fixed-capacity slot maps: rows named by generation-checked handles, pinned while a call of
