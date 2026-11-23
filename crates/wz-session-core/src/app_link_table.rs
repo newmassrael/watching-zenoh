@@ -1009,7 +1009,14 @@ impl AppLinkTable {
             ProgramEvent::Writable => {
                 // Compared for equality only, so a count that wrapped still tells two apart.
                 link.writables = link.writables.wrapping_add(1);
-                link.drive(AppLinkEvent::LinkWritable)
+                let mut effects = link.drive(AppLinkEvent::LinkWritable);
+                // An open link that holds a remainder has no transition on a writable, but its
+                // writer waits for the program to take bytes again, to offer it what it holds.
+                if link.state() == AppLinkState::Open && !link.remainder.is_empty() {
+                    let writer = link.writer.take();
+                    effects.absorb(link.wake(writer));
+                }
+                effects
             }
         })
     }
@@ -1626,6 +1633,35 @@ mod tests {
             room: false,
         };
         assert!(table.wait_link(link, nothing, &waker));
+    }
+
+    /// A wait for room on an open link that holds a remainder is woken by the program's writable,
+    /// which has no transition while the link is open: the writer offers the program what it holds.
+    /// Turned red by a writable that wakes only a blocked link's writer.
+    #[test]
+    fn a_writable_wakes_a_room_wait_on_a_link_that_holds_a_remainder() {
+        let mut table = AppLinkTable::new();
+        let link = open_stream(&mut table);
+        table
+            .hold_remainder(link, b"held")
+            .expect("an open link holds a remainder");
+        let (count, waker) = counter();
+        let room = LinkInterest {
+            input: false,
+            room: true,
+        };
+        assert!(
+            !table.wait_link(link, room, &waker),
+            "a remainder takes the room"
+        );
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .event(link, ProgramEvent::Writable)
+                .expect("an open link")),
+            1
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "the writer is woken");
+        assert_eq!(table.state(link), Some(AppLinkState::Open));
     }
 
     #[test]
