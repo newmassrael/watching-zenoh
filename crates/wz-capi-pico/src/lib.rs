@@ -497,8 +497,6 @@ pub mod revision;
 // `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits
 // inside `#ifdef Z_FEATURE_UNSTABLE_API` and `#if Z_FEATURE_QUERY == 1`.
 #[cfg(all(feature = "unstable-api", feature = "query"))]
-// Totality debt TD-179 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod codec;
 // Totality debt TD-158 (docs/c-abi-architecture.md section 7).
