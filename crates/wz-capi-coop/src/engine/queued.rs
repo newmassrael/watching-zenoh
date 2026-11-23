@@ -6,12 +6,11 @@
 //! gets) and almost always finds it empty: the word answers that with no lock taken, and the lock
 //! is taken only for what is there.
 
-use alloc::sync::Arc;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::os::{Mutex, MutexGuard};
-use wz_capi_port::{MatchId, MatchingSink};
+use wz_capi_port::MatchId;
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 
@@ -93,7 +92,7 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
 /// first's row away rather than a row of its own, and the table needs a row for each listener the
 /// build admits and no more.
 pub(crate) struct MatchFlips {
-    flips: BoundedVec<(MatchId, bool, MatchingSink), { caps::MAX_MATCHING_LISTENERS }, Static>,
+    flips: BoundedVec<(MatchId, bool), { caps::MAX_MATCHING_LISTENERS }, Static>,
 }
 
 impl MatchFlips {
@@ -103,27 +102,25 @@ impl MatchFlips {
         }
     }
 
-    /// The status of `listener`, whose callback is `sink`, changed to `matching`. A change back
-    /// takes the waiting row away; the same change again finds it already waiting and is that
-    /// change, not a second one. The row carries the callback, so the change is handed with no
-    /// look for it.
-    pub(crate) fn flip(&mut self, listener: MatchId, matching: bool, sink: &MatchingSink) {
-        if let Some(at) = self.flips.iter().position(|(id, _, _)| *id == listener) {
+    /// The status of `listener` changed to `matching`. A change back takes the waiting row away;
+    /// the same change again finds it already waiting and is that change, not a second one.
+    pub(crate) fn flip(&mut self, listener: MatchId, matching: bool) {
+        if let Some(at) = self.flips.iter().position(|(id, _)| *id == listener) {
             if self
                 .flips
                 .get(at)
-                .is_some_and(|(_, waiting, _)| *waiting != matching)
+                .is_some_and(|&(_, waiting)| waiting != matching)
             {
                 self.flips.remove(at);
             }
             return;
         }
-        let held = self.flips.push((listener, matching, Arc::clone(sink)));
+        let held = self.flips.push((listener, matching));
         debug_assert!(held.is_ok(), "a row for each listener the build admits");
     }
 
-    /// The change found first, with its listener's callback, to hand to it.
-    pub(crate) fn next(&mut self) -> Option<(MatchId, bool, MatchingSink)> {
+    /// The change found first, to hand to its listener.
+    pub(crate) fn next(&mut self) -> Option<(MatchId, bool)> {
         if self.flips.is_empty() {
             None
         } else {
@@ -133,7 +130,7 @@ impl MatchFlips {
 
     /// `listener` is gone: nothing it was owed is handed.
     pub(crate) fn forget(&mut self, listener: MatchId) {
-        self.flips.retain(|(id, _, _)| *id != listener);
+        self.flips.retain(|(id, _)| *id != listener);
     }
 
     /// Whether no change is owed.
@@ -170,53 +167,19 @@ mod tests {
         assert!(!queue.is_pending());
     }
 
-    /// A listener's callback that does nothing.
-    fn sink() -> MatchingSink {
-        Arc::new(|_matching: bool| {})
-    }
-
-    /// The next change `flips` hands, without its callback.
-    fn next(flips: &mut MatchFlips) -> Option<(MatchId, bool)> {
-        flips.next().map(|(id, matching, _)| (id, matching))
-    }
-
     /// The changes of matching statuses are handed in the order they were found; a change and the
     /// change back before the first was handed leave the listener where it stood and are handed as
     /// nothing.
     #[test]
     fn a_change_and_its_change_back_are_handed_as_nothing() {
         let mut flips = MatchFlips::new();
-        flips.flip(1, true, &sink());
-        flips.flip(2, true, &sink());
-        flips.flip(1, false, &sink());
-        assert_eq!(next(&mut flips), Some((2, true)));
-        assert_eq!(next(&mut flips), None, "listener 1 stands where it stood");
-        flips.flip(1, true, &sink());
-        assert_eq!(next(&mut flips), Some((1, true)));
-    }
-
-    /// A change carries the callback of the listener it is for, which the delivery calls with no
-    /// look for it.
-    #[test]
-    fn a_change_carries_its_listeners_callback() {
-        use core::sync::atomic::AtomicUsize;
-        let told = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&told);
-        let sink: MatchingSink = Arc::new(move |matching: bool| {
-            if matching {
-                counted.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        let mut flips = MatchFlips::new();
-        flips.flip(4, true, &sink);
-        let (id, matching, carried) = flips.next().expect("the change");
-        assert_eq!((id, matching), (4, true));
-        carried(matching);
-        assert_eq!(
-            told.load(Ordering::SeqCst),
-            1,
-            "the listener's own callback"
-        );
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(1, false);
+        assert_eq!(flips.next(), Some((2, true)));
+        assert_eq!(flips.next(), None, "listener 1 stands where it stood");
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
     }
 
     /// The same change found twice before it was handed is that one change, handed once: a second
@@ -224,23 +187,23 @@ mod tests {
     #[test]
     fn the_same_change_found_twice_is_handed_once() {
         let mut flips = MatchFlips::new();
-        flips.flip(1, true, &sink());
-        flips.flip(1, true, &sink());
-        assert_eq!(next(&mut flips), Some((1, true)));
-        assert_eq!(next(&mut flips), None);
+        flips.flip(1, true);
+        flips.flip(1, true);
+        assert_eq!(flips.next(), Some((1, true)));
+        assert_eq!(flips.next(), None);
     }
 
     /// A listener that is gone is handed nothing it was owed, and the others keep their order.
     #[test]
     fn a_listener_that_is_gone_is_handed_nothing() {
         let mut flips = MatchFlips::new();
-        flips.flip(1, true, &sink());
-        flips.flip(2, true, &sink());
-        flips.flip(3, false, &sink());
+        flips.flip(1, true);
+        flips.flip(2, true);
+        flips.flip(3, false);
         flips.forget(2);
-        assert_eq!(next(&mut flips), Some((1, true)));
-        assert_eq!(next(&mut flips), Some((3, false)));
-        assert_eq!(next(&mut flips), None);
+        assert_eq!(flips.next(), Some((1, true)));
+        assert_eq!(flips.next(), Some((3, false)));
+        assert_eq!(flips.next(), None);
     }
 
     /// Every listener the build admits has a row: as many listeners as the build's value each owe a
@@ -250,11 +213,11 @@ mod tests {
         let mut flips = MatchFlips::new();
         let listeners = caps::MAX_MATCHING_LISTENERS as u64;
         for id in 0..listeners {
-            flips.flip(id, true, &sink());
+            flips.flip(id, true);
         }
         for id in 0..listeners {
-            assert_eq!(next(&mut flips), Some((id, true)));
+            assert_eq!(flips.next(), Some((id, true)));
         }
-        assert_eq!(next(&mut flips), None);
+        assert_eq!(flips.next(), None);
     }
 }

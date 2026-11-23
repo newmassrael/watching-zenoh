@@ -1744,8 +1744,8 @@ struct MatchEntry {
     plane: FilterPlane,
     watch: u64,
     keyexpr: RowKey,
-    /// The listener's callback, which every change of its status carries out of the lock
-    /// (`MatchFlips`); the row holds it to the listener's end, and is let go of with no lock held.
+    /// The listener's callback, copied out of the row under the session's lock for each change of
+    /// its status and called after it; let go of with the row, with no lock held.
     sink: MatchingSink,
 }
 
@@ -4356,11 +4356,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         while self.matching.is_pending() {
             // Popped under the queue's lock alone, which is released before the sink runs.
             let next = self.matching.lock().next();
-            let Some((_, matching, sink)) = next else {
+            let Some((id, matching)) = next else {
                 break;
             };
             handed = true;
-            sink(matching);
+            // The callback is copied out of the listener's row under the session's lock and called
+            // after it; a listener undeclared since the change was found is handed nothing.
+            let sink = self.live().and_then(|core| {
+                core.0
+                    .matches
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| Arc::clone(&entry.sink))
+            });
+            if let Some(sink) = sink {
+                sink(matching);
+            }
         }
         let asked = self.hand_queries();
         handed || asked
@@ -5853,17 +5864,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = core.next_match;
         core.next_match += 1;
         let local = count_local && Self::local_matches(core, plane, keyexpr);
-        // Each change carries the listener's callback with it, so a registration that already
-        // matches, and reports it as it registers, hands a change a delivery can call at once. The
-        // registry's watch reaches the callback through the row and holds no count of it, so the
-        // row's end (undeclared, or the session closed) is the callback's end.
+        // A change is queued by the listener's id; the delivery takes the callback from the
+        // listener's row, so the row is the callback's one holder and its end is the callback's.
         let queue = self.matching.clone();
-        let reported = Arc::downgrade(&sink);
-        let report = BoxedMatchingSink::new(move |matching| {
-            if let Some(sink) = reported.upgrade() {
-                queue.lock().flip(id, matching, &sink);
-            }
-        });
+        let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         // An already-matching registration is told so by the registry as it registers, as
@@ -5922,8 +5926,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 Some(entry.sink)
             }
         });
-        // The changes still owed go first, so the row's callback, let go of here with no lock
-        // held, is the last holder of it.
+        // Nothing it was owed is handed; its row's callback is let go of here, with no lock held.
         self.matching.lock().forget(id);
         drop(gone);
     }
@@ -6929,14 +6932,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // with no lock held.
         #[cfg(feature = "queryable")]
         drop(core::mem::take(&mut *self.plane.queries.lock()));
-        // The changes still owed hold their listeners' callbacks: let go of with them.
-        loop {
-            let next = self.matching.lock().next();
-            let Some(change) = next else {
-                break;
-            };
-            drop(change);
-        }
     }
 
     fn is_closed(&self) -> bool {
