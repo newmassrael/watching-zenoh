@@ -208,57 +208,75 @@ struct AnswerArea<'a> {
 }
 
 impl<'a> AnswerArea<'a> {
+    /// The alignment of the area's words.
+    const WORD_ALIGN: usize = align_of::<usize>();
+
+    /// The most bytes the words' alignment skips at the start of the area.
+    const WORD_SLACK: usize = Self::WORD_ALIGN - 1;
+
     /// The bytes an area for `shape` takes, with the slack that aligns its words wherever the
     /// program's storage starts; `None` when the count overflows.
     fn bytes(shape: &Shape) -> Option<usize> {
         let cells = shape.instances.checked_mul(shape.depth)?;
         let words = cells.checked_mul(2)?.checked_mul(size_of::<usize>())?;
         let copies = cells.checked_add(1)?.checked_mul(shape.frame_max)?;
-        words
-            .checked_add(copies)?
-            .checked_add(align_of::<usize>() - 1)
+        words.checked_add(copies)?.checked_add(Self::WORD_SLACK)
     }
 
-    /// The area over `bytes`, at least [`Self::bytes`] of `shape` long, which it zeroes.
-    fn over(bytes: &'a mut [u8], shape: &Shape) -> Self {
+    /// The area over `bytes`, which it zeroes; `None` when `bytes` is shorter than
+    /// [`Self::bytes`] of `shape`.
+    fn over(bytes: &'a mut [u8], shape: &Shape) -> Option<Self> {
         bytes.fill(0);
         let cells = shape.ring_cells();
-        let pad = (bytes.as_ptr() as usize).wrapping_neg() % align_of::<usize>();
-        let (_, aligned) = bytes.split_at_mut(pad);
-        let (words, copies) = aligned.split_at_mut(2 * cells * size_of::<usize>());
-        // SAFETY: `words` starts aligned for a `usize` and holds `2 * cells` of them, every byte
+        let pad = (bytes.as_ptr() as usize).wrapping_neg() % Self::WORD_ALIGN;
+        let (_, aligned) = bytes.split_at_mut_checked(pad)?;
+        let word_count = cells.checked_mul(2)?;
+        let (words, copies) =
+            aligned.split_at_mut_checked(word_count.checked_mul(size_of::<usize>())?)?;
+        // SAFETY: `words` starts aligned for a `usize` and holds `word_count` of them, every byte
         // zero, which is a `usize`; nothing else reaches those bytes while the area lives.
         let words: &'a mut [usize] = unsafe {
-            core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<usize>(), 2 * cells)
+            core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<usize>(), word_count)
         };
-        let (order, lens) = words.split_at_mut(cells);
-        let (frames, release) = copies.split_at_mut(cells * shape.frame_max);
-        Self {
+        let (order, lens) = words.split_at_mut_checked(cells)?;
+        let (frames, release) = copies.split_at_mut_checked(cells.checked_mul(shape.frame_max)?)?;
+        Some(Self {
             order,
             lens,
             frames,
-            release: &mut release[..shape.frame_max],
+            release: release.get_mut(..shape.frame_max)?,
             frame_max: shape.frame_max,
-        }
+        })
     }
 
     /// Begin an answer of `cache` and copy each frame it lists into the area, in its order: how
     /// many.
     fn snapshot(&mut self, cache: &mut ReplayPublisher<'_>) -> usize {
         let listed = cache.begin_answer(self.order);
-        for (slot, &cell) in self.order[..listed].iter().enumerate() {
+        let rows = self.order.iter().take(listed).zip(self.lens.iter_mut());
+        for (slot, (&cell, len)) in rows.enumerate() {
             let frame = cache.frame(cell);
-            let at = slot * self.frame_max;
-            self.frames[at..at + frame.len()].copy_from_slice(frame);
-            self.lens[slot] = frame.len();
+            // Each slot's copy has `frame_max` bytes, which a frame of the cache does not pass.
+            let copy = slot
+                .checked_mul(self.frame_max)
+                .and_then(|at| self.frames.get_mut(at..at.checked_add(frame.len())?));
+            *len = match copy {
+                Some(copy) => {
+                    copy.copy_from_slice(frame);
+                    frame.len()
+                }
+                None => 0,
+            };
         }
         listed
     }
 
     /// The copy of the `slot`th frame of the last snapshot.
     fn frame(&self, slot: usize) -> &[u8] {
-        let at = slot * self.frame_max;
-        &self.frames[at..at + self.lens[slot]]
+        let len = self.lens.get(slot).copied().unwrap_or(0);
+        slot.checked_mul(self.frame_max)
+            .and_then(|at| self.frames.get(at..at.checked_add(len)?))
+            .unwrap_or_default()
     }
 }
 
@@ -417,7 +435,10 @@ impl Shared {
             let Some(len) = next else {
                 return;
             };
-            let _ = self.put(&out[..len]);
+            let Some(frame) = out.get(..len) else {
+                return;
+            };
+            let _ = self.put(frame);
         }
     }
 
@@ -570,6 +591,11 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
                 Ok(_) => Err(CreateRefused::StorageShort),
             },
         };
+        // The answer's area is what the shape's bytes left after the rings, so it holds one.
+        let made = made.and_then(|(cache, answer)| {
+            let answer = AnswerArea::over(answer, &shape).ok_or(CreateRefused::StorageShort)?;
+            Ok((cache, answer))
+        });
         let (cache, answer) = match made {
             Ok(made) => made,
             Err(why) => {
@@ -583,7 +609,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
             live_segments: Mutex::new(None),
             chunk_bytes: Mutex::new(0),
             shape: policy.reply_shape,
-            answer: Mutex::new(AnswerArea::over(answer, &shape)),
+            answer: Mutex::new(answer),
             // The loan's words, copied as a C program copies the struct its header declares.
             publisher: core::ptr::read(publisher),
         });
@@ -980,7 +1006,7 @@ mod tests {
                     .record(*instance, time as u64, frame)
                     .expect("recorded");
             }
-            let mut area = AnswerArea::over(answer_bytes, &shape);
+            let mut area = AnswerArea::over(answer_bytes, &shape).expect("an area over its bytes");
             assert_eq!(area.snapshot(&mut cache), 3, "offset {offset}");
             let copies: Vec<&[u8]> = (0..3).map(|slot| area.frame(slot)).collect();
             assert_eq!(copies, expected, "offset {offset}");

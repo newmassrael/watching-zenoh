@@ -671,8 +671,6 @@ pub mod query;
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-159 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_publisher;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
