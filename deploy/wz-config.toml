@@ -2199,7 +2199,7 @@ kconfig = "WZ_LIMIT_MAX_SUBSCRIPTIONS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2213,12 +2213,8 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration."
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its subscribers in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `z_result_t res = z_declare_subscriber(z_loan(s2), sub, z_loan(rids2[i]), z_move(callback), NULL);`), so a session of the pico ABI takes every subscriber a pico program of its tests declares."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) subscribers: HashMap<Id, Arc<SubscriberState>>,`"]
-
-[limit.pico_preset]
-value = 3
-reason = "zenoh-pico keeps its subscribers in a list on the heap with no count of its own; the most its API tests hold on one session at once is three (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `assert_ok(z_declare_subscriber(z_session_loan(&s2), &sub2, z_view_keyexpr_loan(&k_pub),`), and each of its examples holds one."
 
 [[limit]]
 id = "MATCH_MEMO_SLOTS"
@@ -2379,7 +2375,7 @@ kconfig = "WZ_LIMIT_MAX_QUERYABLES"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2393,12 +2389,8 @@ while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration."
+reason = "No key of upstream's configuration bounds it: a zenoh session holds its queryables in a map that grows with each declaration, and zenoh-pico in a list on the heap with no constant of its own. The default is the most zenoh-pico's own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `assert(z_declare_queryable(z_loan(s2), qle, z_loan(ke), z_move(callback), NULL) == _Z_RES_OK);`), so a session of the pico ABI takes every queryable a pico program of its tests declares."
 cite = ["`zenoh/src/api/session.rs` @ `pub(crate) queryables: HashMap<Id, Arc<QueryableState>>,`"]
-
-[limit.pico_preset]
-value = 4
-reason = "zenoh-pico bounds its queryables by no count; the most its API tests hold on one session at once is four, a queryable on a key no get names and three more, in one test of its matching listeners (`vendor/zenoh-pico/tests/z_api_matching_test.c` @ `void test_matching_listener_querier(bool complete, bool background) {`), and each of its examples holds one."
 
 [[limit]]
 id = "MAX_PENDING_QUERIES"
@@ -2538,7 +2530,7 @@ kconfig = "WZ_LIMIT_MAX_PUBLISHERS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 16
+default = 100
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2553,11 +2545,7 @@ refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico has no constant for them; the default is MAX_SUBSCRIPTIONS's, the other side of the same traffic."
-
-[limit.pico_preset]
-value = 2
-reason = "zenoh-pico bounds its publishers by no count; its examples and its API tests hold one at a time on a session, and the pico API program of the MCU speed matrix (deploy/zephyr-mcu-speed) holds two, the one it measures and the one that stops its peer."
+reason = "No key of upstream's configuration bounds the publishers a session declares, and zenoh-pico keeps them in a list on the heap with no constant of its own; the default is the most its own tests hold on one session at once, a hundred in its client test (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `if (z_declare_publisher(z_loan(s1), pub, z_loan(rids1[i]), NULL) < 0) {`), so a session of the pico ABI takes every publisher a pico program of its tests declares."
 
 [[limit]]
 id = "MAX_QUERIERS"
@@ -2618,7 +2606,7 @@ kconfig = "WZ_LIMIT_MAX_DECLARED_KEYEXPRS"
 kind = "bound"
 driven = "local"
 on_heap = "advisory"
-default = 80
+default = 332
 storage = "both"
 scope = "session"
 binding_heap = "open"
@@ -2633,11 +2621,11 @@ one more distinct key is refused while the table is full.
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (16 subscribers, 16 queryables, 8 tokens, 8 liveliness subscribers, 16 publishers, 16 queriers)."
+reason = "No key of upstream's configuration bounds the key expressions a session declares, and zenoh-pico has no constant for them; the default is one key for each entity the other defaults admit (100 subscribers, 100 queryables, 8 tokens, 8 liveliness subscribers, 100 publishers, 16 queriers)."
 
 [limit.pico_preset]
-value = 14
-reason = "zenoh-pico bounds its declared keys by no count; as the default is, the preset is one key for each entity the other values of the preset admit (3 subscribers, 4 queryables, 2 tokens, 1 liveliness subscriber, 2 publishers, 2 queriers)."
+value = 306
+reason = "zenoh-pico bounds its declared keys by no count, and its client test holds a hundred on one session at once (`vendor/zenoh-pico/tests/z_client_test.c` @ `#define SET 100`, `vendor/zenoh-pico/tests/z_client_test.c` @ `z_declare_keyexpr(z_loan(s1), &expr, z_loan(ke));`); as the default is, the preset is one key for each entity the other values of the preset admit (100 subscribers, 100 queryables, 2 tokens, 2 liveliness subscribers, 100 publishers, 2 queriers)."
 
 [[limit]]
 id = "HELD_SESSIONS"
