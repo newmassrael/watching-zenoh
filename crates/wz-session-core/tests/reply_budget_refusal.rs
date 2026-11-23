@@ -132,7 +132,7 @@ fn request(rid: wz_session_core::wire_id::RequestId) -> NetworkMessage {
     NetworkMessage::Request(Box::new(
         RequestQueryBuilder::new(
             rid,
-            crate::wire_key::WireKey::literal("demo/a").expect("a literal key"),
+            wz_session_core::wire_key::WireKey::literal("demo/a").expect("a literal key"),
         )
         .build()
         .expect("build"),
