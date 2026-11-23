@@ -18,11 +18,12 @@
 
 use std::ffi::CString;
 
+use wz_capi_pico::abi::z_owned_keyexpr_t;
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_declare_keyexpr,
     z_declare_publisher, z_keyexpr_drop, z_keyexpr_loan, z_keyexpr_move, z_open, z_owned_config_t,
-    z_owned_keyexpr_t, z_owned_publisher_t, z_owned_session_t, z_publisher_drop, z_publisher_move,
-    z_session_drop, z_session_loan, z_session_loan_mut, z_session_move, z_view_keyexpr_from_str,
+    z_owned_publisher_t, z_owned_session_t, z_publisher_drop, z_publisher_move, z_session_drop,
+    z_session_loan, z_session_loan_mut, z_session_move, z_view_keyexpr_from_str,
     z_view_keyexpr_loan, z_view_keyexpr_t, zp_config_insert, Z_CONFIG_LISTEN_KEY,
     Z_CONFIG_MODE_KEY, Z_ERR_GENERIC, Z_OK,
 };
