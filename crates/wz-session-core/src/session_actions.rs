@@ -10205,23 +10205,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = self.held_answer.first() else {
             return false;
         };
-        // A copy of the hold's own type takes whatever the hold has: the session's storage on
-        // `session-slot`, and a buffer as long as the answer on every other profile.
-        let mut copy = HeldAnswer::default();
-        let copied = R::with_mutex_mut(slot, |held| copy.extend_from_slice(&held[..]).is_ok());
-        let len = copy.len();
-        if !copied || len == 0 {
-            return false;
-        }
+        // The heap profile copies the bytes out of the hold before the send, which takes locks of
+        // its own: a buffer as long as the answer.
         #[cfg(not(feature = "tx-lend-only"))]
         {
+            let mut copy = HeldAnswer::default();
+            let copied = R::with_mutex_mut(slot, |held| copy.extend_from_slice(&held[..]).is_ok());
+            if !copied || copy.is_empty() {
+                return false;
+            }
             self.send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
             true
         }
+        // The lend-only send writes the bytes from the hold straight into the slot the link
+        // lends, under the hold's lock alone: the slot is taken before and the frame sent after,
+        // as the lend-only Init send writes its staged chain (`send_init_lent`), so no copy of
+        // the answer is made.
         #[cfg(feature = "tx-lend-only")]
         {
+            let len = R::with_mutex_mut(slot, |held| held.len());
+            if len == 0 {
+                return false;
+            }
             self.send_control_lent(Reliability::Reliable, HANDSHAKE_LANE, len, |buf| {
-                buf.append(&copy[..])
+                R::with_mutex_mut(slot, |held| {
+                    if held.is_empty() {
+                        return Err(sce_forge_runtime::codec::CodecError::BufferOverflow);
+                    }
+                    buf.append(&held[..])
+                })
             })
             .is_ok()
         }
