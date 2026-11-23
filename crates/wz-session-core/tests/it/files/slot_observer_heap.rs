@@ -346,20 +346,22 @@ fn for_one_session_the_slot_observer_does_what_the_application_observer_does() {
     let mut ap = ApplicationLayerObserver::new();
     let ap_seen = Arc::new(Mutex::new(Vec::new()));
     let into = ap_seen.clone();
-    ap.subscribers
-        .register_sink(
-            "**",
-            Locality::Any,
-            BoxedSink::new(move |sample: &dyn SampleView| {
-                into.lock()
-                    .expect("not poisoned")
-                    .push(sample.keyexpr().to_string());
-            }),
-        )
-        .expect("register the subscriber");
-    ap.queryables
-        .register_sink("demo/q/**", Locality::Any, false, two_replies())
-        .expect("register the queryable");
+    ap.register_subscriber(
+        "**",
+        Locality::Any,
+        BoxedSink::new(move |sample: &dyn SampleView| {
+            into.lock()
+                .expect("not poisoned")
+                .push(sample.keyexpr().to_string());
+        }),
+    )
+    .expect("register the subscriber");
+    ap.with_app(|app_half| {
+        app_half
+            .queryables
+            .register_sink("demo/q/**", Locality::Any, false, two_replies())
+            .expect("register the queryable")
+    });
     let ap_sent = Sent::default();
     for messages in frames() {
         let outcome = frame(messages);
