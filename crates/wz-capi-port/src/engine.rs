@@ -283,11 +283,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Take one more hold on declaration `mapping_id`, which a holder already holds, so it stays
     /// declared until this hold is let go too ([`Self::release_keyexpr`]); nothing goes on the
     /// wire. The engine's count is the one count of a declaration's holders. A declaration no
-    /// longer held takes none, and an engine that holds no declaration, the provided answer, has
-    /// none to take.
-    fn retain_keyexpr(&self, mapping_id: ExprId) {
-        let _ = mapping_id;
-    }
+    /// longer held takes none. Every engine states it: one that held a declaration and did not
+    /// count this would retract it before its last holder let go.
+    fn retain_keyexpr(&self, mapping_id: ExprId);
 
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
     fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
