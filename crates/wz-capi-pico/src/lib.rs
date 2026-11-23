@@ -727,8 +727,6 @@ pub mod snapshot;
 // Totality debt TD-198 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::arithmetic_side_effects)]
 pub mod stream_supervision;
-// Totality debt TD-190 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod string_array;
 #[cfg(feature = "supervision")]
 pub mod supervision;
