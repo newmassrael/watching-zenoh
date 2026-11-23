@@ -28,6 +28,9 @@ use crate::CoopConfig;
 const PAYLOAD: usize = 60 * 1024;
 /// The most droppable publishes the slow stream is given to fill.
 const FILL_AT_MOST: usize = 4_096;
+/// How long a droppable publish waits for a stream that takes nothing: zenoh's default
+/// `wait_before_drop`, where the pico profile's waits as long as a blocking one.
+const DROP_WAIT_US: u64 = 1_000;
 
 fn publish(congestion: CongestionControl) -> PublishOptions {
     PublishOptions::put()
@@ -53,7 +56,8 @@ fn stepped(config: CoopConfig) -> Arc<Engine> {
 
 /// A listener of one outbound slot holds two faces: a good peer, which came first, and a slow one
 /// that stops reading. The slow peer's stream is filled until its link holds the slot for a frame
-/// it has not finished. Then a droppable publish is dropped on the good face at once, and a
+/// it has not finished. Then a droppable publish is dropped on the good face at once (and on the
+/// slow face within its own `wait_before_drop`, its stream taking nothing), and a
 /// blocking one waits for the slot without holding the session (the session answers meanwhile),
 /// and once the slow peer reads again it is sent: the good peer hears it, and never the dropped
 /// one.
@@ -70,7 +74,10 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
         zid: Some(vec![0xa1; 4]),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         limits,
+        // A droppable publish waits at most a millisecond for the slow peer's own stream, which
+        // the pool has nothing to do with; a blocking one waits long past the test's steps.
         tx_queue: TxQueueConf {
+            wait_before_drop_us: DROP_WAIT_US,
             wait_before_close_us: 30_000_000,
             ..client_config().tx_queue
         },
