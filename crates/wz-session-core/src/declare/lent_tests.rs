@@ -140,6 +140,45 @@ fn a_lent_subscriber_declaration_reaches_the_remote_subscribers_as_the_owned_one
     assert!(lent.has_matching("c/d") && !lent.has_matching("a/b"));
 }
 
+/// The final of the initial interest ends the peer's first declarations in either form: a
+/// sender reads an absent subscriber as none only after it, and the declaration watch is told of
+/// it. Another interest's final and an unsolicited one end nothing in either form.
+#[test]
+fn a_lent_initial_final_ends_the_peers_first_declarations_as_the_owned_one_does() {
+    use super::subscriber::RemoteSubscriberRegistry;
+    let mut owned = RemoteSubscriberRegistry::new();
+    let mut lent = RemoteSubscriberRegistry::new();
+    let table: HashMap<u64, String> = HashMap::new();
+    for declare in [build_declare_final_reply(7), build_declare_final()] {
+        both_declare(
+            &declare,
+            |event| owned.dispatch_iteration_event(event, &table),
+            |event| lent.dispatch_iteration_event(event, &table),
+        );
+    }
+    assert_eq!(
+        (
+            owned.peer().initial_declarations_final(),
+            lent.peer().initial_declarations_final()
+        ),
+        (false, false),
+        "another interest's final and an unsolicited one end nothing"
+    );
+    both_declare(
+        &build_declare_final_reply(crate::extbound::INITIAL_INTEREST_ID),
+        |event| owned.dispatch_iteration_event(event, &table),
+        |event| lent.dispatch_iteration_event(event, &table),
+    );
+    assert_eq!(
+        (
+            owned.peer().initial_declarations_final(),
+            lent.peer().initial_declarations_final()
+        ),
+        (true, true),
+        "the initial interest's final ends them, lent as owned"
+    );
+}
+
 #[test]
 fn a_lent_queryable_declaration_carries_its_completeness_as_the_owned_one_does() {
     use super::queryable::{QuerierCriterion, RemoteQueryableRegistry};
