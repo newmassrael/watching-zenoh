@@ -1693,7 +1693,7 @@ pub(crate) enum MovedBytes<'a> {
     /// A BORROW of a delivered sample's payload, which its marshal holds past the call.
     Lent(&'a ByteBuf),
     /// The caller's payload, consumed: its storage goes back when this is dropped.
-    Owned(ByteBuf),
+    Owned(core::mem::ManuallyDrop<ByteBuf>),
 }
 
 impl core::ops::Deref for MovedBytes<'_> {
@@ -1702,6 +1702,19 @@ impl core::ops::Deref for MovedBytes<'_> {
         match self {
             Self::Lent(buf) => buf,
             Self::Owned(buf) => buf,
+        }
+    }
+}
+
+impl Drop for MovedBytes<'_> {
+    /// The caller's payload let go, its storage given back; a borrow is its marshal's. One body
+    /// out of line: every door that reads a moved payload or attachment drops one, and the
+    /// payload's drop inlined at each would hold its own copy of giving the storage back.
+    #[inline(never)]
+    fn drop(&mut self) {
+        if let Self::Owned(buf) = self {
+            // SAFETY: the payload is dropped here once, and nothing reads it after.
+            unsafe { core::mem::ManuallyDrop::drop(buf) };
         }
     }
 }
@@ -1731,7 +1744,9 @@ pub(crate) unsafe fn read_moved_bytes<'a>(payload: *mut z_moved_bytes_t) -> Opti
     Some(if borrowed {
         MovedBytes::Lent(&*(handle as *const ByteBuf))
     } else {
-        MovedBytes::Owned(crate::bytes::unbox_bytes(handle as *mut ByteBuf))
+        MovedBytes::Owned(core::mem::ManuallyDrop::new(crate::bytes::unbox_bytes(
+            handle as *mut ByteBuf,
+        )))
     })
 }
 
@@ -2099,6 +2114,67 @@ mod put_options_tests {
                 _this: z_owned_bytes_t::null_value(),
             };
             assert!(read_moved_bytes(&mut empty).is_none());
+        }
+    }
+
+    /// A moved payload of the caller's own is let go when what read it is dropped, and not
+    /// before: the release its constructor was handed runs then, once. A borrow is its marshal's
+    /// and is let go with it. Turned red by a drop that leaves an owned payload's storage held, or
+    /// that lets a borrowed one go.
+    #[test]
+    fn a_moved_payload_is_let_go_when_its_reader_is_dropped() {
+        use super::read_moved_bytes;
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::bytes::{ByteBuf, Release};
+        use core::ffi::c_void;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe extern "C" fn count(_data: *mut c_void, context: *mut c_void) {
+            (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut bytes = *b"held";
+        let released = AtomicUsize::new(0);
+        let context = &released as *const AtomicUsize as *mut c_void;
+        // SAFETY: `bytes` and `released` outlive every payload made over them, and every pointer
+        // handed over is null or points at a live value of its type.
+        unsafe {
+            let mut owned = z_owned_bytes_t::null_value();
+            let made = crate::platform::z_bytes_from_buf(
+                &mut owned,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                Some(count),
+                context,
+            );
+            assert_eq!(made, crate::result::Z_OK);
+            let mut moved = z_moved_bytes_t { _this: owned };
+            let taken = read_moved_bytes(&mut moved).expect("an owned payload is taken");
+            assert_eq!(released.load(Ordering::SeqCst), 0, "held while it is read");
+            drop(taken);
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "let go once, when dropped"
+            );
+
+            let held = ByteBuf::aliased(
+                bytes.as_ptr(),
+                bytes.len(),
+                Release::new(Some(count), bytes.as_mut_ptr().cast(), context),
+            )
+            .expect("room for the record of the bytes");
+            let mut lent = z_moved_bytes_t {
+                _this: z_owned_bytes_t::borrowed((&held as *const ByteBuf).cast()),
+            };
+            drop(read_moved_bytes(&mut lent).expect("a borrow is read"));
+            assert_eq!(
+                released.load(Ordering::SeqCst),
+                1,
+                "a borrow is its marshal's"
+            );
+            drop(held);
+            assert_eq!(released.load(Ordering::SeqCst), 2);
         }
     }
 
