@@ -70,21 +70,23 @@ impl SessionZid {
             return Err(ZidError::LengthOutOfRange { len: src.len() });
         }
         let mut nonzero = false;
-        let mut at = 0;
-        while at < src.len() {
-            if src[at] != 0 {
+        let mut rest = src;
+        while let [byte, tail @ ..] = rest {
+            if *byte != 0 {
                 nonzero = true;
             }
-            at += 1;
+            rest = tail;
         }
         if !nonzero {
             return Err(ZidError::AllZero { len: src.len() });
         }
+        // At most `ZID_MAX` bytes, checked above: the copy walks both together.
         let mut bytes = [0u8; ZID_MAX];
-        let mut i = 0;
-        while i < src.len() {
-            bytes[i] = src[i];
-            i += 1;
+        let (mut into, mut from): (&mut [u8], &[u8]) = (&mut bytes, src);
+        while let ([slot, into_rest @ ..], [byte, from_rest @ ..]) = (into, from) {
+            *slot = *byte;
+            into = into_rest;
+            from = from_rest;
         }
         Ok(Self {
             bytes,
