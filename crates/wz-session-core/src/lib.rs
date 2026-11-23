@@ -1783,12 +1783,6 @@ pub mod foreign_version;
     feature = "codec-close",
     feature = "codec-frame"
 ))]
-// Totality debt TD-001 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
 pub mod passive;
 
 // R311y752 (carry N12) — the container decoded messages are held in, moved down
