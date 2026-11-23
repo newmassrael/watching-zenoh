@@ -129,7 +129,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::sink::{SampleDelivery, SampleView};
+use wz_session_core::sink::{RowAccess, SampleDelivery, SampleView};
 use wz_session_core::timestamp_visibility::{exposed_by, HiddenTimestamp};
 use wz_session_core::unicast_rx::RouterLend;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -1596,10 +1596,11 @@ impl SubscriberRow {
     }
 }
 
-// A call reads its row where it lies, so the rows lie where no table moves them.
+// A call reads its row where it lies, so the rows lie in the session's arena, lent at its open,
+// where no table moves them and the dispatch reads them only through a shared borrow.
 const _: () = assert!(
-    <Lent as wz_session_core::bounded::Storage>::ENFORCES_CAPACITY,
-    "the session's tables lend their rows and never move one"
+    <Lent as wz_session_core::bounded::Storage>::LENT_AT_OPEN,
+    "the session's tables lend their rows from its arena and never move one"
 );
 
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
@@ -1684,10 +1685,16 @@ impl RoundDelivery {
 }
 
 impl SampleDelivery<SubscriberRow, SubscriberHandle> for RoundDelivery {
-    fn deliver(&mut self, id: SubscriberHandle, row: &mut SubscriberRow, sample: &dyn SampleView) {
-        // A row past the most calls one latch counts is handed nothing; an undeclared one is in no
-        // lookup, so no dispatch reaches it.
-        let Some(call) = RowCallback::begin(&*row) else {
+    fn deliver(
+        &mut self,
+        id: SubscriberHandle,
+        row: RowAccess<'_, SubscriberRow>,
+        sample: &dyn SampleView,
+    ) {
+        // The row is read where it lies, shared with the calls of it a delivery makes on another
+        // thread. One past the most calls one latch counts is handed nothing; an undeclared one is
+        // in no lookup, so no dispatch reaches it.
+        let Some(call) = RowCallback::begin(row.row()) else {
             return;
         };
         // SAFETY: the session's tables are dispatched under the session's lock, which only `Core`

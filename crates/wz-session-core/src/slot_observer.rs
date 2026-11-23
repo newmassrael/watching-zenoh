@@ -1554,7 +1554,7 @@ mod tests {
         fn deliver(
             &mut self,
             id: crate::session_tables::SubscriberHandle,
-            _row: &mut BoxedSink,
+            _row: crate::sink::RowAccess<'_, BoxedSink>,
             _sample: &dyn SampleView,
         ) {
             self.0.push(id);

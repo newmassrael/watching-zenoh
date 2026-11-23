@@ -62,6 +62,7 @@ use crate::query::stage_queryable_interest;
 use crate::query::{fire_queryables, QueryableRef, QueryableRows};
 use crate::registry_error::RegisterError;
 use crate::row_callback::RowCallback;
+use crate::sink::RowAccess;
 use crate::slot_map::{Handle, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
 use crate::wire_key::MappedId;
@@ -1996,20 +1997,38 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 }
 
-impl<Key: KeyBacking, Cb, P: Storage> SubscriberRows
+/// A row whose calls read it where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read by them
+/// on other threads while the tables are held, so the dispatch reaches it only by a shared
+/// reference; a row the tables call while held is handed exclusively.
+impl<Key: KeyBacking, Cb: RowCallback, P: Storage> SubscriberRows
     for SlotMap<kind::Subscriber, SubscriberRow<Key, Cb>, { caps::MAX_SUBSCRIPTIONS }, P>
 {
     type Sink = Cb;
     type RowId = SubscriberHandle;
 
-    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriberHandle, &mut Cb)>(&mut self, mut f: F) {
-        for (place, handle, row) in self.live_handles_mut() {
-            let found = RowRef {
-                pattern: text(&row.key.key),
-                facts: row.facts,
-                origin: row.origin,
-            };
-            f(place, found, handle, &mut row.callback);
+    fn each_row_mut<F: FnMut(usize, RowRef<'_>, SubscriberHandle, RowAccess<'_, Cb>)>(
+        &mut self,
+        mut f: F,
+    ) {
+        if Cb::READS_ROW_IN_PLACE {
+            for (place, handle, row) in self.live_handles() {
+                let found = RowRef {
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                };
+                f(place, found, handle, RowAccess::InPlace(&row.callback));
+            }
+        } else {
+            // The row's fields are borrowed apart: its key to read, its callback to change.
+            for (place, handle, row) in self.live_handles_mut() {
+                let found = RowRef {
+                    pattern: text(&row.key.key),
+                    facts: row.facts,
+                    origin: row.origin,
+                };
+                f(place, found, handle, RowAccess::Held(&mut row.callback));
+            }
         }
     }
 
@@ -2023,9 +2042,14 @@ impl<Key: KeyBacking, Cb, P: Storage> SubscriberRows
         })
     }
 
-    fn sink_at(&mut self, position: usize) -> Option<(SubscriberHandle, &mut Cb)> {
-        self.live_handle_at_mut(position)
-            .map(|(handle, row)| (handle, &mut row.callback))
+    fn sink_at(&mut self, position: usize) -> Option<(SubscriberHandle, RowAccess<'_, Cb>)> {
+        if Cb::READS_ROW_IN_PLACE {
+            self.live_handle_at(position)
+                .map(|(handle, row)| (handle, RowAccess::InPlace(&row.callback)))
+        } else {
+            self.live_handle_at_mut(position)
+                .map(|(handle, row)| (handle, RowAccess::Held(&mut row.callback)))
+        }
     }
 }
 
@@ -2080,7 +2104,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         any_local_match(&self.subscribers, key)
     }
 
-    fn fire_matching<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn fire_matching<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         local: bool,
@@ -2100,7 +2124,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
 
     /// The table set holds no key gate yet: a peer's message on any key is matched against
     /// every subscription that hears peers.
-    fn deliver_from_peer<D: FnMut(Self::RowId, &mut Self::Sink)>(
+    fn deliver_from_peer<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
         _class: Option<crate::key_gate::ClassId>,
@@ -2127,8 +2151,14 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         &mut self,
         cx: &mut X,
     ) {
-        for (handle, row) in self.subscribers.iter_mut() {
-            cx.end_plain_frame(handle, &mut row.callback);
+        if <F::Subscriber as RowCallback>::READS_ROW_IN_PLACE {
+            for (handle, row) in self.subscribers.iter() {
+                cx.end_plain_frame(handle, RowAccess::InPlace(&row.callback));
+            }
+        } else {
+            for (handle, row) in self.subscribers.iter_mut() {
+                cx.end_plain_frame(handle, RowAccess::Held(&mut row.callback));
+            }
         }
     }
 }

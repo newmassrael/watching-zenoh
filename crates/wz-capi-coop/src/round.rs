@@ -1165,7 +1165,7 @@ impl Round {
             first,
         ));
         let kept = match entry {
-            Ok(()) => self.owe(table, call),
+            Ok(()) => self.owe_call(table, call),
             Err(_) => {
                 self.released.end(call);
                 false
@@ -1177,7 +1177,7 @@ impl Round {
 
     /// Owe `call` in `table`, which has the room for it: `false`, the call ended, when it had
     /// not after all.
-    fn owe(&self, table: &mut Table, call: SubscriberCall) -> bool {
+    fn owe_call(&self, table: &mut Table, call: SubscriberCall) -> bool {
         match table.callbacks.push(Owed::Subscriber(call)) {
             Ok(()) => true,
             Err(full) => {
@@ -1231,7 +1231,7 @@ impl Round {
         if !joins || !Self::joins(table) {
             return Err(call);
         }
-        if self.owe(table, call) {
+        if self.owe_call(table, call) {
             if let Some(last) = table.entries.last_mut() {
                 last.owed = last.owed.saturating_add(1);
             }
