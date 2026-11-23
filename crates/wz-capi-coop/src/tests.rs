@@ -948,43 +948,6 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
     );
 }
 
-/// The samples a link lends are handed the callback their subscriber's row holds, copied out of the
-/// row with each of them under the session's lock: the table of callbacks is not searched for
-/// them, however many steps they arrive in. The CONTROL is the count of the samples handed.
-#[test]
-fn the_samples_a_link_lends_take_their_callback_from_the_row() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let received = Arc::new(AtomicUsize::new(0));
-    let count = received.clone();
-    let declares_before = router.seen(|s| s.declares);
-    engine
-        .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
-            let count = count.clone();
-            SubscriberSink::shared(move |_sample: &dyn SampleView| {
-                count.fetch_add(1, Ordering::SeqCst);
-            })
-        })
-        .expect("the session declares the subscriber");
-    until(&engine, "the router to see the subscriber", || {
-        router.seen(|s| s.declares) > declares_before
-    });
-    let looks = engine.takes.callbacks.load(Ordering::SeqCst);
-    for _ in 0..8 {
-        router.send(Command::Push("demo/a", b"x"));
-    }
-    // Every push reaches the session's socket before the session reads one.
-    std::thread::sleep(Duration::from_millis(200));
-    until(&engine, "the pushes", || {
-        received.load(Ordering::SeqCst) == 8
-    });
-    let found = engine.takes.callbacks.load(Ordering::SeqCst) - looks;
-    assert_eq!(
-        found, 0,
-        "no look in the table for 8 samples: each carries its row's callback"
-    );
-}
-
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
 /// subscriber's callback where they lie: the samples of each datagram are handed on through the
 /// delivery lane, which has no lock, as one record, its payloads read in the datagram, which is

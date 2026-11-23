@@ -7470,7 +7470,6 @@ mod matching_aggregate_tests {
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
-        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let declare = |shared: &SharedSession| {
             SessionEngine::declare_subscriber_on_wire(
                 shared,
@@ -7478,7 +7477,7 @@ mod matching_aggregate_tests {
                 WireKey::literal(),
                 wz_session_core::locality::Locality::Any,
                 None,
-                sink.clone(),
+                wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {}),
             )
         };
         assert!(

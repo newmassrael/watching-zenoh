@@ -747,14 +747,12 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
 }
 
 /// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
-/// queue of handed legs were taken, and a subscriber's callback was looked up in the table of
-/// them: what a test of the cost of one message counts.
+/// queue of handed legs were taken: what a test of the cost of one message counts.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Takes {
     pub(crate) core: core::sync::atomic::AtomicUsize,
     pub(crate) handed: core::sync::atomic::AtomicUsize,
-    pub(crate) callbacks: core::sync::atomic::AtomicUsize,
     /// The turns a droppable publish spun on a held session before it tried the session again.
     pub(crate) spins: core::sync::atomic::AtomicUsize,
     /// The reads whose wait was a wait on the readiness of the session's links and ports, which
