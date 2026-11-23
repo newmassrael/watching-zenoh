@@ -343,7 +343,7 @@ impl ArenaPlan {
         )?
         .min(links);
         // The links encode their frames into a pool of slots they share as well, a slot held by a
-        // link from its grant to its send, and past it only while the pool keeps another free
+        // link from its grant to its send, or until a frame its stream took in part is written
         // (`wz_runtime_coop::link_storage::PooledTx`).
         let tx_slots = lent::<{ caps::TX_POOL_SLOTS }>(
             "TX_POOL_SLOTS",

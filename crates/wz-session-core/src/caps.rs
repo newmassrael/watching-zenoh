@@ -577,8 +577,9 @@ const _: () = assert!(
 );
 
 /// How many outbound slots the links of a session whose engine lends them from its arena share at
-/// most: a link holds one from a frame's encode to its write, and past it only while the pool
-/// keeps another free, as zenoh-pico encodes every message into its transport's one write buffer.
+/// most: a link holds one from a frame's encode to its write, a frame its stream took in part
+/// until the rest is written, and a batch frame left open only while the pool keeps another free,
+/// as zenoh-pico encodes every message into its transport's one write buffer.
 /// At least `1`.
 pub const TX_POOL_SLOTS: usize = generated::TX_POOL_SLOTS;
 

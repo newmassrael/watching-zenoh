@@ -1100,13 +1100,6 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
     /// taken: none for a frame that waits whole behind another.
     fn owe(&self, owed: Owed, skip: usize) -> LinkSendOutcome {
-        // A slot of a pool the session's other links need is not held past this call: what the
-        // stream has not taken is written now, waiting for it, as zenoh-pico's send waits on its
-        // one buffer (`vendor/zenoh-pico/src/transport/common/tx.c` @
-        // `static z_result_t _z_transport_tx_flush_buffer(`).
-        if owed.held_slot().is_some() && !self.tx.spare() {
-            return self.write_through(owed, skip);
-        }
         let refused = self.owed.borrow_mut().push(owed);
         match refused {
             Ok(()) => LinkSendOutcome::Sent,
@@ -1115,48 +1108,6 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
                     self.tx.release(slot);
                 }
                 self.cannot_owe(skip)
-            }
-        }
-    }
-
-    /// Write `last` behind everything owed before it, waiting for the stream to take each (the
-    /// stream's own wait, `StreamSocket::send_parts`), and give each slot back as it is written.
-    /// `skip` is how much of `last`'s frame the stream has taken.
-    fn write_through(&self, last: Owed, skip: usize) -> LinkSendOutcome {
-        if let Err(last) = self.owed.borrow_mut().push(last) {
-            if let Some(slot) = last.held_slot() {
-                self.tx.release(slot);
-            }
-            return self.cannot_owe(skip);
-        }
-        loop {
-            if self.lost.get().is_some() {
-                self.drop_owed();
-                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
-            }
-            let mut owed = self.owed.borrow_mut();
-            let Some(front) = owed.front_mut() else {
-                self.room_known.set(false);
-                return LinkSendOutcome::Sent;
-            };
-            let rest: &[u8] = match &*front {
-                // SAFETY: the slot is held by the link (`Owed::Slot`) until the pop below gives
-                // it back, so nothing writes it.
-                Owed::Slot { slot, from, end } => unsafe { self.tx.held(*slot, *from, *end) },
-                #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-                Owed::Bytes { bytes, from } => &bytes[*from..],
-            };
-            match self.socket.send_parts(&[rest]) {
-                Ok(()) => {
-                    if let Some(slot) = owed.pop().and_then(|done| done.held_slot()) {
-                        self.tx.release(slot);
-                    }
-                }
-                Err(e) => {
-                    drop(owed);
-                    self.fail(e);
-                    return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
-                }
             }
         }
     }
@@ -1201,6 +1152,15 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Boxe
         let owed_written = self.write_owed();
         if self.lost.get().is_some() {
             return RoomAnswer::at_once(LinkRoom::Free);
+        }
+        // A link of a pool whose every slot another link holds for a frame its stream has not
+        // finished has no slot for the next frame until that link's step writes it. It does not
+        // wait for that under the session's lock, where that step cannot run: it is congested now,
+        // and a droppable message is dropped at once, as zenoh-pico drops one that finds its
+        // transmit lock held (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+        // `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
+        if owed_written && !self.tx.claimable() {
+            return RoomAnswer::at_once(LinkRoom::Congested);
         }
         if !owed_written {
             let (room, waited_us) = self.socket.wait_writable_timed(wait_us);
@@ -2468,40 +2428,74 @@ mod tests {
         )
     }
 
-    /// A link of a pool that has no slot free besides the one it holds does not keep that slot for
-    /// a frame the stream took in part: it writes the rest at once, waiting for the stream, and the
-    /// slot is back for the other link, which finds one. The CONTROL is a pool with a slot for
-    /// each link, where the frame is owed and its slot held, as a link of its own slots does.
+    /// A link of a pool whose stream takes a frame only in part keeps its slot, as a link of its
+    /// own slots does, and writes nothing more until the stream has room: it does not wait. The other
+    /// links go on meanwhile through the slots left, each frame written whole, and once the slow
+    /// stream takes the rest the slot is back.
     #[test]
-    fn a_link_of_a_short_pool_writes_a_frame_through_rather_than_hold_its_slot() {
+    fn a_slow_stream_keeps_its_slot_and_the_other_links_go_on() {
+        let (tables, links) = pooled_tx_links(3, 2);
+        assert_eq!(
+            send_lent(&links[0], b"slow!", Some(3)),
+            LinkSendOutcome::Sent
+        );
+        assert!(links[0].owes(), "the rest is owed");
+        assert_eq!(links[0].socket.waited_writes.get(), 0, "and nothing waited");
+        assert_eq!(tables.tx_in_use(), 1);
+        for round in 0..3u8 {
+            for link in &links[1..] {
+                assert_eq!(
+                    send_lent(link, &[b'a' + round; 4], None),
+                    LinkSendOutcome::Sent
+                );
+                assert_eq!(tables.tx_in_use(), 1, "the slot is back after each send");
+            }
+        }
+        for link in &links[1..] {
+            assert_eq!(link.socket.writes.borrow().len(), 3, "every frame, whole");
+            assert_eq!(link.socket.waited_writes.get(), 0);
+        }
+        assert!(links[0].owes(), "the slow stream still owes");
+        links[0].socket.takes.set(None);
+        links[0].service();
+        assert!(!links[0].owes());
+        assert_eq!(links[0].socket.writes.borrow().concat(), batch(b"slow!"));
+        assert_eq!(tables.tx_in_use(), 0, "written, its slot is back");
+    }
+
+    /// A link of a pool whose every slot another link holds for a frame its stream has not
+    /// finished is congested at once, whatever the message may wait, and waits on no stream: the
+    /// step that frees the slot is the other link's. Once that link's stream takes the rest, the
+    /// link has room and sends.
+    #[test]
+    fn a_link_that_finds_every_slot_held_is_congested_at_once_and_waits_for_none() {
         let (tables, links) = pooled_tx_links(2, 1);
         assert_eq!(
-            send_lent(&links[0], b"through", Some(3)),
+            send_lent(&links[0], b"held", Some(2)),
             LinkSendOutcome::Sent
         );
+        assert_eq!(tables.tx_in_use(), 1);
+        for wait in [
+            RoomWait::Drop { wait_us: 1_000 },
+            RoomWait::Block { wait_us: 1_000_000 },
+        ] {
+            assert_eq!(
+                links[1].wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Congested)
+            );
+        }
+        assert!(links[1].socket.room_waits.borrow().is_empty(), "no wait");
+        assert!(links[1].tx_slot_acquire(16, Priority::DEFAULT).is_none());
+        links[0].socket.takes.set(None);
+        links[0].service();
+        assert_eq!(tables.tx_in_use(), 0);
         assert_eq!(
-            links[0].socket.waited_writes.get(),
-            1,
-            "the rest, waited for"
+            links[1]
+                .wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 })
+                .room,
+            LinkRoom::Free
         );
-        assert_eq!(links[0].socket.writes.borrow().concat(), batch(b"through"));
-        assert!(!links[0].owes());
-        assert_eq!(tables.tx_in_use(), 0, "the slot is back in the pool");
-        assert_eq!(send_lent(&links[1], b"next", None), LinkSendOutcome::Sent);
-        assert_eq!(links[1].socket.writes.borrow().concat(), batch(b"next"));
-
-        let (roomy, links) = pooled_tx_links(2, 2);
-        assert_eq!(
-            send_lent(&links[0], b"owed", Some(3)),
-            LinkSendOutcome::Sent
-        );
-        assert!(
-            links[0].owes(),
-            "CONTROL: a slot for every link, so the frame is owed"
-        );
-        assert_eq!(links[0].socket.waited_writes.get(), 0);
-        assert_eq!(roomy.tx_in_use(), 1, "and its slot held");
-        assert!(links[0].tx_slot_spare());
+        assert_eq!(send_lent(&links[1], b"after", None), LinkSendOutcome::Sent);
     }
 
     /// A link of a pool whose open batch frame would take the last free slot says so

@@ -157,10 +157,19 @@ pub trait TxStore {
         let _ = slot;
     }
 
-    /// Whether the slot the link holds may stay held past the call that holds it (a frame the
-    /// stream took in part, a batch frame left open): storage of the link's own always may; a slot
-    /// of a pool may while the pool keeps another free for the session's other links, so a link
-    /// that asks for one always finds one.
+    /// Whether a grant would find a slot now: storage of the link's own always may be asked
+    /// (its own book says whether one is out); a pool may, while the link holds its slot or the
+    /// pool has one free.
+    fn claimable(&self) -> bool {
+        true
+    }
+
+    /// Whether the slot the link holds may stay held past the call that holds it by the session's
+    /// choice (a batch frame left open for the messages after it): storage of the link's own
+    /// always may; a slot of a pool may while the pool keeps another free for the session's other
+    /// links. A frame the stream took in part keeps its slot whatever this says: what it owes is
+    /// written by the link's steps as the stream takes it, and a link that finds no slot free
+    /// meanwhile is congested ([`Self::claimable`]).
     fn spare(&self) -> bool {
         true
     }
@@ -304,6 +313,13 @@ impl TxStore for LinkTx {
         }
     }
 
+    fn claimable(&self) -> bool {
+        match self {
+            Self::Own(store) => store.claimable(),
+            Self::Pooled(store) => store.claimable(),
+        }
+    }
+
     fn spare(&self) -> bool {
         match self {
             Self::Own(store) => store.spare(),
@@ -359,6 +375,10 @@ impl TxStore for PooledTx {
 
     fn give_back(&self, _slot: usize) {
         *self.held.borrow_mut() = None;
+    }
+
+    fn claimable(&self) -> bool {
+        self.holds() || self.pool.in_use() < self.pool.capacity()
     }
 
     fn spare(&self) -> bool {
@@ -534,6 +554,13 @@ impl TxStore for TxBuffer {
         }
     }
 
+    fn claimable(&self) -> bool {
+        match self {
+            Self::Owned(store) => store.claimable(),
+            Self::Lent(store) => store.claimable(),
+        }
+    }
+
     fn spare(&self) -> bool {
         match self {
             Self::Owned(store) => store.spare(),
@@ -632,6 +659,11 @@ impl<T: TxStore> TxLender<T> {
     /// ([`TxStore::spare`]).
     pub fn spare(&self) -> bool {
         self.store.spare()
+    }
+
+    /// Whether a grant would find a slot of the store now ([`TxStore::claimable`]).
+    pub fn claimable(&self) -> bool {
+        self.store.claimable()
     }
 
     /// Take `slot` back for its send, and the bytes `start .. start + len` of it, which the session

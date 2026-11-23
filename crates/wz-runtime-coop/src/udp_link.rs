@@ -50,8 +50,8 @@ use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
-    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
-    DEFAULT_LINK_MTU,
+    BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait,
+    TxSlot, TxSlotGrant, DEFAULT_LINK_MTU,
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -578,6 +578,17 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
 
     fn tx_slot_spare(&self) -> bool {
         self.tx.spare()
+    }
+
+    // The socket takes a datagram whole and at once, so the link's room is its slots': a link of
+    // a pool whose every slot another link holds is congested now, and does not wait under the
+    // session's lock for the step that frees one.
+    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        if self.tx.claimable() {
+            RoomAnswer::at_once(LinkRoom::Free)
+        } else {
+            RoomAnswer::at_once(LinkRoom::Congested)
+        }
     }
 
     fn open_blocking(&self) {}

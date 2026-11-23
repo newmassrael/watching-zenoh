@@ -3521,12 +3521,13 @@ help = '''
 How many outbound slots, each of the batch a session advertises, the links of a
 session share when its engine lends their buffers from the session's memory at
 open. A link holds one from the moment it encodes a frame until the frame is
-written. It keeps one past that only while the pool keeps another free for the
-session's other links: a frame the stream took in part is then written at once,
-waiting for the stream as a blocking write does, and a batch frame left open is
-sent with the messages it holds. A pool as large as the links a session may hold
-keeps every link's slot its own, and is held to them. At least 1; a session may
-lower it and never raise it.
+written; a frame the stream took in part keeps it until the link's later steps
+have written the rest. A batch frame left open for later messages keeps one only
+while the pool keeps another free, and is sent with the messages it holds
+otherwise. A link that finds every slot held is congested, as one whose stream
+takes nothing is: a droppable message is dropped. A pool as large as the links a
+session may hold keeps every link's slot its own, and is held to them. At least
+1; a session may lower it and never raise it.
 '''
 
 [limit.upstream]
