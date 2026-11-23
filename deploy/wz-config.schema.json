@@ -986,6 +986,63 @@
               "x-wz-binding-fixed": "open",
               "x-wz-wire": "none"
             },
+            "SESSION_MAX_PEER_KEYEXPR_ALIASES": {
+              "description": "The key expressions all the peers of a session may have declared to it at a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "SESSION_MAX_REMOTE_DECLS": {
+              "description": "The declarations of one kind (subscribers, queryables, liveliness tokens) all the peers of a session may hold open to it at a time, each peer also held to MAX_REMOTE_DECLS.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "SESSION_MAX_INBOUND_SUB_INTERESTS": {
+              "description": "The interests in this session's subscribers that all its peers may have it remember at a time, each peer also held to MAX_INBOUND_SUB_INTERESTS.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
             "QUERIER_MAX_PENDING_QUERIES": {
               "description": "The queries one declared querier may have in flight at once; one more is refused until a pending one ends.",
               "oneOf": [

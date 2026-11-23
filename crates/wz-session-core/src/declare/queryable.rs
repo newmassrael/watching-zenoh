@@ -456,6 +456,31 @@ impl RemoteQueryablePeer<Profile> {
     }
 }
 
+#[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
+impl RemoteQueryablePeer<crate::bounded::Lent> {
+    /// Keep the queryables the peer declares from here on in rows of `rows`, the session's: a pool
+    /// the faces share, or a span of this table's own. What the table held elsewhere is forgotten
+    /// first.
+    pub fn keep_rows_in(
+        &mut self,
+        rows: crate::row_pool::RowSpace<
+            crate::row_pool::Keyed<DeclaredQueryable<crate::bounded::Lent>>,
+        >,
+    ) {
+        self.declared.keep_rows_in(rows);
+    }
+
+    /// Keep the repeats of the queryables the peer declares from here on in rows of `repeats`, the
+    /// session's: a pool the faces share, or a span of this table's own.
+    #[cfg(feature = "alloc")]
+    pub fn keep_repeat_rows_in(
+        &mut self,
+        repeats: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
+    ) {
+        self.aliases.keep_rows_in(repeats);
+    }
+}
+
 #[cfg(all(
     feature = "storage-profile",
     feature = "alloc",

@@ -3367,6 +3367,108 @@ value = 1
 reason = "zenoh-pico accepts one link at a time: its accept task runs the whole handshake of the link it took before it takes the next (`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`)."
 
 [[limit]]
+id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
+kconfig = "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
+help = '''
+The key expressions all the peers of a session may have declared to it at
+a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES. One more is
+refused and counted as one past a peer's own bound is. The cooperative
+engine keeps them in one pool its faces share, the fewer of this and as
+many as its faces could hold, so a peer that declares few leaves its share
+to the others. The default is MAX_PEER_KEYEXPR_ALIASES for each face of
+the default MAX_FACES and the dial's, so it refuses nothing a face's bound
+admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids each peer declared in a map of its face that grows with each declaration, and bounds the session by its heap."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
+
+[limit.pico_preset]
+value = 32
+reason = "zenoh-pico takes each key id a peer declares from its heap as it comes, in a list of that peer with no count (`vendor/zenoh-pico/src/session/resource.c` @ `*resources = _z_resource_slist_push_empty(*resources);`), so it bounds them by its heap alone. The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and lets the faces of a listener of the preset hold twice that together, against ten times it reserved before; the speed image states four for its one peer."
+
+[[limit]]
+id = "SESSION_MAX_REMOTE_DECLS"
+kconfig = "WZ_LIMIT_SESSION_MAX_REMOTE_DECLS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The declarations of one kind (subscribers, queryables, liveliness tokens)
+all the peers of a session may hold open to it at a time, each peer also
+held to MAX_REMOTE_DECLS. One more is refused and counted as one past a
+peer's own bound is, and the application is not told of it. The
+cooperative engine keeps them in one pool of each kind its faces share,
+the fewer of this and as many as its faces could hold. The default is
+MAX_REMOTE_DECLS for each face of the default MAX_FACES and the dial's, so
+it refuses nothing a face's bound admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds the declarations of its peers in maps that grow with each one, and bounds them by its heap."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) remote_subscribers: HashMap<SubscriberId, KeyExpr<'static>>,`", "`zenoh/src/api/session.rs` @ `pub(crate) remote_queryables: HashMap<Id, (KeyExpr<'static>, bool)>,`"]
+
+[limit.pico_preset]
+value = 32
+reason = "zenoh-pico takes each subscriber, queryable and token its peers declare from its heap as it comes, in one list of the session with no count (`vendor/zenoh-pico/src/session/interest.c` @ `zn->_remote_declares = _z_declare_data_slist_push_empty(zn->_remote_declares);`), so it bounds them by its heap alone. The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and lets the faces of a listener of the preset hold twice that of each kind together, against ten times it reserved before; the speed image states four of each kind for its one peer."
+
+[[limit]]
+id = "SESSION_MAX_INBOUND_SUB_INTERESTS"
+kconfig = "WZ_LIMIT_SESSION_MAX_INBOUND_SUB_INTERESTS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# left out.
+wire = "none"
+help = '''
+The interests in this session's subscribers that all its peers may have
+it remember at a time, each peer also held to MAX_INBOUND_SUB_INTERESTS.
+Past it a peer still gets the subscribers of the moment, not the later
+ones, as past a peer's own bound. The cooperative engine keeps them in one
+pool its faces share, the fewer of this and as many as its faces could
+hold. The default is MAX_INBOUND_SUB_INTERESTS for each face of the
+default MAX_FACES and the dial's, so it refuses nothing a face's bound
+admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the interests of its peers a session remembers."
+
+[limit.pico_preset]
+value = 16
+reason = "zenoh-pico remembers none of the interests a peer sends: it answers the current part and keeps no future one (`vendor/zenoh-pico/src/session/interest.c` @ `// TODO: Update future masks`). The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and the faces of a listener of the preset share one face's worth, more than zenoh-pico keeps; the speed image states two for its one peer."
+
+[[limit]]
 id = "QUERIER_MAX_PENDING_QUERIES"
 kconfig = "WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"
 kind = "bound"

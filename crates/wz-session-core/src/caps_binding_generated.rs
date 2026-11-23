@@ -598,6 +598,42 @@ pub const MAX_ACCEPT_PENDING: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::SESSION_MAX_PEER_KEYEXPR_ALIASES`] is bound.
+pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::SESSION_MAX_REMOTE_DECLS`] is bound.
+pub const SESSION_MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::SESSION_MAX_INBOUND_SUB_INTERESTS`] is bound.
+pub const SESSION_MAX_INBOUND_SUB_INTERESTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::QUERIER_MAX_PENDING_QUERIES`] is bound.
 pub const QUERIER_MAX_PENDING_QUERIES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
