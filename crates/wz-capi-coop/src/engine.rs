@@ -84,10 +84,10 @@ use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
     session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
 };
-#[cfg(feature = "time-base")]
-use wz_runtime_coop::session_drive::LinkReadiness;
-#[cfg(feature = "listen")]
+#[cfg(any(feature = "listen", feature = "time-base"))]
 use wz_runtime_coop::session_drive::LinkWait;
+#[cfg(feature = "time-base")]
+use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, OpenedLink, PendingDial, PumpFields,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
@@ -314,10 +314,10 @@ pub struct CoopConfig<E = Vec<String>> {
     /// with [`OpenError::Group`]).
     pub groups: Vec<wz_capi_port::group::GroupJoin>,
     /// What tells a read that the session's clock moved on, for a clock the program moves (a time
-    /// base it supplies): a read that waits for its next dial waits on it, and one that waits on
-    /// its links waits on it beside them, so the program's word ends the wait. `None` for a clock
-    /// that moves by itself, whose waits the wall bounds. Always `None` in a build without
-    /// `time-base`, whose [`ClockMovesWord`] has no value.
+    /// base it supplies): the open has it wake a wake of the links' stack, which a read waits on
+    /// beside its links and in place of a sleep to its next dial, so the program's word ends the
+    /// wait. `None` for a clock that moves by itself, whose waits the wall bounds. Always `None`
+    /// in a build without `time-base`, whose [`ClockMovesWord`] has no value.
     pub clock_moves: Option<ClockMovesWord>,
     /// The session limits the ABI resolved for the session, which its tables are held to:
     /// `SessionLimits::defaults()` for an ABI that states none.
@@ -377,8 +377,9 @@ impl CoopConfig {
 /// ([`CoopConfig::clock_moves`]).
 #[cfg(feature = "time-base")]
 pub trait ClockMoves: Send + Sync {
-    /// A wait that is ready once the clock has moved on after this call.
-    fn moved(&self) -> Arc<dyn LinkReadiness>;
+    /// Wake `waker` at each word from now on, for as long as this is held; a later watch takes
+    /// the place of an earlier one. The open hands it the waker of its stack's wake.
+    fn watch(&self, waker: core::task::Waker);
 }
 
 /// What [`CoopConfig::clock_moves`] holds: the program's word that a clock it moves has moved on
@@ -393,39 +394,21 @@ pub type ClockMovesWord = Arc<dyn ClockMoves>;
 #[cfg(not(feature = "time-base"))]
 pub enum ClockMovesWord {}
 
-/// `wait`, ended also by the program's word that the clock moved on when `moves` gives one: a
-/// sleep becomes a wait on the word, and a wait on links waits on it too. With no word, or no
-/// wait, it is `wait` as it was.
+/// What a read of a session waits on beside its links for the program's word that the clock
+/// moved on (`moves`), and the longest it then waits of `most`: the stack's wake the word wakes
+/// (`wake`), for as long as the links' wait; with no wake the stack could make, a look, after
+/// which the step reads the clock again. A clock that moves by itself leaves the wait as it was.
 #[cfg(feature = "time-base")]
-fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
-    let Some(moves) = moves else {
-        return wait;
-    };
-    match wait {
-        IdleWait::None => IdleWait::None,
-        IdleWait::Sleep(ms) => IdleWait::Input {
-            on: Vec::new(),
-            beside: Some(moves.moved()),
-            ms,
-        },
-        IdleWait::Input { on, ms, .. } => IdleWait::Input {
-            on,
-            beside: Some(moves.moved()),
-            ms,
-        },
-        // Made only for a session whose clock moves by itself (`LinkSupervisor::idle_wait`): a
-        // read the link waits in cannot be ended by the word.
-        read @ IdleWait::Read(..) => read,
+fn clock_beside(
+    most: u32,
+    moves: Option<&ClockMovesWord>,
+    wake: Option<&StackWake>,
+) -> (u32, Option<LinkWait>) {
+    match (moves, wake) {
+        (None, _) => (most, None),
+        (Some(_), Some(wake)) => (most, Some(LinkWait::input(wake.on))),
+        (Some(_), None) => (most.min(1), None),
     }
-}
-
-/// `wait` as it was: a build without `time-base` has no word to end it with.
-#[cfg(not(feature = "time-base"))]
-fn ended_by_clock_moves(wait: IdleWait, moves: Option<&ClockMovesWord>) -> IdleWait {
-    if let Some(word) = moves {
-        match *word {}
-    }
-    wait
 }
 
 /// The policies a session [`CoopEngine::open`] opens from `config` runs under: the one place that
@@ -1371,6 +1354,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
     links: LinkSupervisor<L, Face<C, L>>,
+    /// The wake of the links' stack that the program's word that the clock moved on wakes, which
+    /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
+    /// by itself, or a stack that makes no wake. Held for the session: a wait names it by value.
+    #[cfg(feature = "time-base")]
+    clock_wake: Option<StackWake>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
     /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
     /// copies went with the open.
@@ -3540,10 +3528,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let others = self.groups.iter().filter_map(GroupFace::input);
         #[cfg(not(feature = "group"))]
         let others = core::iter::empty();
-        let wait = self.links.idle_wait(most, &mut now_us, may_lend, others);
         // The bounds above are the clock's time read as the wall's, which a clock the program
         // moves is not: its word that the time moved on ends the wait as well.
-        ended_by_clock_moves(wait, self.config.clock_moves.as_ref())
+        #[cfg(feature = "time-base")]
+        let (most, beside) = clock_beside(
+            most,
+            self.config.clock_moves.as_ref(),
+            self.clock_wake.as_ref(),
+        );
+        #[cfg(not(feature = "time-base"))]
+        let beside = None;
+        self.links
+            .idle_wait(most, &mut now_us, may_lend, others, beside)
     }
 
     /// Run the session's tasks until none is ready, the session's one reassembly Router lent to
@@ -3837,6 +3833,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .saturating_add(config.listen.count())
             .saturating_add(config.groups.len());
         let limits = resolve_limits(&config);
+        #[cfg(feature = "time-base")]
+        let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
+            let wake = links.waits().wake()?;
+            moves.watch(wake.waker.clone());
+            Some(wake)
+        });
         let core = Core {
             local,
             endpoints,
@@ -3867,6 +3869,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 config.max_faces.saturating_add(1),
                 wait_room,
             ),
+            #[cfg(feature = "time-base")]
+            clock_wake,
             #[cfg(feature = "group")]
             groups: Vec::new(),
             entropy,
@@ -7540,72 +7544,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
     }
 }
 
-#[cfg(all(test, feature = "std", feature = "time-base"))]
+#[cfg(all(test, feature = "std", feature = "time-base", unix))]
 mod clock_moves_tests {
     use super::*;
-    use std::sync::{Condvar, Mutex as StdMutex};
+    use core::task::Waker;
+    use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
+    use wz_runtime_posix::net::PosixWaits;
 
-    /// A clock the test moves: a count of its moves and the word that it grew.
-    struct Moves {
-        count: StdMutex<u64>,
-        moved: Condvar,
-    }
+    /// A program's word as a test tells it: the waker the open watched with, woken by `tell`.
+    #[derive(Default)]
+    struct Word(StdMutex<Option<Waker>>);
 
-    /// A wait that ends once the count passes the one it was made at.
-    struct Since {
-        moves: Arc<Moves>,
-        seen: u64,
-    }
-
-    impl LinkReadiness for Since {
-        fn wait_readable(&self, timeout_ms: u32) {
-            let count = self.moves.count.lock().unwrap();
-            let bound = Duration::from_millis(timeout_ms.into());
-            let moved = &self.moves.moved;
-            let _ = moved.wait_timeout_while(count, bound, |count| *count == self.seen);
+    impl Word {
+        fn tell(&self) {
+            if let Some(waker) = self.0.lock().unwrap().as_ref() {
+                waker.wake_by_ref();
+            }
         }
     }
-
-    struct Word(Arc<Moves>);
 
     impl ClockMoves for Word {
-        fn moved(&self) -> Arc<dyn LinkReadiness> {
-            let seen = *self.0.count.lock().unwrap();
-            Arc::new(Since {
-                moves: self.0.clone(),
-                seen,
-            })
+        fn watch(&self, waker: Waker) {
+            *self.0.lock().unwrap() = Some(waker);
         }
     }
 
-    fn word() -> (Arc<Moves>, Arc<dyn ClockMoves>) {
-        let moves = Arc::new(Moves {
-            count: StdMutex::new(0),
-            moved: Condvar::new(),
-        });
-        let word: Arc<dyn ClockMoves> = Arc::new(Word(moves.clone()));
-        (moves, word)
-    }
-
-    /// A read waiting five seconds for its next dial is let go by the program's word that the
-    /// clock moved on, long before its bound of the wall clock.
+    /// A read on a moved clock that sleeps five seconds to its next dial waits on the stack's
+    /// wake in place of the sleep, and the program's word, told from another thread, ends it long
+    /// before its bound. Turned red by a sleep the word cannot end, or a wake the word does not
+    /// wake.
     #[test]
     fn a_wait_for_the_next_dial_ends_at_the_word_that_the_clock_moved() {
-        let (moves, word) = word();
-        let mut wait = ended_by_clock_moves(IdleWait::Sleep(5_000), Some(&word));
-        // The wait stays on the thread that made it, as a session's read does (its lent receive
-        // lease is no value of another thread's); the word comes from another, as a program's does.
+        let word = Arc::new(Word::default());
+        let moves: ClockMovesWord = word.clone();
+        let wake = PosixWaits.wake().expect("the host makes a wake");
+        moves.watch(wake.waker.clone());
+        let (most, beside) = clock_beside(5_000, Some(&moves), Some(&wake));
+        let mut wait = IdleWait::Input {
+            on: beside.into_iter().collect(),
+            ms: most,
+        };
         let telling = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
-            *moves.count.lock().unwrap() += 1;
-            moves.moved.notify_all();
+            word.tell();
         });
         let started = Instant::now();
-        // The word made the sleep a wait on input, so the sleep is never called.
-        wait.wait(&wz_runtime_coop::session_drive::NoWaits, |ms| {
-            std::thread::sleep(Duration::from_millis(u64::from(ms)))
-        });
+        wait.wait(&PosixWaits, |_| panic!("the word made the sleep a wait"));
         let took = started.elapsed();
         telling.join().expect("the thread that tells the word");
         assert!(
@@ -7614,34 +7599,23 @@ mod clock_moves_tests {
         );
     }
 
-    /// A wait on links waits on the word beside them; no wait stays none; and a clock that moves
-    /// by itself leaves every wait as it was.
+    /// A moved clock's word joins a read's wait as the stack's wake, for the whole bound; a stack
+    /// that makes no wake bounds the wait at a look; a clock that moves by itself leaves the wait
+    /// as it was. Turned red by a word left out of the wait, or one with no wake that waits on.
     #[test]
-    fn the_word_joins_a_wait_and_makes_none_where_there_was_none() {
-        let (_moves, word) = word();
-        match ended_by_clock_moves(
-            IdleWait::Input {
-                on: Vec::new(),
-                beside: None,
-                ms: 9,
-            },
-            Some(&word),
-        ) {
-            IdleWait::Input {
-                beside: Some(_),
-                ms: 9,
-                ..
-            } => {}
-            _ => panic!("a wait on links keeps its bound and gains the word"),
-        }
-        assert!(matches!(
-            ended_by_clock_moves(IdleWait::None, Some(&word)),
-            IdleWait::None
-        ));
-        assert!(matches!(
-            ended_by_clock_moves(IdleWait::Sleep(7), None),
-            IdleWait::Sleep(7)
-        ));
+    fn the_word_joins_a_wait_as_the_stacks_wake_or_bounds_it_at_a_look() {
+        let moves: ClockMovesWord = Arc::new(Word::default());
+        let wake = PosixWaits.wake().expect("the host makes a wake");
+        assert_eq!(
+            clock_beside(9, Some(&moves), Some(&wake)),
+            (9, Some(LinkWait::input(wake.on)))
+        );
+        assert_eq!(clock_beside(9, Some(&moves), None), (1, None), "no wake");
+        assert_eq!(
+            clock_beside(7, None, Some(&wake)),
+            (7, None),
+            "CONTROL: a clock that moves by itself"
+        );
     }
 }
 

@@ -267,41 +267,21 @@ pub(crate) fn session_clock(time_base: Option<TimeBaseHold>) -> SessionClock {
     }
 }
 
-/// The one wait of a session on the program's time base: it ends at the program's word that its
-/// time moved on after the mark `seen`, the count of words when the session last looked at its
-/// clock to decide how long to wait.
-///
-/// One for the session, made with its open, so a read borrows it and makes nothing. The mark is the
-/// session's and not each read's: a read decides its wait from the session's deadlines as its look
-/// at the clock found them, so a look taken later supersedes an earlier one, and the read that took
-/// it steps the session past every deadline the earlier look had not yet seen.
+/// The program's word, as the cooperative engine's reads wait on it: the session's time base, and
+/// the one watch of it that wakes the wake the session's reads wait on beside their links.
 #[cfg(not(feature = "engine-tokio"))]
-struct MovedSince {
+struct TimeBaseMoves {
+    watch: wz_capi_port::sync::Lock<Option<wz_node_time::time_base::MoveWatch>>,
     time_base: TimeBaseHold,
-    seen: wz_capi_port::sync::Lock<u64>,
 }
-
-#[cfg(not(feature = "engine-tokio"))]
-impl wz_capi_coop::LinkReadiness for MovedSince {
-    fn wait_readable(&self, timeout_ms: u32) {
-        let seen = self.seen.with(|seen| *seen);
-        let _ = self
-            .time_base
-            .wait_moved(seen, core::time::Duration::from_millis(timeout_ms.into()));
-    }
-}
-
-/// The program's word, as the cooperative engine's reads wait on it: the session's one wait, its
-/// mark moved to the count of words at each look.
-#[cfg(not(feature = "engine-tokio"))]
-struct TimeBaseMoves(alloc::sync::Arc<MovedSince>);
 
 #[cfg(not(feature = "engine-tokio"))]
 impl wz_capi_coop::ClockMoves for TimeBaseMoves {
-    fn moved(&self) -> alloc::sync::Arc<dyn wz_capi_coop::LinkReadiness> {
-        let moves = self.0.time_base.moves();
-        self.0.seen.with(|seen| *seen = moves);
-        self.0.clone()
+    fn watch(&self, waker: core::task::Waker) {
+        let watch = self.time_base.watch(waker);
+        // The watch this takes the place of is let go after the lock: its drop takes the time base's.
+        let earlier = self.watch.with(|held| held.replace(watch));
+        drop(earlier);
     }
 }
 
@@ -330,12 +310,10 @@ pub(crate) fn clock_moves(
 ) -> Option<std::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
     match clock {
         SessionClock::Host(_) => None,
-        SessionClock::Program(time_base) => Some(alloc::sync::Arc::new(TimeBaseMoves(
-            alloc::sync::Arc::new(MovedSince {
-                seen: wz_capi_port::sync::Lock::new(time_base.moves()),
-                time_base: time_base.clone(),
-            }),
-        ))),
+        SessionClock::Program(time_base) => Some(alloc::sync::Arc::new(TimeBaseMoves {
+            watch: wz_capi_port::sync::Lock::new(None),
+            time_base: time_base.clone(),
+        })),
     }
 }
 
@@ -612,40 +590,43 @@ mod tests {
         );
     }
 
-    /// Every wait of a cooperative session on a time base borrows the session's one wait: a look
-    /// at the clock makes nothing. A word after the latest look ends the wait at once; a look taken
-    /// after that word waits for the next one and runs to its bound without it.
+    /// The word of a cooperative session on a time base wakes the one waker its engine watches
+    /// with, at each word; a later watch takes the place of an earlier, which is woken no more.
+    /// CONTROL: before the word no waker is woken. Turned red by a word that wakes no watch, or
+    /// two watches kept for one session.
     #[cfg(not(feature = "engine-tokio"))]
     #[test]
-    fn each_wait_of_a_session_on_a_time_base_borrows_its_one_wait() {
-        use std::time::{Duration, Instant};
+    fn the_word_wakes_the_one_watch_a_session_on_a_time_base_keeps() {
+        struct Counts(AtomicUsize);
+        impl std::task::Wake for Counts {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let counted = || {
+            let counts = std::sync::Arc::new(Counts(AtomicUsize::new(0)));
+            (counts.clone(), core::task::Waker::from(counts))
+        };
         let program = Program::default();
         let context = &program as *const Program as *mut c_void;
         // SAFETY: `program` outlives the clock and every hold of its time base.
         let time_base = unsafe { wz_capi_port::time_base::over_calls(context, read, None) };
         let clock = session_clock(Some(time_base.clone()));
         let moves = clock_moves(&clock).expect("a session on a time base has the program's word");
-        let first = moves.moved();
-        let second = moves.moved();
-        assert!(
-            alloc::sync::Arc::ptr_eq(&first, &second),
-            "a look at the clock made a wait of its own"
-        );
-
+        let (first, first_waker) = counted();
+        moves.watch(first_waker);
+        assert_eq!(first.0.load(Ordering::SeqCst), 0, "CONTROL: no word yet");
         time_base.advanced();
-        let started = Instant::now();
-        second.wait_readable(5_000);
-        assert!(
-            started.elapsed() < Duration::from_millis(2_500),
-            "the word after the look did not end the wait"
-        );
+        assert_eq!(first.0.load(Ordering::SeqCst), 1, "the word woke the watch");
 
-        let third = moves.moved();
-        let started = Instant::now();
-        third.wait_readable(50);
-        assert!(
-            started.elapsed() >= Duration::from_millis(50),
-            "a look taken after the word was ended by it"
+        let (second, second_waker) = counted();
+        moves.watch(second_waker);
+        time_base.advanced();
+        assert_eq!(
+            first.0.load(Ordering::SeqCst),
+            1,
+            "the watch taken the place of was woken"
         );
+        assert_eq!(second.0.load(Ordering::SeqCst), 1);
     }
 }

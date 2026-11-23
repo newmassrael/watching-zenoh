@@ -299,17 +299,6 @@ pub trait SessionDatagramLink {
     }
 }
 
-/// A wait that a thread which drives no link makes beside the links' (`LinkWaits`): the program's
-/// word that a clock it moves has moved on, which no stack names to its platform. A wait over
-/// links with one of these beside them is a look at the links, and the step that follows reads
-/// every link.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkReadiness: Send + Sync {
-    /// Block until what this waits for has come, or `timeout_ms` has passed; return at once
-    /// when it already has.
-    fn wait_readable(&self, timeout_ms: u32);
-}
-
 /// What a wait on a link names: the link's handle in the stack that made it, a value copied into
 /// a wait set that holds nothing of the link. A handle whose link has gone may name another by
 /// the time it is waited on (a descriptor number a close freed for a new socket), so what a wait
