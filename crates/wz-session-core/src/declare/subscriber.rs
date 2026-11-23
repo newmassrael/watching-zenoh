@@ -334,11 +334,19 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         self.initial_final
     }
 
-    /// The peer's `DeclareFinal` of the initial interest arrived. The counter moves, because
-    /// an answer kept against it (a write filter's) changes with this.
-    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
-    fn mark_initial_final(&mut self) {
-        if !self.initial_final {
+    /// A `DeclareFinal` of interest `interest_id` arrived, in either form a frame's records
+    /// take: only the initial interest's ends the peer's first burst of declarations, another
+    /// interest's final being some other plane's answer. The counter moves, because an answer
+    /// kept against it (a write filter's) changes with this.
+    #[cfg(all(
+        feature = "codec-declare",
+        any(
+            feature = "alloc",
+            all(feature = "storage-profile", feature = "rx-lent-control")
+        )
+    ))]
+    fn final_arrived(&mut self, interest_id: Option<u64>) {
+        if interest_id == Some(crate::extbound::INITIAL_INTEREST_ID) && !self.initial_final {
             self.initial_final = true;
             self.changed();
         }
@@ -1179,12 +1187,8 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         for message in messages {
             if let NetworkMessage::Declare(decl) = message {
-                // The `DeclareFinal` of the initial interest ends the peer's first burst of
-                // declarations; any other interest's final is some other plane's answer.
-                if matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_))
-                    && decl.interest_id == Some(crate::extbound::INITIAL_INTEREST_ID)
-                {
-                    peer.mark_initial_final();
+                if matches!(decl.body, DeclareOwnedVariant::CodecZenohDeclFinal(_)) {
+                    peer.final_arrived(decl.interest_id);
                 }
                 self.dispatch_declare_with_local(
                     peer,
@@ -1244,6 +1248,9 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
             #[cfg(feature = "rx-lent-control")]
             IterationEvent::InPlace(record) => {
                 if let Some(declare) = record.declare() {
+                    if matches!(declare.body, DeclareVariant::CodecZenohDeclFinal(_)) {
+                        peer.final_arrived(declare.interest_id);
+                    }
                     self.dispatch_declare_view_with_local(
                         peer,
                         &declare.body,
