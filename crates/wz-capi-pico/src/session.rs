@@ -87,8 +87,9 @@ use crate::sync::Z_ERR_SYSTEM_GENERIC;
 use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
+use wz_capi_port::BatchStep;
 #[cfg(feature = "multi-thread")]
-use wz_capi_port::{BatchStep, ReadTaskStartRefused};
+use wz_capi_port::ReadTaskStartRefused;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::{SessionPolicy, SnResolution};
 use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
