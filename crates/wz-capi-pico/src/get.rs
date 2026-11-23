@@ -1387,10 +1387,12 @@ pub(crate) fn issue_get(
     // (`~/zenoh-pico/src/net/primitives.c:575-582`). Read off `params` -- which
     // `transmit_parameters` has already normalised -- so the receive gate and
     // the transmitted bytes cannot disagree.
+    // The gate holds the key the get asked under, and the get is sent naming the gate's: one text.
     let gate = Arc::new(ReplyGate {
-        query_keyexpr: keyexpr.clone(),
+        query_keyexpr: keyexpr,
         anyke: parameters_has_anyke(&params),
     });
+    let asked = Arc::clone(&gate);
 
     let opts = get_options(
         target,
@@ -1419,7 +1421,7 @@ pub(crate) fn issue_get(
         None => opts,
     };
     fan_get(closure, gate, token, |fan, leg| {
-        engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
+        engine.get_on_wire(&asked.query_keyexpr, &wire, &opts, fan, leg)
     })
 }
 
