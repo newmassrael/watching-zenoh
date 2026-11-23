@@ -16,6 +16,8 @@
 //!   that size, writes nothing into a buffer one short of it, and, where its
 //!   documentation says so, states zero on every failure.
 
+pub mod records;
+
 use core::ffi::{c_char, c_int, CStr};
 use core::mem::MaybeUninit;
 
