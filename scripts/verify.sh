@@ -75,7 +75,7 @@ read_units() {
     if [[ "$provision" == provision ]]; then
         bash "$repo_root/scripts/provision-kconfiglib.sh"
     fi
-    if ! listing="$(cd "$repo_root" && python3 "$plan_py" --units "$lane")"; then
+    if ! listing="$(cd "$repo_root" && plain python3 "$plan_py" --units "$lane")"; then
         echo "verify.sh: the units of $lane did not resolve (scripts/lib/verify_plan.py)" >&2
         exit 1
     fi
@@ -84,6 +84,13 @@ read_units() {
         echo "verify.sh: lane $lane has no unit" >&2
         exit 1
     fi
+}
+
+# Run a command without what a lane sets for its own builds (scripts/lib/verify_plan.py LANE_ENV
+# says why): the units are resolved with the workspace's toolchain and flags, before a lane's.
+plain() {
+    env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u RUSTDOCFLAGS -u RUSTUP_TOOLCHAIN \
+        -u LLVM_PROFILE_FILE -u MIRIFLAGS -u MIRI_SYSROOT "$@"
 }
 
 # The libtest count of a captured run, summed over its summary lines.
@@ -216,7 +223,7 @@ programs() {
     local lane="$1" sanitizer="$2" features listing line program what log rc fail=0 ran=0
     local -a program_lines=()
     bash "$repo_root/scripts/provision-kconfiglib.sh"
-    if ! features="$(cd "$repo_root" && python3 "$plan_py" --library-features)"; then
+    if ! features="$(cd "$repo_root" && plain python3 "$plan_py" --library-features)"; then
         echo "verify.sh: the C library's capabilities did not resolve" >&2
         return 1
     fi
@@ -256,6 +263,11 @@ sanitized() {
         *) usage ;;
     esac
     toolchain rust-src
+    # The units are resolved before the sanitizer's flags are set: they are the build's, not the
+    # resolution's.
+    if [[ "$part" == tests ]]; then
+        read_units "$lane" provision
+    fi
     local -x RUSTFLAGS="-Zsanitizer=$sanitizer -Cforce-frame-pointers=yes"
     local -x TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1"
     local -x ASAN_OPTIONS="detect_leaks=0:halt_on_error=1:detect_stack_use_after_return=1"
@@ -263,7 +275,6 @@ sanitized() {
         programs "$lane" "$sanitizer"
         return
     fi
-    read_units "$lane" provision
     test_lane "$lane" cargo "+$channel" test -Zbuild-std --target "$host" --target-dir "$build_home/$lane"
 }
 
@@ -271,7 +282,17 @@ interpret() {
     toolchain miri rust-src
     read_units miri none
     local -x MIRIFLAGS="-Zmiri-ignore-leaks"
-    (cd "$repo_root/crates" && cargo "+$channel" miri setup)
+    # The interpreter's standard library, built once into a directory of this lane's own and handed
+    # to every unit. Left to each `cargo miri test`, each unit checks the shared default one, and
+    # a build of it by another run on the machine refuses this one ("a concurrent sysroot build
+    # with different settings").
+    local sysroot
+    if ! sysroot="$(cd "$repo_root/crates" && MIRI_SYSROOT="$build_home/miri-sysroot" \
+        cargo "+$channel" miri setup --print-sysroot)" || [[ -z "$sysroot" ]]; then
+        echo "verify.sh: the interpreter's standard library did not build" >&2
+        return 1
+    fi
+    local -x MIRI_SYSROOT="$sysroot"
     test_lane miri cargo "+$channel" miri test --locked --target-dir "$build_home/miri"
 }
 
@@ -285,7 +306,7 @@ case "${1:-}" in
     units)
         (($# == 2)) || usage
         bash "$repo_root/scripts/provision-kconfiglib.sh"
-        cd "$repo_root" && python3 "$plan_py" --units "$2"
+        cd "$repo_root" && plain python3 "$plan_py" --units "$2"
         ;;
     *) usage ;;
 esac

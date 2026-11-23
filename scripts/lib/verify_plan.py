@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -147,6 +148,13 @@ UNITS: tuple[Unit, ...] = (
     Unit("lane-arena", "wz-capi-coop", "args", (), lanes=MIRI, filters=("tests::lane::", "tests::arena::")),
     Unit("host-os", "wz-capi-port", "args", (), lanes=MIRI, filters=("os::",)),
 )
+
+# What a lane sets for its own builds and a resolution must not see: the feature sets are read with
+# the workspace's own toolchain and flags, as the shipped builds resolve them. A sanitizer's flags
+# reaching `cargo tree` make it probe the target with them, which the workspace's stable compiler
+# refuses; a nightly named for the lane would resolve with another cargo than the build's.
+LANE_ENV = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "RUSTUP_TOOLCHAIN",
+            "LLVM_PROFILE_FILE", "MIRIFLAGS", "MIRI_SYSROOT")
 
 # The C programs of the pico C ABI the sanitizer lanes build against the library and run: the
 # examples of the release package, as the Platform workflow's `capi-examples` job runs them.
@@ -256,7 +264,8 @@ class Resolver:
 
     @staticmethod
     def _run(cmd: list[str]) -> str:
-        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+        env = resolution_env(os.environ)
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
         if proc.returncode != 0:
             raise Refused(f"`{' '.join(cmd)}` exited {proc.returncode}: {proc.stderr.strip()[-800:]}")
         return proc.stdout
@@ -301,6 +310,11 @@ class Resolver:
                 raise Refused(f"unit {unit.unit} of {unit.crate} names no kit image {kit!r}")
             return feature_args(unit.crate, self.tree(kit), self.declared(), f"the kit image {kit}")
         raise Refused(f"unit {unit.unit} of {unit.crate} has no source {unit.source!r}")
+
+
+def resolution_env(environ: object) -> dict[str, str]:
+    """The environment a resolution runs in: the caller's, without what a lane sets for its builds."""
+    return {key: value for key, value in dict(environ).items() if key not in LANE_ENV}
 
 
 def unit_line(unit: Unit, cargo_args: tuple[str, ...]) -> str:
@@ -400,6 +414,12 @@ def selftest() -> int:
             cases += 1
         else:
             raise AssertionError(f"{unit.source} was resolved")
+
+    # A resolution does not see a lane's flags or its nightly, and keeps the rest of the caller's.
+    clean = resolution_env({"RUSTFLAGS": "-Zsanitizer=thread", "CARGO_ENCODED_RUSTFLAGS": "-Zx",
+                            "RUSTUP_TOOLCHAIN": "nightly", "MIRI_SYSROOT": "/s", "PATH": "/bin"})
+    assert clean == {"PATH": "/bin"}, clean
+    cases += 1
 
     # cargo's report: only test executables, each once, and a line that is not JSON passes by.
     report = "\n".join((
