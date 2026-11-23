@@ -193,6 +193,8 @@ impl InitCaps {
 /// [`encode_init`]'s: an InitSyn never carries one, an InitAck carries
 /// `cookie_override` or, without one, the parameters' own.
 #[cfg(feature = "codec-init-body")]
+// One body for the write and for the count (`init_frame_len`).
+#[inline(never)]
 pub fn encode_init_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     params: &SessionInitParams,
@@ -227,8 +229,18 @@ pub(crate) fn init_frame_len(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> usize {
-    match init_message(params, caps, is_ack, extensions, cookie_override) {
-        Ok(message) => TransportInitWire::measure(&message).len(),
+    // Counted by the writer itself, so the count and the write are one compiled encoder and
+    // the document's separate measure is not linked.
+    let mut count = crate::tx_buf::CountTxBuf::new();
+    match encode_init_into(
+        &mut count,
+        params,
+        caps,
+        is_ack,
+        extensions,
+        cookie_override,
+    ) {
+        Ok(()) => crate::tx_buf::TxBuf::len(&count),
         Err(_) => 0,
     }
 }
@@ -401,6 +413,8 @@ pub fn encode_open_into(
     ),
     all(test, feature = "codec-init-body", feature = "codec-open-body")
 ))]
+// One body for the write and for the count (`open_head_len`).
+#[inline(never)]
 pub(crate) fn encode_open_head_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
     params: &SessionInitParams,
@@ -457,8 +471,18 @@ pub(crate) fn open_head_len(
     is_ack: bool,
     cookie_override: Option<&[u8]>,
 ) -> usize {
-    match open_message(params, initial_sn, is_ack, cookie_override, &[]) {
-        Ok(message) => 1 + wz_codecs::open_body::OpenBodyWire::measure(&message.body).len(),
+    // Counted by the writer itself, as `init_frame_len` counts; the Z flag is a bit of the
+    // header and changes no length.
+    let mut count = crate::tx_buf::CountTxBuf::new();
+    match encode_open_head_into(
+        &mut count,
+        params,
+        initial_sn,
+        is_ack,
+        cookie_override,
+        false,
+    ) {
+        Ok(()) => crate::tx_buf::TxBuf::len(&count),
         Err(_) => 0,
     }
 }
@@ -939,6 +963,17 @@ mod tests {
                         head,
                         "the sizer counts the head it writes"
                     );
+                    #[cfg(all(
+                        feature = "tx-lend-only",
+                        feature = "storage-profile",
+                        feature = "session-unicast",
+                        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                    ))]
+                    assert_eq!(
+                        crate::ext_chain::ext_chain_len(chain),
+                        split.len() - head,
+                        "the sizer counts the chain it writes"
+                    );
                     #[cfg(not(all(
                         feature = "tx-lend-only",
                         feature = "storage-profile",
@@ -946,6 +981,46 @@ mod tests {
                         any(feature = "session-unicast-open", feature = "session-unicast-accept")
                     )))]
                     let _ = head;
+                }
+            }
+        }
+    }
+
+    /// The lend-only Init sizer counts exactly what the writer writes, with and without a
+    /// chain, for an InitSyn and for an InitAck with and without a cookie of its own.
+    #[cfg(all(
+        feature = "codec-open-body",
+        feature = "tx-lend-only",
+        feature = "storage-profile",
+        feature = "session-unicast",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ))]
+    #[test]
+    fn the_init_sizer_counts_the_init_it_writes() {
+        let params = open_params(10_000);
+        let caps = super::InitCaps::of(&params);
+        let entries = [crate::extpatch::encode_patch_ext()];
+        let cookie = [0x5Au8; 12];
+        for is_ack in [false, true] {
+            for chain in [&entries[..], &[][..]] {
+                for cookie_override in [None, Some(&cookie[..])] {
+                    let mut wire = alloc::vec::Vec::new();
+                    super::encode_init_into(
+                        &mut wire,
+                        &params,
+                        caps,
+                        is_ack,
+                        chain,
+                        cookie_override,
+                    )
+                    .expect("writes");
+                    assert_eq!(
+                        super::init_frame_len(&params, caps, is_ack, chain, cookie_override),
+                        wire.len(),
+                        "ack {is_ack}, {} ext(s), cookie {}",
+                        chain.len(),
+                        cookie_override.is_some()
+                    );
                 }
             }
         }

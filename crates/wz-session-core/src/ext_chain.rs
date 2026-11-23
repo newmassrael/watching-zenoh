@@ -641,10 +641,12 @@ pub(crate) fn encode_ext_chain_into(
     any(feature = "session-unicast-open", feature = "session-unicast-accept")
 ))]
 pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
-    entries
-        .iter()
-        .map(|entry| wz_codecs::ext_entry::ExtEntryWire::measure(entry).len())
-        .sum()
+    // Counted by the writer itself, so the count and the write are one compiled encoder.
+    let mut count = crate::tx_buf::CountTxBuf::new();
+    match encode_ext_chain_into(&mut count, entries) {
+        Ok(()) => crate::tx_buf::TxBuf::len(&count),
+        Err(_) => 0,
+    }
 }
 
 /// Decode the Z-flag-gated ext chain into the lifetime-free owned mirror, to
