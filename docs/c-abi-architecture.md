@@ -243,7 +243,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-010 | `wz-session-core` | `delivery_lane` | `indexing_slicing`, `arithmetic_side_effects` | 54 | open |
 | TD-011 | `wz-session-core` | `raweth_link` | `indexing_slicing`, `arithmetic_side_effects` | 47 | open |
 | TD-013 | `wz-session-core` | `plain_push` | `indexing_slicing`, `unwrap_used`, `arithmetic_side_effects` | 40 | open |
-| TD-014 | `wz-session-core` | `key_catalogue` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 39 | open |
+| TD-014 | `wz-session-core` | `key_catalogue` | `panic` | 39 | open |
 | TD-015 | `wz-session-core` | `key_arena` | `panic`, `arithmetic_side_effects` | 38 | open |
 | TD-016 | `wz-session-core` | `lent_response` | `indexing_slicing`, `arithmetic_side_effects` | 38 | open |
 | TD-017 | `wz-session-core` | `frame_encode` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 37 | open |
@@ -442,3 +442,8 @@ TD-204 and TD-205 are the stall of a `block_on` (a future nothing can wake),
 whose refusal is a `RuntimeError` of its own and `block_on` answering a `Result`, which moves its
 callers; TD-206 is the slot profile's `SessionRuntime::share`, which has no pointer
 to give, and whose refusal belongs in that trait of `wz-session-core`.
+
+Some rows keep only `panic` for a check that runs while the build evaluates a constant, where the
+panic is how a wrong generated table stops the build that holds it: TD-014's `KeyCatalogue::new`.
+Its refusal as a value is `try_new`; the panic moves out when the generator writes the `match`
+on `try_new` into the image's own crate.
