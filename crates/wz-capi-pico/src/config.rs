@@ -10,7 +10,6 @@
 //! to pick the dial vs accept role. Values verified against
 //! `~/zenoh-pico/include/zenoh-pico/config.h.in:84-103`.
 
-use alloc::collections::BTreeMap;
 use core::ffi::{c_char, c_void, CStr};
 
 use crate::prelude::*;
@@ -93,7 +92,10 @@ pub const Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY: u8 = 0x56;
 /// The boxed payload behind a `z_owned_config_t` handle.
 #[derive(Clone, Default)]
 pub(crate) struct ConfigState {
-    pub(crate) entries: BTreeMap<u8, String>,
+    /// The values by key, each key once, in the order first set. A list read by one scan rather
+    /// than an ordered map: a config holds a handful of keys, nothing reads them in key order, and
+    /// a map's insert, clone and drop are each a body of their own in the library's text.
+    entries: Vec<(u8, String)>,
     /// What wz's own doors state about the session's policies, which no numbered key carries
     /// (`wz_ext_config_policy`, `wz_ext_config_profile`, `wz_ext_config_document`); nothing in a
     /// build without `config-policy`.
@@ -116,9 +118,15 @@ pub(crate) struct ConfigState {
 impl ConfigState {
     #[inline]
     pub(crate) fn get(&self, key: u8) -> Option<&str> {
+        self.stored(key).map(|v| v.strip_suffix('\0').unwrap_or(v))
+    }
+
+    /// The value stored under `key`, its terminator included: what [`zp_config_get`] lends.
+    fn stored(&self, key: u8) -> Option<&str> {
         self.entries
-            .get(&key)
-            .map(|v| v.strip_suffix('\0').unwrap_or(v.as_str()))
+            .iter()
+            .find(|(stored, _)| *stored == key)
+            .map(|(_, value)| value.as_str())
     }
 
     /// Record `value` under `key`, NUL-TERMINATED in the map (R311y559).
@@ -129,11 +137,18 @@ impl ConfigState {
     /// a borrow can only be NUL-terminated if the stored bytes are. Every
     /// reader goes through [`Self::get`], which strips it, so the terminator is
     /// invisible to the Rust side.
+    ///
+    /// A key set again has its value replaced, as a map's insert replaces it; the bytes a
+    /// borrow of another key points at are that key's own allocation, which moving the list
+    /// does not move.
     pub(crate) fn insert(&mut self, key: u8, value: &str) {
         let mut owned = String::with_capacity(value.len() + 1);
         owned.push_str(value);
         owned.push('\0');
-        self.entries.insert(key, owned);
+        match self.entries.iter_mut().find(|(stored, _)| *stored == key) {
+            Some((_, slot)) => *slot = owned,
+            None => self.entries.push((key, owned)),
+        }
     }
 }
 
@@ -207,7 +222,7 @@ pub unsafe extern "C" fn zp_config_insert(
 /// the config's OWN storage, which is upstream's contract and is why the value
 /// is not rendered into a temporary: a caller holds it for as long as it holds
 /// the config. `ConfigState::entries` owns `String`s that are never rewritten
-/// in place (`zp_config_insert` replaces the map entry), so the borrow is
+/// in place (`zp_config_insert` replaces the entry's value), so the borrow is
 /// stable for the entry's life.
 ///
 /// The stored bytes carry the terminator, which is what makes the borrow a
@@ -227,9 +242,9 @@ pub unsafe extern "C" fn zp_config_get(config: *const z_loaned_config_t, key: u8
             return core::ptr::null();
         }
         let state = &*(handle as *const ConfigState);
-        match state.entries.get(&key) {
-            // The map's values are stored NUL-terminated (see the insert path),
-            // so the pointer is a valid C string.
+        match state.stored(key) {
+            // The values are stored NUL-terminated (see the insert path), so the
+            // pointer is a valid C string.
             Some(value) => value.as_ptr() as *const c_char,
             None => core::ptr::null(),
         }
@@ -256,4 +271,101 @@ pub unsafe extern "C" fn z_config_clone(
         };
         Z_OK
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `state` as the loaned config the doors are handed.
+    fn loaned(state: &mut ConfigState) -> z_loaned_config_t {
+        z_loaned_config_t {
+            handle: state as *mut ConfigState as *mut c_void,
+            _pad: [core::ptr::null_mut(); 3],
+        }
+    }
+
+    /// A key set again keeps one entry, holding the value set last; a key never set reads as
+    /// absent, an empty value reads as itself, and the terminator the store keeps is not part of
+    /// what the Rust side reads.
+    #[test]
+    fn a_key_set_twice_holds_the_value_set_last() {
+        let mut cfg = ConfigState::default();
+        assert_eq!(cfg.get(Z_CONFIG_MODE_KEY), None);
+        cfg.insert(Z_CONFIG_MODE_KEY, "peer");
+        cfg.insert(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
+        cfg.insert(Z_CONFIG_MODE_KEY, "client");
+        assert_eq!(cfg.get(Z_CONFIG_MODE_KEY), Some("client"));
+        assert_eq!(cfg.get(Z_CONFIG_CONNECT_KEY), Some("tcp/192.0.2.1:7447"));
+        assert_eq!(cfg.get(Z_CONFIG_LISTEN_KEY), None);
+        assert_eq!(cfg.entries.len(), 2);
+        cfg.insert(Z_CONFIG_LISTEN_KEY, "");
+        assert_eq!(cfg.get(Z_CONFIG_LISTEN_KEY), Some(""));
+        assert_eq!(cfg.entries.len(), 3);
+    }
+
+    /// `zp_config_get` lends the stored bytes as a C string, and the borrow of one key still
+    /// points at its value after other keys were set and the list grew under it.
+    #[test]
+    fn a_lent_value_stays_where_it_was_while_other_keys_are_set() {
+        let mut state = ConfigState::default();
+        let mut config = loaned(&mut state);
+        unsafe {
+            assert_eq!(
+                zp_config_insert(
+                    &mut config,
+                    Z_CONFIG_CONNECT_KEY,
+                    c"udp/192.0.2.1:7447".as_ptr()
+                ),
+                Z_OK
+            );
+            let lent = zp_config_get(&config, Z_CONFIG_CONNECT_KEY);
+            assert!(!lent.is_null());
+            for key in 0..Z_CONFIG_MODE_KEY {
+                assert_eq!(zp_config_insert(&mut config, key, c"x".as_ptr()), Z_OK);
+            }
+            assert_eq!(zp_config_get(&config, Z_CONFIG_CONNECT_KEY), lent);
+            assert_eq!(CStr::from_ptr(lent).to_str(), Ok("udp/192.0.2.1:7447"));
+            assert!(zp_config_get(&config, Z_CONFIG_LISTEN_KEY).is_null());
+        }
+    }
+
+    /// A value that is not text, or no value, is refused and leaves the key as it was.
+    #[test]
+    fn a_value_that_is_not_text_is_refused_and_leaves_the_key_as_it_was() {
+        let mut state = ConfigState::default();
+        let mut config = loaned(&mut state);
+        let not_text = b"\xff\0";
+        unsafe {
+            assert_eq!(
+                zp_config_insert(&mut config, Z_CONFIG_MODE_KEY, c"peer".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                zp_config_insert(
+                    &mut config,
+                    Z_CONFIG_MODE_KEY,
+                    not_text.as_ptr() as *const c_char
+                ),
+                Z_ERR_INVALID
+            );
+            assert_eq!(
+                zp_config_insert(&mut config, Z_CONFIG_MODE_KEY, core::ptr::null()),
+                Z_ERR_NULL
+            );
+        }
+        assert_eq!(state.get(Z_CONFIG_MODE_KEY), Some("peer"));
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    /// A clone holds values of its own: setting a key on one is not seen by the other.
+    #[test]
+    fn a_clone_holds_values_of_its_own() {
+        let mut cfg = ConfigState::default();
+        cfg.insert(Z_CONFIG_MODE_KEY, "peer");
+        let copy = cfg.clone();
+        cfg.insert(Z_CONFIG_MODE_KEY, "client");
+        assert_eq!(copy.get(Z_CONFIG_MODE_KEY), Some("peer"));
+        assert_eq!(cfg.get(Z_CONFIG_MODE_KEY), Some("client"));
+    }
 }
