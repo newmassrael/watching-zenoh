@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 5d398cc7bf469c4f01087eb8cf32b49d140e819737ed3c3bbcd8da3b31dc82cf
+// source-hash: 79216c735dd86dd9532118d0c98574f76585ec6be4ef85b635858df72ac15262
 // source: reassembly_slot.scxml
 
 
@@ -72,10 +72,20 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: reassembly_slot.scxml:82 :: _machine
+// SCE-MAP: reassembly_slot.scxml:93 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
+
+// SCE Protocol-Synthesis RFC §synth-5-J-2 + §synth-5-L (item C3): per-document
+// event-queue capacity declared via
+// `<scxml sce:capacity="N">` or sourced from deploy.yaml
+// `machines.<m>.scheduler.default_event_queue_capacity`. Consumed
+// below by `type ExternalQueue` as the no_std ring depth of this
+// machine's W3C Appendix D external queue, and by `type InternalQueue`
+// when no internal depth is proven from the document (docs/adr/0076)
+// (the policy-carried SSOT for the per-machine queue size).
+pub const EVENT_QUEUE_CAPACITY: usize = 1;
 
 // ======================================================================
 // State enum (W3C SCXML 3.3)
@@ -422,7 +432,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // default). Inert under std (`VecDeque`), so this one emission compiles on
     // both runtime profiles. The queue holds events as numbers and only the
     // payloads as this machine's type (docs/adr/0068).
-    type ExternalQueue = sce_rust_runtime::EventQueue<Self::Payload>;
+    type ExternalQueue = sce_rust_runtime::EventQueue<Self::Payload, { EVENT_QUEUE_CAPACITY }>;
 
     // W3C SCXML Appendix D internalQueue: only what this machine raises for
     // itself during a macrostep, so its no_std depth is the bound the
@@ -615,8 +625,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:82 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:93 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
     }
 
@@ -627,8 +637,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:82 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:93 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -650,8 +660,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // enables, as its row of the tables, which holds its targets and its
     // type. The engine walks the atomic states and their ancestors and keeps
     // the ordered set. `Event::Null` asks for eventless transitions.
-    #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:82 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:93 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: Self::State,
@@ -753,8 +763,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
-    #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
-// SCE-MAP: reassembly_slot.scxml:82 :: _machine
+    #[doc = "SCE-MAP: reassembly_slot.scxml:93 :: _machine"]
+// SCE-MAP: reassembly_slot.scxml:93 :: _machine
     fn execute_transition_content(
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
@@ -763,7 +773,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         match transition.0 {
             // Aborted, transition 0
             11 => {
-                // SCE-MAP: reassembly_slot.scxml:170 :: Aborted :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:182 :: Aborted :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -774,7 +784,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Complete, transition 0
             9 => {
-                // SCE-MAP: reassembly_slot.scxml:155 :: Complete :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:167 :: Complete :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -785,7 +795,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Empty, transition 0
             0 => {
-                // SCE-MAP: reassembly_slot.scxml:115 :: Empty :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:127 :: Empty :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -796,7 +806,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Empty, transition 1
             1 => {
-                // SCE-MAP: reassembly_slot.scxml:118 :: Empty :: _transition_1
+                // SCE-MAP: reassembly_slot.scxml:130 :: Empty :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -810,7 +820,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 0
             2 => {
-                // SCE-MAP: reassembly_slot.scxml:129 :: Receiving :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:141 :: Receiving :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -821,7 +831,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 1
             3 => {
-                // SCE-MAP: reassembly_slot.scxml:132 :: Receiving :: _transition_1
+                // SCE-MAP: reassembly_slot.scxml:144 :: Receiving :: _transition_1
                 // W3C SCXML 3.13: Transition 1 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -832,7 +842,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 2
             4 => {
-                // SCE-MAP: reassembly_slot.scxml:135 :: Receiving :: _transition_2
+                // SCE-MAP: reassembly_slot.scxml:147 :: Receiving :: _transition_2
                 // W3C SCXML 3.13: Transition 2 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -843,7 +853,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 3
             5 => {
-                // SCE-MAP: reassembly_slot.scxml:138 :: Receiving :: _transition_3
+                // SCE-MAP: reassembly_slot.scxml:150 :: Receiving :: _transition_3
                 // W3C SCXML 3.13: Transition 3 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -854,7 +864,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 4
             6 => {
-                // SCE-MAP: reassembly_slot.scxml:141 :: Receiving :: _transition_4
+                // SCE-MAP: reassembly_slot.scxml:153 :: Receiving :: _transition_4
                 // W3C SCXML 3.13: Transition 4 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -865,7 +875,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 5
             7 => {
-                // SCE-MAP: reassembly_slot.scxml:144 :: Receiving :: _transition_5
+                // SCE-MAP: reassembly_slot.scxml:156 :: Receiving :: _transition_5
                 // W3C SCXML 3.13: Transition 5 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -876,7 +886,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // Receiving, transition 6
             8 => {
-                // SCE-MAP: reassembly_slot.scxml:147 :: Receiving :: _transition_6
+                // SCE-MAP: reassembly_slot.scxml:159 :: Receiving :: _transition_6
                 // W3C SCXML 3.13: Transition 6 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
@@ -887,7 +897,7 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             }
             // TimedOut, transition 0
             10 => {
-                // SCE-MAP: reassembly_slot.scxml:162 :: TimedOut :: _transition_0
+                // SCE-MAP: reassembly_slot.scxml:174 :: TimedOut :: _transition_0
                 // W3C SCXML 3.13: Transition 0 actions
                 // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                 'action_block: {
