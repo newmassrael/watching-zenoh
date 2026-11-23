@@ -2164,8 +2164,6 @@ pub mod owed_replies;
 // Runtime-agnostic so the same bundle serves the tokio (AP) and lwIP
 // (MCU) profiles.
 #[cfg(feature = "alloc")]
-// Totality debt TD-106 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod observer;
 
 // The most memory a session's tables can hold, computed from the limits it runs under: the rows a

@@ -310,7 +310,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-101 | `wz-session-core` | `serde_codec` | `indexing_slicing`, `arithmetic_side_effects` | 4 | open |
 | TD-102 | `wz-session-core` | `ext_name` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-104 | `wz-session-core` | `lifecycle_contract` | `indexing_slicing` | 3 | open |
-| TD-106 | `wz-session-core` | `observer` | `arithmetic_side_effects` | 3 | open |
 | TD-107 | `wz-session-core` | `peer_planner` | `indexing_slicing`, `arithmetic_side_effects` | 3 | open |
 | TD-108 | `wz-session-core` | `query_options` | `expect_used`, `unreachable`, `arithmetic_side_effects` | 3 | open |
 | TD-109 | `wz-session-core` | `reset_generations` | `indexing_slicing`, `unreachable` | 3 | open |
