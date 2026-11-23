@@ -1567,8 +1567,6 @@ pub mod lent_response;
 /// allocator. Byte-equal to the owned builder, which the module's tests hold for every
 /// combination its description can state.
 #[cfg(all(feature = "storage-profile", feature = "codec-request"))]
-// Totality debt TD-079 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod lent_request;
 
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
