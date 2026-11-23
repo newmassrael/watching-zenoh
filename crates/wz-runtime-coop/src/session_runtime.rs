@@ -195,6 +195,17 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for C
 pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
     <CoopRuntime<C, D> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
+/// What a session's engine is built over, as one value: the handle on the link's actions and the
+/// session's entropy source, which the engine's handshake binding holds together. They travel
+/// together from the session's making to its engine, so they are passed together.
+pub struct SessionParts<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver>
+{
+    /// The link's actions.
+    pub actions: SessionHandle<C, D>,
+    /// The session's entropy source.
+    pub entropy: SessionEntropy,
+}
+
 /// The session's one entropy source, as this profile's [`SessionRuntime::EntropyDraw`]: a counted
 /// handle on it, cloned to each of the session's links, whose bindings draw every InitAck's cookie
 /// nonce and challenges from it. The board supplies its source once, as a TYPE, and a link's

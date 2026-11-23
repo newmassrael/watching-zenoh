@@ -81,7 +81,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::session_runtime::{SessionEntropy, SessionHandle, SessionParts};
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
 /// What the drive loop needs from a network stack: advance its input path,
@@ -1412,8 +1412,7 @@ impl<
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C, D>,
-        entropy: SessionEntropy,
+        parts: SessionParts<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
@@ -1426,16 +1425,7 @@ impl<
         UnicastRx::init_in(rx, make_router)?;
         // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
         unsafe {
-            Self::build_in(
-                place,
-                runtime,
-                link,
-                actions,
-                entropy,
-                clock,
-                config,
-                |_| {},
-            );
+            Self::build_in(place, runtime, link, parts, clock, config, |_| {});
             Some(place.assume_init_mut())
         }
     }
@@ -1461,8 +1451,7 @@ impl<
                 &mut place,
                 runtime,
                 link,
-                actions,
-                entropy,
+                SessionParts { actions, entropy },
                 clock,
                 config,
                 |rx| {
@@ -1493,12 +1482,12 @@ impl<
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C, D>,
-        entropy: SessionEntropy,
+        parts: SessionParts<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
+        let SessionParts { actions, entropy } = parts;
         let SessionDriveConfig {
             timeouts,
             role,
@@ -1853,8 +1842,7 @@ impl<D> MakeRouter<wz_session_core::unicast_rx::RouterLend<D>>
 pub fn spawn_session_with_router<C, L, R, M, F>(
     local: &CoopLocalSet<C>,
     link: L,
-    actions: SessionHandle<C>,
-    entropy: SessionEntropy,
+    parts: SessionParts<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1872,8 +1860,7 @@ where
         place: Becomes::new(PumpParts {
             runtime,
             link,
-            actions,
-            entropy,
+            parts,
             clock,
             config,
             make_router,
@@ -1911,8 +1898,7 @@ type TaskPlace<C, L, R, M> = Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn B
 struct PumpParts<C: ClockSource + 'static, L, M> {
     runtime: CoopRuntime<C>,
     link: L,
-    actions: SessionHandle<C>,
-    entropy: SessionEntropy,
+    parts: SessionParts<C>,
     clock: CoopTime<C>,
     config: SessionDriveConfig,
     make_router: M,
@@ -1940,22 +1926,14 @@ where
             let PumpParts {
                 runtime,
                 link,
-                actions,
-                entropy,
+                parts,
                 clock,
                 config,
                 make_router,
             } = parts;
-            SessionPump::with_router_in(
-                slot,
-                runtime,
-                link,
-                actions,
-                entropy,
-                clock,
-                config,
-                |router| make_router.make_in(router),
-            )
+            SessionPump::with_router_in(slot, runtime, link, parts, clock, config, |router| {
+                make_router.make_in(router)
+            })
         });
         // A pump its maker did not build in its place is no session to drive: the task ends.
         let Some(pump) = built else {
@@ -2408,8 +2386,7 @@ impl<
                 &mut *cell.pump.get(),
                 runtime,
                 link,
-                actions,
-                entropy,
+                SessionParts { actions, entropy },
                 clock,
                 config,
                 // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
@@ -2597,7 +2574,7 @@ mod wake_budget_tests {
     #[cfg(feature = "session-unicast-accept")]
     use wz_session_core::driver_loop::DriverLoopOutcome;
 
-    use crate::session_runtime::{new_session_actions, SessionEntropy};
+    use crate::session_runtime::{new_session_actions, SessionEntropy, SessionParts};
     use crate::time::{ClockSource, CoopTime};
     use crate::CoopRuntime;
 
@@ -2871,8 +2848,10 @@ mod wake_budget_tests {
         let task = spawn_session_with_router(
             &local,
             Rc::clone(&link),
-            actions.clone(),
-            entropy,
+            SessionParts {
+                actions: actions.clone(),
+                entropy,
+            },
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2931,8 +2910,10 @@ mod wake_budget_tests {
         let task = spawn_session_with_router(
             &local,
             Rc::clone(&link),
-            actions,
-            entropy,
+            SessionParts {
+                actions: actions,
+                entropy,
+            },
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
@@ -2988,8 +2969,10 @@ mod wake_budget_tests {
             let spawned = spawn_session_with_router(
                 &local,
                 Rc::new(Recording::default()),
-                actions,
-                entropy,
+                SessionParts {
+                    actions: actions,
+                    entropy,
+                },
                 clock,
                 SessionDriveConfig {
                     timeouts: SessionTimeouts::from_build(),
@@ -3069,8 +3052,10 @@ mod wake_budget_tests {
         let task = spawn_session_with_router(
             &local,
             Rc::new(Recording::default()),
-            actions,
-            entropy,
+            SessionParts {
+                actions: actions,
+                entropy,
+            },
             clock,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::from_build(),
