@@ -485,6 +485,27 @@ impl RawRows {
         self.refused = self.refused.saturating_add(1);
     }
 
+    /// The rows the table holds, as a table of their own in the same pool, and this one left
+    /// holding none in the space it holds, its refusals kept: `None`, taking nothing, where its
+    /// rows lie in a span of its own, which no second table may hold rows of.
+    fn split_off(&mut self) -> Option<Self> {
+        match self.lay() {
+            Lay::Own { .. } => None,
+            Lay::Bare => Some(Self::new()),
+            Lay::Pool(_) => {
+                let held = Self {
+                    at: self.at,
+                    first: self.first,
+                    len: self.len,
+                    refused: 0,
+                };
+                self.first = NIL;
+                self.len = 0;
+                Some(held)
+            }
+        }
+    }
+
     /// Take the rows pushed from here on from `space`; what the table held in another space is
     /// given back first, dropped. A table handed the space it holds keeps its rows.
     #[inline(never)]
@@ -1463,6 +1484,17 @@ impl<K: RowKind, const N: usize> PooledRows<K, N> {
     #[inline]
     pub fn clear(&mut self) {
         self.raw.clear(K::SHAPE);
+    }
+
+    /// The rows the table holds, in their order, as a table of their own that keeps them where
+    /// they lie in the pool, and this one left holding none and taking rows of the same pool, its
+    /// refusals kept. `None`, taking nothing, for a table whose rows lie in a span of its own,
+    /// which no second table may hold rows of.
+    pub fn split_off(&mut self) -> Option<Self> {
+        self.raw.split_off().map(|raw| Self {
+            raw,
+            _items: PhantomData,
+        })
     }
 
     /// Take the item of the row at `place` out of the table, the row given back.

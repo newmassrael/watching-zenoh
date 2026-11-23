@@ -324,6 +324,23 @@ impl PeerTokens<crate::bounded::Lent> {
     ) {
         self.table.keep_rows_in(rows);
     }
+
+    /// The tokens the peer declared, as a table of their own that keeps their rows where they lie
+    /// in the session's pool and their keys in its key arena, held to the same quotas; this table
+    /// is left holding none and taking rows of the same pool, its refusals kept. What a face that
+    /// went still owes the liveliness subscribers, apart from the tables it held. `None`, taking
+    /// nothing, for a table whose rows lie in a span of its own, the one face of a session.
+    pub fn split_off(&mut self) -> Option<Self> {
+        let table = self.table.split_off()?;
+        Some(Self {
+            table,
+            quota: self.quota,
+            key_quota: self.key_quota,
+            oversize: 0,
+            keys: self.keys,
+            _policy: core::marker::PhantomData,
+        })
+    }
 }
 
 impl PeerTokens<Profile> {
