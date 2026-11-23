@@ -12,6 +12,10 @@
 //! empty: a lent record that a registry ignored would pass an equality test of two
 //! empty logs, so every test also pins what the log holds.
 //!
+//! In the build that lends every record (the cooperative C library's and the MCU kit's) no owned
+//! message reaches a table, so there is no owned form to compare: both registries read the lent
+//! record ([`owned_form`]), and what each test pins of the lent log is the claim it makes there.
+//!
 //! The end-to-end claim (the lent records cost the heap nothing on a real session)
 //! is `wz-session-lwip`'s `slot_control_records`; what this file adds is the
 //! per-registry equivalence that file cannot see for the planes it does not
@@ -35,7 +39,7 @@ use crate::declare_build::{
     build_declare_subscriber, build_declare_token, build_declare_token_reply,
     build_undeclare_queryable, build_undeclare_subscriber, build_undeclare_token,
 };
-use crate::driver_loop::{DriverLoopOutcome, InPlaceRecord, IterationEvent};
+use crate::driver_loop::{DriverLoopOutcome, InPlaceRecord, IterationEvent, OWNED_RECORDS};
 use crate::locality::Locality;
 use crate::network_message::NetworkMessage;
 use crate::qos::Priority;
@@ -63,28 +67,46 @@ fn frame(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
     }
 }
 
-/// Hand `declare` to `owned` as the owned message of a frame and to `lent` as the
-/// record read where its frame lies.
+/// What the registry fed the owned form is handed for a record: the frame of owned messages
+/// `frame` where this build's tables read owned messages ([`OWNED_RECORDS`]), and the lent record
+/// `lent` where they do not. The build that lends every record (`rx-lent-only` with
+/// `rx-lent-control`: the cooperative C library's and the MCU kit's) raises no frame that carries
+/// a message, and its tables read none; a frame of messages is no event that build can see. There
+/// both registries read the one form the build has, and each test's claim is what it pins of the
+/// lent result.
+fn owned_form<'a, 'f>(
+    frame: &'a DriverLoopOutcome,
+    lent: IterationEvent<'a, 'f>,
+) -> IterationEvent<'a, 'f> {
+    if OWNED_RECORDS {
+        IterationEvent::Poll(frame)
+    } else {
+        lent
+    }
+}
+
+/// Hand `declare` to `owned` as the owned message of a frame ([`owned_form`]) and to `lent` as
+/// the record read where its frame lies.
 fn both_declare(
     declare: &DeclareOwned,
     mut owned: impl FnMut(IterationEvent<'_, '_>),
     mut lent: impl FnMut(IterationEvent<'_, '_>),
 ) {
-    owned(IterationEvent::Poll(&frame(vec![NetworkMessage::Declare(
-        Box::new(declare.clone()),
-    )])));
+    let owned_frame = frame(vec![NetworkMessage::Declare(Box::new(declare.clone()))]);
     // The record the in-place walk lends, read where the frame lies.
     let wire = declare
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec();
     let view = wz_codecs::lent::Declare::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-    lent(IterationEvent::InPlace(InPlaceRecord::declare_of_frame(
+    let record = IterationEvent::InPlace(InPlaceRecord::declare_of_frame(
         &view,
         true,
         0,
         Priority::DEFAULT,
-    )));
+    ));
+    owned(owned_form(&owned_frame, record));
+    lent(record);
 }
 
 #[test]
@@ -424,27 +446,25 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
             BoundedVec::new();
         let mut lent_pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
             BoundedVec::new();
-        let owned_refused = registry.dispatch_iteration_event(
-            IterationEvent::Poll(&frame(vec![NetworkMessage::Interest(interest.clone())])),
-            &table,
-            &mut owned_pending,
-        );
+        let owned_frame = frame(vec![NetworkMessage::Interest(interest.clone())]);
         let wire = interest
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec();
         let view =
             wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-        let lent_refused = registry.dispatch_iteration_event(
-            IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
-                &view,
-                true,
-                0,
-                Priority::DEFAULT,
-            )),
+        let record = IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
+            &view,
+            true,
+            0,
+            Priority::DEFAULT,
+        ));
+        let owned_refused = registry.dispatch_iteration_event(
+            owned_form(&owned_frame, record),
             &table,
-            &mut lent_pending,
+            &mut owned_pending,
         );
+        let lent_refused = registry.dispatch_iteration_event(record, &table, &mut lent_pending);
         assert_eq!(owned_refused, lent_refused, "refused chains");
         assert_eq!(
             tokens_and_finals(&lent_pending),
@@ -512,25 +532,21 @@ fn a_lent_response_final_ends_the_pending_get_as_the_owned_one_does() {
         build_response_final(99, QosLevel::default()),
         build_response_final(7, QosLevel::default()),
     ] {
-        owned.dispatch_iteration_event(
-            IterationEvent::Poll(&frame(vec![NetworkMessage::ResponseFinal(done.clone())])),
-            &table,
-        );
+        let owned_frame = frame(vec![NetworkMessage::ResponseFinal(done.clone())]);
         let wire = done
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec();
         let view =
             wz_codecs::lent::ResponseFinal::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-        lent.dispatch_iteration_event(
-            IterationEvent::InPlace(InPlaceRecord::response_final_of_frame(
-                &view,
-                true,
-                0,
-                Priority::DEFAULT,
-            )),
-            &table,
-        );
+        let record = IterationEvent::InPlace(InPlaceRecord::response_final_of_frame(
+            &view,
+            true,
+            0,
+            Priority::DEFAULT,
+        ));
+        owned.dispatch_iteration_event(owned_form(&owned_frame, record), &table);
+        lent.dispatch_iteration_event(record, &table);
     }
     assert_eq!(lines(&lent_log), vec!["final 7"]);
     assert_eq!(
@@ -583,20 +599,20 @@ fn a_lent_alias_and_a_lent_subscriber_interest_are_kept_as_the_owned_ones_are() 
     // A CURRENT and FUTURE subscriber interest: the row is kept and the answer is
     // staged; its FINAL retires the row.
     let interest = build_interest_subscribers(11, true, true, 0, Some("i/**")).expect("build");
-    owned.dispatch_iteration_event(IterationEvent::Poll(&frame(vec![
-        NetworkMessage::Interest(interest.clone()),
-    ])));
+    let owned_frame = frame(vec![NetworkMessage::Interest(interest.clone())]);
     let wire = interest
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec();
     let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-    lent.dispatch_iteration_event(IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
+    let record = IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
         &view,
         true,
         0,
         Priority::DEFAULT,
-    )));
+    ));
+    owned.dispatch_iteration_event(owned_form(&owned_frame, record));
+    lent.dispatch_iteration_event(record);
     assert_eq!(
         (owned.peer().interest_count(), lent.peer().interest_count()),
         (1, 1),
@@ -608,20 +624,20 @@ fn a_lent_alias_and_a_lent_subscriber_interest_are_kept_as_the_owned_ones_are() 
         "and answered alike"
     );
     let done = build_interest_final(11);
-    owned.dispatch_iteration_event(IterationEvent::Poll(&frame(vec![
-        NetworkMessage::Interest(done.clone()),
-    ])));
+    let owned_frame = frame(vec![NetworkMessage::Interest(done.clone())]);
     let wire = done
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec();
     let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-    lent.dispatch_iteration_event(IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
+    let record = IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
         &view,
         true,
         0,
         Priority::DEFAULT,
-    )));
+    ));
+    owned.dispatch_iteration_event(owned_form(&owned_frame, record));
+    lent.dispatch_iteration_event(record);
     assert_eq!(
         (owned.peer().interest_count(), lent.peer().interest_count()),
         (0, 0),

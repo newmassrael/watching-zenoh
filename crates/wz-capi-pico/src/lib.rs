@@ -582,16 +582,20 @@ pub mod message_catalog;
 #[cfg(feature = "message-payload")]
 #[cfg(not(wz_additional_apart))]
 pub mod message_payload;
-// Fixed pools, one per slot size, that the objects behind the owned handles are taken from in
-// place of the heap: wz doors (`wz_ext.h`) of the unstable surface.
+// The doors through which a program reserves the process pools itself and reads them: wz doors
+// (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "object-pool")]
 pub mod object_pool;
-// Where the object behind an owned handle is placed and let go: a slot of the pools when the
-// program reserved them, the heap's otherwise.
+// Where an object a program holds outside a session is placed and let go: a slot of the process
+// pools where the build has them, the heap's otherwise.
 mod object_slot;
 mod option_fields;
 mod os;
 pub mod platform;
+// The places of the objects a program holds that no session holds for it, reserved once for the
+// process: in every library without the tokio engine, and in one with it that has their doors.
+#[cfg(wz_process_pools)]
+mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema: the instance keys' and the message payloads'.
 #[cfg(any(feature = "instance-key", feature = "message-payload"))]

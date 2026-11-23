@@ -351,6 +351,11 @@
 #              allocates after a session opens: each operation family's
 #              allocations a round, held by deploy/no_heap_ratchet.json so
 #              that they only fall, to 0 (docs/upstream-parity.md D12).
+#   Layers Vcov, Vtsan, Vasan, Vmiri — the engine's crates measured:
+#              coverage held to deploy/coverage_floor.json, the thread and
+#              address sanitizers, the Miri interpreter (scripts/verify.sh,
+#              docs/verification.md). Opt-in via `--layer <id>` or
+#              `WZ_RUN_LAYER_VERIFY=1`; hosted, a job each.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -29381,6 +29386,76 @@ layer_fz_fuzz_regress() {
     bash scripts/fuzz.sh regress
 }
 
+# ─── Layers Vcov, Vtsan, Vasan, Vmiri — measured verification of the engine's crates ──
+# What the tests reach and whether the code they run is sound, measured over the crates of the
+# cooperative engine (wz-session-core, wz-session-mcu, wz-runtime-coop, wz-capi-coop, wz-capi-pico
+# and, for the interpreter, wz-capi-port), each in the feature sets the shipped builds give it: the
+# pico C library's profile and the MCU kit images (scripts/lib/verify_plan.py resolves them when
+# the lane runs). scripts/verify.sh builds every lane with the nightly crates/wz-fuzz pins. What
+# each lane proves and what it does not: docs/verification.md.
+#
+#   Vcov   line, branch and function coverage of each crate, held to deploy/coverage_floor.json
+#          (scripts/lib/coverage_floor_gate.py): a fall fails, a rise prints the tighter row, a row
+#          not filled yet is NOT-MEASURED; the functions no test reached are written beside it.
+#   Vtsan  the units' tests and the C programs of the library under ThreadSanitizer; any report
+#          fails.
+#   Vasan  the same under AddressSanitizer.
+#   Vmiri  the units whose unsafe code lends places of an arena, and the host lock made in its
+#          place, under the Miri interpreter; any undefined behaviour it finds fails.
+#
+# Opt-in, as Layers S and Cmut are: each builds its crates again under its own flags and runs for
+# tens of minutes, so a full sweep skips them unless asked (`--layer <id>` or
+# WZ_RUN_LAYER_VERIFY=1). Hosted, each is a job of its own; on the fleet, a unit of its own.
+layer_vcov_coverage() {
+    local out="$WZ_ARTIFACTS/target/verify/coverage"
+    if [[ "$ONLY_LAYER" != "Vcov" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vcov SKIP (opt-in verification lane; --layer Vcov or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vcov || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg coverage_floor_gate.selftest -- python3 scripts/lib/coverage_floor_gate.py --selftest
+    _runci_leg declared --after verify_plan.selftest,coverage_floor_gate.selftest -- python3 scripts/lib/coverage_floor_gate.py --declared
+    _runci_leg measure --after verify_plan.selftest -- bash scripts/verify.sh coverage
+    _runci_leg coverage_floor_gate --after coverage_floor_gate.selftest,declared,measure -- python3 scripts/lib/coverage_floor_gate.py --check "$out/export.json" --summary-out "$out/summary.json" --uncovered-out "$out/uncovered.txt"
+    _runci_legs_close
+}
+
+layer_vtsan_thread_sanitizer() {
+    if [[ "$ONLY_LAYER" != "Vtsan" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vtsan SKIP (opt-in verification lane; --layer Vtsan or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vtsan || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg tests --after verify_plan.selftest -- bash scripts/verify.sh tsan tests
+    _runci_leg programs --after verify_plan.selftest -- bash scripts/verify.sh tsan programs
+    _runci_legs_close
+}
+
+layer_vasan_address_sanitizer() {
+    if [[ "$ONLY_LAYER" != "Vasan" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vasan SKIP (opt-in verification lane; --layer Vasan or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vasan || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg tests --after verify_plan.selftest -- bash scripts/verify.sh asan tests
+    _runci_leg programs --after verify_plan.selftest -- bash scripts/verify.sh asan programs
+    _runci_legs_close
+}
+
+layer_vmiri_interpreter() {
+    if [[ "$ONLY_LAYER" != "Vmiri" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vmiri SKIP (opt-in verification lane; --layer Vmiri or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vmiri || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg interpret --after verify_plan.selftest -- bash scripts/verify.sh miri
+    _runci_legs_close
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 # R3978 — the oracles this machine has already built, copied into this checkout
@@ -29570,6 +29645,10 @@ run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
 run_layer E18 layer_e18_zenoh_family_conformance || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer Fz layer_fz_fuzz_regress || overall=1
+run_layer Vcov layer_vcov_coverage || overall=1
+run_layer Vtsan layer_vtsan_thread_sanitizer || overall=1
+run_layer Vasan layer_vasan_address_sanitizer || overall=1
+run_layer Vmiri layer_vmiri_interpreter || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1

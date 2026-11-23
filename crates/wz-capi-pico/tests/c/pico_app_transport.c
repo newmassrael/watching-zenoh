@@ -249,11 +249,21 @@ static void on_query(z_loaned_query_t *query, void *arg) {
     z_query_reply(query, z_query_keyexpr(query), z_bytes_move(&payload), NULL);
 }
 
+/* What the asking side's get was handed. Every field is under `lock`: the reply and the drop of
+ * its closure run on a session thread while the program waits on its own. */
 static struct {
-    volatile int replies;
-    volatile int done;
+    z_owned_mutex_t lock;
+    int replies;
+    int done;
     char payload[64];
 } asked;
+
+static int asked_read(const int *field) {
+    z_mutex_lock(z_mutex_loan_mut(&asked.lock));
+    int value = *field;
+    z_mutex_unlock(z_mutex_loan_mut(&asked.lock));
+    return value;
+}
 
 static void on_reply(z_loaned_reply_t *reply, void *arg) {
     (void)arg;
@@ -261,17 +271,21 @@ static void on_reply(z_loaned_reply_t *reply, void *arg) {
     z_owned_string_t value;
     z_bytes_to_string(z_sample_payload(z_reply_ok(reply)), &value);
     size_t len = z_string_len(z_string_loan(&value));
+    z_mutex_lock(z_mutex_loan_mut(&asked.lock));
     if (len < sizeof asked.payload) {
         memcpy(asked.payload, z_string_data(z_string_loan(&value)), len);
         asked.payload[len] = '\0';
     }
-    z_string_drop(z_string_move(&value));
     asked.replies++;
+    z_mutex_unlock(z_mutex_loan_mut(&asked.lock));
+    z_string_drop(z_string_move(&value));
 }
 
 static void on_reply_drop(void *arg) {
     (void)arg;
+    z_mutex_lock(z_mutex_loan_mut(&asked.lock));
     asked.done = 1;
+    z_mutex_unlock(z_mutex_loan_mut(&asked.lock));
 }
 
 static int heard_count(void) {
@@ -315,9 +329,11 @@ static int wait_for_peer(const z_loaned_session_t *session) {
 /* Ask `demo/ask` until a get is answered or the bound runs out. 1 when one was. */
 static int ask(const z_loaned_session_t *session) {
     for (int attempt = 0; attempt < 15; attempt++) {
+        z_mutex_lock(z_mutex_loan_mut(&asked.lock));
         asked.replies = 0;
         asked.done = 0;
         asked.payload[0] = '\0';
+        z_mutex_unlock(z_mutex_loan_mut(&asked.lock));
         z_owned_closure_reply_t reply_closure;
         z_closure_reply(&reply_closure, on_reply, on_reply_drop, NULL);
         z_view_keyexpr_t ke;
@@ -328,8 +344,8 @@ static int ask(const z_loaned_session_t *session) {
         if (z_get(session, z_view_keyexpr_loan(&ke), "", z_closure_reply_move(&reply_closure), &opts) != Z_OK) {
             return 0;
         }
-        for (int i = 0; i < 500 && !asked.done; i++) z_sleep_ms(10);
-        if (asked.replies > 0) return 1;
+        for (int i = 0; i < 500 && !asked_read(&asked.done); i++) z_sleep_ms(10);
+        if (asked_read(&asked.replies) > 0) return 1;
         /* A get that found no target completed at once; the next is asked after a pause,
          * so the attempts span time rather than a few microseconds. */
         z_sleep_ms(200);
@@ -376,6 +392,8 @@ static void run_join(const char *what, uint8_t first_key, const char *first, uin
     memset(&heard, 0, sizeof heard);
     z_mutex_init(&heard.lock);
     heard.in_order = 1;
+    memset(&asked, 0, sizeof asked);
+    z_mutex_init(&asked.lock);
 
     z_owned_session_t one;
     z_owned_session_t two;
@@ -452,6 +470,7 @@ done:
           read_counter(&pipe_state.drops));
     CHECK(read_counter(&pipe_state.closes) > 0, "%s: the sessions closed no link on the program", what);
     z_mutex_drop(z_mutex_move(&heard.lock));
+    z_mutex_drop(z_mutex_move(&asked.lock));
 }
 
 int main(void) {

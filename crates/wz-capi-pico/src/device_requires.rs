@@ -49,8 +49,14 @@ pub unsafe extern "C" fn wz_ext_config_device_requires(
             Ok(json) => (Z_OK, json),
             Err((code, reason)) => (code, reason.to_owned()),
         };
-        crate::bytes::store_owned_string(out_requirement, text.as_bytes());
-        code
+        let stored = crate::bytes::store_owned_string(out_requirement, text.as_bytes());
+        // The requirement is its text, so without room for it there is none; a refusal's code
+        // is the answer whether its reason found room or not.
+        if code == Z_OK {
+            stored
+        } else {
+            code
+        }
     })
 }
 
