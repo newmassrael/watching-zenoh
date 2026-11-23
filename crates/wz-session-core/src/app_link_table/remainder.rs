@@ -56,6 +56,9 @@ impl Cells {
         }
     }
 
+    // Read back only when what is held moves to new storage, which a fixed build never does, and
+    // by the tests.
+    #[cfg(any(test, not(feature = "bounded-heapless")))]
     fn read(&self, at: usize) -> u8 {
         let Some(cell) = self.cell(at) else {
             return 0;
