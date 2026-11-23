@@ -460,7 +460,9 @@ pub struct EndpointRefusal {
 impl EndpointRefusal {
     /// The refusal of `endpoint` for `why`. A refusal is made after the open too (a dial again
     /// that fails), so it keeps the endpoint in a row's length and no memory of the heap: a text
-    /// longer than that is kept up to the last whole character that fits.
+    /// longer than that is kept up to the last whole character that fits. Out of line: every way
+    /// an endpoint is refused makes one.
+    #[inline(never)]
     pub(crate) fn new(endpoint: &str, why: Refusal) -> Self {
         let mut cut = endpoint.len().min(caps::MAX_LOCATOR_LEN);
         while !endpoint.is_char_boundary(cut) {
@@ -2831,8 +2833,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
                 self.lose_link(id);
                 self.report_face(FaceEventKind::Down, snapshot);
-                if id != DIAL_FACE {
-                    self.remove_face(at);
+                if self.face_goes(at, id) {
                     return Ok(());
                 }
                 if redial_ms.is_none() {
@@ -2866,8 +2867,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.abort_link(at);
                 self.run_tasks();
                 self.links.put_link(at, Link::Waiting { at_us: now_us });
-                if id != DIAL_FACE {
-                    self.remove_face(at);
+                if self.face_goes(at, id) {
                     return Ok(());
                 }
                 // The dial role's link reached a node another face holds or is bringing up:
@@ -2908,11 +2908,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Err(OpenError::EntropyUnavailable) => {
                         return Err(OpenError::EntropyUnavailable)
                     }
-                    Err(_) if id != DIAL_FACE => {
-                        self.remove_face(at);
-                        return Ok(());
+                    Err(last) => {
+                        if self.face_goes(at, id) {
+                            return Ok(());
+                        }
+                        self.dial_or_wait(next, last, redial_ms)?
                     }
-                    Err(last) => self.dial_or_wait(next, last, redial_ms)?,
                 }
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
@@ -3255,6 +3256,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Accepted::Broken => {}
             }
         }
+    }
+
+    /// Take the face at `at`, numbered `id`, out of the session when it is not the dial role's:
+    /// whether it went. What a face does whose link was lost or never came up; the dial role's
+    /// stays, to dial again. One body for each way a face's link ends.
+    #[inline(never)]
+    fn face_goes(&mut self, at: usize, id: FaceId) -> bool {
+        if id == DIAL_FACE {
+            return false;
+        }
+        self.remove_face(at);
+        true
     }
 
     /// Take the face at `at` out of the session, with its tables. The dial role's face is never
