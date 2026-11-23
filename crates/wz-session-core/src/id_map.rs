@@ -551,16 +551,18 @@ impl<P: Storage> DeclaredAliases<P> {
 
     /// Record that `id` repeats a keyexpr the application was told under `told`.
     pub fn insert(&mut self, id: u64, told: u64) {
-        match RowList::iter_mut(&mut self.0).find(|(held, _)| *held == id) {
-            Some(row) => row.1 = told,
-            None => {
-                let kept = RowList::push(&mut self.0, (id, told));
-                debug_assert!(
-                    kept.is_ok(),
-                    "an alias is an id of the peer's declarations, which hold no more"
-                );
-            }
+        // The search's borrow ends with its statement: the iterator of a pooled list is a value
+        // whose drop would hold the list through the arms of a `match` on it.
+        let held = RowList::iter_mut(&mut self.0).find(|(held, _)| *held == id);
+        if let Some(row) = held {
+            row.1 = told;
+            return;
         }
+        let kept = RowList::push(&mut self.0, (id, told));
+        debug_assert!(
+            kept.is_ok(),
+            "an alias is an id of the peer's declarations, which hold no more"
+        );
     }
 
     /// Forget `id`, returning the id it stood for if it was an alias.
