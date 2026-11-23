@@ -1280,8 +1280,6 @@ mod transport_header_parity;
 /// the same wire for a caller that decides everything itself. Behind its own
 /// feature because it selects the writers' codecs as a set.
 #[cfg(feature = "transport-compose")]
-// Totality debt TD-057 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::expect_used, clippy::arithmetic_side_effects)]
 pub mod transport_compose;
 
 /// R311y816 — the Open-body `initial_sn` derivation (zenoh `compute_sn`),

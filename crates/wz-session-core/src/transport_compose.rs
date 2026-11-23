@@ -366,10 +366,17 @@ impl Framing {
 /// Measured by writing it: the codec is the definition, and a second formula
 /// would be a second opinion about where the 9-byte bucket starts.
 pub fn vle_width(value: u64) -> usize {
-    let mut scratch = [0u8; 16];
-    let mut sink = sce_forge_runtime::codec::SliceSink::new(&mut scratch);
-    sink.write_vle_u64(value).expect("16 bytes hold any VLE");
-    sink.position()
+    let mut count = sce_forge_runtime::codec::CountSink::new();
+    infallible(count.write_vle_u64(value));
+    count.len()
+}
+
+/// A write to a sink that cannot refuse: its error type has no value.
+fn infallible(written: Result<(), core::convert::Infallible>) {
+    match written {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
 }
 
 /// The widest VLE the codec writes, in bytes.
@@ -389,11 +396,12 @@ pub fn vle_range(width: usize) -> Option<(u64, u64)> {
     let largest = |w: usize| -> u64 {
         let (mut lo, mut hi) = (0u64, u64::MAX);
         while lo < hi {
-            let mid = lo + (hi - lo) / 2 + (hi - lo) % 2;
+            // The upper middle, above `lo` while `lo < hi`, so the step down from it is exact.
+            let mid = lo.saturating_add(hi.saturating_sub(lo).div_ceil(2));
             if vle_width(mid) <= w {
                 lo = mid;
             } else {
-                hi = mid - 1;
+                hi = mid.saturating_sub(1);
             }
         }
         lo
@@ -401,7 +409,7 @@ pub fn vle_range(width: usize) -> Option<(u64, u64)> {
     let min = if width == 1 {
         0
     } else {
-        largest(width - 1) + 1
+        largest(width.saturating_sub(1)).saturating_add(1)
     };
     Some((min, largest(width)))
 }
@@ -434,7 +442,7 @@ fn check_priority(priority: Option<u8>) -> Result<Option<Priority>, ComposeError
 /// nibble, the two bits between them reserved and written zero
 /// (`commons/zenoh-protocol/src/transport/init.rs` @ `|zid_len|x|x|wai|`).
 fn cbyte(whatami: u8, zid_len: usize) -> u8 {
-    whatami | (((zid_len as u8) - 1) << 4)
+    whatami | ((zid_len as u8).saturating_sub(1) << 4)
 }
 
 /// The entries of a chain the caller states, in its order, as the message's
@@ -566,8 +574,10 @@ pub fn compose_init(spec: &InitSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         extensions: held(&chain),
     };
     let mut wire = Vec::with_capacity(TransportInitWire::measure(&message).len());
-    TransportInitWire::encode_source(&message, &mut VecSink::new(&mut wire))
-        .expect("VecSink is infallible");
+    infallible(TransportInitWire::encode_source(
+        &message,
+        &mut VecSink::new(&mut wire),
+    ));
     Ok(wire)
 }
 
@@ -608,8 +618,10 @@ pub fn compose_open(spec: &OpenSpec<'_>) -> Result<Vec<u8>, ComposeError> {
         extensions: held(&chain),
     };
     let mut wire = Vec::with_capacity(TransportOpenWire::measure(&message).len());
-    TransportOpenWire::encode_source(&message, &mut VecSink::new(&mut wire))
-        .expect("VecSink is infallible");
+    infallible(TransportOpenWire::encode_source(
+        &message,
+        &mut VecSink::new(&mut wire),
+    ));
     Ok(wire)
 }
 
@@ -627,8 +639,10 @@ pub fn compose_close(reason: u8, session: bool) -> Vec<u8> {
         extensions: None,
     };
     let mut wire = Vec::with_capacity(2);
-    TransportCloseWire::encode_source(&message, &mut VecSink::new(&mut wire))
-        .expect("VecSink is infallible");
+    infallible(TransportCloseWire::encode_source(
+        &message,
+        &mut VecSink::new(&mut wire),
+    ));
     wire
 }
 
@@ -640,8 +654,10 @@ pub fn compose_keep_alive() -> Vec<u8> {
         extensions: None,
     };
     let mut wire = Vec::with_capacity(1);
-    TransportKeepAliveWire::encode_source(&message, &mut VecSink::new(&mut wire))
-        .expect("VecSink is infallible");
+    infallible(TransportKeepAliveWire::encode_source(
+        &message,
+        &mut VecSink::new(&mut wire),
+    ));
     wire
 }
 
@@ -697,7 +713,7 @@ pub fn frame_unit(framing: Framing, body: &[u8]) -> Result<Vec<u8>, ComposeError
         }
         .encode_to_vec(),
         Framing::LowLatencyStream => {
-            let mut wire = Vec::with_capacity(4 + body.len());
+            let mut wire = Vec::with_capacity(body.len().saturating_add(4));
             wire.extend_from_slice(&(body.len() as u32).to_le_bytes());
             wire.extend_from_slice(body);
             wire
