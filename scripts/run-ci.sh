@@ -9571,8 +9571,14 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # links split by a DECLARED class (upstream's `rel=`), the only way two
     # links of one protocol segregate once a link's class is its protocol's.
     # MEASURED: 9 passed on this command.
+    # 9 -> 11, and `transport-link-udp` joins this arm: a TCP link and a UDP
+    # link to one peer, no class declared on either end, split the reliable and
+    # the best-effort channel by their protocols' classes over real sockets, in
+    # both link orders. ML_FEATURES carries no UDP link, so without it those two
+    # cases are compiled out of every run; they ride this arm rather than a build
+    # of their own. MEASURED: 11 passed on this command.
     wz_test_args wz-runtime-tokio session_multilink_e2e
-    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ba 11 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos,transport-link-udp" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     wz_test_args wz-runtime-tokio session_multilink_deploy_e2e
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
