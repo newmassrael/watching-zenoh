@@ -4753,7 +4753,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // acceptor then took a few hundred bytes more of its 4 KB heap than they need, which
         // ran it out mid-handshake (Layer Q's microbit leg, from `47d33579d`). Built by value,
         // as it is three words on the stack.
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
         {
             let chain = if patch {
                 alloc::vec![default_init_patch_ext_entry()]
@@ -4763,7 +4763,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // SAFETY: the caller's contract.
             unsafe { at.write(R::new_mutex(chain)) };
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
         {
             // SAFETY: the caller's contract.
             unsafe { at.write(R::new_mutex(ExtChainBuf::default())) };
@@ -7160,7 +7160,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The entries are held in upstream's encode order, ascending extension
     /// id (stable, so entries of one id keep the order given): the stagers
     /// keep that order, and a chain handed over whole is written as theirs is.
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
     pub fn set_ext_chain(&self, role: ExtChainRole, mut entries: Vec<ExtEntryOwned>) {
         crate::ext_chain::sort_into_canonical_order(&mut entries);
         R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);

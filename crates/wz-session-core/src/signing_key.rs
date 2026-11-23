@@ -51,16 +51,17 @@ use zeroize::Zeroizing;
 /// log its inner bytes.
 ///
 /// Under `session-slot` (the heap-free per-session profile, fixed-memory step
-/// S5) the bytes are an array of `SIGNING_KEY_MAX` held in the key itself, and a
+/// S5) and on a build whose limits are its build's values (`limits-lent-at-open`)
+/// the bytes are an array of `SIGNING_KEY_MAX` held in the key itself, and a
 /// key longer than that is stored as its SHA-256, which is the same key to HMAC:
 /// RFC 2104 defines a key longer than the block as that key hashed.
 #[derive(Clone)]
 pub struct SigningKey {
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
     bytes: Zeroizing<Vec<u8>>,
-    #[cfg(feature = "session-slot")]
+    #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
     bytes: Zeroizing<[u8; SIGNING_KEY_MAX]>,
-    #[cfg(feature = "session-slot")]
+    #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
     len: usize,
 }
 
@@ -100,7 +101,7 @@ pub const SIGNING_KEY_BYTES: usize = 32;
 
 /// How many key bytes a [`SigningKey`] holds under `session-slot`: the HMAC-SHA256
 /// block, which is also the longest key HMAC uses as it stands.
-#[cfg(feature = "session-slot")]
+#[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
 pub const SIGNING_KEY_MAX: usize = 64;
 
 impl SigningKey {
@@ -141,13 +142,13 @@ impl SigningKey {
     ) -> Result<Self, crate::entropy::EntropyUnavailable> {
         // Zeroizing FIRST, so a partially-filled buffer is wiped on the `?`
         // rather than left on the heap for the allocator to hand out.
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
         {
             let mut bytes = Zeroizing::new(alloc::vec![0u8; SIGNING_KEY_BYTES]);
             source.try_fill_bytes(&mut bytes)?;
             Ok(Self { bytes })
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
         {
             let mut bytes = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
             source.try_fill_bytes(&mut bytes[..SIGNING_KEY_BYTES])?;
@@ -171,13 +172,13 @@ impl SigningKey {
             let _ = Zeroizing::new(bytes);
             return Err(SigningKeyTooShort(0)); // length already inspected
         }
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
         {
             Ok(Self {
                 bytes: Zeroizing::new(bytes),
             })
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
         {
             let bytes = Zeroizing::new(bytes);
             Self::from_slice(&bytes)
@@ -192,13 +193,13 @@ impl SigningKey {
         if bytes.len() < SIGNING_KEY_BYTES {
             return Err(SigningKeyTooShort(0));
         }
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
         {
             Ok(Self {
                 bytes: Zeroizing::new(bytes.to_vec()),
             })
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
         {
             let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
             let len = if bytes.len() <= SIGNING_KEY_MAX {
@@ -232,11 +233,11 @@ impl SigningKey {
 
     /// Crate-internal slice view; not exposed to consumers.
     fn as_slice(&self) -> &[u8] {
-        #[cfg(not(feature = "session-slot"))]
+        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
         {
             &self.bytes
         }
-        #[cfg(feature = "session-slot")]
+        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
         {
             &self.bytes[..self.len]
         }

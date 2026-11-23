@@ -27,7 +27,10 @@ use alloc::vec::Vec;
 /// has the handshake; the rest each by the feature that owns them. Capacity for
 /// one more than the count is not kept: an entry that would not fit is a
 /// stager that skipped its replace, and `ExtChainBuf::push` says so.
-#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[cfg(all(
+    any(feature = "session-slot", feature = "limits-lent-at-open"),
+    feature = "session-unicast"
+))]
 pub const STAGED_EXT_KINDS: usize = 3
     + cfg!(feature = "transport-qos") as usize
     + cfg!(feature = "transport-lowlatency") as usize
@@ -36,23 +39,33 @@ pub const STAGED_EXT_KINDS: usize = 3
     + cfg!(feature = "session-extauth") as usize
     + cfg!(feature = "transport-multilink") as usize;
 
-/// One handshake ext chain as a session stages it: the growable `Vec` of every
-/// profile but `session-slot`, and under it an array of `STAGED_EXT_KINDS`
-/// entries held in the session's own storage (fixed-memory step S5).
+/// One handshake ext chain as a session stages it: the growable `Vec` of the heap
+/// profile, and an array of `STAGED_EXT_KINDS` entries held in the session's own
+/// storage under `session-slot` (fixed-memory step S5) and on a build whose limits
+/// are its build's values (`limits-lent-at-open`).
 ///
 /// The fixed form has exactly the operations the stagers use on the vector
 /// (`push`, `retain`, indexing, iteration, `Default` for the take-and-put-back
 /// of the lend-only handshake), so a stager is written once.
-#[cfg(all(not(feature = "session-slot"), feature = "session-unicast"))]
+#[cfg(all(
+    not(any(feature = "session-slot", feature = "limits-lent-at-open")),
+    feature = "session-unicast"
+))]
 pub type ExtChainBuf = Vec<ExtEntryOwned>;
 
 /// See the growable form of this alias.
-#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[cfg(all(
+    any(feature = "session-slot", feature = "limits-lent-at-open"),
+    feature = "session-unicast"
+))]
 #[derive(Debug, Clone, Default)]
 pub struct ExtChainBuf(heapless::Vec<ExtEntryOwned, STAGED_EXT_KINDS>);
 
 // Which of these a build uses depends on which extensions it can stage.
-#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[cfg(all(
+    any(feature = "session-slot", feature = "limits-lent-at-open"),
+    feature = "session-unicast"
+))]
 #[allow(dead_code)]
 impl ExtChainBuf {
     /// Append `entry`. The chain holds one entry per kind of extension the
@@ -128,12 +141,18 @@ fn canonical_position(chain: &[ExtEntryOwned], id: u8) -> usize {
 /// Put a chain handed over whole into the order
 /// [`stage_in_canonical_order`] keeps, so a seeded chain and a staged one are
 /// written alike. Stable, so entries of one id keep the order they came in.
-#[cfg(all(not(feature = "session-slot"), feature = "session-unicast"))]
+#[cfg(all(
+    not(any(feature = "session-slot", feature = "limits-lent-at-open")),
+    feature = "session-unicast"
+))]
 pub(crate) fn sort_into_canonical_order(chain: &mut ExtChainBuf) {
     chain.sort_by_key(|e| e.ext_id());
 }
 
-#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[cfg(all(
+    any(feature = "session-slot", feature = "limits-lent-at-open"),
+    feature = "session-unicast"
+))]
 impl core::ops::Deref for ExtChainBuf {
     type Target = [ExtEntryOwned];
 
@@ -142,7 +161,10 @@ impl core::ops::Deref for ExtChainBuf {
     }
 }
 
-#[cfg(all(feature = "session-slot", feature = "session-unicast"))]
+#[cfg(all(
+    any(feature = "session-slot", feature = "limits-lent-at-open"),
+    feature = "session-unicast"
+))]
 impl core::ops::DerefMut for ExtChainBuf {
     fn deref_mut(&mut self) -> &mut [ExtEntryOwned] {
         self.0.as_mut_slice()
@@ -787,7 +809,7 @@ mod canonical_order_tests {
     /// SHM, region name. zenoh writes them qos, shm, auth, mlink, lowlatency,
     /// compression, patch, region (`commons/zenoh-codec/src/transport/init.rs`
     /// @ `// Extensions`), which is ascending id.
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
     #[test]
     fn entries_staged_in_send_order_sit_in_upstreams_encode_order() {
         let mut chain: ExtChainBuf = alloc::vec![crate::extpatch::encode_patch_ext()];
@@ -839,7 +861,7 @@ mod canonical_order_tests {
 
     /// A chain handed over whole is ordered by the 4-bit id, not the header
     /// byte, and stably: two entries of one id keep the order they came in.
-    #[cfg(not(feature = "session-slot"))]
+    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
     #[test]
     fn a_chain_handed_over_whole_is_sorted_by_id_stably() {
         let mut chain: ExtChainBuf = alloc::vec![unit(0x08), z64(0x01, 3), unit(0x07), unit(0x01)];
