@@ -1888,6 +1888,8 @@ def classify(following: str) -> str:
     if ASSERTION.match(following):
         return "not-an-item"
     if MACRO_CALL.match(following):
+        if macro_call_is_expression(following):
+            return "not-an-item"
         return "macro-invocation"
     if FIELD.match(following) or BLOCK_OR_STMT.match(following):
         return "not-an-item"
@@ -1896,13 +1898,21 @@ def classify(following: str) -> str:
     return "UNCLASSIFIED"
 
 
+_CLOSER = {"[": "]", "(": ")", "{": "}"}
+
+
 def _matching_bracket(text: str, open_at: int) -> int | None:
-    """Index of the `]` that closes the `[` at `open_at`, or `None`.
+    """Index of the bracket that closes the `[`, `(` or `{` at `open_at`, or `None`.
 
     A bracket inside a string literal does not count: a feature name or a
     message is free text, and counting it would end an attribute early or
-    never.
+    never. Only the opener's own kind is counted, which is enough for the
+    well-nested text it is given.
     """
+    opener = text[open_at]
+    closer = _CLOSER.get(opener)
+    if closer is None:
+        return None
     depth = 0
     in_string = False
     k = open_at
@@ -1915,9 +1925,9 @@ def _matching_bracket(text: str, open_at: int) -> int | None:
                 in_string = False
         elif ch == '"':
             in_string = True
-        elif ch == "[":
+        elif ch == opener:
             depth += 1
-        elif ch == "]":
+        elif ch == closer:
             depth -= 1
             if depth == 0:
                 return k
@@ -1942,6 +1952,26 @@ def _without_line_comment(line: str) -> str:
             return line[:k].rstrip()
         k += 1
     return line.rstrip()
+
+
+def macro_call_is_expression(line: str) -> bool:
+    """True when the macro call at the start of `line` heads an expression and is no item.
+
+    A macro in item position is `name!(..);`, `name![..];` or `name! {..}`: nothing follows its
+    group on the line but the `;`. `addr_of_mut!((*at).x).write(v);` calls a method on the
+    macro's value, a statement no item can be, the way `f(x).write(v);` is one
+    (`CALL_OR_PATH`); so is a value followed by `?` or an operator. A group that does not close
+    on its line is left a macro invocation: the line alone cannot say, and counting it is the
+    over-reporting direction.
+    """
+    found = MACRO_CALL.match(line)
+    if found is None:
+        return False
+    close = _matching_bracket(line, found.end() - 1)
+    if close is None:
+        return False
+    rest = _without_line_comment(line[close + 1 :]).strip()
+    return rest != "" and not rest.startswith(";")
 
 
 def after_attributes(text: str) -> str | None:
@@ -3252,6 +3282,11 @@ def _fixture() -> dict[str, str]:
         "demo/src/macro_rules.rs": f"{b}\nmacro_rules! helper {{\n    () => {{}};\n}}\n",
         # a gated `mut` parameter
         "demo/src/param.rs": f"fn f(\n    {a}\n    mut n: u8,\n) {{}}\n",
+        # a statement that calls a method on a macro's value: an expression, as
+        # `f(x).write(v);` is, and no item a feature could take away
+        "demo/src/macro_value.rs": (
+            f"fn f() {{\n    {b}\n    addr_of_mut!((*at).x).write(None);\n}}\n"
+        ),
     }
 
 
@@ -4108,7 +4143,15 @@ def attribute_selftest() -> int:
          "UNCLASSIFIED"),
         ("a foreign block opened on its line", 'extern "C" {', "UNCLASSIFIED"),
     ]
-    for label, line, want in foreign:
+    macros = [
+        ("a macro statement", "make_public_thing!(one, two);", "macro-invocation"),
+        ("a macro whose group closes on a later line", "helper! {", "macro-invocation"),
+        ("a macro statement with a comment", "helper! { a } // b.c", "macro-invocation"),
+        ("a method on a macro's value", "addr_of_mut!((*at).x).write(None);", "not-an-item"),
+        ("a macro's value with `?`", "try_thing!(x)?;", "not-an-item"),
+        ("a ) in a string inside the group", 'm!(")").f();', "not-an-item"),
+    ]
+    for label, line, want in foreign + macros:
         if classify(line) != want:
             print(
                 f"feature-public-surface: SELFTEST FAIL -- classify, {label}: expected "
@@ -4147,8 +4190,8 @@ def selftest() -> int:
         "restricted-item": 1,
         # private, macro_rules
         "private-item": 2,
-        # expr, field, assertion, guard, inline, param
-        "not-an-item": 6,
+        # expr, field, assertion, guard, inline, param, macro_value
+        "not-an-item": 7,
         "UNCLASSIFIED": 1,
         # wrapped_stack's second attribute, cfg_attr
         "conditional-attribute": 2,
@@ -4162,7 +4205,8 @@ def selftest() -> int:
             f"be charged to the next line's (R2972). R2973: an attribute is "
             f"read WHOLE (a wrapped `all(..)`, a comment or a `]` inside one, a "
             f"wrapped attribute in the stack), a `cfg_attr` is no gate, "
-            f"`macro_rules!` is an item and `mut n: T,` is a parameter."
+            f"`macro_rules!` is an item and `mut n: T,` is a parameter. A "
+            f"method called on a macro's value is a statement, not an item."
         )
         return 1
     if attribute_selftest() != 0:
