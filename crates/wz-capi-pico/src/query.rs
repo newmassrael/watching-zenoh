@@ -1168,24 +1168,13 @@ unsafe fn declare_queryable_inner(
     *owned = z_owned_closure_query_t::null_value();
     let released = cclosure.release_latch();
 
-    let Some(handle) = session_handle(zs) else {
-        return Err(Z_ERR_NULL);
-    };
     // A closed session takes no declaration; the closure consumed above runs its drop.
-    if handle.is_closed() {
-        return Err(Z_ERR_SESSION_CLOSED);
-    }
-    let ke = match keyexpr_str(keyexpr) {
-        Some(k) => k.to_owned(),
-        None => return Err(Z_ERR_INVALID),
-    };
-    // Reject a non-canonical / pico-unsafe keyexpr UP FRONT — the same
-    // outbound gate `z_declare_subscriber` hoists, and for the same reason:
+    let handle = crate::session::open_session_handle(zs)?;
+    // A non-canonical / pico-unsafe keyexpr is refused UP FRONT — the same
+    // outbound gate `z_declare_subscriber` applies, and for the same reason:
     // the registry declares best-effort per face, so a per-face reject would
     // be swallowed and the call would report `Z_OK` for a dead SSOT entry.
-    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-        return Err(Z_ERR_INVALID);
-    }
+    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?.to_owned();
     let (complete, allowed_origin) = if options.is_null() {
         (false, crate::locality::default_locality!("local-queryable"))
     } else {

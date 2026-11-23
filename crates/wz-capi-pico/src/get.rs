@@ -138,14 +138,14 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
-use crate::keyexpr::{keyexpr_str, wire_key_of};
+use crate::keyexpr::wire_key_of;
 use crate::prelude::*;
 use crate::pubsub::{
     sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
 };
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
-use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{session_handle, z_loaned_session_t, Engine};
+use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use crate::session::{z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
 
 // --- pico enum-typed option fields -----------------------------------------
@@ -1199,25 +1199,20 @@ pub(crate) unsafe fn get_inner(
         Err(code) => return code,
     };
 
-    let Some(handle) = session_handle(zs) else {
-        return Z_ERR_NULL;
-    };
     // A closed session issues no get; the closure adopted above runs its drop.
-    if handle.is_closed() {
-        return crate::result::Z_ERR_SESSION_CLOSED;
-    }
+    let handle = match crate::session::open_session_handle(zs) {
+        Ok(handle) => handle,
+        Err(code) => return code,
+    };
     // The session's close waits for this get's closure to finish and be dropped.
     handle.keep_background(cclosure.release_latch());
-    let ke = match keyexpr_str(keyexpr) {
-        Some(k) => k.to_owned(),
-        None => return Z_ERR_INVALID,
+    // A non-canonical / pico-unsafe keyexpr is refused up front, as the declare
+    // paths refuse it: the fan is best-effort per face, so a per-face reject
+    // would be swallowed and the call would report Z_OK.
+    let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
+        Ok(k) => k.to_owned(),
+        Err(code) => return code,
     };
-    // Reject a non-canonical / pico-unsafe keyexpr up front — the gate the
-    // declare paths hoist, for the same reason: the fan is best-effort per face,
-    // so a per-face reject would be swallowed and the call would report Z_OK.
-    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-        return Z_ERR_INVALID;
-    }
 
     // pico dereferences `options` only when non-null and otherwise fills the
     // defaults (`api.c:1756-1761`), so a null `options` is a valid default get.

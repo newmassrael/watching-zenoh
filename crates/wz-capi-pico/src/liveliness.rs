@@ -201,14 +201,11 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         if token.is_null() {
             return Z_ERR_NULL;
         }
-        let handle = match session_handle(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
         // A closed session takes no declaration.
-        if handle.is_closed() {
-            return crate::result::Z_ERR_SESSION_CLOSED;
-        }
+        let handle = match crate::session::open_session_handle(zs) {
+            Ok(handle) => handle,
+            Err(code) => return code,
+        };
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
@@ -344,13 +341,11 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let Some(handle) = session_handle(zs) else {
-            return Z_ERR_NULL;
-        };
         // A closed session takes no declaration; the closure consumed above runs its drop.
-        if handle.is_closed() {
-            return crate::result::Z_ERR_SESSION_CLOSED;
-        }
+        let handle = match crate::session::open_session_handle(zs) {
+            Ok(handle) => handle,
+            Err(code) => return code,
+        };
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -554,22 +549,17 @@ pub unsafe extern "C" fn z_liveliness_get(
         // Adopt the closure FIRST and null the source (consume-on-all-paths).
         let closure = crate::get::adopt_reply_closure(callback);
 
-        let Some(handle) = session_handle(zs) else {
-            return Z_ERR_NULL;
-        };
         // A closed session issues no get; the closure adopted above runs its drop.
-        if handle.is_closed() {
-            return crate::result::Z_ERR_SESSION_CLOSED;
-        }
+        let handle = match crate::session::open_session_handle(zs) {
+            Ok(handle) => handle,
+            Err(code) => return code,
+        };
         // The session's close waits for this get's closure to finish and be dropped.
         handle.keep_background(closure.release_latch());
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
+        let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
+            Ok(k) => k.to_owned(),
+            Err(code) => return code,
         };
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
-        }
         // A NULL options pointer is pico's "defaults", not an error.
         let timeout_ms = if options.is_null() {
             0

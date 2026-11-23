@@ -52,7 +52,7 @@ use crate::get::{
     z_consolidation_mode_t, z_query_consolidation_t, z_query_target_t, Z_CONSOLIDATION_MODE_AUTO,
     Z_QUERY_TARGET_BEST_MATCHING,
 };
-use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
+use crate::keyexpr::{declared_of, DeclaredKeyexpr};
 use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
@@ -60,9 +60,7 @@ use crate::matching::{
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
-use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
-};
+use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
 
@@ -374,13 +372,10 @@ pub unsafe extern "C" fn z_declare_querier(
             return Z_ERR_NULL;
         };
         let engine = engine_of(handle);
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_INVALID,
+        let ke = match crate::keyexpr::outbound_keyexpr(keyexpr) {
+            Ok(k) => k.to_owned(),
+            Err(code) => return code,
         };
-        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_ERR_INVALID;
-        }
         // pico dereferences `options` only when non-null and otherwise takes the
         // defaults, so a null `options` is a valid default querier — which is
         // exactly what `z_get_lat.c` passes.

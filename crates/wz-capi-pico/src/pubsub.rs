@@ -2954,25 +2954,12 @@ unsafe fn declare_subscriber_with(
     let cclosure = CClosure::new(moved.context, moved.call, moved.drop);
     *moved = z_owned_closure_sample_t::null_value();
 
-    let Some(state) = session_handle(zs) else {
-        return Err(Z_ERR_NULL);
-    };
     // A closed session takes no declaration; the closure this call consumed runs its drop.
-    if state.is_closed() {
-        return Err(Z_ERR_SESSION_CLOSED);
-    }
+    let state = crate::session::open_session_handle(zs)?;
     // The caller's key is read where it lies: the session copies it into its own key arena, so
-    // no copy is made for the call.
-    let Some(ke) = keyexpr_str(keyexpr) else {
-        return Err(Z_ERR_INVALID);
-    };
-    // A non-canonical or pico-unsafe keyexpr is refused up front, the outbound gate wz's own
-    // `Session::declare_subscriber` applies per face, so the verdict is the same whether or not
-    // a peer is up yet (the registry declares best-effort per face and would swallow a per-face
-    // refusal).
-    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(ke).is_err() {
-        return Err(Z_ERR_INVALID);
-    }
+    // no copy is made for the call. One the outbound gate refuses is refused before anything is
+    // declared.
+    let ke = crate::keyexpr::outbound_keyexpr(keyexpr)?;
     let slot = if owned {
         match crate::object_slot::Slot::take(crate::object_slot::Kind::Subscriber) {
             Some(slot) => Some(slot),

@@ -60,6 +60,24 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
     core::str::from_utf8(bytes).ok()
 }
 
+/// The key a declaration or a get names, read where the caller holds it: `Z_ERR_INVALID` when it
+/// is null or not UTF-8, and when it is not one a zenoh-pico peer takes (not canon, or pico-unsafe),
+/// the outbound gate wz's own session applies per face. Judged here, before anything is declared or
+/// asked, because a session declares and asks per face at its best, and would swallow a refusal of
+/// one face. One body every such door calls, so the gate and its code are not copied into each.
+///
+/// # Safety
+/// As [`keyexpr_str`].
+#[inline(never)]
+pub(crate) unsafe fn outbound_keyexpr<'a>(
+    ke: *const z_loaned_keyexpr_t,
+) -> Result<&'a str, ZResult> {
+    let key = keyexpr_str(ke).ok_or(Z_ERR_INVALID)?;
+    wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(key)
+        .map_err(|_| Z_ERR_INVALID)?;
+    Ok(key)
+}
+
 /// The [`DeclaredKeyexpr`] behind a loaned keyexpr, or `None` for a view.
 ///
 /// Only the owned keyexprs this crate builds, and the loans its entities hand
@@ -537,26 +555,22 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    guarded(|| {
-        if keyexpr.is_null() || name.is_null() {
-            return Z_ERR_NULL;
-        }
-        let cstr = CStr::from_ptr(name);
-        // Validate UTF-8 up front; the borrowed bytes are read as `&str` later.
-        let Ok(text) = cstr.to_str() else {
-            return Z_ERR_INVALID;
-        };
-        if !is_pico_canon(text) {
-            return Z_EINVAL;
-        }
-        let bytes = cstr.to_bytes();
-        *keyexpr = z_view_keyexpr_t {
-            _start: bytes.as_ptr(),
-            _len: bytes.len(),
-            _pad: [0usize; 4],
-        };
-        Z_OK
-    })
+    // pico's is the substring form over the string's length, and so is this one, so the two
+    // judge a text through one body.
+    z_view_keyexpr_from_substr(keyexpr, name, c_str_len(name))
+}
+
+/// The length of the C string at `name`, `0` for a null one: what each `_from_str` door of a key
+/// hands its substring form.
+///
+/// # Safety
+/// `name` must be null or a valid NUL-terminated string.
+unsafe fn c_str_len(name: *const c_char) -> usize {
+    if name.is_null() {
+        0
+    } else {
+        CStr::from_ptr(name).to_bytes().len()
+    }
 }
 
 /// Build a view keyexpr WITHOUT validating it (pico
@@ -579,22 +593,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
 ) {
-    let _ = guarded(|| {
-        if keyexpr.is_null() {
-            return Z_ERR_NULL;
-        }
-        if name.is_null() || CStr::from_ptr(name).to_str().is_err() {
-            z_view_keyexpr_empty(keyexpr);
-            return Z_ERR_INVALID;
-        }
-        let bytes = CStr::from_ptr(name).to_bytes();
-        *keyexpr = z_view_keyexpr_t {
-            _start: bytes.as_ptr(),
-            _len: bytes.len(),
-            _pad: [0usize; 4],
-        };
-        Z_OK
-    });
+    z_view_keyexpr_from_substr_unchecked(keyexpr, name, c_str_len(name));
 }
 
 /// Build a view keyexpr borrowing `len` bytes of the caller's buffer (pico
@@ -956,12 +955,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    let len = if name.is_null() {
-        0
-    } else {
-        CStr::from_ptr(name).to_bytes().len()
-    };
-    z_keyexpr_from_substr(keyexpr, name, len)
+    z_keyexpr_from_substr(keyexpr, name, c_str_len(name))
 }
 
 /// Build an owned keyexpr from an explicitly-sized substring (pico
@@ -1004,11 +998,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    let mut len = if name.is_null() {
-        0
-    } else {
-        CStr::from_ptr(name).to_bytes().len()
-    };
+    let mut len = c_str_len(name);
     z_keyexpr_from_substr_autocanonize(keyexpr, name, &mut len)
 }
 
@@ -1261,10 +1251,20 @@ pub unsafe extern "C" fn z_keyexpr_equals(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
-    })
+    guard_val(false, || keyexpr_pair(l, r).is_some_and(|(a, b)| a == b))
+}
+
+/// The texts of two loaned keyexprs, or `None` when either is null or not UTF-8: what each door
+/// that compares two keys reads, through one body.
+///
+/// # Safety
+/// `l` / `r` must be null or live loaned keyexprs.
+#[inline(never)]
+unsafe fn keyexpr_pair<'a>(
+    l: *const z_loaned_keyexpr_t,
+    r: *const z_loaned_keyexpr_t,
+) -> Option<(&'a str, &'a str)> {
+    Some((keyexpr_str(l)?, keyexpr_str(r)?))
 }
 
 /// Whether `l`'s set CONTAINS `r`'s (pico `z_keyexpr_includes`).
@@ -1276,9 +1276,9 @@ pub unsafe extern "C" fn z_keyexpr_includes(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
-        (Some(a), Some(b)) => wz_session_core::keyexpr_match::keyexpr_includes(a, b),
-        _ => false,
+    guard_val(false, || {
+        keyexpr_pair(l, r)
+            .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_includes(a, b))
     })
 }
 
@@ -1291,9 +1291,9 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(false, || match (keyexpr_str(l), keyexpr_str(r)) {
-        (Some(a), Some(b)) => wz_session_core::keyexpr_match::keyexpr_intersects(a, b),
-        _ => false,
+    guard_val(false, || {
+        keyexpr_pair(l, r)
+            .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_intersects(a, b))
     })
 }
 
@@ -1313,11 +1313,15 @@ pub unsafe extern "C" fn z_keyexpr_relation_to(
     right: *const z_loaned_keyexpr_t,
 ) -> z_keyexpr_intersection_level_t {
     guard_val(Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT, || {
-        if z_keyexpr_equals(left, right) {
+        // The two texts are read once, and the cascade asks of them.
+        let Some((a, b)) = keyexpr_pair(left, right) else {
+            return Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT;
+        };
+        if a == b {
             Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
-        } else if z_keyexpr_includes(left, right) {
+        } else if wz_session_core::keyexpr_match::keyexpr_includes(a, b) {
             Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
-        } else if z_keyexpr_intersects(left, right) {
+        } else if wz_session_core::keyexpr_match::keyexpr_intersects(a, b) {
             Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
         } else {
             Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
@@ -1492,6 +1496,105 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
         }
         z_view_keyexpr_from_substr(keyexpr, name, *len)
     })
+}
+
+#[cfg(test)]
+mod door_reading_tests {
+    use super::*;
+
+    /// A view over `text`, made without the checks, so a test can hand a door a key the
+    /// checked constructors refuse.
+    fn unchecked(text: &core::ffi::CStr) -> z_view_keyexpr_t {
+        let mut view = z_view_keyexpr_t {
+            _start: core::ptr::null(),
+            _len: 0,
+            _pad: [0usize; 4],
+        };
+        // SAFETY: a live view of this frame and a C string that outlives it.
+        unsafe { z_view_keyexpr_from_str_unchecked(&mut view, text.as_ptr()) };
+        view
+    }
+
+    /// The key a declaration or a get names is read through one gate: a canon key is read where
+    /// it lies, and no key, an empty one and one with an empty chunk are `Z_ERR_INVALID`.
+    #[test]
+    fn the_outbound_gate_reads_a_canon_key_and_refuses_the_rest() {
+        let canon = unchecked(c"demo/a/**");
+        let empty_chunk = unchecked(c"demo//a");
+        // SAFETY: views of this frame, and a null pointer.
+        unsafe {
+            let read = outbound_keyexpr(z_view_keyexpr_loan(&canon)).expect("a canon key");
+            assert_eq!(read, "demo/a/**");
+            assert_eq!(read.as_ptr(), canon._start, "read where the view holds it");
+            assert_eq!(
+                outbound_keyexpr(z_view_keyexpr_loan(&empty_chunk)),
+                Err(Z_ERR_INVALID)
+            );
+            assert_eq!(outbound_keyexpr(core::ptr::null()), Err(Z_ERR_INVALID));
+        }
+    }
+
+    /// The C string forms of the view constructors judge a text as their substring forms do:
+    /// a canon key is viewed whole, one that is not canon is `Z_EINVAL`, no text is `Z_ERR_NULL`
+    /// for the checked form and an empty view for the unchecked one.
+    #[test]
+    fn the_string_views_judge_as_the_substring_views() {
+        let mut view = unchecked(c"x");
+        // SAFETY: a live view of this frame, and C strings that outlive it.
+        unsafe {
+            assert_eq!(z_view_keyexpr_from_str(&mut view, c"a/b".as_ptr()), Z_OK);
+            assert_eq!(view._len, 3);
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut view, c"a//b".as_ptr()),
+                Z_EINVAL
+            );
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut view, core::ptr::null()),
+                Z_ERR_NULL
+            );
+            z_view_keyexpr_from_str_unchecked(&mut view, core::ptr::null());
+            assert!(z_view_keyexpr_is_empty(&view));
+        }
+    }
+
+    /// Two keys are compared through one reading of both: equal, including, intersecting and
+    /// disjoint keys each have their relation, and a key that is absent relates to nothing.
+    #[test]
+    fn two_keys_are_read_once_and_related_strongest_first() {
+        let ab = unchecked(c"a/b");
+        let any = unchecked(c"a/**");
+        let star_c = unchecked(c"a/*/c");
+        let b_star = unchecked(c"a/b/*");
+        let other = unchecked(c"z");
+        let relation = |l: &z_view_keyexpr_t, r: &z_view_keyexpr_t| {
+            // SAFETY: views of this frame.
+            unsafe { z_keyexpr_relation_to(z_view_keyexpr_loan(l), z_view_keyexpr_loan(r)) }
+        };
+        assert_eq!(relation(&ab, &ab), Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS);
+        assert_eq!(relation(&any, &ab), Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES);
+        assert_eq!(
+            relation(&star_c, &b_star),
+            Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
+        );
+        assert_eq!(relation(&ab, &other), Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT);
+        // SAFETY: a view of this frame and a null pointer.
+        unsafe {
+            let ab = z_view_keyexpr_loan(&ab);
+            assert_eq!(
+                z_keyexpr_relation_to(ab, core::ptr::null()),
+                Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
+            );
+            assert!(z_keyexpr_equals(ab, ab));
+            assert!(!z_keyexpr_equals(ab, core::ptr::null()));
+            assert!(z_keyexpr_includes(z_view_keyexpr_loan(&any), ab));
+            assert!(!z_keyexpr_includes(ab, z_view_keyexpr_loan(&any)));
+            assert!(z_keyexpr_intersects(
+                z_view_keyexpr_loan(&star_c),
+                z_view_keyexpr_loan(&b_star)
+            ));
+            assert!(!z_keyexpr_intersects(ab, z_view_keyexpr_loan(&other)));
+        }
+    }
 }
 
 // Their engine is the tokio engine's face registry, which a cooperative build does not have.
