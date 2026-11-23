@@ -2805,11 +2805,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let id = self.next_face;
             // The tables first: the group's task dispatches to them from its first step. They are
             // the face's for as long as the session holds the group, across its joins.
+            // The open lent a set for each group the task cells hold, so a group past them is
+            // refused as its spawn would be: no task cell is left for it.
             if self.registry.borrow_mut().add_face(id).is_err() {
-                return Err(OpenError::Group(EndpointRefusal::new(
-                    &join.endpoint,
-                    Refusal::FacesFull,
-                )));
+                return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
             }
             // An id of the key ids every node shares is read on the group as on a link.
             #[cfg(feature = "shared-key-ids")]
