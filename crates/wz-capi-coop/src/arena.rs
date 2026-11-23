@@ -65,8 +65,10 @@
 //!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
 //!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
 //!   counted, as zenoh-pico drops a declaration its heap cannot hold;
-//! - with [`ArenaPlan::holding`], the place the ABI keeps its own handle of the session in, last,
-//!   so the handle is reserved with the session and takes no memory of its own.
+//! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
+//!   and the places it keeps its objects of the session's entities in, one for each row the
+//!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
+//!   reserved with the session, sized by the session's own limits, and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -152,9 +154,108 @@ impl ArenaRow {
     }
 }
 
-/// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
-/// handle ([`ArenaPlan::holding`]).
-pub const ARENA_ROWS: usize = 30;
+/// The most rows a plan holds: every row of the build with every feature, the two of the ABI's
+/// handle and the two of each kind of its entities' places ([`ArenaPlan::holding`]).
+pub const ARENA_ROWS: usize = 42;
+
+/// How many kinds of entity an ABI may hold places of its own for ([`EntityKind`]).
+pub const ENTITY_KINDS: usize = 6;
+
+/// A kind of the session's own entities whose rows an ABI may hold a place of its own beside
+/// ([`HeldPlaces`]): one place for each row the engine keeps of the kind ([`EntityRows`]), so the
+/// ABI's object for an entity lies in the session's arena, as many as the limit the session opened
+/// under admits, and goes with the session's memory, not with a pool of the process's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityKind {
+    /// A publisher (`MAX_PUBLISHERS`).
+    Publisher,
+    /// A subscriber (`MAX_SUBSCRIPTIONS`).
+    Subscriber,
+    /// A queryable (`MAX_QUERYABLES`).
+    Queryable,
+    /// A liveliness token (`MAX_LOCAL_TOKENS`).
+    Token,
+    /// A liveliness subscriber (`MAX_LIVELINESS_SUBSCRIPTIONS`).
+    LivelinessSubscriber,
+    /// A querier (`MAX_QUERIERS`).
+    Querier,
+}
+
+impl EntityKind {
+    /// Every kind, in the order the plan lays their places out.
+    pub const ALL: [Self; ENTITY_KINDS] = [
+        Self::Publisher,
+        Self::Subscriber,
+        Self::Queryable,
+        Self::Token,
+        Self::LivelinessSubscriber,
+        Self::Querier,
+    ];
+
+    /// The two rows of the kind's places, the flags and the places, and the limit that counts
+    /// them, as the plan names them.
+    const fn rows(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Publisher => (
+                "publisher place flags",
+                "publisher places",
+                "MAX_PUBLISHERS",
+            ),
+            Self::Subscriber => (
+                "subscriber place flags",
+                "subscriber places",
+                "MAX_SUBSCRIPTIONS",
+            ),
+            Self::Queryable => (
+                "queryable place flags",
+                "queryable places",
+                "MAX_QUERYABLES",
+            ),
+            Self::Token => ("token place flags", "token places", "MAX_LOCAL_TOKENS"),
+            Self::LivelinessSubscriber => (
+                "liveliness subscriber place flags",
+                "liveliness subscriber places",
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+            ),
+            Self::Querier => ("querier place flags", "querier places", "MAX_QUERIERS"),
+        }
+    }
+}
+
+/// What an ABI keeps of its own in a session's arena, laid out after every table of the session
+/// ([`ArenaPlan::holding`]): a place for its handle of the session, and for each kind of entity it
+/// names, a place of that layout for each row the session keeps of the kind. What it holds there is
+/// reserved with the session and takes no memory of its own, and an open whose arena cannot hold it
+/// opens nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldPlaces {
+    handle: Option<Layout>,
+    entities: [Option<Layout>; ENTITY_KINDS],
+}
+
+impl HeldPlaces {
+    /// No place at all.
+    pub const NONE: Self = Self {
+        handle: None,
+        entities: [None; ENTITY_KINDS],
+    };
+
+    /// A place of `layout` for the ABI's handle of the session, and none for its entities.
+    pub const fn handle(layout: Layout) -> Self {
+        Self {
+            handle: Some(layout),
+            entities: [None; ENTITY_KINDS],
+        }
+    }
+
+    /// These places, with a place of `layout` for each row the session keeps of `kind`.
+    pub fn with_entity(mut self, kind: EntityKind, layout: Layout) -> Self {
+        if let Some(place) = self.entities.get_mut(kind as usize) {
+            *place = Some(layout);
+        }
+        self
+    }
+}
 
 /// What sizes the links' receive rows: the pool's limit in a build that listens, the batch in one
 /// that only dials, whose every link has a buffer of its own.
@@ -280,6 +381,18 @@ pub struct FacePeers {
 }
 
 impl EntityRows {
+    /// The rows the engine keeps of `kind`, each of which an ABI's place of the kind is for.
+    pub const fn of_kind(&self, kind: EntityKind) -> usize {
+        match kind {
+            EntityKind::Publisher => self.publishers,
+            EntityKind::Subscriber => self.subscribers,
+            EntityKind::Queryable => self.queryables,
+            EntityKind::Token => self.tokens,
+            EntityKind::LivelinessSubscriber => self.liveliness_subscribers,
+            EntityKind::Querier => self.queriers,
+        }
+    }
+
     /// The rows of the write filters' one table: a publisher's and a querier's each.
     pub const fn filters(&self) -> Option<usize> {
         self.publishers.checked_add(self.queriers)
@@ -325,6 +438,9 @@ pub struct ArenaPlan {
     /// The bytes of the place the ABI keeps its handle of the session in, none for no place
     /// ([`Self::holding`]).
     handle_bytes: usize,
+    /// The bytes of each place the ABI keeps an entity of a kind in, by [`EntityKind`], none for
+    /// no place ([`Self::holding`]).
+    entity_bytes: [usize; ENTITY_KINDS],
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
 }
@@ -410,6 +526,7 @@ impl ArenaPlan {
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
             handle_bytes: 0,
+            entity_bytes: [0; ENTITY_KINDS],
             endpoint_rows: (config.endpoints.count(), config.listen.count()),
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
@@ -721,21 +838,44 @@ impl ArenaPlan {
         Ok(())
     }
 
-    /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
-    /// after every other row: the handle then takes no memory of its own, and an open whose arena
-    /// cannot hold it reserves nothing, as for any other row. A handle of no bytes takes no place.
-    /// Refused as past the address space when the handle asks for more alignment than a span of
-    /// the arena starts on ([`ARENA_ALIGN`]), or the arena with it is.
-    pub fn holding(mut self, handle: Layout) -> Result<Self, ArenaRefused> {
-        if handle.align() > ARENA_ALIGN {
-            return Err(ArenaRefused::TooLarge);
+    /// The plan with the places `held` names, lent after every other row: the ABI's handle of the
+    /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
+    /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
+    /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
+    /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
+    /// already is not laid out again. Refused as past the address space when a place asks for more
+    /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
+    /// places is.
+    pub fn holding(mut self, held: &HeldPlaces) -> Result<Self, ArenaRefused> {
+        if let Some(handle) = held.handle {
+            if handle.align() > ARENA_ALIGN {
+                return Err(ArenaRefused::TooLarge);
+            }
+            if handle.size() != 0 && self.handle_bytes == 0 {
+                self.handle_bytes = handle.size();
+                self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
+                self.put("session handle", "", 1, handle.size())?;
+            }
         }
-        if handle.size() == 0 || self.handle_bytes != 0 {
-            return Ok(self);
+        let laid = self.entity_bytes;
+        for ((kind, place), laid) in EntityKind::ALL.into_iter().zip(held.entities).zip(laid) {
+            let Some(place) = place else {
+                continue;
+            };
+            if place.align() > ARENA_ALIGN {
+                return Err(ArenaRefused::TooLarge);
+            }
+            let count = self.entities.of_kind(kind);
+            if place.size() == 0 || count == 0 || laid != 0 {
+                continue;
+            }
+            let (flags, places, basis) = kind.rows();
+            self.put(flags, basis, count, LentByteCells::FLAG_BYTES)?;
+            self.put(places, basis, count, place.size())?;
+            if let Some(bytes) = self.entity_bytes.get_mut(kind as usize) {
+                *bytes = place.size();
+            }
         }
-        self.handle_bytes = handle.size();
-        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES)?;
-        self.put("session handle", "", 1, handle.size())?;
         self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
         Ok(self)
     }
@@ -743,6 +883,11 @@ impl ArenaPlan {
     /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
     pub fn handle_bytes(&self) -> usize {
         self.handle_bytes
+    }
+
+    /// The bytes of each place the plan holds for an entity of `kind`, `0` for none.
+    pub fn entity_bytes(&self, kind: EntityKind) -> usize {
+        self.entity_bytes.get(kind as usize).copied().unwrap_or(0)
     }
 
     /// The rows, in the order they are lent.
@@ -1124,6 +1269,55 @@ impl HandlePlace {
     }
 }
 
+/// The places a session's arena lent for the ABI's entities ([`HeldPlaces`]), a table of each kind
+/// it holds places of. A place is lent to the ABI by its address and given back by it, each under
+/// the session's lock, which every table of the arena is reached under.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EntityPlaces {
+    cells: [Option<LentByteCells>; ENTITY_KINDS],
+}
+
+impl EntityPlaces {
+    /// No place of any kind.
+    pub(crate) const NONE: Self = Self {
+        cells: [None; ENTITY_KINDS],
+    };
+
+    /// The table of `kind`'s places, if the arena holds one.
+    fn of(&self, kind: EntityKind) -> Option<LentByteCells> {
+        self.cells.get(kind as usize).copied().flatten()
+    }
+
+    /// A free place for an entity of `kind`, its first byte aligned to [`ARENA_ALIGN`], or `None`
+    /// when every one is lent or the arena holds none of the kind. The place is the ABI's until it
+    /// gives it back ([`Self::give_back`]).
+    pub(crate) fn claim(&self, kind: EntityKind) -> Option<NonNull<u8>> {
+        let buffer = self.of(kind)?.claim()?;
+        let (base, _) = buffer.raw();
+        // The claim is held by the ABI's object from here, by its address, and ended by
+        // `give_back`, not by the buffer's drop.
+        core::mem::forget(buffer);
+        NonNull::new(base)
+    }
+
+    /// Give back the place of `kind` at `place`: `false`, changing nothing, when it is no place
+    /// of that kind lent now.
+    ///
+    /// # Safety
+    /// Nothing uses the place's bytes from here.
+    pub(crate) unsafe fn give_back(&self, kind: EntityKind, place: NonNull<u8>) -> bool {
+        // SAFETY: the caller's.
+        self.of(kind)
+            .is_some_and(|cells| unsafe { cells.release_at(place) })
+    }
+
+    /// How many places of `kind` are lent, and how many the arena holds.
+    pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.of(kind)
+            .map_or((0, 0), |cells| (cells.in_use(), cells.capacity()))
+    }
+}
+
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let
 /// go.
 pub(crate) struct SessionArena {
@@ -1287,6 +1481,30 @@ impl SessionArena {
         }))
     }
 
+    /// Lend the places `plan` holds for the ABI's entities, its rows after the handle's, a table
+    /// of each kind it holds places of. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_entity_places(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<EntityPlaces, ArenaRefused> {
+        let mut places = EntityPlaces::NONE;
+        for ((kind, bytes), cells) in EntityKind::ALL
+            .into_iter()
+            .zip(plan.entity_bytes)
+            .zip(places.cells.iter_mut())
+        {
+            if bytes == 0 {
+                continue;
+            }
+            *cells = Some(
+                self.arena
+                    .lend_byte_cells(bytes, plan.entities.of_kind(kind))
+                    .map_err(ArenaRefused::Lend)?,
+            );
+        }
+        Ok(places)
+    }
+
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,
     /// taking nothing, past `N` or past what is left, which an arena reserved by the plan that
     /// counts the table never is.
@@ -1339,8 +1557,17 @@ mod tests {
             held_queries: 0,
             key_bytes: 0,
             handle_bytes: 0,
+            entity_bytes: [0; ENTITY_KINDS],
             endpoint_rows: (0, 0),
         }
+    }
+
+    /// The rows a plan holds are those of every table of the build, thirty, and two for the handle
+    /// and two for each kind of entity's places.
+    #[test]
+    fn a_plan_has_rows_for_every_place_an_abi_holds() {
+        assert_eq!(ARENA_ROWS, 30 + 2 * ENTITY_KINDS);
+        assert_eq!(EntityKind::ALL.len(), ENTITY_KINDS);
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.

@@ -1949,7 +1949,7 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        Some(layout),
+        crate::arena::HeldPlaces::handle(layout),
     )
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
@@ -1988,10 +1988,92 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
 
     let plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
     assert_eq!(
-        plan.holding(Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")),
+        plan.holding(&crate::arena::HeldPlaces::handle(
+            Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")
+        )),
         Err(ArenaRefused::TooLarge),
         "a handle aligned past a span has no place"
     );
+}
+
+/// An open asked for places of an entity kind lends one for each row the session keeps of the kind,
+/// from its own arena: every one is lent once and the one past them is refused, a place given back
+/// is lent again, and another session's places are its own, so one session at its limit refuses
+/// nothing to the other. Turned red by places shared between sessions, or counted by anything but
+/// the session's own limit.
+#[test]
+fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
+    use crate::arena::{AllocatorMemory, ArenaPlan, EntityKind, HeldPlaces};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_session_core::bounded::ARENA_ALIGN;
+    use wz_session_core::policy::SessionPolicy;
+
+    let layout = Layout::from_size_align(48, 8).expect("a layout");
+    let held = HeldPlaces::NONE.with_entity(EntityKind::Subscriber, layout);
+    let open = |router: &Router| {
+        Engine::open_made_in(
+            PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            || config(router),
+            SessionPolicy::defaults(),
+            OpenKeyIds::none(),
+            &AllocatorMemory,
+            held,
+        )
+        .expect("the session opens")
+    };
+    let (router, other_router) = (Router::start(CatchAll::None), Router::start(CatchAll::None));
+    let (one, other) = (open(&router), open(&other_router));
+    let rows = ArenaPlan::of(&config(&router), &config(&router).limits)
+        .expect("a plan")
+        .entities()
+        .of_kind(EntityKind::Subscriber);
+    assert!(rows > 0, "the session keeps subscribers");
+    assert_eq!(one.entity_places(EntityKind::Subscriber), (0, rows));
+    assert_eq!(
+        one.entity_places(EntityKind::Publisher),
+        (0, 0),
+        "a kind the open was asked for no place of has none"
+    );
+    assert_eq!(one.claim_place(EntityKind::Publisher), None);
+
+    let lent: Vec<_> = (0..rows)
+        .map(|_| {
+            one.claim_place(EntityKind::Subscriber)
+                .expect("a place for each row")
+        })
+        .collect();
+    assert!(lent
+        .iter()
+        .all(|place| place.as_ptr() as usize % ARENA_ALIGN == 0));
+    assert_eq!(
+        one.claim_place(EntityKind::Subscriber),
+        None,
+        "none past them"
+    );
+    let theirs = other
+        .claim_place(EntityKind::Subscriber)
+        .expect("the other session's places are its own");
+    assert_eq!(other.entity_places(EntityKind::Subscriber), (1, rows));
+
+    let first = lent.first().copied().expect("a lent place");
+    // SAFETY: each place was lent by its own engine for the kind, and nothing uses it after.
+    unsafe {
+        one.give_back_place(EntityKind::Subscriber, first);
+        assert_eq!(
+            one.claim_place(EntityKind::Subscriber),
+            Some(first),
+            "a place given back is lent again"
+        );
+        for place in lent {
+            one.give_back_place(EntityKind::Subscriber, place);
+        }
+        other.give_back_place(EntityKind::Subscriber, theirs);
+    }
+    assert_eq!(one.entity_places(EntityKind::Subscriber), (0, rows));
+    assert_eq!(other.entity_places(EntityKind::Subscriber), (0, rows));
 }
 
 /// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
@@ -2441,7 +2523,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        None,
+        crate::arena::HeldPlaces::NONE,
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2483,7 +2565,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
-        None,
+        crate::arena::HeldPlaces::NONE,
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());
