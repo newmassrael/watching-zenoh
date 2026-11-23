@@ -4625,8 +4625,13 @@ layer_c0_test_discipline() {
 #     layers that select the test: 29 notes named `Layer E` for tests another lane
 #     runs. It reads `cargo tree` metadata, which Layer A4 in the same job needs,
 #     and builds nothing.
+#   * nondefault_feature_legs_gate -- every non-default feature of the engine and
+#     session crates is turned on by a leg of nondefault-tests-gate.sh, or a row of
+#     the gate says where else it runs and the row's evidence still holds. The census
+#     of that table counts tests, so a feature that changes what a default test reads,
+#     or one with no test at all, was in no leg and no census said so. A text read.
 #
-# The three read the tree and not each other, so the lane is a leg ledger
+# The four read the tree and not each other, so the lane is a leg ledger
 # (open-debt item 938): each grade waits only on its own gate's selftest.
 layer_c0s_test_lane_discipline() {
     _runci_legs_open C0s || return 1
@@ -4636,6 +4641,8 @@ layer_c0s_test_lane_discipline() {
     _runci_leg barrier_needle_gate --after barrier_needle_gate.selftest -- python3 scripts/lib/barrier_needle_gate.py --check
     _runci_leg lane_feature_membership_gate.selftest -- python3 scripts/lib/lane_feature_membership_gate.py --selftest
     _runci_leg lane_feature_membership_gate --after lane_feature_membership_gate.selftest -- python3 scripts/lib/lane_feature_membership_gate.py
+    _runci_leg nondefault_feature_legs_gate.selftest -- python3 scripts/lib/nondefault_feature_legs_gate.py --selftest
+    _runci_leg nondefault_feature_legs_gate --after nondefault_feature_legs_gate.selftest -- python3 scripts/lib/nondefault_feature_legs_gate.py --check
     _runci_legs_close
 }
 
