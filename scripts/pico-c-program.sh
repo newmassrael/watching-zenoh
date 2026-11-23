@@ -51,6 +51,15 @@
 # the shape of a program whose sessions cannot share a thread, as two single-threaded sessions
 # that dial each other cannot. The program passes when every process exits 0.
 #
+# WZ_PICO_SANITIZER, when set, is `thread` or `address`: the library and the program built under
+# that sanitizer, on Linux, for the library with `std` (scripts/verify.sh, Layers Vtsan and Vasan).
+# The library is built by the nightly crates/wz-fuzz/rust-toolchain.toml pins, with `-Zsanitizer` and
+# its standard library rebuilt under it (`-Zbuild-std`, for the host's own target, so it lives in a
+# target directory of its own). The program is compiled with the C compiler's `-fsanitize` and linked
+# against the sanitizer runtime that nightly ships, linked whole and its symbols exported: the
+# library's instrumentation calls into the runtime of the compiler that instrumented it, which a
+# system compiler's own runtime can be older than.
+#
 # Reads RUNNER_OS and RUNNER_TEMP, which the Actions runner sets, and appends its verdict
 # to GITHUB_STEP_SUMMARY when that is set. Exit status 0 means the program built, ran and
 # passed. A failure to build is reported as NOT-MEASURED and is a non-zero exit too: a
@@ -103,6 +112,27 @@ os="${RUNNER_OS:-$(uname -s)}"
 source "$(dirname "$0")/lib/artifact-root.sh"
 wz_artifact_root_init "$PWD" || exit 2
 lib_dir="$WZ_ARTIFACTS/crates/target/debug"
+sanitizer="${WZ_PICO_SANITIZER:-}"
+case "$sanitizer" in
+    "") ;;
+    thread | address)
+        if [ "$os" != Linux ] || [ "$form" != std ]; then
+            echo "pico-c-program: WZ_PICO_SANITIZER is read on Linux, for the library with \`std\`" >&2
+            exit 2
+        fi
+        RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"$/\1/p' crates/wz-fuzz/rust-toolchain.toml)"
+        if [ -z "$RUSTUP_TOOLCHAIN" ]; then
+            echo "pico-c-program: crates/wz-fuzz/rust-toolchain.toml names no channel" >&2
+            exit 2
+        fi
+        export RUSTUP_TOOLCHAIN
+        export RUSTFLAGS="-Zsanitizer=$sanitizer -Cforce-frame-pointers=yes"
+        ;;
+    *)
+        echo "pico-c-program: WZ_PICO_SANITIZER is \`thread\` or \`address\`, not \`$sanitizer\`" >&2
+        exit 2
+        ;;
+esac
 
 say() {
     echo "$1"
@@ -142,6 +172,15 @@ if [ "$form" = nostd ]; then
     engine_args=(--no-default-features --profile capi-nostd --config .cargo/capi-nostd.toml
         --target "$host_triple")
     lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/capi-nostd"
+fi
+if [ -n "$sanitizer" ]; then
+    host_triple="$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')"
+    if [ -z "$host_triple" ]; then
+        say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
+        exit 1
+    fi
+    engine_args+=(-Zbuild-std --target "$host_triple")
+    lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/debug"
 fi
 feature_args=()
 if [ -n "$build_features" ]; then
@@ -238,7 +277,29 @@ case "$os" in
         ;;
     Linux)
         compiler=cc
-        cc -std=gnu11 -DZENOH_LINUX -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        if [ -n "$sanitizer" ]; then
+            case "$sanitizer" in
+                thread) runtime_name=tsan ;;
+                *) runtime_name=asan ;;
+            esac
+            runtime=""
+            for candidate in "$(rustc --print sysroot)/lib/rustlib/$host_triple/lib"/librustc*_rt."$runtime_name".a; do
+                if [ -f "$candidate" ]; then
+                    runtime="$candidate"
+                fi
+            done
+            if [ -z "$runtime" ]; then
+                say "pico-program-probe on ${os}: the pinned nightly ships no ${runtime_name} runtime NOT-MEASURED"
+                exit 1
+            fi
+            cc -std=gnu11 -DZENOH_LINUX -fsanitize="$sanitizer" -fno-omit-frame-pointer -g -I"$inc" -I"$ext_inc" \
+                -c "$src" -o "$exe.o" &&
+                cc "$exe.o" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" \
+                    -Wl,--whole-archive "$runtime" -Wl,--no-whole-archive -Wl,--export-dynamic \
+                    -lpthread -lm -ldl -lrt && compiled=PASS
+        else
+            cc -std=gnu11 -DZENOH_LINUX -I"$inc" -I"$ext_inc" "$src" -o "$exe" -L"$lib_dir" -lwz_capi_pico -Wl,-rpath,"$lib_dir" && compiled=PASS
+        fi
         ;;
     Windows)
         compiler=cl
