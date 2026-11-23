@@ -40,7 +40,16 @@
 /// `Z_ERR_TIMESTAMP_GENERATION_FAILED` and sends nothing, as pico refuses the put whose
 /// `z_timestamp_new` failed: a session with no time left, and a `trusted-only` build whose clock
 /// is not yet reported synchronised; at 1 the second sent the sample stamped with the system clock.
-pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 2;
+///
+/// It moved to 3 when a process pool's slot became its object's own size: the report of a size
+/// class (`wz_ext_object_pool_class_t`) grew a `bytes` field, the bytes its slots take, and its
+/// `slot_bytes` became the class's largest slot rather than the size of each of its slots, so a
+/// program built against 2 hands the door a report too small and reads the slots' bytes wrongly.
+///
+/// It moved to 4 when a querier and a declared key expression took a slot of a pool of their own:
+/// the counts a program states (`wz_ext_object_pool_counts_t`) grew `queriers` and `keyexprs`
+/// after `payload_bytes`, so a program built against 3 hands the door counts too small.
+pub const WZ_CAPI_PICO_ABI_REVISION: u32 = 4;
 
 wz_abi_stamp::stamp!(
     family = "capi-pico",

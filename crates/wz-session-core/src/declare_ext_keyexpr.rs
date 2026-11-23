@@ -110,20 +110,39 @@ pub fn build_ext_wireexpr(
 }
 
 /// The `ZBuf` body of the extension [`build_ext_wireexpr`] makes, `[inner header | VLE(id) |
-/// suffix]`: what a retraction written from its parts (`crate::lent_control`) borrows, so its bytes
-/// and the owned entry's are made in one place.
+/// suffix]`, on the heap: [`ext_wireexpr_body_into`]'s bytes.
 #[cfg(feature = "alloc")]
 pub fn ext_wireexpr_body(mapping_id: crate::wire_id::ExprId, suffix: &str) -> Vec<u8> {
-    let mut body: Vec<u8> = Vec::with_capacity(suffix.len().saturating_add(2));
+    // The header, an id of at most ten VLE bytes, and the suffix: the body always fits.
+    let mut body = alloc::vec![0u8; suffix.len().saturating_add(11)];
+    let len = ext_wireexpr_body_into(mapping_id, suffix, &mut body).unwrap_or(0);
+    body.truncate(len);
+    body
+}
+
+/// The `ZBuf` body of the extension [`build_ext_wireexpr`] makes, `[inner header | VLE(id) |
+/// suffix]`, written into `out`: how many bytes it took, or `None` when `out` is too short for
+/// it. The one writer of the body: the owned entry's (`ext_wireexpr_body`) and a retraction
+/// written from its parts into storage of its own (`crate::lent_control`) are its bytes.
+pub fn ext_wireexpr_body_into(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: &str,
+    out: &mut [u8],
+) -> Option<usize> {
+    use sce_forge_runtime::codec::SceSink;
     let has_suffix = if suffix.is_empty() {
         0
     } else {
         INNER_HAS_SUFFIX
     };
-    body.push(INNER_IS_LOCAL | has_suffix);
-    crate::vle::encode_vle_u64_into(&mut body, u64::from(mapping_id));
-    body.extend_from_slice(suffix.as_bytes());
-    body
+    let mut buf = crate::tx_buf::SliceTxBuf::new(out);
+    {
+        let mut sink = crate::tx_buf::TxSink::over(&mut buf);
+        sink.write_u8(INNER_IS_LOCAL | has_suffix).ok()?;
+        sink.write_vle_u64(u64::from(mapping_id)).ok()?;
+        sink.write_bytes(suffix.as_bytes()).ok()?;
+    }
+    Some(crate::tx_buf::TxBuf::len(&buf))
 }
 
 /// Parse the FIRST `ext_keyexpr` entry in `exts` into its raw inner fields —
@@ -309,6 +328,23 @@ pub fn resolve_ext_keyexpr_in<'k, E: ExtEntryView>(
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+
+    /// The body written into storage of the caller's is the owned body's bytes, and storage one
+    /// byte short of it takes none.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_body_written_into_storage_is_the_owned_body_and_short_storage_takes_none() {
+        let mut buf = [0u8; 32];
+        let len = ext_wireexpr_body_into(300, "demo/k", &mut buf).expect("it fits");
+        assert_eq!(&buf[..len], ext_wireexpr_body(300, "demo/k").as_slice());
+        assert_eq!(
+            ext_wireexpr_body_into(300, "demo/k", &mut buf[..len - 1]),
+            None
+        );
+        let mut small = [0u8; 4];
+        let len = ext_wireexpr_body_into(5, "", &mut small).expect("it fits");
+        assert_eq!(&small[..len], ext_wireexpr_body(5, "").as_slice());
+    }
     use alloc::vec;
     use hashbrown::HashMap;
 

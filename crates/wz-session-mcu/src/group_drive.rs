@@ -299,7 +299,7 @@ mod stage;
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
-pub use stage::{GroupLink, GroupTxPace, GroupTxStage, LentPushRefused};
+pub use stage::{GroupLink, GroupTxPace, GroupTxStage};
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic
@@ -1191,7 +1191,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     }
 
     /// Write from `stage`, which the group's producers push onto framed and numbered
-    /// ([`GroupTxStage::push`]), as the tokio engine's group writer writes its pipeline: each JOIN
+    /// ([`GroupTxStage::push_encoded`]), as the tokio engine's group writer writes its pipeline: each JOIN
     /// advertises the sequence numbers written, by this pump or by a holder that writes the stage
     /// itself ([`GroupLink::write_staged`]), and what the pull seam yields is put on the stage too,
     /// so that the stage numbers everything the group sends.

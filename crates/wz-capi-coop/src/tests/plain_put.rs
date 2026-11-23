@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, SessionEngine, WireKey};
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::publish_options::PublishOptions;
 
 use super::{open, until, CatchAll, Command, Engine, Router};
@@ -20,9 +20,9 @@ fn filter_on(engine: &Engine, key: &str) -> FilterId {
             FilterPlane::Subscribers,
             key,
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some(key.to_owned()),
+                suffix: Some(key),
                 aggregate: false,
             }),
             false,

@@ -1206,7 +1206,8 @@ pub unsafe extern "C" fn z_scout(
         }
     };
     let (what, budget_ms) = match options.as_ref() {
-        Some(o) => (o.what as u8, u64::from(o.timeout_ms)),
+        // Widened first: the field is one byte on a bare Arm core and a word elsewhere.
+        Some(o) => (i64::from(o.what) as u8, u64::from(o.timeout_ms)),
         None => (read.what, read.budget_ms),
     };
     let ScoutConfig { locator, zid, .. } = read;
@@ -1476,8 +1477,12 @@ mod tests {
             (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
         }
 
+        // A build whose every value the resolution admits holds no refused statement.
+        let Some(policies) = PolicyStatements::refused_by_the_resolution() else {
+            return;
+        };
         let cfg = ConfigState {
-            policies: PolicyStatements::unchecked("no-such-policy", "on"),
+            policies,
             ..ConfigState::default()
         };
         let mut config = crate::abi::z_moved_config_t {

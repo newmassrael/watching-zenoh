@@ -748,10 +748,10 @@ pub fn build_push_literal_with_meta(
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_with_meta(
             value,
-            meta.timestamp.as_ref(),
-            meta.encoding.as_ref(),
+            meta.timestamp,
+            meta.encoding,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -822,10 +822,10 @@ pub fn build_push_shm_literal(
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_shm(
             descriptor,
-            meta.timestamp.as_ref(),
-            meta.encoding.as_ref(),
+            meta.timestamp,
+            meta.encoding,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -871,10 +871,10 @@ pub fn build_push_shm_aliased(
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_shm(
             descriptor,
-            meta.timestamp.as_ref(),
-            meta.encoding.as_ref(),
+            meta.timestamp,
+            meta.encoding,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -908,10 +908,10 @@ pub fn build_push_aliased_with_meta(
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_with_meta(
             value,
-            meta.timestamp.as_ref(),
-            meta.encoding.as_ref(),
+            meta.timestamp,
+            meta.encoding,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -937,9 +937,9 @@ pub fn build_push_del_literal_with_meta(
         },
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
-            meta.timestamp.as_ref(),
+            meta.timestamp,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -971,9 +971,9 @@ pub fn build_push_del_aliased_with_meta(
         },
         extensions: outer_exts,
         body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
-            meta.timestamp.as_ref(),
+            meta.timestamp,
             meta.source_info.as_ref(),
-            meta.attachment.as_deref(),
+            meta.attachment,
         )?),
     })
 }
@@ -1756,8 +1756,9 @@ mod tests {
         let empty = PushMetadata::default();
         assert!(empty.is_empty());
 
+        let stamp = TimestampHint::default();
         let with_ts = PushMetadata {
-            timestamp: Some(TimestampHint::default()),
+            timestamp: Some(&stamp),
             ..Default::default()
         };
         assert!(!with_ts.is_empty());
@@ -1803,17 +1804,19 @@ mod tests {
         // Validates that the wire form survives SCE's encode/decode
         // path with every metadata field set, not just that the
         // in-memory Push struct shape is correct.
+        let stamp = TimestampHint {
+            time: 0x1122_3344_5566_7788,
+            zid: vec![0xAA, 0xBB, 0xCC],
+        };
+        let encoded = EncodingHint {
+            packed_id: 5,
+            schema: Some("text/plain".into()),
+        };
         let meta = PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: 0x1122_3344_5566_7788,
-                zid: vec![0xAA, 0xBB, 0xCC],
-            }),
-            encoding: Some(EncodingHint {
-                packed_id: 5,
-                schema: Some("text/plain".into()),
-            }),
+            timestamp: Some(&stamp),
+            encoding: Some(&encoded),
             source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
-            attachment: Some(b"attach".to_vec()),
+            attachment: Some(b"attach"),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,
@@ -1890,17 +1893,19 @@ mod tests {
         // Del path: timestamp + source_info + attachment + qos must
         // round-trip; encoding has no parameter slot so the wire form
         // cannot carry it. Mirrors the loopback path's projection.
+        let stamp = TimestampHint {
+            time: 0xAABB_CCDD,
+            zid: vec![0x42],
+        };
+        let encoded = EncodingHint {
+            packed_id: 99,
+            schema: Some("ignored".into()),
+        };
         let meta = PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: 0xAABB_CCDD,
-                zid: vec![0x42],
-            }),
-            encoding: Some(EncodingHint {
-                packed_id: 99,
-                schema: Some("ignored".into()),
-            }),
+            timestamp: Some(&stamp),
+            encoding: Some(&encoded),
             source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
-            attachment: Some(b"del-att".to_vec()),
+            attachment: Some(b"del-att"),
             qos: Some(QosLevel::from_raw(0x10)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

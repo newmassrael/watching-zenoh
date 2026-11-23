@@ -51,6 +51,22 @@
 //! in every build.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 
 extern crate alloc;
 
@@ -61,12 +77,17 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
+// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;
 mod engine;
+pub mod entity_place;
 pub mod group;
 pub mod held_key;
+// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.
@@ -91,8 +112,11 @@ pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{RedeclareRefusal, SessionEngine};
+pub use entity_place::{EntityKind, EntityPlace, PlaceLender, ENTITY_KINDS};
 pub use held_key::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
-pub use peers::{each_group_member, each_peer, PeerIdentity, PeerLists};
+pub use peers::{
+    each_group_member, each_known_node, each_peer, KnownNode, PeerIdentity, PeerLists,
+};
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 pub use refusal::Refusal;
 
@@ -117,7 +141,7 @@ pub type FilterId = u64;
 /// ([`Self::call`]), from any thread and at any depth, a call from inside itself included:
 /// zenoh-pico calls its subscriptions' callbacks with no lock of its session held, so a put a
 /// callback makes on a key its own subscription matches calls it again from inside itself
-/// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), and
+/// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`), and
 /// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
 /// the engine is done with it, after its last call has returned: its drop is the program's.
 pub enum SubscriberSink {
@@ -514,6 +538,18 @@ impl core::fmt::Display for LinksNotHonoured {
 
 impl core::error::Error for LinksNotHonoured {}
 
+/// What a `zp_batch_*` call asks of every batch window of a session
+/// ([`SessionEngine::batch_all`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchStep {
+    /// Open a window (zenoh-pico `zp_batch_start`).
+    Start,
+    /// Write what the open windows hold and keep them open (zenoh-pico `zp_batch_flush`).
+    Flush,
+    /// Close the windows, writing what they hold (zenoh-pico `zp_batch_stop`).
+    Stop,
+}
+
 /// What a put through a write filter did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilteredPut {
@@ -559,7 +595,23 @@ pub struct WireKey {
     pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix, `None` when it covers the whole key.
     pub suffix: Option<String>,
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Keeps,
+    /// One hold on the declaration of the key of the entity this key announces, when that is not
+    /// the declaration the wire names: the entity's retraction names it, so it is held for as long
+    /// as the entry is ([`Self::holding_also`]).
+    also: Option<KeyHold>,
+}
+
+/// What a key keeps alive for as long as a declaration made on it stays recorded.
+#[derive(Clone, Default)]
+enum Keeps {
+    /// Nothing.
+    #[default]
+    Nothing,
+    /// An object of the ABI's that retracts the declaration when the last holder lets it go.
+    Anchor { _held: Arc<dyn Send + Sync> },
+    /// One hold on the declaration, counted by the engine itself.
+    Hold { _held: KeyHold },
 }
 
 impl core::fmt::Debug for WireKey {
@@ -567,8 +619,60 @@ impl core::fmt::Debug for WireKey {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
-            .field("keeps", &self.keeps.is_some())
+            .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
+            .field("also", &self.also.as_ref().map(KeyHold::mapping_id))
             .finish()
+    }
+}
+
+/// One hold on a keyexpr declaration of a session, taken from and given back to the engine's own
+/// count of the declaration's holders ([`SessionEngine::retain_keyexpr`],
+/// [`SessionEngine::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
+/// keeps nothing of its own on the heap, and once the session is gone a copy and a drop do
+/// nothing.
+pub struct KeyHold {
+    engine: alloc::sync::Weak<dyn SessionEngine>,
+    mapping_id: wz_session_core::wire_id::ExprId,
+}
+
+impl KeyHold {
+    /// The hold on `mapping_id` that the caller took through `engine`
+    /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
+    pub fn taken(
+        engine: alloc::sync::Weak<dyn SessionEngine>,
+        mapping_id: wz_session_core::wire_id::ExprId,
+    ) -> Self {
+        Self { engine, mapping_id }
+    }
+
+    /// The declaration held.
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
+        self.mapping_id
+    }
+
+    /// Whether the hold is on `engine`'s session, by address.
+    pub fn is_on(&self, engine: *const ()) -> bool {
+        core::ptr::addr_eq(self.engine.as_ptr(), engine)
+    }
+}
+
+impl Clone for KeyHold {
+    fn clone(&self) -> Self {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.retain_keyexpr(self.mapping_id);
+        }
+        Self {
+            engine: self.engine.clone(),
+            mapping_id: self.mapping_id,
+        }
+    }
+}
+
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.release_keyexpr(self.mapping_id);
+        }
     }
 }
 
@@ -583,13 +687,29 @@ impl WireKey {
         Self {
             mapping_id,
             suffix,
-            keeps: None,
+            keeps: Keeps::Nothing,
+            also: None,
         }
     }
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
     pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Some(anchor);
+        self.keeps = Keeps::Anchor { _held: anchor };
+        self
+    }
+
+    /// This key, holding the declaration `hold` holds for as long as a declaration made on it
+    /// stays recorded, in the engine's own count and with nothing of its own on the heap.
+    pub fn holding(mut self, hold: KeyHold) -> Self {
+        self.keeps = Keeps::Hold { _held: hold };
+        self
+    }
+
+    /// This key, holding besides what it names the declaration `hold` holds, of the key of the
+    /// entity it announces, which the entity's retraction names: one more hold in the engine's own
+    /// count, with nothing of its own on the heap.
+    pub fn holding_also(mut self, hold: KeyHold) -> Self {
+        self.also = Some(hold);
         self
     }
 

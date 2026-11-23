@@ -32,7 +32,6 @@ use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
-use core::alloc::Layout;
 use core::any::Any;
 use core::cell::{Cell, RefCell};
 use core::ops::{Deref, DerefMut};
@@ -46,8 +45,8 @@ use portable_atomic::AtomicU64;
 use crate::prelude::*;
 
 use crate::arena::{
-    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityRows, HandlePlace, LinkCells,
-    SessionArena,
+    AllocatorMemory, ArenaMemory, ArenaPlan, ArenaRefused, EntityKind, EntityPlace, EntityPlaces,
+    EntityRows, HandlePlace, HeldPlaces, LinkCells, SessionArena,
 };
 use crate::round::{Round, RoundCounts, RoundGate, RoundRows};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -65,9 +64,10 @@ use wz_session_core::slot_observer::ObserverRows;
 use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::{
-    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey, KeyAsk,
-    KeyNotHeld, MatchId, MatchingSink, PeerIdentity, ReadTaskStartRefused, SessionClosed,
-    SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
+    KeyAsk, KeyNotHeld, MatchId, MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused,
+    SessionClosed, SessionDrive, SessionEngine, SessionKeys, StatementNotHonoured, SubId,
+    SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -91,17 +91,16 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::session_drive::{
     router_session_task_bytes, spawn_session_with_router, LinkWritability, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
+    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
-use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle, SessionParts};
+use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeRows};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::declare::matching::BoxedMatchingSink;
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
 use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
@@ -1089,7 +1088,9 @@ struct HandedLeg {
     keyexpr: String,
     wire: WireKey,
     payload: Vec<u8>,
-    opts: PublishOptions,
+    /// The options without the attachment they borrowed, which the leg keeps beside them.
+    opts: PublishOptions<'static>,
+    attachment: Option<Vec<u8>>,
     dropped_on: Vec<FaceId>,
 }
 
@@ -1098,8 +1099,8 @@ struct Publication<'a> {
     keyexpr: &'a str,
     wire: &'a WireKey,
     payload: &'a [u8],
-    opts: &'a PublishOptions,
-    meta: &'a PushMetadata,
+    opts: &'a PublishOptions<'a>,
+    meta: &'a PushMetadata<'a>,
 }
 
 /// What a publish's leg to the links finds of the session ([`CoopEngine::live_to_publish`]).
@@ -1424,6 +1425,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// link sets a deadline by and another reads it by (the Router's chains among them) are on one
     /// epoch, whenever each link came up.
     session_time: CoopTime<C>,
+    /// The places the ABI keeps its objects of the session's entities in, lent from the arena at
+    /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`PlaceLender::claim_place`]).
+    places: EntityPlaces,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -1832,6 +1836,10 @@ struct FilterEntry {
     /// move it (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h` @
     /// `return ctx->state == WRITE_FILTER_ACTIVE;`).
     peers: Cell<Option<(u64, bool)>>,
+    /// How a write of the filter's entity that brings nothing of its own goes the plain way: the
+    /// facts it is sent from and the declaration that names its key, stated once by the entity
+    /// that declared the filter (`keep_write_filter_plain`). `None` sends it the general way.
+    plain: Cell<Option<(PlainPutParams, ExprId)>>,
 }
 
 /// One Interest the session holds open, and how many hold it.
@@ -2536,16 +2544,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // none free is refused and counted. The link's task holds the place it is lent in.
         let spawned = spawn_session_with_router(
             &self.local,
-            link.clone(),
-            SessionParts {
+            PumpFields {
+                link: link.clone(),
                 actions: actions.clone(),
                 entropy: self.entropy.clone(),
-            },
-            self.session_time.clone(),
-            SessionDriveConfig {
-                timeouts: self.config.timeouts,
-                role,
-                max_iters: None,
+                clock: self.session_time.clone(),
+                config: SessionDriveConfig {
+                    timeouts: self.config.timeouts,
+                    role,
+                    max_iters: None,
+                },
             },
             self.lend.clone(),
             dispatch,
@@ -3624,7 +3632,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             policy,
             key_ids,
             memory,
-            None,
+            HeldPlaces::NONE,
         )
     }
 
@@ -3642,10 +3650,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
     ///
-    /// With `handle`, the arena also holds a place of that layout for the ABI's own handle of the
-    /// session, lent after every table ([`ArenaPlan::holding`], [`CoopDrive::handle_place`]): the
-    /// handle is then reserved with the session, and an open whose arena cannot hold it opens
-    /// nothing.
+    /// The arena also holds the places `held` names, lent after every table
+    /// ([`ArenaPlan::holding`]): a place for the ABI's own handle of the session
+    /// ([`CoopDrive::handle_place`]) and places for its objects of the session's entities
+    /// ([`PlaceLender::claim_place`]). They are reserved with the session, and an open whose arena cannot
+    /// hold them opens nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn open_made_in(
         links: L,
@@ -3655,11 +3664,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
-        handle: Option<Layout>,
+        held: HeldPlaces,
     ) -> Result<Arc<Self>, OpenError> {
-        let engine = Self::assemble(
-            links, clock, entropy, source, policy, key_ids, memory, handle,
-        )?;
+        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, memory, held)?;
         engine.open_links()?;
         Ok(engine)
     }
@@ -3679,18 +3686,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
-        handle: Option<Layout>,
+        held: HeldPlaces,
     ) -> Result<Arc<Self>, OpenError> {
         let (config, write_endpoints) = source.into_parts();
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, &resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        let plan = arena_plan::<C, _>(&links, &config).map_err(OpenError::Arena)?;
-        let plan = match handle {
-            Some(handle) => plan.holding(handle).map_err(OpenError::Arena)?,
-            None => plan,
-        };
+        let plan = arena_plan::<C, _>(&links, &config)
+            .and_then(|plan| plan.holding(&held))
+            .map_err(OpenError::Arena)?;
         let mut arena = SessionArena::reserve(&plan, memory).map_err(OpenError::Arena)?;
         links.lend_buffers(arena.lend_links(&plan).map_err(OpenError::Arena)?);
         let cells = arena.lend_cells(&plan).map_err(OpenError::Arena)?;
@@ -3779,6 +3784,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         );
         // The ABI's handle's place, the plan's last row.
         let handle_place = arena.lend_handle(&plan).map_err(OpenError::Arena)?;
+        // The places of the ABI's objects of the session's entities, the rows after it.
+        let places = arena.lend_entity_places(&plan).map_err(OpenError::Arena)?;
         // The task and timer tables, reserved here once: no spawn and no sleep of the session
         // takes memory after its open (`open_links` seals them).
         let runtime = RuntimeTables::of::<C>(&config).runtime(clock.clone());
@@ -3856,6 +3863,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             router,
             lend: RouterLend::new(),
             session_time,
+            places,
             arena,
         };
         #[cfg(feature = "queryable")]
@@ -4530,11 +4538,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
             ToPublish::DroppedOn { faces, told } => {
+                let (kept, attachment) = opts.clone().into_owned_parts();
                 self.hand_off(HandedLeg {
                     keyexpr: String::from(keyexpr),
                     wire: wire.clone(),
                     payload: payload.to_vec(),
-                    opts: opts.clone(),
+                    opts: kept,
+                    attachment: attachment.map(<[u8]>::to_vec),
                     dropped_on: faces,
                 });
                 return if told {
@@ -4856,7 +4866,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core::mem::take(&mut *handed)
         };
         for leg in &legs {
-            let meta = leg.opts.push_metadata();
+            // The options the leg kept, over the attachment it kept beside them.
+            let mut opts: PublishOptions<'_> = leg.opts.clone();
+            opts.attachment = leg.attachment.as_deref();
+            let meta = opts.push_metadata();
             // The caller was answered when the leg was handed.
             let _ = self.fan_out(
                 core,
@@ -4864,7 +4877,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     keyexpr: &leg.keyexpr,
                     wire: &leg.wire,
                     payload: &leg.payload,
-                    opts: &leg.opts,
+                    opts: &opts,
                     meta: &meta,
                 },
                 &leg.dropped_on,
@@ -4883,7 +4896,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
     /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
     /// it here, with no lock of the session held, inside the put as zenoh-pico's does
-    /// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), by a
+    /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`), by a
     /// call begun on each one's row under the session's lock ([`SubscriberCall`]). A callback is
     /// called through a shared borrow: one running on another thread is called beside it, and one
     /// the putting thread is inside of is called again from inside itself, as pico's is, so a put a
@@ -5279,7 +5292,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core: &mut Core<L, C>,
         plane: FilterPlane,
         keyexpr: &str,
-        form: &InterestForm,
+        form: InterestAsk<'_>,
     ) -> Result<(), Declined> {
         if let Some(hold) = core
             .interests
@@ -5303,7 +5316,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return Err(Declined::NoEntityId);
         };
         // The rest of the key the form names is read from the row's own key, not copied.
-        let suffix_at = suffix_place(keyexpr, form.suffix.as_deref());
+        let suffix_at = suffix_place(keyexpr, form.suffix);
         let hold = InterestHold {
             plane,
             keyexpr: key,
@@ -5313,7 +5326,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 suffix: if suffix_at.is_some() {
                     None
                 } else {
-                    form.suffix.clone()
+                    form.suffix.map(String::from)
                 },
                 aggregate: form.aggregate,
             },
@@ -5481,6 +5494,65 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             .iter()
             .find(|f| f.id == id)
             .is_some_and(|f| !Self::filter_matches(core, f))
+    }
+
+    /// A plain Put on `mapping_id` (the literal `keyexpr` when it is `0`) sent from `params` to
+    /// every link, once the write filter let it through: `NotPlain`, with nothing sent, when a
+    /// subscriber of the session, a group or a link that rewrites keys wants it the general way.
+    fn put_plain_in(
+        core: &Core<L, C>,
+        keyexpr: &str,
+        mapping_id: ExprId,
+        payload: &[u8],
+        params: &PlainPutParams,
+    ) -> FilteredPut {
+        // A put one of the session's own subscribers wants is not plain: the general publish
+        // sends it and delivers it there.
+        #[cfg(feature = "local-subscriber")]
+        if params.destination.allows_local()
+            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                &*tables(&core.registry),
+                keyexpr,
+            )
+        {
+            return FilteredPut::NotPlain;
+        }
+        if !params.destination.allows_remote() {
+            return FilteredPut::Sent(Ok(0));
+        }
+        // A group is sent a put by the general publish, which pushes it onto the group's stage.
+        #[cfg(feature = "group")]
+        if !core.groups.is_empty() {
+            return FilteredPut::NotPlain;
+        }
+        // Asked of every link before any is sent to, so the put goes plain to all of them or to
+        // none: a link that rewrites what it originates (a routing namespace) takes the general
+        // publish for the whole of it. Its namespace is installed before the session sends
+        // anything, so no link answers otherwise below.
+        if core.ups().any(|actions| actions.rewrites_originated_keys()) {
+            return FilteredPut::NotPlain;
+        }
+        // The key as the session's tables name it, and each link as its key-wire form says.
+        let Some(named) = tables(&core.registry).named_by(keyexpr, mapping_id) else {
+            return FilteredPut::NotPlain;
+        };
+        let mut outcome = Ok(0);
+        for actions in core.ups() {
+            let sent = leg(actions
+                .send_plain_put_qos(
+                    key_on_link(actions, named),
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+                .unwrap_or(Err(SendWireError::FeatureDisabled)));
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        FilteredPut::Sent(outcome)
     }
 
     /// [`Self::filter_active_in`], except on a session that holds a group the filter does not
@@ -6026,7 +6098,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.retract_keyexpr(links, retracted);
     }
 
+    #[inline(never)]
+    fn retain_keyexpr(&self, mapping_id: ExprId) {
+        let Some(core) = self.live() else {
+            return;
+        };
+        // One more hold of the row in the session's one table set; nothing goes on the wire.
+        let mut tables = tables_mut(&core.0.registry);
+        if let Some(handle) = tables.keyexpr_by_id(mapping_id) {
+            tables.retain_keyexpr(handle);
+        }
+    }
+
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
+        Some(self)
+    }
+
+    fn place_lender(&self) -> Option<&dyn PlaceLender> {
         Some(self)
     }
 
@@ -6060,9 +6148,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             core,
             plane,
             keyexpr,
-            &InterestForm {
+            InterestAsk {
                 mapping_id: 0,
-                suffix: Some(keyexpr.to_owned()),
+                suffix: Some(keyexpr),
                 aggregate: false,
             },
         )?;
@@ -6071,8 +6159,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let local = count_local && Self::local_matches(core, plane, keyexpr);
         // A change is queued by the listener's id; the delivery takes the callback from the
         // listener's row, so the row is the callback's one holder and its end is the callback's.
-        let queue = self.matching.clone();
-        let report = BoxedMatchingSink::new(move |matching| queue.lock().flip(id, matching));
+        let report = registry::FlipReport {
+            queue: self.matching.clone(),
+            id,
+        };
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::filter_matches`]), so the listener and the filter cannot differ.
         // An already-matching registration is told so by the registry as it registers, as
@@ -6142,7 +6232,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
-        ask: Option<InterestForm>,
+        ask: Option<InterestAsk<'_>>,
         // See `declare_matching_listener`: the session's own subscribers count with
         // `local-subscriber`.
         count_local: bool,
@@ -6176,7 +6266,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let mut spent = None;
         // A filter whose Interest the session cannot hold, or that finds no id left, is refused
         // and spends no filter id.
-        match &ask {
+        match ask {
             Some(form) => {
                 let before = core.interests.len();
                 self.acquire_interest(core, plane, keyexpr, form)?;
@@ -6219,6 +6309,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 asked: ask.is_some(),
                 count_local,
                 peers: Cell::new(None),
+                plain: Cell::new(None),
             },
         );
         Ok(id)
@@ -6277,113 +6368,87 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if Self::holds_back_in(core, filter) {
             return FilteredPut::Suppressed;
         }
-        // A put one of the session's own subscribers wants is not plain: the general publish
-        // sends it and delivers it there.
-        #[cfg(feature = "local-subscriber")]
-        if params.destination.allows_local()
-            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
-                &*tables(&core.registry),
-                keyexpr,
-            )
-        {
-            return FilteredPut::NotPlain;
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, params)
+    }
+
+    fn keep_write_filter_plain(&self, filter: FilterId, plain: Option<(PlainPutParams, ExprId)>) {
+        let Some(core) = self.live() else {
+            return;
+        };
+        if let Some(entry) = core.0.filters.iter().find(|entry| entry.id == filter) {
+            entry.plain.set(plain);
         }
-        if !params.destination.allows_remote() {
+    }
+
+    #[inline(never)]
+    fn publish_filtered(
+        &self,
+        filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        if let Some(opts) = opts {
+            if self.write_filter_holds_back(filter) {
+                return FilteredPut::Suppressed;
+            }
+            return FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts));
+        }
+        // A write that brings nothing of its own: the filter's answer and the plain form its row
+        // keeps, read under one take of the session.
+        let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
+        };
+        let core = &core.0;
+        if Self::holds_back_in(core, filter) {
+            return FilteredPut::Suppressed;
         }
-        // A group is sent a put by the general publish, which pushes it onto the group's stage.
-        #[cfg(feature = "group")]
-        if !core.groups.is_empty() {
-            return FilteredPut::NotPlain;
-        }
-        // Asked of every link before any is sent to, so the put goes plain to all of them or to
-        // none: a link that rewrites what it originates (a routing namespace) takes the general
-        // publish for the whole of it. Its namespace is installed before the session sends
-        // anything, so no link answers otherwise below.
-        if core.ups().any(|actions| actions.rewrites_originated_keys()) {
-            return FilteredPut::NotPlain;
-        }
-        // The key as the session's tables name it, and each link as its key-wire form says.
-        let Some(named) = tables(&core.registry).named_by(keyexpr, mapping_id) else {
+        let Some((params, mapping_id)) = core
+            .filters
+            .iter()
+            .find(|entry| entry.id == filter)
+            .and_then(|entry| entry.plain.get())
+        else {
             return FilteredPut::NotPlain;
         };
-        let mut outcome = Ok(0);
-        for actions in core.ups() {
-            let sent = leg(actions
-                .send_plain_put_qos(
-                    key_on_link(actions, named),
-                    payload,
-                    params.qos,
-                    params.reliable,
-                    params.express,
-                    params.priority,
-                )
-                .unwrap_or(Err(SendWireError::FeatureDisabled)));
-            if sent.is_err() {
-                outcome = sent;
-            }
+        // A link that names keys its own way is sent the general way, which names the key as
+        // its form says: no declared id goes to every link at once.
+        #[cfg(feature = "shared-key-ids")]
+        if core.key_ids.is_some() || core.key_forms.departs_from_declared() {
+            return FilteredPut::NotPlain;
         }
-        FilteredPut::Sent(outcome)
+        Self::put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
-    /// Each group the session joined opens a window too, and is counted as a link is: a group's
+    /// Each group the session joined takes the step too, and is counted as a link is: a group's
     /// window holds what the session sends on the group, as pico's batch holds what it sends on
-    /// its multicast transport.
-    fn batch_start_all(&self) -> usize {
+    /// its multicast transport, and is written by a flush or a stop on the caller's thread, as a
+    /// link's is.
+    fn batch_all(&self, step: BatchStep) -> usize {
         self.live().map_or(0, |core| {
             let links = core
                 .0
                 .ups()
-                .filter(|actions| actions.batch_start().is_ok())
+                .filter(|actions| {
+                    match step {
+                        BatchStep::Start => actions.batch_start(),
+                        BatchStep::Flush => actions.batch_flush(),
+                        BatchStep::Stop => actions.batch_stop(),
+                    }
+                    .is_ok()
+                })
                 .count();
             #[cfg(feature = "group")]
             let groups = core
                 .0
                 .groups
                 .iter()
-                .filter(|group| group.batch_start())
-                .count();
-            #[cfg(not(feature = "group"))]
-            let groups = 0;
-            links + groups
-        })
-    }
-
-    /// Each group's window is written by this call, on the caller's thread, as a link's is.
-    fn batch_flush_all(&self) -> usize {
-        self.live().map_or(0, |core| {
-            let links = core
-                .0
-                .ups()
-                .filter(|actions| actions.batch_flush().is_ok())
-                .count();
-            #[cfg(feature = "group")]
-            let groups = core
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.batch_flush())
-                .count();
-            #[cfg(not(feature = "group"))]
-            let groups = 0;
-            links + groups
-        })
-    }
-
-    /// Each group's window is closed and what it held written by this call.
-    fn batch_stop_all(&self) -> usize {
-        self.live().map_or(0, |core| {
-            let links = core
-                .0
-                .ups()
-                .filter(|actions| actions.batch_stop().is_ok())
-                .count();
-            #[cfg(feature = "group")]
-            let groups = core
-                .0
-                .groups
-                .iter()
-                .filter(|group| group.batch_stop())
+                .filter(|group| match step {
+                    BatchStep::Start => group.batch_start(),
+                    BatchStep::Flush => group.batch_flush(),
+                    BatchStep::Stop => group.batch_stop(),
+                })
                 .count();
             #[cfg(not(feature = "group"))]
             let groups = 0;
@@ -7063,6 +7128,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         drop(guard);
         self.deliver();
         Ok(id)
+    }
+}
+
+/// The places the session's arena laid out at its open for the ABI's objects of its entities
+/// ([`HeldPlaces::with_entity`]), one for each row the session keeps of a kind, lent and given
+/// back under the session's lock, as every table of its arena is.
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for CoopEngine<L, C> {
+    /// Closed or not: a place is the session's memory and not its state, and the declaration the
+    /// place is taken for answers a closed session itself, as it would with a place to spare.
+    fn claim_place(&self, kind: EntityKind) -> Option<EntityPlace> {
+        self.core.lock().0.places.claim(kind)
+    }
+
+    /// Closed or not: the arena the place lies in is the session's until the engine is let go,
+    /// which the ABI's object of the entity holds off.
+    fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        self.core.lock().0.places.give_back(place)
+    }
+
+    fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.core.lock().0.places.counts(kind)
     }
 }
 

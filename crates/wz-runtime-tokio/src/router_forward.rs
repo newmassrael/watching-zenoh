@@ -382,7 +382,7 @@ use wz_session_core::linkstate_oam::{
 };
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::multicast_tx::MulticastTxItem;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::{MessageRef, NetworkMessage};
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::read_push_source;
@@ -6238,9 +6238,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let link = self.mcast_link.read();
         let ctx = match keyexpr {
             Some(keyexpr) => crate::interceptor::GroupContext::resolved(&link, keyexpr),
-            None => crate::interceptor::GroupContext::of_message(&link, msg),
+            None => crate::interceptor::GroupContext::of_message(&link, msg.view()),
         };
-        let verdict = chain.admit(&ctx, msg);
+        let verdict = chain.admit(&ctx, msg.view());
         if !verdict.is_admitted() {
             self.interceptor_dropped.bump();
         }
@@ -6275,7 +6275,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // takes the direct path, which is also the whole path with the feature
         // off.
         #[cfg(feature = "routing-interceptor-hotreload")]
-        if let Some(keyexpr) = resolve_governed_keyexpr(msg, &face.keyexpr_table) {
+        if let Some(keyexpr) = resolve_governed_keyexpr(msg.view(), &face.keyexpr_table) {
             let mut cache = self.ingress_keyexpr_cache.guard();
             let recomputes = &self.interceptor_cache_recomputes;
             let mut compute = || {
@@ -6288,9 +6288,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if slot.version() != chain.version() {
                 *slot = compute();
             }
-            return chain.admit_cached(&ctx, msg, Some(slot));
+            return chain.admit_cached(&ctx, msg.view(), Some(slot));
         }
-        chain.admit(&ctx, msg)
+        chain.admit(&ctx, msg.view())
     }
 
     /// Whether the EGRESS chain admits sending `msg` to the face `ctx` describes, face `id`.
@@ -6320,7 +6320,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // already holds it. The key is the one the context gives the chain, so a face reached
         // through a held route is keyed without its aliases being read.
         #[cfg(feature = "routing-interceptor-hotreload")]
-        if let Some(keyexpr) = ctx.full_keyexpr(msg) {
+        if let Some(keyexpr) = ctx.full_keyexpr(msg.view()) {
             let mut cache = self.egress_keyexpr_cache.guard();
             let recomputes = &self.egress_interceptor_cache_recomputes;
             let mut compute = || {
@@ -6333,9 +6333,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if slot.version() != chain.version() {
                 *slot = compute();
             }
-            return chain.admit_cached(ctx, msg, Some(slot));
+            return chain.admit_cached(ctx, msg.view(), Some(slot));
         }
-        chain.admit(ctx, msg)
+        chain.admit(ctx, msg.view())
     }
 
     /// The QoS overwrite of the INGRESS chain, applied to a message that arrived on face `id`:
@@ -6364,7 +6364,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return Some((None, band));
         };
         let ctx = RouterFaceContext { face, known: None };
-        let Some(qos) = chain.overwritten_qos(&ctx, message, reliable) else {
+        let Some(qos) = chain.overwritten_qos(&ctx, message.view(), reliable) else {
             return Some((None, band));
         };
         let Some(mut owned) = crate::interceptor::qos_overwrite::clone_for_rewrite(message) else {
@@ -6397,7 +6397,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if !chain.overwrites_qos() {
             return Some((msg, express, priority));
         }
-        let Some(qos) = chain.overwritten_qos(ctx, &msg, reliable) else {
+        let Some(qos) = chain.overwritten_qos(ctx, msg.view(), reliable) else {
             return Some((msg, express, priority));
         };
         // The pending table is not taken with the chain held.
@@ -15524,7 +15524,7 @@ impl InterceptorContext for RouterFaceContext<'_> {
         peer_acl_username(&self.face.runtime.actions)
     }
 
-    fn full_keyexpr(&self, msg: &NetworkMessage) -> Option<String> {
+    fn full_keyexpr(&self, msg: MessageRef<'_>) -> Option<String> {
         // Delegates to the shared SSOT, alias-resolved against THIS face's
         // table — one governed-kind match for every interceptor context.
         resolve_governed_keyexpr(msg, &self.face.keyexpr_table)
@@ -25781,11 +25781,12 @@ mod tests {
         }
         sink_subscriber.reset();
         let ahead = fwd.node_hlc.stamp().expect("a router stamps").time + (1u64 << 30);
+        let stamp = wz_session_core::sample::TimestampHint {
+            time: ahead,
+            zid: vec![0xAA],
+        };
         let meta = wz_session_core::metadata::PushMetadata {
-            timestamp: Some(wz_session_core::sample::TimestampHint {
-                time: ahead,
-                zid: vec![0xAA],
-            }),
+            timestamp: Some(&stamp),
             ..Default::default()
         };
         let push = wz_session_core::push_build::build_push_literal_with_meta(

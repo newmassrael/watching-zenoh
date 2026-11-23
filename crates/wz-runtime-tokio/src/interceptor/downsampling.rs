@@ -98,7 +98,7 @@ use std::time::{Duration, Instant};
 
 use wz_codecs::push::PushOwnedVariant;
 use wz_session_core::keyexpr_match::keyexpr_intersects;
-use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::network_message::MessageRef;
 
 use wz_session_core::link::{InterceptorLink, LinkSubject};
 
@@ -401,18 +401,18 @@ impl DownsamplingInterceptor {
 ///   governed whenever the rule names Put or Del. That is this module's stated
 ///   fail-CLOSED direction for an indeterminate subject, applied to an
 ///   indeterminate KIND, and it is stricter than upstream rather than a port.
-fn message_kinds(msg: &NetworkMessage) -> &'static [DownsamplingMessage] {
+fn message_kinds(msg: MessageRef<'_>) -> &'static [DownsamplingMessage] {
     use DownsamplingMessage as M;
     const DATA_EITHER: &[DownsamplingMessage] = &[M::Put, M::Delete];
     match msg {
-        NetworkMessage::Push(p) => match &p.body {
+        MessageRef::Push(p) => match &p.body {
             PushOwnedVariant::CodecZenohMsgPut(_) => &[M::Put],
             PushOwnedVariant::CodecZenohMsgDel(_) => &[M::Delete],
             // The tag the pin cannot represent — fail-closed, see above.
             _ => DATA_EITHER,
         },
-        NetworkMessage::Request(_) => &[M::Query],
-        NetworkMessage::Response(_) => &[M::Reply],
+        MessageRef::Request(_) => &[M::Query],
+        MessageRef::Response(_) => &[M::Reply],
         _ => &[],
     }
 }
@@ -422,7 +422,7 @@ impl Interceptor for DownsamplingInterceptor {
         super::InterceptorKind::Downsampling
     }
 
-    fn intercept(&self, ctx: &dyn InterceptorContext, msg: &NetworkMessage) -> bool {
+    fn intercept(&self, ctx: &dyn InterceptorContext, msg: MessageRef<'_>) -> bool {
         // A kind zenoh does not throttle is admitted (its `false` arms).
         let kinds = message_kinds(msg);
         if kinds.is_empty() {
@@ -456,6 +456,7 @@ impl DownsamplingInterceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::network_message::NetworkMessage;
     // R2794 — a SUBJECT is built from the link's kind, while a RULE below still
     // names an `InterceptorLink`. Imported here, not above: production code in
     // this module never builds a subject, so a top-level import would be unused.
@@ -654,7 +655,7 @@ mod tests {
     fn an_indeterminate_push_body_is_governed_by_either_data_kind() {
         // The classification itself: the arm resolves to both data kinds.
         assert_eq!(
-            message_kinds(&unknown_tag_push()),
+            message_kinds(unknown_tag_push().view()),
             &[DownsamplingMessage::Put, DownsamplingMessage::Delete],
             "an unnameable push body is indeterminate DATA, not ungoverned"
         );
@@ -670,7 +671,7 @@ mod tests {
                 link_protocols: Vec::new(),
                 interfaces: Vec::new(),
             }]);
-            let kinds = message_kinds(&unknown_tag_push());
+            let kinds = message_kinds(unknown_tag_push().view());
             assert!(ds.admit_at(t0, kinds, "demo/x", None));
             assert!(
                 !ds.admit_at(t0 + Duration::from_millis(10), kinds, "demo/x", None),
@@ -688,7 +689,7 @@ mod tests {
             link_protocols: Vec::new(),
             interfaces: Vec::new(),
         }]);
-        let kinds = message_kinds(&unknown_tag_push());
+        let kinds = message_kinds(unknown_tag_push().view());
         assert!(query_only.admit_at(t0, kinds, "demo/x", None));
         assert!(
             query_only.admit_at(t0, kinds, "demo/x", None),
@@ -944,7 +945,7 @@ mod tests {
         let push = NetworkMessage::Push(Box::new(
             build_push_literal("demo/x", b"1234").expect("build put"),
         ));
-        assert_eq!(message_kinds(&push), &[DownsamplingMessage::Put]);
+        assert_eq!(message_kinds(push.view()), &[DownsamplingMessage::Put]);
 
         // The kind that did not exist before this round. A real Del off the
         // push builder, so collapsing the two body arms back into one reds here
@@ -952,7 +953,7 @@ mod tests {
         let del = NetworkMessage::Push(Box::new(
             build_push_del_literal("demo/x").expect("build del"),
         ));
-        assert_eq!(message_kinds(&del), &[DownsamplingMessage::Delete]);
+        assert_eq!(message_kinds(del.view()), &[DownsamplingMessage::Delete]);
 
         let query = NetworkMessage::Request(Box::new(
             build_request_query(
@@ -961,7 +962,7 @@ mod tests {
             )
             .expect("build query"),
         ));
-        assert_eq!(message_kinds(&query), &[DownsamplingMessage::Query]);
+        assert_eq!(message_kinds(query.view()), &[DownsamplingMessage::Query]);
 
         let reply = NetworkMessage::Response(Box::new(
             build_response_reply(
@@ -971,14 +972,14 @@ mod tests {
             )
             .expect("build reply"),
         ));
-        assert_eq!(message_kinds(&reply), &[DownsamplingMessage::Reply]);
+        assert_eq!(message_kinds(reply.view()), &[DownsamplingMessage::Reply]);
 
         let declare = NetworkMessage::Declare(Box::new(
             wz_session_core::declare_build::build_declare_queryable(0, 0, Some("demo/q"))
                 .expect("build decl queryable"),
         ));
         assert!(
-            message_kinds(&declare).is_empty(),
+            message_kinds(declare.view()).is_empty(),
             "the control plane is never throttled"
         );
     }

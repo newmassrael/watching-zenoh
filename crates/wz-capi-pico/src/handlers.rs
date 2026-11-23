@@ -605,8 +605,9 @@ unsafe fn clear(slot: *mut c_void, free_f: z_element_free_f) {
     slot.cast::<*mut c_void>().write(core::ptr::null_mut());
     let mut channel = Box::from_raw(handle.cast::<Channel>());
     // The only reference there is: no lock to take. A mutex a panic left poisoned on a host still
-    // holds the elements, which are ours to release.
-    let drained: Vec<usize> = channel.state.get_mut().items.drain(..).collect();
+    // holds the elements, which are ours to release. The queue is taken whole, not copied, and
+    // the channel goes before the program's free runs.
+    let drained = core::mem::take(&mut channel.state.get_mut().items);
     drop(channel);
     if let Some(free) = free_f {
         for bits in drained {

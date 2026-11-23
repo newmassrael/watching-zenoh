@@ -96,16 +96,41 @@ impl TsStack {
         true
     }
 
+    /// The bytes of the extension's body, written into `sink`: their one writer, which
+    /// [`Self::encode`] runs into a vector and a publication written from its parts runs into the
+    /// frame.
+    pub fn write<S: sce_forge_runtime::codec::SceSink>(
+        &self,
+        sink: &mut S,
+    ) -> Result<(), S::Error> {
+        sink.write_u8(self.conf_flags)?;
+        write_zint(sink, self.stack.len() as u64)?;
+        for interception in &self.stack {
+            sink.write_u8(interception.flags)?;
+            write_zint(sink, interception.timestamp.len() as u64)?;
+            sink.write_bytes(&interception.timestamp)?;
+        }
+        Ok(())
+    }
+
+    /// How many bytes [`Self::write`] writes.
+    pub fn encoded_len(&self) -> usize {
+        self.stack.iter().fold(
+            zint_len(self.stack.len() as u64).saturating_add(1),
+            |len, interception| {
+                let bytes = interception.timestamp.len();
+                len.saturating_add(1)
+                    .saturating_add(zint_len(bytes as u64))
+                    .saturating_add(bytes)
+            },
+        )
+    }
+
     /// The bytes of the extension's body.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.stack.len().saturating_mul(18).saturating_add(2));
-        out.push(self.conf_flags);
-        push_zint(&mut out, self.stack.len() as u64);
-        for interception in &self.stack {
-            out.push(interception.flags);
-            push_zint(&mut out, interception.timestamp.len() as u64);
-            out.extend_from_slice(&interception.timestamp);
-        }
+        let mut out = Vec::with_capacity(self.encoded_len());
+        // A vector takes every write.
+        let _ = self.write(&mut sce_forge_runtime::codec::VecSink::new(&mut out));
         out
     }
 
@@ -137,6 +162,22 @@ impl TsStack {
         }
         rest.is_empty().then_some(Self { conf_flags, stack })
     }
+}
+
+/// Write `value` as a zint, the bytes [`push_zint`] appends.
+fn write_zint<S: sce_forge_runtime::codec::SceSink>(
+    sink: &mut S,
+    value: u64,
+) -> Result<(), S::Error> {
+    let mut buf = [0u8; 10];
+    let n = wz_codecs::vle::encode_zint(&mut buf, value);
+    sink.write_bytes(buf.get(..n).unwrap_or(&buf))
+}
+
+/// How many bytes `value` takes as a zint.
+fn zint_len(value: u64) -> usize {
+    let mut buf = [0u8; 10];
+    wz_codecs::vle::encode_zint(&mut buf, value)
 }
 
 fn push_zint(out: &mut Vec<u8>, value: u64) {

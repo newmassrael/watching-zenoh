@@ -259,6 +259,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/e2e_receiver.rs` | S12 | |
 | `crates/wz-capi-pico/src/e2e_sender.rs` | S12 | |
 | `crates/wz-capi-pico/src/encoding.rs` | S7 | |
+| `crates/wz-capi-pico/src/endpoint.rs` | S7 | |
 | `crates/wz-capi-pico/src/entity.rs` | S7 | |
 | `crates/wz-capi-pico/src/event_log.rs` | S7 | |
 | `crates/wz-capi-pico/src/ext_interface.rs` | S12 | |
@@ -322,6 +323,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/decl_watch.rs` | S7 | |
 | `crates/wz-capi-port/src/drive.rs` | S7 | |
 | `crates/wz-capi-port/src/engine.rs` | S7 | |
+| `crates/wz-capi-port/src/entity_place.rs` | S7 | |
 | `crates/wz-capi-port/src/group.rs` | S7 | |
 | `crates/wz-capi-port/src/held_key.rs` | S7 | |
 | `crates/wz-capi-port/src/lib.rs` | S7 | |
@@ -334,6 +336,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-port/src/os.rs` | S7 | |
 | `crates/wz-capi-port/src/peers.rs` | S7 | |
 | `crates/wz-capi-port/src/query.rs` | S7 | |
+| `crates/wz-capi-port/src/refusal.rs` | S7 | |
 | `crates/wz-capi-port/src/runtime_limits.rs` | S7 | |
 | `crates/wz-capi-port/src/sync.rs` | S7 | |
 | `crates/wz-capi-port/src/time_base.rs` | S7 | |
@@ -833,6 +836,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/query/in_place.rs` | S2 | |
 | `crates/wz-session-core/src/query_mode.rs` | S2 | |
 | `crates/wz-session-core/src/query_options.rs` | S2 | |
+| `crates/wz-session-core/src/query_parts.rs` | S2 | |
 | `crates/wz-session-core/src/query_sink.rs` | S2 | |
 | `crates/wz-session-core/src/query_value_ext.rs` | S2 | |
 | `crates/wz-session-core/src/queryable_info.rs` | S2 | |
@@ -850,6 +854,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/reply.rs` | S2 | |
 | `crates/wz-session-core/src/reply/in_place.rs` | S2 | |
 | `crates/wz-session-core/src/reply_acceptance.rs` | S2 | |
+| `crates/wz-session-core/src/reply_hold.rs` | S2 | |
 | `crates/wz-session-core/src/reply_sink.rs` | S2 | |
 | `crates/wz-session-core/src/reply_stage.rs` | S2 | |
 | `crates/wz-session-core/src/request_build.rs` | S2 | |
@@ -860,6 +865,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/response_final_build.rs` | S2 | |
 | `crates/wz-session-core/src/response_sink.rs` | S2 | |
 | `crates/wz-session-core/src/retry_period.rs` | S1 | |
+| `crates/wz-session-core/src/row_callback.rs` | S2 | |
 | `crates/wz-session-core/src/row_pool.rs` | S3 | |
 | `crates/wz-session-core/src/rx_profile.rs` | S3 | |
 | `crates/wz-session-core/src/sample.rs` | S2 | |
@@ -884,11 +890,15 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/session_init_params.rs` | S1 | |
 | `crates/wz-session-core/src/session_memory.rs` | S10 | |
 | `crates/wz-session-core/src/session_slot.rs` | S1 | |
+| `crates/wz-session-core/src/session_tables.rs` | S2 | |
+| `crates/wz-session-core/src/session_tables/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/session_timeouts.rs` | S1 | |
 | `crates/wz-session-core/src/session_zid.rs` | S10 | |
 | `crates/wz-session-core/src/shared_key_ids.rs` | S12 | |
 | `crates/wz-session-core/src/signing_key.rs` | S1 | |
 | `crates/wz-session-core/src/sink.rs` | S3 | |
+| `crates/wz-session-core/src/slot_map.rs` | S2 | |
+| `crates/wz-session-core/src/slot_map/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/slot_observer.rs` | S3 | |
 | `crates/wz-session-core/src/sn.rs` | S1 | |
 | `crates/wz-session-core/src/sorted_chunks.rs` | S2 | |
@@ -920,6 +930,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/wire.rs` | S1 | |
 | `crates/wz-session-core/src/wire_bincode.rs` | S1 | |
 | `crates/wz-session-core/src/wire_id.rs` | S1 | |
+| `crates/wz-session-core/src/wire_key.rs` | S2 | |
 | `crates/wz-session-core/src/wire_noise.rs` | S1 | |
 | `crates/wz-session-core/src/wireexpr_build.rs` | S1, S2 | |
 | `crates/wz-session-core/src/wireexpr_resolve.rs` | S1, S2 | |

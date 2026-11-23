@@ -1371,6 +1371,35 @@ fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
         .map(|(_, value)| *value)
 }
 
+/// The limits of entity tables the pico preset leaves at the build's default: zenoh-pico's own
+/// client test holds a hundred of each on one session, as many as the default admits.
+const HELD_AT_THE_DEFAULT: [&str; 3] = ["MAX_SUBSCRIPTIONS", "MAX_QUERYABLES", "MAX_PUBLISHERS"];
+
+/// The value a session of the pico preset holds of `id`, as the generated Kconfig states it: the
+/// preset's where it states one, and the limit's default where it does not, as for a limit
+/// zenoh-pico's own tests need the whole default of.
+fn pico_value(id: &str) -> usize {
+    const KCONFIG: &str = include_str!("../../../../deploy/Kconfig.limits");
+    let mut within = false;
+    let mut default = None;
+    for line in KCONFIG.lines() {
+        if let Some(limit) = line.strip_prefix("config WZ_LIMIT_") {
+            if within {
+                break;
+            }
+            within = limit == id;
+        } else if within {
+            if let Some(value) = line.trim().strip_prefix("default ") {
+                match value.strip_suffix(" if WZ_LIMITS_ZENOH_PICO") {
+                    Some(preset) => return preset.parse().expect("a preset is a number"),
+                    None => default = default.or_else(|| value.parse().ok()),
+                }
+            }
+        }
+    }
+    default.unwrap_or_else(|| panic!("the generated Kconfig states {id}"))
+}
+
 /// A session at the pico preset's limits lends each table the preset sizes as many rows as the
 /// preset states, the tables that share a limit's rows as many as their limits add up to, and an
 /// arena that is the sum of its rows' spans and smaller than the build's.
@@ -1378,13 +1407,10 @@ fn preset_of(presets: &[(&str, usize)], id: &str) -> Option<usize> {
 fn the_pico_presets_arena_lends_the_presets_rows() {
     let presets = pico_preset();
     for id in [
-        "MAX_SUBSCRIPTIONS",
-        "MAX_PUBLISHERS",
         "MAX_QUERIERS",
         "MAX_MATCHING_LISTENERS",
         "MAX_DECLARED_KEYEXPRS",
         "MAX_PENDING_QUERIES",
-        "MAX_PENDING_DECLARES",
     ] {
         assert!(
             preset_of(&presets, id).is_some(),
@@ -1395,7 +1421,7 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    let preset = |id: &str| preset_of(&presets, id).expect("the preset states it");
+    let preset = pico_value;
     let mut held = 0;
     for row in plan.rows() {
         // The lane's row is one buffer of the limit's bytes, the key arena's one area of them, a
@@ -1409,7 +1435,14 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         {
             continue;
         }
-        if let Some(value) = preset_of(&presets, row.basis) {
+        // A table of a limit the preset leaves at its default, as many as zenoh-pico's own tests
+        // hold, is as many rows as that default; any other limit is counted where it has a preset.
+        let value = preset_of(&presets, row.basis).or_else(|| {
+            HELD_AT_THE_DEFAULT
+                .contains(&row.basis)
+                .then(|| pico_value(row.basis))
+        });
+        if let Some(value) = value {
             // A pool the links share holds no more than the links: the client's one.
             let value = if row.basis == "RX_POOL_BUFFERS" || row.basis == "TX_POOL_SLOTS" {
                 value.min(1)
@@ -1462,10 +1495,9 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
 /// answers holds every subscriber and every local token the preset admits, and a final.
 #[test]
 fn the_pico_preset_stages_an_answer_to_every_entity_it_admits() {
-    let presets = pico_preset();
-    let declares = preset_of(&presets, "MAX_PENDING_DECLARES").expect("the preset states it");
-    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
-    let tokens = preset_of(&presets, "MAX_LOCAL_TOKENS").expect("the preset states it");
+    let declares = pico_value("MAX_PENDING_DECLARES");
+    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
+    let tokens = pico_value("MAX_LOCAL_TOKENS");
     assert!(declares > subscribers && declares > tokens);
 }
 
@@ -1523,9 +1555,8 @@ fn the_pico_presets_lane_holds_one_record() {
         .max_keyexpr_bytes()
         .lent_under(Quota::at_most(caps::MAX_KEYEXPR_BYTES))
         .expect("the preset's key is under the build's");
-    let subscribers = preset_of(&presets, "MAX_SUBSCRIPTIONS").expect("the preset states it");
-    let liveliness =
-        preset_of(&presets, "MAX_LIVELINESS_SUBSCRIPTIONS").expect("the preset states it");
+    let subscribers = pico_value("MAX_SUBSCRIPTIONS");
+    let liveliness = pico_value("MAX_LIVELINESS_SUBSCRIPTIONS");
     let most = if cfg!(feature = "liveliness") {
         subscribers.max(liveliness)
     } else {
@@ -1827,20 +1858,11 @@ fn the_arena_of_a_session_by_row_measured() {
 #[test]
 #[ignore = "a measurement: prints the arena a listener reserves at each default"]
 fn print_the_arena_a_listener_reserves_at_each_default() {
-    use crate::arena::{admitted_faces, admitted_handshakes};
-
     for (name, limits) in [
         ("build defaults", SessionLimits::defaults()),
         ("pico preset", pico_preset_limits()),
     ] {
-        let config = CoopConfig {
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            max_faces: admitted_faces(&limits).expect("the limits admit their own faces"),
-            accept_pending: admitted_handshakes(&limits)
-                .expect("the limits admit their own handshakes"),
-            limits,
-            ..client_config()
-        };
+        let config = listener_config(limits).expect("the limits admit their own faces");
         let plan = host_plan(&config).expect("the limits lay an arena out");
         std::println!(
             "{name}: {} faces, {} pending: {} B",
@@ -1858,14 +1880,124 @@ fn print_the_arena_a_listener_reserves_at_each_default() {
             );
         }
     }
+
+    // What one more of each kind adds at the pico preset: its rows in the engine's tables, and in
+    // the tables it is counted in with other kinds (filters, interests). The ABI's own object for
+    // the entity, in its place of the arena, comes on top, as the key arena does for its key.
+    let preset = pico_preset_limits();
+    let at_preset = listener_bytes(preset).expect("the pico preset lays an arena out");
+    std::println!("one more of each kind at the pico preset ({at_preset} B):");
+    let mut each = Vec::new();
+    for id in ENTITY_LIMITS {
+        let Some(held) = held_count(&preset, id) else {
+            std::println!("  {id:<30} not read by this build");
+            continue;
+        };
+        match selecting(preset, id, held.saturating_add(1)).and_then(listener_bytes) {
+            Some(bytes) => {
+                let one = bytes.saturating_sub(at_preset);
+                each.push((id, held, one));
+                std::println!("  {id:<30} {held:>4} held: {one:>7} B each");
+            }
+            None => std::println!("  {id:<30} {held:>4} held: this build admits no more"),
+        }
+    }
+
+    // The preset raised to the counts it is to hold: what the plan lays out when the build's
+    // capacities admit it, and what the bytes of one of each above make of it in any build.
+    let projected = RAISED_PRESET.iter().fold(at_preset, |sum, &(id, value)| {
+        each.iter()
+            .find(|(kind, _, _)| *kind == id)
+            .map_or(sum, |&(_, held, one)| {
+                sum.saturating_add(value.saturating_sub(held).saturating_mul(one))
+            })
+    });
+    std::println!("pico preset raised to {RAISED_PRESET:?}:");
+    std::println!("  by the bytes of one of each: {projected} B");
+    let raised = RAISED_PRESET
+        .iter()
+        .try_fold(preset, |limits, &(id, value)| selecting(limits, id, value));
+    match raised.and_then(listener_bytes) {
+        Some(bytes) => std::println!("  as the plan lays it out: {bytes} B"),
+        None => {
+            std::println!("  as the plan lays it out: past this build's capacities (WZ_LIMIT_*)")
+        }
+    }
 }
 
-/// A plan with every row of the build, the links' cells, their gates', their actions' and the
-/// ABI's handle among them, holds exactly `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in
-/// whichever build. A group that puts a row it does not count, or counts one it does not put,
-/// turns this red.
+/// The counts of each kind the pico preset is to be raised to, by the limit that counts it.
+const RAISED_PRESET: [(&str, usize); 4] = [
+    ("MAX_PUBLISHERS", 100),
+    ("MAX_SUBSCRIPTIONS", 100),
+    ("MAX_QUERYABLES", 100),
+    ("MAX_DECLARED_KEYEXPRS", 200),
+];
+
+/// The limits that count the session's own declarations, a kind each.
+const ENTITY_LIMITS: [&str; 8] = [
+    "MAX_PUBLISHERS",
+    "MAX_SUBSCRIPTIONS",
+    "MAX_QUERYABLES",
+    "MAX_LOCAL_TOKENS",
+    "MAX_LIVELINESS_SUBSCRIPTIONS",
+    "MAX_QUERIERS",
+    "MAX_MATCHING_LISTENERS",
+    "MAX_DECLARED_KEYEXPRS",
+];
+
+/// A session that listens, with the faces and handshakes `limits` admit, `None` when the build's
+/// capacities admit fewer.
+fn listener_config(limits: SessionLimits) -> Option<CoopConfig> {
+    use crate::arena::{admitted_faces, admitted_handshakes};
+
+    Some(CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: admitted_faces(&limits).ok()?,
+        accept_pending: admitted_handshakes(&limits).ok()?,
+        limits,
+        ..client_config()
+    })
+}
+
+/// The bytes the arena of a session that listens under `limits` reserves, `None` when the build
+/// lays none out for them.
+fn listener_bytes(limits: SessionLimits) -> Option<usize> {
+    host_plan(&listener_config(limits)?).ok()?.reserved_bytes()
+}
+
+/// How many of the kind the limit `id` counts `limits` holds, `None` for a limit the build does
+/// not read.
+fn held_count(limits: &SessionLimits, id: &str) -> Option<usize> {
+    let entry = SESSION_LIMITS.iter().find(|entry| entry.id() == id)?;
+    match entry.value_in(limits) {
+        LimitValue::Integer(held) => Some(held),
+        LimitValue::Unbounded => None,
+    }
+}
+
+/// `limits` with `value` selected for the limit `id`, `None` when the build reads no such limit or
+/// refuses the value.
+fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<SessionLimits> {
+    let entry = SESSION_LIMITS.iter().find(|entry| entry.id() == id)?;
+    entry
+        .select(&mut limits, LimitValue::Integer(value))?
+        .ok()?;
+    Some(limits)
+}
+
+/// A plan with every row of the build, the links' cells, their gates', their actions', the ABI's
+/// handle and its places for every kind of entity among them, holds exactly `ARENA_ROWS` rows: the
+/// groups' counts are the rows the plan puts, in whichever build. A group that puts a row it does
+/// not count, or counts one it does not put, turns this red.
 #[test]
 fn a_plan_with_every_row_holds_exactly_arena_rows() {
+    use crate::arena::{EntityKind, HeldPlaces};
+    let place = core::alloc::Layout::new::<u64>();
+    let held = EntityKind::ALL
+        .into_iter()
+        .fold(HeldPlaces::handle(place), |held, kind| {
+            held.with_entity(kind, place)
+        });
     // Faces that share their pools, so the table of tokens the faces that went owe is put too.
     let plan = ArenaPlan::of(
         &CoopConfig {
@@ -1881,7 +2013,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
             actions: 64,
         })
     })
-    .and_then(|plan| plan.holding(core::alloc::Layout::new::<u64>()))
+    .and_then(|plan| plan.holding(&held))
     .expect("the build's limits lay an arena out");
     assert_eq!(plan.rows().len(), crate::arena::ARENA_ROWS);
 }

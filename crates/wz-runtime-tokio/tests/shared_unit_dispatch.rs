@@ -428,8 +428,9 @@ fn census_wire(attached: bool) -> Vec<u8> {
     use wz_session_core::metadata::PushMetadata;
     use wz_session_core::push_build::build_push_literal_with_meta;
 
+    let census = vec![0xA7; CENSUS_ATTACHMENT];
     let meta = PushMetadata {
-        attachment: attached.then(|| vec![0xA7; CENSUS_ATTACHMENT]),
+        attachment: attached.then_some(census.as_slice()),
         ..PushMetadata::default()
     };
     let push = build_push_literal_with_meta("demo/census", &vec![0x5C; CENSUS_PAYLOAD], &meta)

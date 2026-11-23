@@ -149,10 +149,15 @@ impl<const P: usize> Publishing<P> {
     /// that was not started starts here.
     pub fn begin_round(&mut self, now_ms: u64, items: &[Publication]) {
         if !self.armed {
-            for (at, item) in items.iter().take(P).enumerate() {
-                self.arrivals[at] = Arrivals::new(item.arrivals);
-                self.sequence[at] = 0;
-                self.retry_at[at] = None;
+            let rows = self
+                .arrivals
+                .iter_mut()
+                .zip(self.sequence.iter_mut())
+                .zip(self.retry_at.iter_mut());
+            for (((arrivals, sequence), retry_at), item) in rows.zip(items) {
+                *arrivals = Arrivals::new(item.arrivals);
+                *sequence = 0;
+                *retry_at = None;
             }
             self.start_ms = now_ms;
             self.armed = true;
@@ -164,31 +169,42 @@ impl<const P: usize> Publishing<P> {
     /// When publication `at`'s next put is due on the plane's clock: its intended time, rounded up
     /// to the millisecond.
     fn due_ms(&self, at: usize) -> u64 {
-        self.start_ms
-            .saturating_add(self.arrivals[at].due().div_ceil(1_000_000))
+        let due = self
+            .arrivals
+            .get(at)
+            .map_or(0, |arrivals| arrivals.due().div_ceil(1_000_000));
+        self.start_ms.saturating_add(due)
     }
 
     /// When publication `at` can next be put: its due time, or the retry of a put the session could
     /// not take, whichever is later.
     fn ready_ms(&self, at: usize) -> u64 {
         let due = self.due_ms(at);
-        self.retry_at[at].map_or(due, |retry| retry.max(due))
+        match self.retry_at.get(at) {
+            Some(Some(retry)) => due.max(*retry),
+            _ => due,
+        }
     }
 
     /// The publication to put next in this round at `now_ms`, or `None` when the round has none
     /// left: none is due, or each that is has made its [`CATCH_UP`].
     pub fn next(&mut self, now_ms: u64, items: &[Publication]) -> Option<usize> {
         let count = items.len().min(P);
-        let found = (0..count)
-            .map(|step| (self.cursor + step) % count)
-            .find(|&at| self.made[at] < CATCH_UP && self.ready_ms(at) <= now_ms)?;
-        self.cursor = (found + 1) % count;
+        // From the cursor to the last publication, then from the first up to the cursor.
+        let found = (self.cursor..count)
+            .chain(0..self.cursor.min(count))
+            .find(|&at| {
+                self.made.get(at).is_some_and(|made| *made < CATCH_UP)
+                    && self.ready_ms(at) <= now_ms
+            })?;
+        // `found` is below `count`; a cursor at `count` starts the next search at the first.
+        self.cursor = found.wrapping_add(1);
         Some(found)
     }
 
     /// The sequence number of publication `at`'s next put: what a made body is filled from.
     pub fn sequence(&self, at: usize) -> u64 {
-        self.sequence[at]
+        self.sequence.get(at).copied().unwrap_or(0)
     }
 
     /// The put of publication `at` that [`Self::next`] named went as `outcome` at `now_ms`: count
@@ -196,7 +212,9 @@ impl<const P: usize> Publishing<P> {
     pub fn settle(&mut self, at: usize, now_ms: u64, outcome: Outcome, counts: &PublishCounts<P>) {
         match outcome {
             Outcome::Retry => {
-                self.retry_at[at] = Some(now_ms + RETRY_MS);
+                if let Some(retry_at) = self.retry_at.get_mut(at) {
+                    *retry_at = Some(now_ms.saturating_add(RETRY_MS));
+                }
                 return;
             }
             Outcome::Sent => {
@@ -205,10 +223,19 @@ impl<const P: usize> Publishing<P> {
             }
             Outcome::Refused => counts.record_refused(at),
         }
-        self.retry_at[at] = None;
-        self.sequence[at] = self.sequence[at].wrapping_add(1);
-        self.arrivals[at].advance();
-        self.made[at] += 1;
+        if let Some(retry_at) = self.retry_at.get_mut(at) {
+            *retry_at = None;
+        }
+        if let Some(sequence) = self.sequence.get_mut(at) {
+            *sequence = sequence.wrapping_add(1);
+        }
+        if let Some(arrivals) = self.arrivals.get_mut(at) {
+            arrivals.advance();
+        }
+        // At most `CATCH_UP` a round: `next` names no publication that made them.
+        if let Some(made) = self.made.get_mut(at) {
+            *made = made.saturating_add(1);
+        }
     }
 
     /// The earliest moment at or after `now_ms` the plane is to be woken at for a publication
@@ -232,8 +259,10 @@ impl<const P: usize> Publishing<P> {
     ) -> Option<u64> {
         self.begin_round(now_ms, items);
         while let Some(at) = self.next(now_ms, items) {
-            let item = &items[at];
-            let outcome = match item.body.bytes(self.sequence[at], buffer) {
+            let Some(item) = items.get(at) else {
+                break;
+            };
+            let outcome = match item.body.bytes(self.sequence(at), buffer) {
                 Some(bytes) => send(at, item.key, bytes),
                 None => Outcome::Refused,
             };

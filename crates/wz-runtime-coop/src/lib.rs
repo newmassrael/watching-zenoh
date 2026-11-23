@@ -191,8 +191,6 @@ pub mod join_handle;
 // The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —
 // see the module doc.
 #[cfg(feature = "runtime")]
-// Totality debt TD-204 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::panic)]
 pub mod local;
 #[cfg(feature = "runtime")]
 // Totality debt TD-205 (docs/c-abi-architecture.md section 7).

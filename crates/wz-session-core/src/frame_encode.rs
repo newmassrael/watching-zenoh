@@ -1189,7 +1189,12 @@ pub enum FragmentBody<'a> {
 
 /// The body encoder a lent chain re-runs per fragment, as a trait object so a
 /// chain over any message type is one function and not one per message type.
-#[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
+/// Named in every build: a group's lent push (`multicast_tx::MulticastTxEncoded`) carries one
+/// whether or not its build lends slots or cuts chains.
+#[cfg(any(
+    feature = "alloc",
+    all(feature = "transport-fragmentation", feature = "transport-tx-lend")
+))]
 pub type BodyEncoder<'f> = dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'f;
 
 /// Write ONE fragment of `body` (the range `span` names) into `buf`: the header
@@ -1530,23 +1535,26 @@ fn write_fragment_head_to<K: sce_forge_runtime::codec::SceSink>(
         body: ExtEntryPartsBody::CodecZenohExtUnit(&marker),
     };
     let mut chain = [unit_entry(FRAGMENT_FIRST_EXT_HEADER); 3];
-    #[cfg(feature = "transport-qos")]
-    let qos_entry = qos.as_ref().map(qos_entry);
-    #[cfg(not(feature = "transport-qos"))]
-    let qos_entry = {
-        let _ = ext_qos;
-        None
-    };
-    let wanted = [
-        qos_entry,
-        first.then(|| unit_entry(FRAGMENT_FIRST_EXT_HEADER)),
-        drop_marker.then(|| unit_entry(FRAGMENT_DROP_EXT_HEADER)),
-    ];
-    // At most the three entries the chain has room for.
+    // At most the three entries the chain has room for, so every one finds its slot and the
+    // count stays below the array's length.
     let mut len = 0usize;
-    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
-        *slot = entry;
-        len = len.saturating_add(1);
+    let mut push = |entry| {
+        if let Some(slot) = chain.get_mut(len) {
+            *slot = entry;
+            len = len.wrapping_add(1);
+        }
+    };
+    #[cfg(feature = "transport-qos")]
+    if let Some(value) = &qos {
+        push(qos_entry(value));
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = ext_qos;
+    if first {
+        push(unit_entry(FRAGMENT_FIRST_EXT_HEADER));
+    }
+    if drop_marker {
+        push(unit_entry(FRAGMENT_DROP_EXT_HEADER));
     }
     let head = wz_codecs::transport_fragment_header::TransportFragmentHeaderParts {
         header,
@@ -1740,22 +1748,24 @@ mod tests {
         use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 
         let long_key = "a/".repeat(100) + "z";
+        let stamp = TimestampHint {
+            time: u64::MAX,
+            zid: vec![0xAB; 16],
+        };
+        let encoded = EncodingHint {
+            packed_id: u32::MAX,
+            schema: Some(b"application/x-schema".repeat(3)),
+        };
         let everything = PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: u64::MAX,
-                zid: vec![0xAB; 16],
-            }),
-            encoding: Some(EncodingHint {
-                packed_id: u32::MAX,
-                schema: Some(b"application/x-schema".repeat(3)),
-            }),
+            timestamp: Some(&stamp),
+            encoding: Some(&encoded),
             source_info: Some(SourceInfo {
                 zid: [0xCD; 16],
                 zid_len: 16,
                 eid: u32::MAX,
                 sn: u32::MAX,
             }),
-            attachment: Some(vec![7; 300]),
+            attachment: Some(&[7; 300]),
             qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack: None,

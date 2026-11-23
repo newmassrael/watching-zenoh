@@ -336,6 +336,22 @@ fn a_key_expression_declared_twice_is_held_twice_and_retracted_by_its_last_holde
     assert_eq!(tables.undeclare_keyexpr(first.handle), None);
 }
 
+/// A hold taken for a copied holder keeps the declaration until that holder lets go too; a handle
+/// that names no row takes none.
+#[test]
+fn a_retained_key_expression_is_retracted_by_its_last_holder() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    assert!(tables.retain_keyexpr(declared.handle));
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), None);
+    assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
+    assert!(
+        !tables.retain_keyexpr(declared.handle),
+        "a retracted one takes none"
+    );
+    assert!(tables.keyexprs().is_empty());
+}
+
 #[test]
 fn a_key_expression_id_skips_one_still_declared() {
     let mut tables = Tables::new();
@@ -1174,6 +1190,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     );
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
         Reliability::Reliable,
     );
@@ -1184,6 +1201,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     );
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id + 1))),
         Reliability::Reliable,
     );
@@ -1209,6 +1227,7 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     peer.set_own_mapping_space(installed);
     peer.dispatch(
         &mut tables,
+        &mut Handed::default(),
         &NetworkMessage::Push(alloc::boxed::Box::new(push_naming_ours(declared.id))),
         Reliability::Reliable,
     );

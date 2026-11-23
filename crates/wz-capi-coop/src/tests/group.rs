@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
+use wz_capi_port::{
+    BatchStep, FilterPlane, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
+};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::app_link_table::{
     AppLinkKind, AppLinkTable, LinkHandle, ProgramEvent, ProgramOpen, ProgramSend,
@@ -1759,12 +1761,16 @@ mod woken {
         let (member, stack, _transport) = open_alone(PosixClock, 5_000);
         let sent = || stack.sent.lock().unwrap().clone();
         let before = sent().len();
-        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+        assert_eq!(
+            member.batch_all(BatchStep::Start),
+            1,
+            "the group opens a window"
+        );
         put(&member, "demo/group/a", b"batched-first");
         put(&member, "demo/group/b", b"batched-second");
         assert_eq!(sent().len(), before, "the window holds both");
 
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         let flushed = sent();
         assert_eq!(flushed.len(), before + 1, "one datagram for both");
         let frame = flushed.last().expect("the window's frame");
@@ -1793,7 +1799,7 @@ mod woken {
 
         put(&member, "demo/group/e", b"batched-fourth");
         assert_eq!(sent().len(), before + 2, "held again");
-        assert_eq!(member.batch_stop_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Stop), 1);
         let stopped = sent();
         assert_eq!(stopped.len(), before + 3, "the stop writes what is left");
         assert!(stopped
@@ -1832,15 +1838,19 @@ mod woken {
         let payload = |at: usize| format!("{at:08}").into_bytes();
         let key = "demo/group/thr";
         let budget = usize::from(profile().batch_size);
-        assert_eq!(member.batch_start_all(), 1, "the group opens a window");
+        assert_eq!(
+            member.batch_all(BatchStep::Start),
+            1,
+            "the group opens a window"
+        );
 
         // The bytes one put adds to a frame, and the frame's head: a frame of one and one of two.
         let base = sent().len();
         put(&member, key, &payload(0));
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         put(&member, key, &payload(1));
         put(&member, key, &payload(2));
-        assert_eq!(member.batch_flush_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Flush), 1);
         let calibration = sent();
         assert_eq!(calibration.len(), base + 2);
         let (one, two) = (calibration[base].len(), calibration[base + 1].len());
@@ -1864,7 +1874,7 @@ mod woken {
             puts,
             "one take of the session a put"
         );
-        assert_eq!(member.batch_stop_all(), 1);
+        assert_eq!(member.batch_all(BatchStep::Stop), 1);
         let frames = sent().split_off(base);
         assert_eq!(frames.len(), puts.div_ceil(fits));
         for (at, frame) in frames.iter().enumerate() {

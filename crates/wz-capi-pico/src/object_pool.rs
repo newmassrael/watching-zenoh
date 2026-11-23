@@ -23,10 +23,11 @@
 //!
 //! # Reading
 //!
-//! The pools are reported by slot size (`wz_ext_object_pool_class`), the kinds of one size
-//! together: their slots, those in use, the most in use at once and the objects refused for want of
-//! a free slot. A pool whose slots are larger than the largest class (a config of the build's text)
-//! is reported by none, and neither is the payloads' area.
+//! The pools are reported by size class (`wz_ext_object_pool_class`), the kinds whose slots a
+//! class holds together: the class's largest slot, their slots and the bytes those take (a slot is
+//! its object's own size, so the slots of one class differ), those in use, the most in use at once
+//! and the objects refused for want of a free slot. A pool whose slots are larger than the largest
+//! class is reported by none, and neither is the payloads' area.
 //!
 //! # Releasing
 //!
@@ -45,14 +46,14 @@ use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK,
 };
 
-/// How many slot sizes there are, the smallest 16 bytes and each one twice the one before, up to
-/// 16 KiB: the classes the pools are reported by.
+/// How many size classes the pools are reported by, the largest slot of the smallest 16 bytes and
+/// each one's twice the one before's, up to 16 KiB.
 pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 
 /// How many of each object the program holds at once, as it states them to reserve the pools.
 ///
-/// The entity counts (`publishers` to `liveliness_subscribers`) are per session; the rest are for
-/// all sessions together. Zero is read as the module says: the bound of the session's limit where
+/// The entity counts (`publishers` to `liveliness_subscribers`, `queriers` and `keyexprs`) are per
+/// session; the rest are for all sessions together. Zero is read as the module says: the bound of the session's limit where
 /// one bounds the object, none where none does.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,6 +87,11 @@ pub struct wz_ext_object_pool_counts_t {
     /// The bytes the payloads, strings and slices the program holds carry together, in blocks of
     /// power-of-two sizes from 32 bytes, each the smallest that holds its bytes and a 16-byte head.
     pub payload_bytes: usize,
+    /// Queriers of each session, at most its `MAX_QUERIERS`.
+    pub queriers: usize,
+    /// Key expressions of each session the program holds declared (`z_declare_keyexpr`), at most
+    /// its `MAX_DECLARED_KEYEXPRS`.
+    pub keyexprs: usize,
 }
 
 impl wz_ext_object_pool_counts_t {
@@ -104,17 +110,19 @@ impl wz_ext_object_pool_counts_t {
             bytes: self.bytes,
             configs: self.configs,
             hellos: self.hellos,
+            queriers: self.queriers,
+            keyexprs: self.keyexprs,
             payload_bytes: self.payload_bytes,
         }
     }
 }
 
-/// The pools of one slot size, the kinds of that size together, as `wz_ext_object_pool_class`
-/// reports them.
+/// The pools of one size class, the kinds whose slots it holds together, as
+/// `wz_ext_object_pool_class` reports them.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct wz_ext_object_pool_class_t {
-    /// The bytes of each of its slots.
+    /// The class's largest slot: each slot it reports holds an object of at most this many bytes.
     pub slot_bytes: usize,
     /// Its slots; zero while no pool is reserved.
     pub slots: usize,
@@ -124,6 +132,8 @@ pub struct wz_ext_object_pool_class_t {
     pub high_water: usize,
     /// The objects it refused for want of a free slot since the reservation.
     pub refused: usize,
+    /// The bytes its slots take, each slot its object's own size; zero while no pool is reserved.
+    pub bytes: usize,
 }
 
 /// The code a door answers for counts that make no pools.
@@ -225,9 +235,10 @@ pub unsafe extern "C" fn wz_ext_object_pool_place(
     })
 }
 
-/// The pools of size class `class` together (`0` to `WZ_EXT_OBJECT_POOL_CLASSES - 1`, the slot of
-/// each twice the one before's), in `out`: its slot size, and while pools are reserved their
-/// slots, those in use, the most in use at once and the objects they refused. `Z_OK`;
+/// The pools of size class `class` together (`0` to `WZ_EXT_OBJECT_POOL_CLASSES - 1`, the largest
+/// slot of each twice the one before's), in `out`: its largest slot, and while pools are reserved
+/// their slots and the bytes those take, those in use, the most in use at once and the objects they
+/// refused. `Z_OK`;
 /// `Z_ERR_NULL` for a NULL `out`; `Z_EINVAL` for a `class` past the last.
 #[no_mangle]
 pub unsafe extern "C" fn wz_ext_object_pool_class(
@@ -248,6 +259,7 @@ pub unsafe extern "C" fn wz_ext_object_pool_class(
             in_use: report.in_use,
             high_water: report.high_water,
             refused: report.refused,
+            bytes: report.bytes,
         };
         Z_OK
     })
@@ -288,6 +300,8 @@ mod tests {
             configs: 11,
             hellos: 12,
             payload_bytes: 13,
+            queriers: 14,
+            keyexprs: 15,
         };
         assert_eq!(
             stated.counts(),
@@ -304,6 +318,8 @@ mod tests {
                 bytes: 10,
                 configs: 11,
                 hellos: 12,
+                queriers: 14,
+                keyexprs: 15,
                 payload_bytes: 13,
             }
         );

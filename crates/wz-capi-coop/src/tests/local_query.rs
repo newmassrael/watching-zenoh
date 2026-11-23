@@ -15,7 +15,7 @@ use wz_capi_port::{
     FilterPlane, HeldQuery, QblId, QueryCallback, QueryHolder, Refusal, ReplyCallback,
     SessionDrive, SessionEngine, WireKey,
 };
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::ConsolidationMode;
@@ -379,9 +379,9 @@ fn a_filter_and_a_listener_count_the_sessions_own_queryables_when_asked() {
                 plane,
                 "demo/lq/x",
                 &WireKey::literal(),
-                Some(InterestForm {
+                Some(InterestAsk {
                     mapping_id: 0,
-                    suffix: Some("demo/lq/x".to_owned()),
+                    suffix: Some("demo/lq/x"),
                     aggregate: false,
                 }),
                 count_local,

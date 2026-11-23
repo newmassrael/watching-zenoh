@@ -66,13 +66,34 @@ pub struct Replay {
     pub schedule: Schedule,
 }
 
+/// Where one replay is: its pacing walk, its next sample, when that is due and when a put the
+/// session could not take is to be tried again.
+struct Lane {
+    pacing: Option<Pacing>,
+    next: usize,
+    due_ms: u64,
+    retry_at: Option<u64>,
+}
+
+impl Lane {
+    const IDLE: Self = Self {
+        pacing: None,
+        next: 0,
+        due_ms: 0,
+        retry_at: None,
+    };
+
+    /// When its next sample can be put: its time, or the retry, whichever is later.
+    fn ready_ms(&self) -> u64 {
+        self.retry_at
+            .map_or(self.due_ms, |retry| retry.max(self.due_ms))
+    }
+}
+
 /// The send-side state of a session's replays: where each is in its samples, its pacing walk, when
 /// its next sample is due and when a put the session could not take is to be tried again.
 pub struct Replaying<const R: usize> {
-    pacing: [Option<Pacing>; R],
-    next: [usize; R],
-    due_ms: [u64; R],
-    retry_at: [Option<u64>; R],
+    lanes: [Lane; R],
     armed: bool,
 }
 
@@ -80,10 +101,7 @@ impl<const R: usize> Replaying<R> {
     /// State that has not started: the first round starts every replay at its first sample.
     pub const fn new() -> Self {
         Self {
-            pacing: [const { None }; R],
-            next: [0; R],
-            due_ms: [0; R],
-            retry_at: [None; R],
+            lanes: [Lane::IDLE; R],
             armed: false,
         }
     }
@@ -91,11 +109,6 @@ impl<const R: usize> Replaying<R> {
     /// The session is not established: the next round plays every replay again from its start.
     pub fn disarm(&mut self) {
         self.armed = false;
-    }
-
-    /// When replay `at`'s next sample can be put: its time, or the retry, whichever is later.
-    fn ready_ms(&self, at: usize) -> u64 {
-        self.retry_at[at].map_or(self.due_ms[at], |retry| retry.max(self.due_ms[at]))
     }
 
     /// One round at `now_ms`: each sample whose time has come is mutated into `buffer` and handed
@@ -110,61 +123,66 @@ impl<const R: usize> Replaying<R> {
         counts: &ReplayCounts<R>,
         mut send: impl FnMut(usize, &'static str, &[u8]) -> Outcome,
     ) -> Option<u64> {
-        let count = replays.len().min(R);
         if !self.armed {
-            for (at, replay) in replays.iter().take(count).enumerate() {
+            for (lane, replay) in self.lanes.iter_mut().zip(replays) {
                 let mut pacing = Pacing::new(replay.schedule);
                 let first = replay.samples.first().and_then(|s| s.captured_at_ms);
-                self.due_ms[at] = now_ms.saturating_add(pacing.next(first).0);
-                self.pacing[at] = Some(pacing);
-                self.next[at] = 0;
-                self.retry_at[at] = None;
+                lane.due_ms = now_ms.saturating_add(pacing.next(first).0);
+                lane.pacing = Some(pacing);
+                lane.next = 0;
+                lane.retry_at = None;
             }
             self.armed = true;
         }
         let mut earliest: Option<u64> = None;
-        for (at, replay) in replays.iter().take(count).enumerate() {
-            let mut made = 0;
-            while let Some(sample) = replay.samples.get(self.next[at]) {
-                if self.ready_ms(at) > now_ms || made == CATCH_UP {
+        for (at, (lane, replay)) in self.lanes.iter_mut().zip(replays).enumerate() {
+            // At most `CATCH_UP` a round, and the next sample below the samples' length: neither
+            // count wraps.
+            let mut made: u32 = 0;
+            while let Some(sample) = replay.samples.get(lane.next) {
+                if lane.ready_ms() > now_ms || made == CATCH_UP {
                     break;
                 }
                 let (outcome, changed) = match sample.mutation.apply_into(sample.body, buffer) {
                     Some(applied) => (
-                        send(at, sample.key, &buffer[..applied.len]),
+                        send(
+                            at,
+                            sample.key,
+                            buffer.get(..applied.len).unwrap_or_default(),
+                        ),
                         applied.changed,
                     ),
                     None => (Outcome::Refused, false),
                 };
                 match outcome {
                     Outcome::Retry => {
-                        self.retry_at[at] = Some(now_ms + RETRY_MS);
+                        lane.retry_at = Some(now_ms.saturating_add(RETRY_MS));
                         break;
                     }
                     Outcome::Sent => {
                         counts.puts.record_sent(at);
                         counts
                             .puts
-                            .record_late(at, now_ms.saturating_sub(self.due_ms[at]));
+                            .record_late(at, now_ms.saturating_sub(lane.due_ms));
                         if changed {
                             Self::bump(&counts.mutated, at);
                         }
                     }
                     Outcome::Refused => counts.puts.record_refused(at),
                 }
-                self.retry_at[at] = None;
-                self.next[at] += 1;
-                made += 1;
-                match (replay.samples.get(self.next[at]), self.pacing[at].as_mut()) {
+                lane.retry_at = None;
+                lane.next = lane.next.wrapping_add(1);
+                made = made.wrapping_add(1);
+                match (replay.samples.get(lane.next), lane.pacing.as_mut()) {
                     (Some(following), Some(pacing)) => {
                         let delay = pacing.next(following.captured_at_ms).0;
-                        self.due_ms[at] = self.due_ms[at].saturating_add(delay);
+                        lane.due_ms = lane.due_ms.saturating_add(delay);
                     }
                     _ => Self::bump(&counts.played, at),
                 }
             }
-            if self.next[at] < replay.samples.len() {
-                let ready = self.ready_ms(at).max(now_ms);
+            if lane.next < replay.samples.len() {
+                let ready = lane.ready_ms().max(now_ms);
                 earliest = Some(earliest.map_or(ready, |e: u64| e.min(ready)));
             }
         }

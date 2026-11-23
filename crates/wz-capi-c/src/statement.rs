@@ -30,7 +30,7 @@ pub(crate) struct PublishStatement {
 impl PublishStatement {
     /// `options` with what this statement states put on them; the options of a statement that
     /// states nothing come back as they were.
-    pub(crate) fn apply(self, options: PublishOptions) -> PublishOptions {
+    pub(crate) fn apply(self, options: PublishOptions<'_>) -> PublishOptions<'_> {
         let options = options.with_links(self.links);
         let options = match self.retry {
             Some(retry) => options.with_admission_retry(retry),

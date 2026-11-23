@@ -789,7 +789,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // upstreams do the replay inside their register function
         // (zenoh-pico `_z_register_liveliness_subscriber` calls
         // `_z_liveliness_subscription_trigger_history` between the register
-        // and the Interest emit, `src/net/liveliness.c:196-209`; zenoh runs
+        // and the Interest emit, `vendor/zenoh-pico/src/net/liveliness.c`
+        // @ `_z_liveliness_subscription_trigger_history(_Z_RC_IN_VAL(zn)`; zenoh runs
         // it before `send_interest`, `zenoh/src/api/session.rs`
         // @ `let known_tokens = if history {`), and so
         // does this — folding it in is what makes both wz declare paths
@@ -2284,6 +2285,7 @@ mod tests {
     /// tokens it is owed are read one at a time, in ascending id, each found after the one before
     /// it: what an engine that calls its callbacks with no lock held walks, so no token it is owed
     /// is left out however many there are.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn an_unreplayed_subscribers_tokens_are_read_one_at_a_time() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2412,6 +2414,7 @@ mod tests {
     /// A link loss retracted while `room` allows stops where it says no: the
     /// tokens left stay in the table, and a later call retracts them in the
     /// same order, so no Delete is lost to a caller that had no room for it.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn link_loss_flushed_while_there_is_room_leaves_the_rest_for_later() {
         let mut reg = LivelinessSubscriberRegistry::new();

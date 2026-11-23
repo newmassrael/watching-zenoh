@@ -113,7 +113,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if numbered == Numbered::Nothing || !matches!(msg, NetworkMessage::Declare(_)) {
             return msg;
         }
-        let Some(key) = resolve_governed_keyexpr(&msg, &state.keyexpr_table) else {
+        let Some(key) = resolve_governed_keyexpr(msg.view(), &state.keyexpr_table) else {
             return msg;
         };
         let NetworkMessage::Declare(declare) = &mut msg else {
@@ -177,7 +177,8 @@ pub(super) fn declare_digest(msg: &NetworkMessage) -> String {
         DeclareOwnedVariant::CodecZenohUndeclToken(u) => ("undeclare-token", u.id),
         _ => ("declare-other", 0),
     };
-    let key = resolve_governed_keyexpr(msg, &Default::default()).unwrap_or_else(|| "?".to_owned());
+    let key =
+        resolve_governed_keyexpr(msg.view(), &Default::default()).unwrap_or_else(|| "?".to_owned());
     format!(
         "{kind} id={id} interest={:?} key={key}",
         declare.interest_id

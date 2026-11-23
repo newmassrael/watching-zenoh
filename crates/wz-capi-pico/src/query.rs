@@ -31,25 +31,22 @@
 //! because exporting it without one would have made every channel-based
 //! queryable link and then silently fail to answer; the owned query is now
 //! deferred through the held query and does not depend on the callback's
-//! `ReplyOut`, which only accumulates replies for the callback's own return.
+//! `ReplyOut`, which is lent to a query only for its callback's own call.
 //!
-//! ## Reply accumulation
+//! ## Replies
 //!
-//! `z_query_reply` records into this query's marshal and the accumulated
-//! replies are flushed into the wz [`ReplyOut`] when the C callback returns.
-//! That is observably identical to emitting during the callback, because wz's
-//! own responder already accumulates: `QueryResponder` "only accumulates into a
-//! `Vec<QueryReply>` that the `codec-response`-gated `into_response` drains"
-//! (`wz-session-core/src/query.rs:884-895`), and the `Response`s leave the
-//! session after the handler returns either way. Accumulating here in addition
-//! buys a strictly smaller unsafe surface: the alternative — stashing the
-//! `&mut dyn ReplyOut` as a raw trait-object pointer with its lifetime erased —
-//! would need a `transmute` and hand the C side a pointer whose validity we
-//! could not check.
+//! `z_query_reply` hands its reply to the responder of the dispatch the query
+//! arrived in while the C callback runs, read where the caller holds it: no
+//! copy of the caller's key and no list of replies is kept for later. wz's own
+//! responder stages what it is handed, and the `Response`s leave the session
+//! after the handler returns. The responder is lent to
+//! the marshal for the callback's call alone (`QueryMarshal::answer_with`),
+//! the one place a lifetime is erased, and taken back before the borrow ends.
 
 use alloc::sync::Arc;
-use core::cell::UnsafeCell;
+use core::cell::Cell;
 use core::ffi::c_void;
+use core::ptr::NonNull;
 
 use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
@@ -94,11 +91,10 @@ pub struct z_loaned_query_t {
 /// the [`ReplyOut`] seam takes.
 ///
 /// Read off the caller's options struct at `z_query_reply` / `z_query_reply_del`
-/// time rather than at flush time, because the options are BORROWED for the
-/// duration of that call only: the `z_timestamp_t*` and `z_source_info_t*` a C
-/// program passes routinely point at its own stack, and a reply is flushed
-/// after the callback returns (or, for an escaped query, arbitrarily later).
-/// Projecting to owned hints at read time is what makes the deferral sound.
+/// time, because the options are BORROWED for the duration of that call only:
+/// the `z_timestamp_t*` and `z_source_info_t*` a C program passes routinely
+/// point at its own stack. Projecting to owned hints at read time keeps them
+/// whatever the responder does with the reply after the call.
 #[derive(Default)]
 struct ReplyMetaOwned {
     encoding: Option<wz_session_core::sample::EncodingHint>,
@@ -129,19 +125,20 @@ impl ReplyMetaOwned {
     }
 }
 
-/// One reply the C callback asked for, held until the callback returns and the
-/// batch is flushed into the wz [`ReplyOut`].
-enum PendingReply {
+/// One reply the C callback asked for, on its way to the responder of the query: the dispatch's,
+/// while the callback runs, or the held query's, for a query kept past it ([`QueryMarshal::reply`]).
+/// Its key is the caller's, read where the caller holds it for the one call.
+enum PendingReply<'k> {
     /// `z_query_reply` — a Put-form reply under an explicit keyexpr.
     Put {
-        keyexpr: String,
+        keyexpr: &'k str,
         payload: crate::bytes::ByteBuf,
         attachment: Option<crate::bytes::ByteBuf>,
         meta: ReplyMetaOwned,
     },
     /// `z_query_reply_del` — a Del-form reply under an explicit keyexpr.
     Del {
-        keyexpr: String,
+        keyexpr: &'k str,
         meta: ReplyMetaOwned,
     },
     /// `z_query_reply_err` — an Err-form reply, with the encoding the options
@@ -165,11 +162,11 @@ enum PendingReply {
 /// R2953 (open-debt item 836) — both are the engine's [`HeldQuery`], which
 /// answers on the query's own route (the wire, or this session's own pending
 /// GET for a query it asked of itself) and releases the Final on drop. This ABI
-/// only formats the reply, through the same [`flush_one`] the in-dispatch flush
-/// uses. Until R2953 it carried its own wire-only responder.
+/// only formats the reply, through the same [`flush_one`] the dispatch's
+/// responder is handed replies by. Until R2953 it carried its own wire-only responder.
 fn emit_held(
     held: &dyn HeldQuery,
-    reply: PendingReply,
+    reply: PendingReply<'_>,
     query_qos: wz_session_core::sample::QosLevel,
 ) {
     let mut reply = Some(reply);
@@ -181,15 +178,15 @@ fn emit_held(
     });
 }
 
-/// Route ONE accumulated reply into a [`ReplyOut`]. Shared by the in-dispatch
-/// flush and the deferred emit so the two cannot answer differently.
+/// Route ONE reply into a [`ReplyOut`]. Shared by the dispatch's responder and the deferred emit
+/// so the two cannot answer differently.
 ///
 /// `query_qos` is the QoS of the query being answered: a reply takes its
 /// congestion control and priority from it and its express bit from its own
 /// options ([`ReplyMetaOwned::express`]).
 fn flush_one(
     out: &mut &mut dyn ReplyOut,
-    reply: PendingReply,
+    reply: PendingReply<'_>,
     query_qos: wz_session_core::sample::QosLevel,
 ) {
     match reply {
@@ -205,7 +202,7 @@ fn flush_one(
             attachment,
             meta,
         } => admitted_at_the_abi(out.reply_keyed_meta(
-            &keyexpr,
+            keyexpr,
             &payload,
             meta.view(attachment.as_ref().map(|a| a.as_slice()), query_qos),
         )),
@@ -213,7 +210,7 @@ fn flush_one(
         // (`has_attachment = _is_put && ..`, `message.c:263`), which is why
         // `z_query_reply_del` takes-and-drops the caller's — as pico does.
         PendingReply::Del { keyexpr, meta } => {
-            admitted_at_the_abi(out.reply_keyed_del_meta(&keyexpr, meta.view(None, query_qos)))
+            admitted_at_the_abi(out.reply_keyed_del_meta(keyexpr, meta.view(None, query_qos)))
         }
         PendingReply::Err { payload, encoding } => {
             // UNPACKED. `EncodingHint::packed_id` is the wire word
@@ -233,11 +230,11 @@ fn flush_one(
 /// The core responder's verdict on a reply this ABI already ADMITTED.
 ///
 /// `z_query_reply` / `z_query_reply_del` apply [`reply_keyexpr_is_covered`]
-/// before a reply is queued and return `_Z_ERR_KEYEXPR_NOT_MATCH` to the C
+/// before a reply is handed on and return `_Z_ERR_KEYEXPR_NOT_MATCH` to the C
 /// program there, as pico's `_z_send_reply` does. The core responder applies
-/// the intersection again at flush, reading `_anyke` in zenoh's dialect where
+/// the intersection again when it stages the reply, reading `_anyke` in zenoh's dialect where
 /// this ABI reads it in both (`abi_reads_anyke`), so an admission here is an
-/// admission there; a refusal at flush means the two gates disagree, a wz
+/// admission there; a refusal there means the two gates disagree, a wz
 /// defect with no C caller left to tell — so a debug build stops on it rather
 /// than dropping the reply unseen.
 fn admitted_at_the_abi(staged: Result<(), wz_session_core::query_sink::ReplyError>) {
@@ -256,21 +253,41 @@ fn admitted_at_the_abi(staged: Result<(), wz_session_core::query_sink::ReplyErro
 /// part on a list that is not UTF-8, where pico's byte scan still finds a
 /// `;`-bounded `_anyke` and the core reads the guarantee
 /// ([`ReplyKeyExpr::from_parameter_bytes`]). Admitting there would hand the C
-/// program `Z_OK` for a reply the flush then refuses, so the ABI reads what both
+/// program `Z_OK` for a reply the responder then refuses, so the ABI reads what both
 /// read.
 fn abi_reads_anyke(parameters: &[u8]) -> bool {
     parameters_has_anyke(parameters)
         && ReplyKeyExpr::from_parameter_bytes(Some(parameters)) == ReplyKeyExpr::Any
 }
 
+/// A text a query's marshal reads: where the view holds it, for the one call the marshal is handed
+/// to ([`QueryMarshal::new`]), or a copy of the marshal's own, for a query kept past it
+/// ([`QueryMarshal::deep_copy_deferred`]).
+enum QueryText<T: ?Sized> {
+    /// The view's, which outlives the marshal that reads it.
+    Lent(*const T),
+    /// The marshal's own.
+    Owned(Box<T>),
+}
+
+impl<T: ?Sized> QueryText<T> {
+    fn get(&self) -> &T {
+        match self {
+            // SAFETY: a lent text outlives the marshal that holds it (`QueryMarshal::new`).
+            Self::Lent(text) => unsafe { &**text },
+            Self::Owned(text) => text,
+        }
+    }
+}
+
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.
 ///
-/// Owns copies of the query's keyexpr / parameters / value payload so they
-/// outlive the wz [`QueryView`] borrow, caches the loaned views the accessors
-/// hand back, and accumulates the replies the callback asks for.
+/// Reads the query's keyexpr, parameters and value where the wz [`QueryView`] holds them for the
+/// call, caches the loaned views the accessors hand back, and hands each reply the callback asks
+/// for to the dispatch's responder as it is asked for ([`Self::answer_with`]).
 pub(crate) struct QueryMarshal {
-    keyexpr: String,
-    parameters: Vec<u8>,
+    keyexpr: QueryText<str>,
+    parameters: QueryText<[u8]>,
     /// pico's `_anyke`: whether this query accepts replies under ANY key rather
     /// than only keys it covers. Derived from `parameters` at marshal time (see
     /// [`parameters_has_anyke`]) — the same derivation pico does, and the gate
@@ -328,31 +345,23 @@ pub(crate) struct QueryMarshal {
     is_local: bool,
     /// Present only on an ESCAPED marshal: the query held past its dispatch,
     /// which a reply issued long after it goes through. `None` means this
-    /// marshal is the ordinary borrowed one, whose replies are accumulated and
-    /// flushed by the dispatch. Each escape is its own hold (pushing the same
+    /// marshal is the ordinary borrowed one, whose replies go to the dispatch's
+    /// responder while the callback runs ([`Self::answer_with`]). Each escape is its own hold (pushing the same
     /// query into two channels is legal), released on its own drop; an escaped
     /// marshal is the end of the chain and is not escaped again.
     deferred: Option<Box<dyn HeldQuery>>,
-    /// Reply accumulator.
+    /// The dispatch's responder, while the callback this marshal is handed to runs
+    /// ([`Self::answer_with`]), and none otherwise.
     ///
-    /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
-    /// must append. The soundness anchor is pico's callback contract, and it is
-    /// the ONLY anchor: one query's callback — and any `z_query_reply` on its
-    /// loaned query — runs on the session's single read task, so no aliasing
-    /// borrow exists while it runs. Here that task is the face's drive thread.
-    ///
-    /// This marshal is valid for exactly the duration of one `call`, the same
-    /// scope pico gives its own `z_loaned_query_t`. Using the pointer after the
-    /// callback returns, or from another thread, is undefined behaviour — in
-    /// pico too, whose loaned query is only escapable via
-    /// `z_query_take_from_loaned` (the owned family this round deliberately
-    /// withholds; see the module doc). We add no tripwire for that: an earlier
-    /// cut carried a `valid` flag cleared at callback return, but with a
-    /// callback-scoped marshal the flag can never usefully fire — after the
-    /// frame dies, READING the flag is itself the use-after-free it was meant
-    /// to intercept. Keeping it would have documented a protection that does
-    /// not exist, which is worse than pico's honest silence.
-    replies: UnsafeCell<Vec<PendingReply>>,
+    /// A `Cell` because the accessors receive `*const z_loaned_query_t`. The soundness anchor is
+    /// pico's callback contract, and it is the ONLY anchor: one query's callback — and any
+    /// `z_query_reply` on its loaned query — runs on the session's single read task, inside the
+    /// dispatch that lent the responder, so the responder is used by nothing else while it is set.
+    /// This marshal is valid for exactly the duration of one `call`, the same scope pico gives its
+    /// own `z_loaned_query_t`; using the pointer after the callback returns, or from another
+    /// thread, is undefined behaviour, in pico too, whose loaned query is only escapable via
+    /// `z_query_take_from_loaned`.
+    responder: Cell<Option<NonNull<dyn ReplyOut>>>,
 }
 
 impl QueryMarshal {
@@ -365,11 +374,13 @@ impl QueryMarshal {
     /// # Safety
     /// The marshal is dropped before the borrow of `view` ends.
     unsafe fn new(view: &dyn QueryView) -> Self {
-        let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
+        // Read where the view holds them, as the payload is: the marshal is dropped before the
+        // view's borrow ends, and an escaped copy keeps copies of its own.
+        let parameters = view.parameters().unwrap_or_default();
         Self {
-            keyexpr: view.keyexpr().to_owned(),
-            anyke: abi_reads_anyke(&parameters),
-            parameters,
+            keyexpr: QueryText::Lent(view.keyexpr() as *const str),
+            anyke: abi_reads_anyke(parameters),
+            parameters: QueryText::Lent(parameters as *const [u8]),
             // Absence collapses to EMPTY here, not to a flag: the accessors
             // must hand C a pointer either way (see the field docs).
             payload: view
@@ -404,7 +415,7 @@ impl QueryMarshal {
             holder: None,
             is_local: view.is_local(),
             deferred: None,
-            replies: UnsafeCell::new(Vec::new()),
+            responder: Cell::new(None),
         }
     }
 
@@ -429,10 +440,8 @@ impl QueryMarshal {
     /// The copy owns everything the accessors read, so it stays valid for as
     /// long as the C program keeps it; the cached views stay UNBOUND until
     /// [`Self::bind`] runs at the copy's final address (see
-    /// [`crate::pubsub::SampleMarshal::deep_copy`]). The reply accumulator is
-    /// created EMPTY rather than copied: replies the callback already asked for
-    /// belong to the borrowed marshal's flush, and duplicating them here would
-    /// send each one twice. `payload` and `attachment` are the copy's own, made before the
+    /// [`crate::pubsub::SampleMarshal::deep_copy`]). It holds no responder of
+    /// the dispatch: its replies go through `held`. `payload` and `attachment` are the copy's own, made before the
     /// hold is taken, so that no room for them holds nothing open.
     fn deep_copy_deferred(
         &self,
@@ -441,8 +450,8 @@ impl QueryMarshal {
         attachment: crate::bytes::ByteBuf,
     ) -> Self {
         Self {
-            keyexpr: self.keyexpr.clone(),
-            parameters: self.parameters.clone(),
+            keyexpr: QueryText::Owned(Box::from(self.keyexpr.get())),
+            parameters: QueryText::Owned(Box::from(self.parameters.get())),
             anyke: self.anyke,
             encoding: self
                 .encoding
@@ -469,7 +478,7 @@ impl QueryMarshal {
             holder: self.holder.clone(),
             is_local: self.is_local,
             deferred: Some(held),
-            replies: UnsafeCell::new(Vec::new()),
+            responder: Cell::new(None),
         }
     }
 
@@ -497,7 +506,7 @@ impl QueryMarshal {
     /// invariant — bind at the final address.
     fn bind(&mut self) {
         self.loaned_keyexpr =
-            z_loaned_keyexpr_t::borrowed(self.keyexpr.as_ptr(), self.keyexpr.len());
+            z_loaned_keyexpr_t::borrowed(self.keyexpr.get().as_ptr(), self.keyexpr.get().len());
         self.loaned_payload.handle = &self.payload as *const crate::bytes::ByteBuf as *mut c_void;
         self.loaned_attachment.handle =
             &self.attachment as *const crate::bytes::ByteBuf as *mut c_void;
@@ -507,31 +516,42 @@ impl QueryMarshal {
         }
     }
 
-    /// Append a reply the C callback asked for.
+    /// Run `call` with this marshal answering through `out`, the responder of the dispatch the
+    /// query arrived in: each reply the callback asks for goes to it as it is asked for, read where
+    /// the caller holds it, with nothing kept for later. The responder is let go of before this
+    /// returns, inside its borrow.
+    fn answer_with(&self, out: &mut dyn ReplyOut, call: impl FnOnce(&Self)) {
+        let lent = NonNull::from(out);
+        // SAFETY: only the lifetime is erased. The borrow of `out` ends only after the Cell is
+        // emptied below, and the pointer is read only from the Cell, so it is never used past it.
+        let lent = unsafe {
+            core::mem::transmute::<NonNull<dyn ReplyOut + '_>, NonNull<dyn ReplyOut>>(lent)
+        };
+        self.responder.set(Some(lent));
+        call(self);
+        self.responder.set(None);
+    }
+
+    /// Hand a reply the C callback asked for to the query's responder: the held query's for an
+    /// ESCAPED query, whose callback returned long ago, and the dispatch's while the callback
+    /// runs. A marshal that has neither, built outside a dispatch, has no route to answer.
     ///
     /// # Safety
     /// Caller must be inside the callback that owns this marshal (the pico
-    /// single-threaded-callback contract), so no aliasing borrow of `replies`
-    /// exists.
-    unsafe fn push_reply(&self, reply: PendingReply) {
-        // An ESCAPED query has no dispatch left to flush it: its callback
-        // returned long ago and the terminator is being held open on its
-        // behalf. Emit on its own route instead of into an accumulator nobody
-        // will drain.
+    /// single-threaded-callback contract), so nothing else uses the responder.
+    unsafe fn reply(&self, reply: PendingReply<'_>) -> ZResult {
         if let Some(held) = self.deferred.as_deref() {
             emit_held(held, reply, self.qos);
-            return;
+            return Z_OK;
         }
-        (*self.replies.get()).push(reply);
-    }
-
-    /// Flush the accumulated replies into the wz responder. Runs after the C
-    /// callback returned, on the drive thread.
-    fn flush(&mut self, mut out: &mut dyn ReplyOut) {
-        let query_qos = self.qos;
-        for reply in self.replies.get_mut().drain(..) {
-            flush_one(&mut out, reply, query_qos);
-        }
+        let Some(mut lent) = self.responder.get() else {
+            return crate::result::Z_ERR_GENERIC;
+        };
+        // SAFETY: the caller's: the responder is set only while the callback runs, inside its
+        // borrow, and nothing else uses it then (`Self::answer_with`).
+        let mut out: &mut dyn ReplyOut = unsafe { lent.as_mut() };
+        flush_one(&mut out, reply, self.qos);
+        Z_OK
     }
 }
 
@@ -541,10 +561,10 @@ impl QueryMarshal {
 /// attachment reads as absent, as the view it was built from would.
 impl QueryView for QueryMarshal {
     fn keyexpr(&self) -> &str {
-        &self.keyexpr
+        self.keyexpr.get()
     }
     fn parameters(&self) -> Option<&[u8]> {
-        Some(&self.parameters)
+        Some(self.parameters.get())
     }
     fn attachment(&self) -> Option<&[u8]> {
         (!self.attachment.is_empty()).then_some(self.attachment.as_slice())
@@ -651,7 +671,7 @@ unsafe impl Sync for CQueryClosure {}
 /// Build the wz-side queryable handler for ONE face from a shared C closure.
 ///
 /// Marshals the wz [`QueryView`] into a borrowed `z_loaned_query_t`, invokes the
-/// C `call`, then flushes whatever replies it accumulated into the wz
+/// C `call`, each reply it asks for handed to the wz
 /// [`ReplyOut`]. The marshal (and so the borrowed keyexpr / payload) is valid
 /// only for the duration of that call — pico's contract, which is why the C side
 /// must copy anything it keeps.
@@ -669,20 +689,21 @@ pub(crate) fn make_queryable_callback(
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `QueryMarshal::bind`.
         marshal.bind();
-        let query_ptr = &marshal as *const QueryMarshal as *const z_loaned_query_t;
-        // SAFETY: `call` is the C callback; `marshal` outlives the call and the
-        // borrowed query is valid only for its duration (pico contract).
-        // `context` travels with the drive dispatch. A panic unwinding OUT of
-        // the C callback across this `extern "C"` boundary is UB and would tear
-        // down the drive thread, so it is caught here — the drive loop survives
-        // a misbehaving callback.
-        let ctx = closure.context.0;
-        let in_callback = crate::ffi::InCallback::enter();
-        let _ = crate::ffi::catch(|| unsafe {
-            call(query_ptr, ctx);
+        // Each reply the callback asks for goes to `out` as it is asked for.
+        marshal.answer_with(out, |marshal| {
+            let query_ptr = marshal as *const QueryMarshal as *const z_loaned_query_t;
+            // SAFETY: `call` is the C callback; `marshal` outlives the call and the
+            // borrowed query is valid only for its duration (pico contract).
+            // `context` travels with the drive dispatch. A panic unwinding OUT of
+            // the C callback across this `extern "C"` boundary is UB and would tear
+            // down the drive thread, so it is caught here — the drive loop survives
+            // a misbehaving callback.
+            let ctx = closure.context.0;
+            let _in_callback = crate::ffi::InCallback::enter();
+            let _ = crate::ffi::catch(|| unsafe {
+                call(query_ptr, ctx);
+            });
         });
-        drop(in_callback);
-        marshal.flush(out);
     }
 }
 
@@ -1121,7 +1142,7 @@ impl z_owned_queryable_t {
 /// # Safety
 /// `h` must be a live `QueryableState` handle.
 unsafe fn free_queryable(h: *mut c_void) {
-    crate::object_slot::release(h as *mut QueryableState);
+    crate::object_slot::release_entity(h as *mut QueryableState);
 }
 
 impl_handle_ownership7!(
@@ -1302,9 +1323,24 @@ pub unsafe extern "C" fn z_declare_queryable(
         if queryable.is_null() {
             return Z_ERR_NULL;
         }
-        // The queryable's place is taken before it is declared, so a full pool refuses the
-        // declaration and declares nothing; the closure is consumed as on every refusal.
-        let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Queryable) else {
+        if callback.is_null() {
+            return Z_ERR_NULL;
+        }
+        // The queryable's place is taken from its session before it is declared, so a session
+        // with no place left refuses the declaration and declares nothing; a session that is not
+        // open is refused as the declaration refuses it. The closure is consumed as on every
+        // refusal.
+        let handle = match crate::session::open_session_handle(zs) {
+            Ok(handle) => handle,
+            Err(code) => {
+                z_closure_query_drop(callback);
+                return code;
+            }
+        };
+        let Some(slot) = crate::object_slot::Slot::take_entity(
+            &crate::session::engine_of(handle),
+            crate::object_slot::Kind::Queryable,
+        ) else {
             z_closure_query_drop(callback);
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
@@ -1369,7 +1405,7 @@ pub unsafe extern "C" fn z_undeclare_queryable(queryable: *mut z_moved_queryable
         }
         let handle = (*queryable)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release(handle as *mut QueryableState);
+            crate::object_slot::release_entity(handle as *mut QueryableState);
             (*queryable)._this = z_owned_queryable_t::null_value();
         }
         Z_OK
@@ -1413,7 +1449,10 @@ pub unsafe extern "C" fn z_query_parameters(
             return Z_OK;
         }
         let (start, len) = match query_marshal(query) {
-            Some(marshal) => (marshal.parameters.as_ptr(), marshal.parameters.len()),
+            Some(marshal) => (
+                marshal.parameters.get().as_ptr(),
+                marshal.parameters.get().len(),
+            ),
             None => (core::ptr::null(), 0),
         };
         (*parameters) = z_view_string_t {
@@ -1502,9 +1541,8 @@ pub unsafe extern "C" fn z_query_attachment(
 /// moved `options->attachment`.
 ///
 /// Enforces zenoh's `reply ⊆ query` contract exactly as pico does — see
-/// `reply_keyexpr_is_covered`. The reply is accumulated and emitted when the
-/// callback returns; see the module doc for why that is observably identical to
-/// emitting inline.
+/// `reply_keyexpr_is_covered`. The reply goes to the query's responder as it is asked
+/// for (see the module doc).
 ///
 /// R311y562 — of `options`, `attachment`, `encoding`, `timestamp` AND
 /// `source_info` are all honoured now. `congestion_control` / `priority` are
@@ -1565,20 +1603,18 @@ pub unsafe extern "C" fn z_query_reply(
         // caller bug that SEGFAULTS pico. Report it instead of inventing a
         // fallback: silently substituting the query's own key would hide the bug
         // and claim a pico semantic that does not exist.
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_NULL,
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_NULL;
         };
-        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
-        marshal.push_reply(PendingReply::Put {
+        marshal.reply(PendingReply::Put {
             keyexpr: ke,
             payload: buf,
             attachment,
             meta,
-        });
-        Z_OK
+        })
     })
 }
 
@@ -1639,15 +1675,13 @@ pub unsafe extern "C" fn z_query_reply_del(
         }
         // Null is a caller bug that segfaults pico — reported, not substituted
         // (see `z_query_reply`).
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k.to_owned(),
-            None => return Z_ERR_NULL,
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_NULL;
         };
-        if !reply_keyexpr_is_covered(&marshal.keyexpr, &ke, marshal.anyke) {
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
-        marshal.push_reply(PendingReply::Del { keyexpr: ke, meta });
-        Z_OK
+        marshal.reply(PendingReply::Del { keyexpr: ke, meta })
     })
 }
 
@@ -1682,11 +1716,10 @@ pub unsafe extern "C" fn z_query_reply_err(
         if marshal.session_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        marshal.push_reply(PendingReply::Err {
+        marshal.reply(PendingReply::Err {
             payload: buf,
             encoding,
-        });
-        Z_OK
+        })
     })
 }
 
@@ -1899,7 +1932,7 @@ mod tests {
     /// The core responder's gate behind `z_query_reply` is never the one that
     /// refuses: whatever `_anyke` the ABI reads, the responder built from the
     /// same parameters reads too, so no reply the ABI answered `Z_OK` for is
-    /// refused at flush.
+    /// refused when the responder stages it.
     ///
     /// Measured over every list of one to three segments drawn from the shapes
     /// on which pico's byte scan and zenoh's key split could part (a valued
@@ -2011,8 +2044,8 @@ mod tests {
         );
         assert_eq!(
             marshal.loaned_keyexpr._start as usize,
-            marshal.keyexpr.as_ptr() as usize,
-            "the cached keyexpr view must address THIS marshal's string buffer"
+            view.keyexpr.as_ptr() as usize,
+            "the cached keyexpr view must address the key where the view holds it, uncopied"
         );
 
         // The accessors built on those views resolve to the query's bytes.
@@ -2081,7 +2114,7 @@ mod tests {
         use wz_session_core::sample::QosLevel;
         let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
         let put = |express| PendingReply::Put {
-            keyexpr: "a/b".to_owned(),
+            keyexpr: "a/b",
             payload: crate::bytes::ByteBuf::copy_of(&[1u8]).expect("room for a byte"),
             attachment: None,
             meta: ReplyMetaOwned {
@@ -2090,7 +2123,7 @@ mod tests {
             },
         };
         let del = |express| PendingReply::Del {
-            keyexpr: "a/b".to_owned(),
+            keyexpr: "a/b",
             meta: ReplyMetaOwned {
                 express,
                 ..ReplyMetaOwned::default()
@@ -2131,8 +2164,9 @@ mod tests {
         // SAFETY: the marshal is dropped before `view`.
         let mut marshal = unsafe { QueryMarshal::new(&view) };
         marshal.bind();
-        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
-        unsafe {
+        let mut tap = QosTap::default();
+        marshal.answer_with(&mut tap, |marshal| unsafe {
+            let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
             let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
             assert_eq!(
                 crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()),
@@ -2169,9 +2203,7 @@ mod tests {
                 ),
                 Z_OK
             );
-        }
-        let mut tap = QosTap::default();
-        marshal.flush(&mut tap);
+        });
         let plain = wz_session_core::sample::QosLevel::DEFAULT;
         assert_eq!(
             tap.seen,
@@ -2304,5 +2336,161 @@ mod tests {
         // SAFETY: a query this crate marshalled and bound.
         let carried = unsafe { z_query_encoding(none_query) };
         assert!(carried.is_null(), "no encoding carried, none handed out");
+    }
+
+    /// A loaned query answered outside the callback it was handed to has no responder: the reply
+    /// is refused with a generic failure and nothing is answered. Turned red by a responder left
+    /// lent past the callback.
+    #[test]
+    fn a_reply_outside_the_callback_is_refused() {
+        let view = FakeQuery {
+            keyexpr: "demo/q".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { QueryMarshal::new(&view) };
+        marshal.bind();
+        let mut tap = QosTap::default();
+        marshal.answer_with(&mut tap, |_| {});
+        let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
+        // SAFETY: a query this crate marshalled and bound, and live keys and payloads.
+        unsafe {
+            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+            assert_eq!(
+                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/q".as_ptr()),
+                Z_OK
+            );
+            let mut payload = core::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"late".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                z_query_reply(
+                    query,
+                    crate::keyexpr::z_view_keyexpr_loan(&ke),
+                    crate::bytes::z_bytes_move(&mut payload),
+                    core::ptr::null()
+                ),
+                crate::result::Z_ERR_GENERIC
+            );
+        }
+        assert!(tap.seen.is_empty(), "nothing reached the responder");
+    }
+
+    /// What a kept query's replies reach: the replies' keys, in order.
+    #[derive(Default)]
+    struct Kept {
+        keys: std::sync::Mutex<Vec<String>>,
+    }
+
+    /// A hold that records each reply's key into `Kept`.
+    struct KeptHold(Arc<Kept>);
+
+    impl HeldQuery for KeptHold {
+        fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+            let mut out = KeyTap(self.0.clone());
+            answer(&mut out);
+        }
+    }
+
+    /// A responder that records the key of each keyed reply.
+    struct KeyTap(Arc<Kept>);
+
+    impl ReplyOut for KeyTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            keyexpr: &str,
+            _payload: &[u8],
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            self.0
+                .keys
+                .lock()
+                .expect("a held lock")
+                .push(keyexpr.to_owned());
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            _keyexpr: &str,
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            Ok(())
+        }
+    }
+
+    /// What a dispatch's queries are held through, here a hold that records into `Kept`.
+    struct KeptHolder(Arc<Kept>);
+
+    impl QueryHolder for KeptHolder {
+        fn hold_query(&self, _view: &dyn QueryView) -> Box<dyn HeldQuery> {
+            Box::new(KeptHold(self.0.clone()))
+        }
+        fn session_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// A query cloned inside its callback is answered after the callback returned, as pico lets a
+    /// program answer one it kept: the reply goes through the hold, not the dispatch's responder,
+    /// which is no longer lent. Turned red by a kept query that answers through the responder.
+    #[test]
+    fn a_query_cloned_in_its_callback_answers_after_it() {
+        let view = FakeQuery {
+            keyexpr: "demo/kept".to_owned(),
+            payload: Vec::new(),
+            attachment: Vec::new(),
+        };
+        let kept = Arc::new(Kept::default());
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal =
+            unsafe { QueryMarshal::new(&view) }.with_holder(Arc::new(KeptHolder(kept.clone())));
+        marshal.bind();
+        let mut owned = z_owned_query_t::null_value();
+        let mut tap = QosTap::default();
+        marshal.answer_with(&mut tap, |marshal| {
+            let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
+            // SAFETY: the callback's own loaned query, and a live destination.
+            assert_eq!(unsafe { z_query_clone(&mut owned, query) }, Z_OK);
+        });
+        drop(marshal);
+        // SAFETY: the kept query is live, and the keys and payloads are this frame's.
+        unsafe {
+            let mut ke: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+            assert_eq!(
+                crate::keyexpr::z_view_keyexpr_from_str(&mut ke, c"demo/kept".as_ptr()),
+                Z_OK
+            );
+            let mut payload = core::mem::zeroed();
+            assert_eq!(
+                crate::bytes::z_bytes_copy_from_str(&mut payload, c"later".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                z_query_reply(
+                    z_query_loan(&owned),
+                    crate::keyexpr::z_view_keyexpr_loan(&ke),
+                    crate::bytes::z_bytes_move(&mut payload),
+                    core::ptr::null()
+                ),
+                Z_OK
+            );
+            z_query_drop(z_query_move(&mut owned));
+        }
+        assert!(tap.seen.is_empty(), "the dispatch's responder is not used");
+        assert_eq!(
+            *kept.keys.lock().expect("a held lock"),
+            vec!["demo/kept".to_owned()]
+        );
     }
 }

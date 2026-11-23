@@ -23950,10 +23950,11 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
-    # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c`, built and run as its
-    # CMake and `tests/api.sh` do, under the arm its integration workflow builds them with.
+    # The other sixteen of zenoh-pico's eighteen `tests/z_api_*_test.c` and its client test
+    # `tests/z_client_test.c`, built and run as its CMake and `tests/api.sh` do, under the arm
+    # its integration workflow builds them with.
     wz_test_args wz-integration-tests pico_upstream_api_tests_on_wz
-    _runci_guarded_test Z 16 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+    _runci_guarded_test Z 17 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
         || return 1
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because

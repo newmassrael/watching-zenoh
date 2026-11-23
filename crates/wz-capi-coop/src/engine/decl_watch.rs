@@ -24,6 +24,7 @@ use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 use wz_session_core::bounded::Storage;
 use wz_session_core::decl_sink::{BoxedDeclSink, BoxedUndeclSink, DeclView};
+use wz_session_core::declare::MatchingReport;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
@@ -184,9 +185,10 @@ impl DeclWatches {
     pub(super) fn observe<
         K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
         P: Storage,
+        M: MatchingReport,
     >(
         &self,
-        app: &mut SlotObserverOf<K, P>,
+        app: &mut SlotObserverOf<K, P, M>,
         plane: DeclPlane,
     ) -> Result<(), Declined> {
         let mut table = lock(&self.table);
@@ -260,9 +262,10 @@ impl DeclWatches {
     pub(super) fn undeclare<
         K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
         P: Storage,
+        M: MatchingReport,
     >(
         &self,
-        app: &mut SlotObserverOf<K, P>,
+        app: &mut SlotObserverOf<K, P, M>,
         id: DeclWatchId,
     ) -> Option<DeclWatchSink> {
         let mut table = lock(&self.table);
@@ -364,8 +367,12 @@ fn undeclared_sink(plane: DeclPlane, staged: &Arc<Mutex<Vec<Staged>>>) -> BoxedU
 }
 
 /// Install in `app` the two observers of `plane`, both or neither.
-fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>, P: Storage>(
-    app: &mut SlotObserverOf<K, P>,
+fn install<
+    K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
+    P: Storage,
+    M: MatchingReport,
+>(
+    app: &mut SlotObserverOf<K, P, M>,
     plane: DeclPlane,
     staged: &Arc<Mutex<Vec<Staged>>>,
 ) -> Result<Observers, Declined> {
@@ -429,8 +436,9 @@ fn install<K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSi
 fn uninstall<
     K: ObserverSinks<Declared = BoxedDeclSink, Undeclared = BoxedUndeclSink>,
     P: Storage,
+    M: MatchingReport,
 >(
-    app: &mut SlotObserverOf<K, P>,
+    app: &mut SlotObserverOf<K, P, M>,
     observers: Observers,
 ) {
     match observers.plane {

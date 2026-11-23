@@ -42,8 +42,7 @@ config WZ_LIMIT_KEY_ARENA_BYTES
 
 config WZ_LIMIT_MAX_SUBSCRIPTIONS
 	int "MAX_SUBSCRIPTIONS"
-	default 3 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The subscribers a session holds at once. Declaring one more is refused
 	  while the table is full.
@@ -97,7 +96,7 @@ config WZ_LIMIT_DELIVERY_LANE_EVENTS
 config WZ_LIMIT_DELIVERY_LANE_BYTES
 	int "DELIVERY_LANE_BYTES"
 	range 1 4294967295
-	default 4380 if WZ_LIMITS_ZENOH_PICO
+	default 4768 if WZ_LIMITS_ZENOH_PICO
 	default 65536
 	help
 	  How many bytes of copied samples a delivery lane holds at once: the key, the
@@ -119,8 +118,7 @@ config WZ_LIMIT_DELIVERY_LANE_CALLBACKS
 
 config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
-	default 4 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The queryables a session holds at once. Declaring one more is refused
 	  while the table is full.
@@ -171,8 +169,7 @@ config WZ_LIMIT_MAX_LOCAL_TOKENS
 
 config WZ_LIMIT_MAX_PUBLISHERS
 	int "MAX_PUBLISHERS"
-	default 2 if WZ_LIMITS_ZENOH_PICO
-	default 16
+	default 100
 	help
 	  The publishers a session holds at once, each with the write filter that
 	  asks whether anything subscribes to its key. Declaring one more is
@@ -197,8 +194,8 @@ config WZ_LIMIT_MAX_MATCHING_LISTENERS
 
 config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 	int "MAX_DECLARED_KEYEXPRS"
-	default 14 if WZ_LIMITS_ZENOH_PICO
-	default 80
+	default 306 if WZ_LIMITS_ZENOH_PICO
+	default 332
 	help
 	  The key expressions a session declares to its peers at once, each held by
 	  the entities that name it and by the program's declarations. Declaring
@@ -206,6 +203,7 @@ config WZ_LIMIT_MAX_DECLARED_KEYEXPRS
 
 config WZ_LIMIT_HELD_SESSIONS
 	int "HELD_SESSIONS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 4
 	help
 	  The sessions a program of the pico C ABI holds open at once: the slots of
@@ -214,7 +212,8 @@ config WZ_LIMIT_HELD_SESSIONS
 
 config WZ_LIMIT_HELD_SAMPLES
 	int "HELD_SAMPLES"
-	default 16
+	default 5 if WZ_LIMITS_ZENOH_PICO
+	default 18
 	help
 	  The owned samples a program of the pico C ABI holds at once (taken out of
 	  a callback, cloned, or held in a channel): the slots of the pool of samples
@@ -223,7 +222,8 @@ config WZ_LIMIT_HELD_SAMPLES
 
 config WZ_LIMIT_HELD_REPLIES
 	int "HELD_REPLIES"
-	default 16
+	default 3 if WZ_LIMITS_ZENOH_PICO
+	default 18
 	help
 	  The owned replies and reply errors a program of the pico C ABI holds at
 	  once: the slots of the pool of replies the library reserves at its first
@@ -232,7 +232,8 @@ config WZ_LIMIT_HELD_REPLIES
 
 config WZ_LIMIT_HELD_QUERIES
 	int "HELD_QUERIES"
-	default 8
+	default 3 if WZ_LIMITS_ZENOH_PICO
+	default 18
 	help
 	  The owned queries a program of the pico C ABI holds at once, each keeping
 	  its query's answer open: the slots of the pool of queries the library
@@ -241,6 +242,7 @@ config WZ_LIMIT_HELD_QUERIES
 
 config WZ_LIMIT_HELD_PAYLOADS
 	int "HELD_PAYLOADS"
+	default 3 if WZ_LIMITS_ZENOH_PICO
 	default 32
 	help
 	  The owned payloads (z_owned_bytes_t) a program of the pico C ABI holds at
@@ -261,6 +263,7 @@ config WZ_LIMIT_HELD_CONFIGS
 
 config WZ_LIMIT_HELD_HELLOS
 	int "HELD_HELLOS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
 	default 16
 	help
 	  The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
@@ -270,6 +273,7 @@ config WZ_LIMIT_HELD_HELLOS
 
 config WZ_LIMIT_HELD_PAYLOAD_BYTES
 	int "HELD_PAYLOAD_BYTES"
+	default 32768 if WZ_LIMITS_ZENOH_PICO
 	default 131072
 	help
 	  The bytes the owned payloads, strings and slices a program of the pico C ABI
@@ -341,8 +345,7 @@ config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 
 config WZ_LIMIT_MAX_PENDING_DECLARES
 	int "MAX_PENDING_DECLARES"
-	default 4 if WZ_LIMITS_ZENOH_PICO
-	default 32
+	default 101
 	help
 	  The declarations a session can have ready to send in answer to its peers'
 	  interests between two sends: each answer is the session's matching

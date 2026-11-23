@@ -65,7 +65,14 @@ from subsystem_spawn_gate import cfg_test_files, cfg_test_spans  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The crates whose release code is held total (the release C ABI library's core).
-CRATES: tuple[str, ...] = ("wz-session-core", "wz-capi-coop", "wz-capi-pico", "wz-runtime-coop")
+CRATES: tuple[str, ...] = (
+    "wz-session-core",
+    "wz-capi-coop",
+    "wz-capi-pico",
+    "wz-runtime-coop",
+    "wz-session-mcu",
+    "wz-capi-port",
+)
 
 #: The register, relative to the root.
 REGISTER = "docs/c-abi-architecture.md"
@@ -96,10 +103,10 @@ SITE_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 #: The last id the register gave. A row past it is debt added after the lints were switched on.
-LAST_ID = 206
+LAST_ID = 229
 
 #: The register's lint cells: every lint every row lists.
-CELLS = 148
+CELLS = 131
 
 ID_COMMENT = re.compile(r"^\s*// Totality debt (TD-\d{3}) \(docs/c-abi-architecture\.md section 7\)\.\s*$")
 ROW = re.compile(r"^\|\s*(TD-\d{3})\s*\|([^|]*)\|([^|]*)\|([^|]*)\|")

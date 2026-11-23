@@ -13,11 +13,12 @@ use std::time::Duration;
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
+    TickerId, TokenId, WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
-use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::declare_form::{InterestAsk, RetractionKey};
 use wz_session_core::link::RxBytes;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
@@ -189,6 +190,9 @@ impl SessionEngine for Script {
         Err(Refusal::NotBuilt)
     }
     fn release_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
+
+    // The script declares no key (`acquire_keyexpr` above), so no hold reaches here.
+    fn retain_keyexpr(&self, _mapping_id: wz_session_core::wire_id::ExprId) {}
     fn declare_matching_listener(
         &self,
         _plane: FilterPlane,
@@ -204,7 +208,7 @@ impl SessionEngine for Script {
         _plane: FilterPlane,
         _keyexpr: &str,
         _wire: &WireKey,
-        _ask: Option<InterestForm>,
+        _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         Ok(0)
@@ -226,13 +230,26 @@ impl SessionEngine for Script {
     ) -> FilteredPut {
         FilteredPut::NotPlain
     }
-    fn batch_start_all(&self) -> usize {
-        0
+    fn keep_write_filter_plain(
+        &self,
+        _filter: FilterId,
+        _plain: Option<(PlainPutParams, wz_session_core::wire_id::ExprId)>,
+    ) {
     }
-    fn batch_flush_all(&self) -> usize {
-        0
+    fn publish_filtered(
+        &self,
+        _filter: FilterId,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: Option<&PublishOptions>,
+    ) -> FilteredPut {
+        match opts {
+            Some(opts) => FilteredPut::Sent(self.publish_on_wire_all(keyexpr, wire, payload, opts)),
+            None => FilteredPut::NotPlain,
+        }
     }
-    fn batch_stop_all(&self) -> usize {
+    fn batch_all(&self, _step: BatchStep) -> usize {
         0
     }
     fn declare_liveliness_token_on_wire(

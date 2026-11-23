@@ -222,7 +222,7 @@ fn open_counted(source: impl OpenSource) -> u64 {
             SessionPolicy::defaults(),
             OpenKeyIds::none(),
             &AllocatorMemory,
-            None,
+            crate::arena::HeldPlaces::NONE,
         )
         .err();
     });

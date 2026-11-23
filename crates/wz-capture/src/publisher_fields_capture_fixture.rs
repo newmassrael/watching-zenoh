@@ -101,18 +101,28 @@ fn encoding_id() -> u16 {
         .unwrap_or_else(|| panic!("the encoding table holds no `{ENCODING_NAME}`")) as u16
 }
 
+/// The timestamp the full publish is set with.
+fn full_timestamp() -> TimestampHint {
+    TimestampHint {
+        time: TIMESTAMP_TIME,
+        zid: TIMESTAMP_ZID.to_vec(),
+    }
+}
+
+/// The encoding the full publish is set with.
+fn full_encoding() -> EncodingHint {
+    EncodingHint {
+        packed_id: u32::from(encoding_id()) << 1,
+        schema: None,
+    }
+}
+
 /// What `PublishOptions` would project for the publish with all three set:
 /// `with_priority`, `with_encoding`, `with_timestamp`.
-fn full_metadata() -> PushMetadata {
+fn full_metadata<'a>(timestamp: &'a TimestampHint, encoding: &'a EncodingHint) -> PushMetadata<'a> {
     PushMetadata {
-        timestamp: Some(TimestampHint {
-            time: TIMESTAMP_TIME,
-            zid: TIMESTAMP_ZID.to_vec(),
-        }),
-        encoding: Some(EncodingHint {
-            packed_id: u32::from(encoding_id()) << 1,
-            schema: None,
-        }),
+        timestamp: Some(timestamp),
+        encoding: Some(encoding),
         qos: Some(QosLevel::DEFAULT.with_priority(PRIORITY)),
         ..PushMetadata::default()
     }
@@ -137,7 +147,10 @@ fn control_frame() -> Vec<u8> {
 
 /// The publish with all three set, on the non-default conduit.
 fn full_frame() -> Vec<u8> {
-    frame(&full_metadata(), Some(PRIORITY))
+    frame(
+        &full_metadata(&full_timestamp(), &full_encoding()),
+        Some(PRIORITY),
+    )
 }
 
 /// The establishment ext chain that OFFERS QoS: the unit entry the ext codec
@@ -294,7 +307,7 @@ fn the_tracked_publisher_fields_capture_is_a_qos_session_with_a_control_and_a_fu
     );
     assert_eq!(
         &full[4..],
-        push(&full_metadata()),
+        push(&full_metadata(&full_timestamp(), &full_encoding())),
         "the full Frame's Push carries the metadata"
     );
 }
@@ -521,11 +534,7 @@ fn the_tracked_publisher_fields_capture_reaches_the_consumer_surface() {
         seen,
         [
             (Priority::DEFAULT, None, None),
-            (
-                PRIORITY,
-                full_metadata().timestamp,
-                full_metadata().encoding
-            ),
+            (PRIORITY, Some(full_timestamp()), Some(full_encoding())),
         ],
         "the control decodes bare and the full publish with what it was handed"
     );

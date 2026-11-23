@@ -36,7 +36,7 @@ use wz_ext_pubsub::advanced_publisher::{
 use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::session::{PublishError, PublishOptions};
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 
 /// The plane of one zenoh-c session.
 pub(crate) struct CPlane {
@@ -137,9 +137,9 @@ impl AdvancedPublisherPlane for CPlane {
                     FilterPlane::Subscribers,
                     keyexpr,
                     &WireKey::literal(),
-                    Some(InterestForm {
+                    Some(InterestAsk {
                         mapping_id: 0,
-                        suffix: Some(keyexpr.to_owned()),
+                        suffix: Some(keyexpr),
                         aggregate: false,
                     }),
                     options.allowed_destination.allows_local(),

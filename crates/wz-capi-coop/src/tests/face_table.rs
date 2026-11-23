@@ -14,7 +14,7 @@ use wz_capi_port::{
     FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
     SubscriberSink, WireKey,
 };
-use wz_session_core::declare_form::InterestForm;
+use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
@@ -193,9 +193,9 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
             plane,
             "demo/m/x",
             &WireKey::literal(),
-            Some(InterestForm {
+            Some(InterestAsk {
                 mapping_id: 0,
-                suffix: Some("demo/m/x".to_owned()),
+                suffix: Some("demo/m/x"),
                 aggregate: false,
             }),
             false,

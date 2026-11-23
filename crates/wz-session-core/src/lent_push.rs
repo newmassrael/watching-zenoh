@@ -296,14 +296,12 @@ const DEL_HEADER: u8 = 0x02;
 
 /// Whether a send of a publication from its borrowed parts ([`write_publication`]) may decline it
 /// and leave it to the owned message: a session that rewrites the keys it originates
-/// (`routing-namespace`), the network counters, which classify a publication by its owned message
-/// (`transport-stats`), and a timestamp stack, which the writer does not carry
-/// (`pubsub-ts-stack`). A build with none of them sends every publication from its parts, so a
+/// (`routing-namespace`), and the network counters, which classify a publication by its owned
+/// message (`transport-stats`). A build with neither sends every publication from its parts, so a
 /// sender that reads this links no owned form of one.
 pub const LENT_PUBLICATION_MAY_DECLINE: bool = cfg!(any(
     feature = "routing-namespace",
-    feature = "transport-stats",
-    feature = "pubsub-ts-stack"
+    feature = "transport-stats"
 ));
 
 /// The body fields of a publication the build writes, read from its metadata under the build's
@@ -318,6 +316,9 @@ struct BodyParts<'m> {
     source_info: Option<&'m crate::sample::SourceInfo>,
     /// The extension's id, which a Put and a Del number apart, and the bytes.
     attachment: Option<(u8, &'m [u8])>,
+    /// The timestamp stack the publication starts, on the outer chain after the QoS.
+    #[cfg(feature = "pubsub-ts-stack")]
+    stack: Option<&'m crate::ts_stack::TsStack>,
 }
 
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
@@ -328,6 +329,8 @@ impl<'m> BodyParts<'m> {
         encoding: None,
         source_info: None,
         attachment: None,
+        #[cfg(feature = "pubsub-ts-stack")]
+        stack: None,
     };
 
     /// Whether no body field rides, which is the case the writer's straight path takes.
@@ -350,11 +353,11 @@ impl<'m> BodyParts<'m> {
     fn of(put: bool, meta: &'m crate::metadata::PushMetadata) -> Self {
         Self {
             #[cfg(feature = "pubsub-timestamp")]
-            timestamp: meta.timestamp.as_ref(),
+            timestamp: meta.timestamp,
             #[cfg(not(feature = "pubsub-timestamp"))]
             timestamp: None,
             #[cfg(feature = "pubsub-encoding")]
-            encoding: meta.encoding.as_ref().filter(|_| put),
+            encoding: meta.encoding.filter(|_| put),
             #[cfg(not(feature = "pubsub-encoding"))]
             encoding: None,
             #[cfg(feature = "pubsub-source-info")]
@@ -365,7 +368,7 @@ impl<'m> BodyParts<'m> {
             #[cfg(not(feature = "pubsub-source-info"))]
             source_info: None,
             #[cfg(feature = "pubsub-attachment")]
-            attachment: meta.attachment.as_deref().map(|bytes| {
+            attachment: meta.attachment.map(|bytes| {
                 let id = if put {
                     crate::attachment::ATTACHMENT_EXT_ID_PUSH
                 } else {
@@ -375,6 +378,20 @@ impl<'m> BodyParts<'m> {
             }),
             #[cfg(not(feature = "pubsub-attachment"))]
             attachment: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            stack: meta.ts_stack.as_ref(),
+        }
+    }
+
+    /// Whether a timestamp stack rides the outer chain.
+    fn has_stack(&self) -> bool {
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            self.stack.is_some()
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        {
+            false
         }
     }
 
@@ -405,7 +422,7 @@ impl<'m> BodyParts<'m> {
 /// source info and the attachment in the body, a QoS byte other than the default on the outer
 /// chain. What the owned builders refuse is refused with `LengthOutOfRange` before a byte is
 /// written: a key past the protocol's `u16` length, a Put's payload past its `u32` length, and a
-/// field past its bound. A timestamp stack is not written ([`LENT_PUBLICATION_MAY_DECLINE`]).
+/// field past its bound. The timestamp stack a publication starts rides after the QoS.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
 pub fn write_publication<S: sce_forge_runtime::codec::SceSink>(
     sink: &mut S,
@@ -462,13 +479,14 @@ where
         return Err(CodecError::LengthOutOfRange);
     }
     let with_qos = qos_rides(qos);
+    let with_stack = body.has_stack();
     let header = wz_codecs::wire_const::N_MID_PUSH
         | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
         // `M`: the id is in the sender's space, which the codec derives from its
         // `WireexprLocal` arm at encode time.
         | FLAG_PUSH_M
         // The header says an outer extension chain follows.
-        | if with_qos { 0x80 } else { 0 };
+        | if with_qos || with_stack { 0x80 } else { 0 };
     let mut head = [0u8; 24];
     let mut used = 0usize;
     head[used] = header;
@@ -481,10 +499,19 @@ where
         used = 0;
     }
     if with_qos {
-        // ENC_ZINT(0x20) | id_qos(0x01), no `Z`: the only extension of the outer chain.
-        head[used] = 0x21;
+        // ENC_ZINT(0x20) | id_qos(0x01), with `Z` when the timestamp stack follows it.
+        head[used] = 0x21 | if with_stack { 0x80 } else { 0 };
         used += 1;
         used = put_vle(&mut head, used, u64::from(qos.raw));
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    if let Some(stack) = body.stack {
+        // The last extension of the outer chain, so no `Z`: its header, its length, its body.
+        sink.write_bytes(&head[..used])?;
+        used = 0;
+        sink.write_u8(crate::ts_stack::TS_STACK_EXT_HEADER)?;
+        sink.write_vle_u64(stack.encoded_len() as u64)?;
+        stack.write(sink)?;
     }
     let extended = body.source_info.is_some() || body.attachment.is_some();
     head[used] = if put { PUT_HEADER } else { DEL_HEADER }
@@ -916,18 +943,20 @@ mod tests {
         let mut compared = 0usize;
         let (mut shortest, mut longest) = (usize::MAX, 0usize);
         for fields in 0u8..64 {
+            let stamp = TimestampHint {
+                time: 0x1234_5678_9abc,
+                zid: alloc::vec![7; 16],
+            };
+            let encoded = EncodingHint {
+                packed_id: 42 << 1,
+                schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
+            };
             let meta = PushMetadata {
-                timestamp: (fields & 1 != 0).then(|| TimestampHint {
-                    time: 0x1234_5678_9abc,
-                    zid: alloc::vec![7; 16],
-                }),
-                encoding: (fields & 2 != 0).then(|| EncodingHint {
-                    packed_id: 42 << 1,
-                    schema: (fields & 4 != 0).then(|| b"text/plain;x".to_vec()),
-                }),
+                timestamp: (fields & 1 != 0).then_some(&stamp),
+                encoding: (fields & 2 != 0).then_some(&encoded),
                 source_info: (fields & 8 != 0)
                     .then(|| SourceInfo::new(&[0xa1, 0xa2, 0xa3], 0x5150, 9001)),
-                attachment: (fields & 16 != 0).then(|| alloc::vec![3u8; 200]),
+                attachment: (fields & 16 != 0).then_some(&[3u8; 200] as &[u8]),
                 qos: (fields & 32 != 0).then(|| QosLevel::from_raw(0x1a)),
                 // A publication starts no timestamp stack; a build with the slot states it empty.
                 #[cfg(feature = "pubsub-ts-stack")]
@@ -1006,26 +1035,38 @@ mod tests {
         use crate::sample::{EncodingHint, SampleKind, TimestampHint};
 
         let past = "k".repeat(usize::from(u16::MAX) + 1);
-        let stamped = |len: usize| PushMetadata {
-            timestamp: Some(TimestampHint {
-                time: 1,
-                zid: alloc::vec![1; len],
-            }),
+        let stamp = |len: usize| TimestampHint {
+            time: 1,
+            zid: alloc::vec![1; len],
+        };
+        let encoding = |len: usize| EncodingHint {
+            packed_id: 2,
+            schema: Some(alloc::vec![b's'; len]),
+        };
+        let (stamp_past, stamp_at) = (stamp(17), stamp(16));
+        let (encoding_past, encoding_at) = (encoding(256), encoding(255));
+        let stamped = |hint| PushMetadata {
+            timestamp: Some(hint),
             ..PushMetadata::default()
         };
-        let encoded = |len: usize| PushMetadata {
-            encoding: Some(EncodingHint {
-                packed_id: 2,
-                schema: Some(alloc::vec![b's'; len]),
-            }),
+        let encoded = |hint| PushMetadata {
+            encoding: Some(hint),
             ..PushMetadata::default()
         };
         let cases: [(Option<&str>, PushMetadata, bool); 5] = [
             (Some(past.as_str()), PushMetadata::default(), true),
-            (Some("k"), stamped(17), cfg!(feature = "pubsub-timestamp")),
-            (Some("k"), stamped(16), false),
-            (Some("k"), encoded(256), cfg!(feature = "pubsub-encoding")),
-            (Some("k"), encoded(255), false),
+            (
+                Some("k"),
+                stamped(&stamp_past),
+                cfg!(feature = "pubsub-timestamp"),
+            ),
+            (Some("k"), stamped(&stamp_at), false),
+            (
+                Some("k"),
+                encoded(&encoding_past),
+                cfg!(feature = "pubsub-encoding"),
+            ),
+            (Some("k"), encoded(&encoding_at), false),
         ];
         for (suffix, meta, refused) in cases {
             let owned = build_push_aliased_with_meta(3, suffix, b"x", &meta);
@@ -1106,14 +1147,66 @@ mod tests {
     }
 
     /// The flag a sender reads to keep its owned send is the build's: a build with no key
-    /// rewriting, no network counters and no timestamp stack declines no publication.
+    /// rewriting and no network counters declines no publication, a timestamp stack or not.
     #[test]
     fn a_publication_is_declined_only_where_the_build_reads_its_owned_form() {
         assert_eq!(
             LENT_PUBLICATION_MAY_DECLINE,
-            cfg!(feature = "routing-namespace")
-                || cfg!(feature = "transport-stats")
-                || cfg!(feature = "pubsub-ts-stack")
+            cfg!(feature = "routing-namespace") || cfg!(feature = "transport-stats")
         );
+    }
+
+    /// A publication that starts a timestamp stack carries it on the outer chain after the QoS,
+    /// the owned builders' bytes, with the QoS and without. Turned red by a stack written in
+    /// another place or form, or a chain whose `Z` bits disagree with the owned one.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_publication_starting_a_timestamp_stack_is_the_owned_builders_bytes() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::{build_push_aliased_with_meta, build_push_del_literal_with_meta};
+        use crate::sample::{QosLevel, SampleKind};
+        use crate::ts_stack::{point, TsStack};
+        let mut stack = TsStack::new(point::SEND | point::ROUTE);
+        assert!(stack.record(point::SEND, alloc::vec![1, 2, 3, 4], false));
+        assert_eq!(stack.encode().len(), stack.encoded_len());
+        let mut compared = 0usize;
+        for qos in [None, Some(QosLevel::from_raw(0x1a))] {
+            let meta = PushMetadata {
+                qos,
+                ts_stack: Some(stack.clone()),
+                ..PushMetadata::default()
+            };
+            let cases: [(u16, Option<&str>, SampleKind); 2] = [
+                (5, Some("tail"), SampleKind::Put),
+                (0, Some("demo/ts"), SampleKind::Del),
+            ];
+            for (id, suffix, kind) in cases {
+                let owned = if id == 0 {
+                    build_push_del_literal_with_meta("demo/ts", &meta)
+                } else {
+                    build_push_aliased_with_meta(id, suffix, b"value", &meta)
+                }
+                .expect("built");
+                let mut want = alloc::vec::Vec::new();
+                owned
+                    .try_as_borrowed()
+                    .expect("the owned Push has a view")
+                    .encode(&mut sce_forge_runtime::codec::VecSink::new(&mut want))
+                    .expect("a Vec grows");
+                let mut got = alloc::vec::Vec::new();
+                write_publication(
+                    &mut sce_forge_runtime::codec::VecSink::new(&mut got),
+                    id,
+                    suffix,
+                    kind,
+                    b"value",
+                    &meta,
+                )
+                .expect("a Vec grows");
+                assert_eq!(got, want, "{qos:?} {id} {kind:?}");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 4);
     }
 }

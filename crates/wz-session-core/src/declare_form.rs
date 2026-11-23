@@ -83,3 +83,67 @@ pub struct InterestForm {
     /// [`build_interest_kinds_with_aggregate`](crate::interest_build::build_interest_kinds_with_aggregate)).
     pub aggregate: bool,
 }
+
+/// An [`InterestForm`] lent for one call: the rest of the key is read where the caller holds it,
+/// so a declaration that names its key from its own text hands it over without a copy, and an
+/// engine copies it only where it keeps one of its own.
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterestAsk<'a> {
+    /// The keyexpr declaration the Interest names, `0` for none.
+    pub mapping_id: crate::wire_id::ExprId,
+    /// What follows the declared prefix; the whole literal when `mapping_id` is 0.
+    pub suffix: Option<&'a str>,
+    /// Ask the peer to answer aggregated, as [`InterestForm::aggregate`].
+    pub aggregate: bool,
+}
+
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+impl InterestAsk<'_> {
+    /// The form an engine keeps of this ask, the rest of the key copied.
+    pub fn to_form(self) -> InterestForm {
+        InterestForm {
+            mapping_id: self.mapping_id,
+            suffix: self.suffix.map(String::from),
+            aggregate: self.aggregate,
+        }
+    }
+}
+
+#[cfg(all(feature = "session-matching", feature = "declare-interest"))]
+impl InterestForm {
+    /// This form lent as an ask, for an engine that is handed one.
+    pub fn as_ask(&self) -> InterestAsk<'_> {
+        InterestAsk {
+            mapping_id: self.mapping_id,
+            suffix: self.suffix.as_deref(),
+            aggregate: self.aggregate,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "session-matching", feature = "declare-interest"))]
+mod tests {
+    use super::*;
+
+    /// A form lent as an ask and kept again is the form it was, with a rest of the key or none.
+    #[test]
+    fn a_form_lent_as_an_ask_is_kept_as_the_same_form() {
+        for form in [
+            InterestForm {
+                mapping_id: 7,
+                suffix: Some(String::from("/tail")),
+                aggregate: true,
+            },
+            InterestForm {
+                mapping_id: 7,
+                suffix: None,
+                aggregate: false,
+            },
+        ] {
+            let ask = form.as_ask();
+            assert_eq!(ask.suffix, form.suffix.as_deref());
+            assert_eq!(ask.to_form(), form);
+        }
+    }
+}
