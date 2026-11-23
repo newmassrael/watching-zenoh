@@ -2574,7 +2574,11 @@ fn push_stream_flow<W: DocOut>(
             .checked_sub(start)
             .and_then(|at| handed.get_mut(at))
             .and_then(Option::take)
-            .unwrap_or_else(|| flow.frames().row(position));
+            .unwrap_or_else(|| {
+                flow.frames()
+                    .get(position)
+                    .expect("a message the list holds")
+            });
         let frame: &PassiveFrame = &row;
         let FoldedRow {
             packet,

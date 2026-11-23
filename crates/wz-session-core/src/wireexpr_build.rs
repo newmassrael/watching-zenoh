@@ -76,6 +76,37 @@ pub fn aliased_wireexpr<S: for<'x> WireexprFrom<'x>>(
     Ok(WireexprOwned { body })
 }
 
+/// The `Wireexpr` naming `key` in the sender's space (`M=1`, `WireexprLocal`): its id, and the text
+/// after the id with its length. What every builder of a message that names a key writes it
+/// through, so the id `0` with no text, which names no key, is not a key any of them can be
+/// handed. Refused by the text's bound as [`literal_wireexpr`] is.
+pub fn key_wireexpr<S: for<'x> WireexprFrom<'x>>(
+    key: crate::wire_key::WireKey<'_>,
+) -> Result<WireexprOwned<S>, CodecError> {
+    let suffix = key.suffix();
+    let text = suffix
+        .map(|s| Bounded::new(s).ok_or(CodecError::LengthOutOfRange))
+        .transpose()?;
+    Ok(WireexprOwned {
+        body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
+            id: key.id(),
+            suffix_len: suffix.map(|s| s.len() as u64),
+            suffix: text
+                .map(|t| t.store::<S, WireexprLocalSuffixField>())
+                .transpose()?,
+        }),
+    })
+}
+
+/// The header bits a message naming `key` carries for it: [`NAMED_FLAG`] when text follows the id.
+pub const fn key_flags(key: crate::wire_key::WireKey<'_>) -> u8 {
+    if key.suffix().is_some() {
+        NAMED_FLAG
+    } else {
+        0
+    }
+}
+
 /// The network-message header `N` (Named — suffix present) bit, uniform across
 /// Push / Request / Response (zenoh `{push,request,response}::flag::N = 1 << 5`).
 /// A literal keyexpr (a suffix) always carries it.

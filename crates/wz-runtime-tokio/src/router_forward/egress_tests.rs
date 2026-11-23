@@ -1307,7 +1307,7 @@ fn a_query_routed_from_a_face_is_held_behind_the_data_its_destination_holds() {
 #[test]
 fn a_request_and_a_response_are_probed_and_come_back_whole_when_there_is_no_room() {
     use wz_session_core::request_build::build_request_query;
-    use wz_session_core::response_build::build_response_reply_literal;
+    use wz_session_core::response_build::build_response_reply;
     use wz_session_core::session_actions::Unsent;
 
     let messages = || {
@@ -1316,7 +1316,13 @@ fn a_request_and_a_response_are_probed_and_come_back_whole_when_there_is_no_room
                 build_request_query(5, 0, Some("demo/asked")).expect("request"),
             )),
             NetworkMessage::Response(Box::new(
-                build_response_reply_literal(5, "demo/asked", b"answer").expect("response"),
+                build_response_reply(
+                    5,
+                    wz_session_core::wire_key::WireKey::literal("demo/asked")
+                        .expect("a literal key"),
+                    b"answer",
+                )
+                .expect("response"),
             )),
         ]
     };

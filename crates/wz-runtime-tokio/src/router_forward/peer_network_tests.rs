@@ -411,8 +411,11 @@ impl Network {
             }
             NetStep::Reply(name, keyexpr, payload) => {
                 if let Some(rid) = self.endpoints[name].open_request {
-                    let response = wz_session_core::response_build::build_response_reply_literal(
-                        rid, keyexpr, payload,
+                    let response = wz_session_core::response_build::build_response_reply(
+                        rid,
+                        wz_session_core::wire_key::WireKey::literal(keyexpr)
+                            .expect("a literal key"),
+                        payload,
                     )
                     .expect("response");
                     self.inject(*name, NetworkMessage::Response(Box::new(response)));

@@ -662,7 +662,8 @@ impl QueryOptions {
     /// Gated on `query-get`, the capability its callers have.
     #[cfg(feature = "query-get")]
     pub fn expected_finals(&self, remote_targets: u32) -> u32 {
-        self.remote_finals(remote_targets) + u32::from(self.allowed_destination.allows_local())
+        self.remote_finals(remote_targets)
+            .saturating_add(u32::from(self.allowed_destination.allows_local()))
     }
 
     /// The Finals the peers' branch of the query owes: `remote_targets` when its destination

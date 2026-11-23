@@ -669,7 +669,7 @@ pub use wz_session_core::qos::{CongestionControl, Priority};
 // R311di-8 — ConsolidationMode moved to wz-session-core::query_mode.
 pub use wz_session_core::query_mode::ConsolidationMode;
 
-// R311dv — the Response-builder cluster (build_response_{reply,err}_*
+// R311dv — the Response-builder cluster (build_response_{reply,err}
 // + ResponseReplyBuilder + ResponseErrBuilder) moved to
 // wz-session-core::response_build (runtime-agnostic wire-record
 // construction). Re-exported here so crate::session_glue::* callers
@@ -677,8 +677,7 @@ pub use wz_session_core::query_mode::ConsolidationMode;
 // unchanged across the reorg.
 #[cfg(feature = "codec-response")]
 pub use wz_session_core::response_build::{
-    build_response_err_aliased, build_response_err_literal, build_response_reply_aliased,
-    build_response_reply_literal, encode_responder_ext_body, ResponseErrBuilder,
+    build_response_err, build_response_reply, encode_responder_ext_body, ResponseErrBuilder,
     ResponseReplyBuilder,
 };
 // R311ek — `encode_source_info_ext_body` is also consumed by the

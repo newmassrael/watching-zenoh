@@ -162,7 +162,8 @@ impl LentByteCells {
         let (taken, base) = unsafe {
             (
                 NonNull::new_unchecked(self.taken.as_ptr().add(at)),
-                self.bytes.as_ptr().add(at * self.size),
+                // `at` is below the count, so the cell's offset is inside the table.
+                self.bytes.as_ptr().add(at.saturating_mul(self.size)),
             )
         };
         Some(ByteBuf {

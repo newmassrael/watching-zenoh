@@ -216,6 +216,31 @@ pub(crate) fn begin_frame(
     parent_flags: u8,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
+    write_frame_head(&mut TxSink::new(buf), sn, parent_flags, ext_qos)
+}
+
+/// The Frame header [`begin_frame`] writes, into any sink: a sink that cannot
+/// refuse a write (`VecSink`) gets an error type with no value, so its caller
+/// holds no failure to handle.
+#[cfg(any(
+    feature = "alloc",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
+))]
+fn write_frame_head<K: sce_forge_runtime::codec::SceSink>(
+    w: &mut K,
+    sn: u64,
+    parent_flags: u8,
+    ext_qos: Option<Priority>,
+) -> Result<(), K::Error> {
     // The QoS ext, when present, is the chain's one entry; the document sets
     // the header's Z flag from the chain and clears the entry's own.
     #[cfg(feature = "transport-qos")]
@@ -225,7 +250,7 @@ pub(crate) fn begin_frame(
     #[cfg(feature = "transport-qos")]
     let extensions = chain
         .as_ref()
-        .and_then(|entries| Bounded::new(&entries[..]));
+        .and_then(|entries| Bounded::new(entries.as_slice()));
     #[cfg(not(feature = "transport-qos"))]
     let extensions = {
         let _ = ext_qos;
@@ -236,10 +261,7 @@ pub(crate) fn begin_frame(
         sn,
         extensions,
     };
-    wz_codecs::transport_frame_header::TransportFrameHeaderWire::encode_source(
-        &head,
-        &mut TxSink::new(buf),
-    )
+    wz_codecs::transport_frame_header::TransportFrameHeaderWire::encode_source(&head, w)
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
@@ -294,7 +316,7 @@ where
     P: FnOnce(&mut TxSink<'_>) -> Result<(), CodecError>,
 {
     // +2 for a possible ext_qos ([0x31][VLE(priority)]); harmless slack when absent.
-    let mut wire = Vec::with_capacity(1 + 10 + 2 + worst_case_payload);
+    let mut wire = Vec::with_capacity(worst_case_payload.saturating_add(13));
     encode_frame_envelope_into(&mut wire, sn, parent_flags, ext_qos, payload_encode)
         .expect("a Vec grows, so its sink is infallible");
     wire
@@ -746,7 +768,7 @@ fn vle_width(sn: u64) -> usize {
     let (mut width, mut v) = (1usize, sn);
     while v >= 0x80 {
         v >>= 7;
-        width += 1;
+        width = width.saturating_add(1);
     }
     width
 }
@@ -768,11 +790,13 @@ fn vle_width(sn: u64) -> usize {
 /// non-QoS / DEFAULT path passes `None` and slices exactly as before.
 #[cfg(all(feature = "transport-fragmentation", feature = "alloc"))]
 pub(crate) fn frame_wire_body(frame: &[u8], sn: u64, ext_qos: Option<Priority>) -> &[u8] {
-    let mut off = 1 + vle_width(sn);
-    if ext_qos.is_some() {
-        off += QOS_EXT_WIRE_BYTES;
-    }
-    &frame[off..]
+    let qos = if ext_qos.is_some() {
+        QOS_EXT_WIRE_BYTES
+    } else {
+        0
+    };
+    let off = vle_width(sn).saturating_add(1).saturating_add(qos);
+    frame.get(off..).unwrap_or_default()
 }
 
 /// Conservative per-fragment header budget: 1 flags byte + the maximum u64
@@ -845,7 +869,7 @@ const FRAGMENT_DROP_EXT_HEADER: u8 = crate::extfragment::FRAGMENT_DROP_EXT_ID;
 /// pre-QoS budget, so its chunking — and its byte layout — is unchanged.
 #[cfg(feature = "transport-fragmentation")]
 fn fragment_chunk_size(mtu: usize, qos: bool) -> usize {
-    let budget = FRAG_HEADER_BUDGET + if qos { QOS_EXT_WIRE_BYTES } else { 0 };
+    let budget = FRAG_HEADER_BUDGET.saturating_add(if qos { QOS_EXT_WIRE_BYTES } else { 0 });
     mtu.saturating_sub(budget).max(1)
 }
 
@@ -991,7 +1015,7 @@ impl Iterator for FragmentChain<'_> {
         let span = self.plan.next_span()?;
         Some(build_fragment_wire(
             span.sn,
-            &self.body[span.start..span.end],
+            self.body.get(span.start..span.end)?,
             self.reliable,
             span.more,
             span.first,
@@ -1066,7 +1090,9 @@ impl FragmentSpan {
     /// header budget, the two one-byte markers, a possible `ext_qos`, and the
     /// chunk. What a slot is asked for before the fragment is written into it.
     pub fn wire_bound(&self) -> usize {
-        FRAG_HEADER_BUDGET + 2 + QOS_EXT_WIRE_BYTES + (self.end - self.start)
+        // A span's end is at or past its start.
+        (FRAG_HEADER_BUDGET + 2 + QOS_EXT_WIRE_BYTES)
+            .saturating_add(self.end.saturating_sub(self.start))
     }
 }
 
@@ -1107,7 +1133,11 @@ impl FragmentPlan {
         if self.done {
             return 0;
         }
-        (self.len - self.off).div_ceil(self.chunk).max(1)
+        // `off` never passes `len`, and `chunk` is at least one.
+        self.len
+            .saturating_sub(self.off)
+            .div_ceil(self.chunk.max(1))
+            .max(1)
     }
 
     /// The SN the next transport message on this conduit carries (see
@@ -1121,7 +1151,7 @@ impl FragmentPlan {
         if self.done {
             return None;
         }
-        let end = core::cmp::min(self.off + self.chunk, self.len);
+        let end = core::cmp::min(self.off.saturating_add(self.chunk), self.len);
         let more = end < self.len;
         let span = FragmentSpan {
             sn: self.sn,
@@ -1187,7 +1217,12 @@ pub fn write_fragment(
         ext_qos,
     )?;
     match body {
-        FragmentBody::Bytes(bytes) => TxBuf::append(buf, &bytes[span.start..span.end]),
+        FragmentBody::Bytes(bytes) => TxBuf::append(
+            buf,
+            bytes
+                .get(span.start..span.end)
+                .ok_or(CodecError::BufferOverflow)?,
+        ),
         #[cfg(feature = "transport-tx-lend")]
         FragmentBody::Encoded(encode) => {
             if span.start == span.end {
@@ -1272,7 +1307,10 @@ impl TxBuf for BodyWindow<'_, '_> {
     }
 
     fn as_slice(&self) -> &[u8] {
-        &self.inner.as_slice()[self.inner_at..]
+        self.inner
+            .as_slice()
+            .get(self.inner_at..)
+            .unwrap_or_default()
     }
 
     fn truncate(&mut self, _len: usize) {}
@@ -1285,7 +1323,11 @@ impl TxBuf for BodyWindow<'_, '_> {
         let lo = core::cmp::max(from, self.start);
         let hi = core::cmp::min(to, self.end);
         if lo < hi {
-            self.inner.append(&bytes[lo - from..hi - from])?;
+            // `from <= lo < hi <= to`: the window's part of `bytes`.
+            let part = bytes
+                .get(lo.saturating_sub(from)..hi.saturating_sub(from))
+                .ok_or(CodecError::BufferOverflow)?;
+            self.inner.append(part)?;
         }
         self.pos = to;
         Ok(())
@@ -1400,17 +1442,29 @@ pub fn build_fragment_wire(
     let qos_reserve = if has_qos { QOS_EXT_WIRE_BYTES } else { 0 };
     let mut wire = Vec::with_capacity(
         FRAG_HEADER_BUDGET
-            + payload.len()
-            + usize::from(first)
-            + usize::from(drop_marker)
-            + qos_reserve,
+            .saturating_add(payload.len())
+            .saturating_add(usize::from(first))
+            .saturating_add(usize::from(drop_marker))
+            .saturating_add(qos_reserve),
     );
-    write_fragment_head(&mut wire, sn, reliable, more, first, drop_marker, ext_qos)
-        .expect("a Vec grows, so its sink is infallible");
+    let head = write_fragment_head_to(
+        &mut sce_forge_runtime::codec::VecSink::new(&mut wire),
+        sn,
+        reliable,
+        more,
+        first,
+        drop_marker,
+        ext_qos,
+    );
+    // A growing vector refuses no write: the error type has no value.
+    match head {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     // The payload is the codec's raw tail (`Fragment::encode` is
     // `write_vle_u64 + write_bytes`, no length prefix), so appending it after
     // the head is the bytes the codec writes for the two together.
-    TxBuf::append(&mut wire, payload).expect("a Vec grows, so its sink is infallible");
+    wire.extend_from_slice(payload);
     wire
 }
 
@@ -1434,6 +1488,29 @@ pub fn write_fragment_head(
     drop_marker: bool,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
+    write_fragment_head_to(
+        &mut TxSink::new(buf),
+        sn,
+        reliable,
+        more,
+        first,
+        drop_marker,
+        ext_qos,
+    )
+}
+
+/// The Fragment head [`write_fragment_head`] writes, into any sink: a sink
+/// that cannot refuse a write gets an error type with no value.
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
+fn write_fragment_head_to<K: sce_forge_runtime::codec::SceSink>(
+    w: &mut K,
+    sn: u64,
+    reliable: bool,
+    more: bool,
+    first: bool,
+    drop_marker: bool,
+    ext_qos: Option<Priority>,
+) -> Result<(), K::Error> {
     use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
 
     let mut header = wire_const::T_MID_FRAGMENT;
@@ -1453,31 +1530,30 @@ pub fn write_fragment_head(
         body: ExtEntryPartsBody::CodecZenohExtUnit(&marker),
     };
     let mut chain = [unit_entry(FRAGMENT_FIRST_EXT_HEADER); 3];
-    let mut len = 0;
     #[cfg(feature = "transport-qos")]
-    if let Some(value) = &qos {
-        chain[len] = qos_entry(value);
-        len += 1;
-    }
+    let qos_entry = qos.as_ref().map(qos_entry);
     #[cfg(not(feature = "transport-qos"))]
-    let _ = ext_qos;
-    if first {
-        chain[len] = unit_entry(FRAGMENT_FIRST_EXT_HEADER);
-        len += 1;
-    }
-    if drop_marker {
-        chain[len] = unit_entry(FRAGMENT_DROP_EXT_HEADER);
-        len += 1;
+    let qos_entry = {
+        let _ = ext_qos;
+        None
+    };
+    let wanted = [
+        qos_entry,
+        first.then(|| unit_entry(FRAGMENT_FIRST_EXT_HEADER)),
+        drop_marker.then(|| unit_entry(FRAGMENT_DROP_EXT_HEADER)),
+    ];
+    // At most the three entries the chain has room for.
+    let mut len = 0usize;
+    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+        *slot = entry;
+        len = len.saturating_add(1);
     }
     let head = wz_codecs::transport_fragment_header::TransportFragmentHeaderParts {
         header,
         sn,
-        extensions: Bounded::new(&chain[..len]),
+        extensions: Bounded::new(chain.get(..len).unwrap_or_default()),
     };
-    wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(
-        &head,
-        &mut TxSink::new(buf),
-    )
+    wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(&head, w)
 }
 
 /// Encode one `T_MID_FRAME` wire frame from its explicit fields: the Frame
@@ -1503,9 +1579,18 @@ pub fn build_frame_wire(
 ) -> Vec<u8> {
     // header + the widest VLE + a possible `[0x31][VLE(priority)]`, as
     // `encode_frame_envelope` reserves.
-    let mut wire = Vec::with_capacity(1 + 9 + 2 + payload.len());
-    begin_frame(&mut wire, sn, frame_flags(reliable), ext_qos)
-        .expect("a Vec grows, so its sink is infallible");
+    let mut wire = Vec::with_capacity(payload.len().saturating_add(12));
+    let head = write_frame_head(
+        &mut sce_forge_runtime::codec::VecSink::new(&mut wire),
+        sn,
+        frame_flags(reliable),
+        ext_qos,
+    );
+    // A growing vector refuses no write: the error type has no value.
+    match head {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     wire.extend_from_slice(payload);
     wire
 }
@@ -1599,7 +1684,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     use crate::request_build::build_request_query;
     #[cfg(feature = "codec-response")]
-    use crate::response_build::build_response_reply_literal;
+    use crate::response_build::build_response_reply;
     #[cfg(feature = "codec-response-final")]
     use crate::response_final_build::build_response_final;
     #[cfg(feature = "codec-push")]
@@ -1751,7 +1836,12 @@ mod tests {
         }
         #[cfg(feature = "codec-response")]
         {
-            let response = build_response_reply_literal(42, "k", b"v").unwrap();
+            let response = build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap();
             assert_eq!(
                 encoded_len(&response_body(&response)),
                 wz_codecs::response::ResponseWire::measure(&response).len()
@@ -2026,12 +2116,22 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
-        let response = build_response_reply_literal(42, "k", b"v").unwrap();
+        let response = build_response_reply(
+            42,
+            crate::wire_key::WireKey::literal("k").expect("a literal key"),
+            b"v",
+        )
+        .unwrap();
         let response_bytes = response.wire();
 
         let wire_reliable = encode_frame_with_response(
             0,
-            build_response_reply_literal(42, "k", b"v").unwrap(),
+            build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap(),
             true,
         );
         assert_eq!(
@@ -2048,7 +2148,12 @@ mod tests {
 
         let wire_best_effort = encode_frame_with_response(
             0,
-            build_response_reply_literal(42, "k", b"v").unwrap(),
+            build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap(),
             false,
         );
         assert_eq!(
@@ -2066,20 +2171,28 @@ mod tests {
     #[test]
     fn encode_frame_with_response_writes_what_the_projection_wrote_with_extensions() {
         let build = || {
-            crate::response_build::ResponseReplyBuilder::new(42, 0, Some("k/x"), b"payload")
-                .qos(crate::sample::QosLevel::DEFAULT.with_express(true))
-                .responder(&[1, 2, 3, 4], 9)
-                .build()
-                .unwrap()
+            crate::response_build::ResponseReplyBuilder::new(
+                42,
+                crate::wire_key::WireKey::literal("k/x").expect("a literal key"),
+                b"payload",
+            )
+            .qos(crate::sample::QosLevel::DEFAULT.with_express(true))
+            .responder(&[1, 2, 3, 4], 9)
+            .build()
+            .unwrap()
         };
         let want = build().wire();
         let frame = encode_frame_with_response(0, build(), true);
         assert!(
             want.len()
-                > build_response_reply_literal(42, "k/x", b"payload")
-                    .unwrap()
-                    .wire()
-                    .len(),
+                > build_response_reply(
+                    42,
+                    crate::wire_key::WireKey::literal("k/x").expect("a literal key"),
+                    b"payload"
+                )
+                .unwrap()
+                .wire()
+                .len(),
             "the extensions are on the wire, or this test compares nothing",
         );
         assert_eq!(&frame[2..], want.as_slice());

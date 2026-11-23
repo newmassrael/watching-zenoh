@@ -284,7 +284,7 @@ mod reply_egress_gate {
 
     use super::bundle;
     use crate::network_message::NetworkMessage;
-    use crate::response_build::build_response_reply_literal;
+    use crate::response_build::build_response_reply;
     use crate::session_actions::ReplyEgressGate;
     use crate::wire::ResponseOwned;
 
@@ -323,7 +323,12 @@ mod reply_egress_gate {
     }
 
     fn reply() -> ResponseOwned {
-        build_response_reply_literal(5, "demo/asked", b"answer").expect("a reply")
+        build_response_reply(
+            5,
+            crate::wire_key::WireKey::literal("demo/asked").expect("a literal key"),
+            b"answer",
+        )
+        .expect("a reply")
     }
 
     /// A reply the installed gate denies is consumed and never reaches the link; one it admits

@@ -178,13 +178,12 @@ pub fn keyexpr_matches(pattern: &str, target: &str) -> bool {
 /// `is_wild`, `key_expr/borrowed.rs:133`). `const` so a static keyexpr literal
 /// can be classified at compile time.
 pub const fn is_wild(keyexpr: &str) -> bool {
-    let bytes = keyexpr.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'*' {
+    let mut rest = keyexpr.as_bytes();
+    while let [first, tail @ ..] = rest {
+        if *first == b'*' {
             return true;
         }
-        i += 1;
+        rest = tail;
     }
     false
 }

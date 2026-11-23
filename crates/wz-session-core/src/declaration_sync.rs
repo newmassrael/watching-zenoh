@@ -107,7 +107,10 @@ impl DeclarationSync {
 
     /// How many interests were given up on at `now_ms`: waited for the whole timeout, no final.
     pub fn timed_out(&self, now_ms: u64, timeout_ms: u64) -> usize {
-        self.pending.len() - self.outstanding(now_ms, timeout_ms)
+        // The outstanding are some of the pending.
+        self.pending
+            .len()
+            .saturating_sub(self.outstanding(now_ms, timeout_ms))
     }
 
     /// Whether nothing is still waited for at `now_ms`.

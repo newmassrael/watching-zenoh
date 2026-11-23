@@ -98,19 +98,21 @@ impl Shape {
 
     /// How many ring cells there are: one per frame every instance keeps.
     pub fn ring_cells(&self) -> usize {
-        self.instances * self.depth
+        self.instances.saturating_mul(self.depth)
     }
 
+    // The cells' widths and offsets below are terms of `storage_bytes`, which a cache is made
+    // only when it does not overflow: the saturating forms are the exact ones.
     fn ring_cell(&self) -> usize {
-        RING_HEADER + self.frame_max
+        RING_HEADER.saturating_add(self.frame_max)
     }
 
     fn defer_cell(&self) -> usize {
-        DEFER_HEADER + self.frame_max
+        DEFER_HEADER.saturating_add(self.frame_max)
     }
 
     fn latest_cell(&self) -> usize {
-        LATEST_HEADER + self.frame_max
+        LATEST_HEADER.saturating_add(self.frame_max)
     }
 }
 
@@ -201,24 +203,57 @@ impl ReplayServingActions for ServingBinding {
     fn release_sends(&mut self) {}
 }
 
+// The cells lie inside the storage `new` measured, so the reads and writes below find their
+// bytes; one that did not would read 0 and write nothing, as a free cell.
+
 fn read_u64(bytes: &[u8], at: usize) -> u64 {
-    let mut word = [0u8; 8];
-    word.copy_from_slice(&bytes[at..at + 8]);
-    u64::from_le_bytes(word)
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<8>())
+        .map_or(0, |word| u64::from_le_bytes(*word))
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
-    let mut word = [0u8; 4];
-    word.copy_from_slice(&bytes[at..at + 4]);
-    u32::from_le_bytes(word)
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.first_chunk::<4>())
+        .map_or(0, |word| u32::from_le_bytes(*word))
 }
 
 fn write_u64(bytes: &mut [u8], at: usize, value: u64) {
-    bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    if let Some(word) = bytes
+        .get_mut(at..)
+        .and_then(|rest| rest.first_chunk_mut::<8>())
+    {
+        *word = value.to_le_bytes();
+    }
 }
 
 fn write_u32(bytes: &mut [u8], at: usize, value: u32) {
-    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    if let Some(word) = bytes
+        .get_mut(at..)
+        .and_then(|rest| rest.first_chunk_mut::<4>())
+    {
+        *word = value.to_le_bytes();
+    }
+}
+
+/// The `len` bytes at `at`.
+fn read_bytes(bytes: &[u8], at: usize, len: usize) -> &[u8] {
+    bytes
+        .get(at..)
+        .and_then(|rest| rest.get(..len))
+        .unwrap_or_default()
+}
+
+/// `frame` written at `at`.
+fn write_bytes(bytes: &mut [u8], at: usize, frame: &[u8]) {
+    if let Some(cell) = bytes
+        .get_mut(at..)
+        .and_then(|rest| rest.get_mut(..frame.len()))
+    {
+        cell.copy_from_slice(frame);
+    }
 }
 
 /// The key an answer orders its frames by.
@@ -260,10 +295,10 @@ impl<'a> ReplayPublisher<'a> {
         if u32::try_from(shape.instances).is_err() {
             return Err(CreateRefused::TooLarge);
         }
-        if storage.len() < need {
+        let Some(area) = storage.get_mut(..need) else {
             return Err(CreateRefused::StorageShort);
-        }
-        storage[..need].fill(0);
+        };
+        area.fill(0);
         let mut engine = Engine::new(ReplayServingPolicy::new_with_checked_session_id(
             SERVING_SESSION_ID,
             ServingBinding {
@@ -312,50 +347,64 @@ impl<'a> ReplayPublisher<'a> {
     }
 
     fn u64_at(&self, at: usize) -> u64 {
-        read_u64(&self.storage[..], at)
+        read_u64(self.storage, at)
     }
 
     fn u32_at(&self, at: usize) -> u32 {
-        read_u32(&self.storage[..], at)
+        read_u32(self.storage, at)
     }
 
     fn ring_at(&self, cell: usize) -> usize {
-        cell * self.shape.ring_cell()
+        cell.saturating_mul(self.shape.ring_cell())
+    }
+
+    /// Where the queue of deferred events starts, past the rings.
+    fn defer_base(&self) -> usize {
+        self.shape
+            .ring_cells()
+            .saturating_mul(self.shape.ring_cell())
     }
 
     fn defer_at(&self, slot: usize) -> usize {
-        self.shape.ring_cells() * self.shape.ring_cell() + slot * self.shape.defer_cell()
+        self.defer_base()
+            .saturating_add(slot.saturating_mul(self.shape.defer_cell()))
     }
 
     fn latest_at(&self, instance: usize) -> usize {
-        self.shape.ring_cells() * self.shape.ring_cell()
-            + self.shape.deferral_capacity() * self.shape.defer_cell()
-            + instance * self.shape.latest_cell()
+        self.defer_base()
+            .saturating_add(
+                self.shape
+                    .deferral_capacity()
+                    .saturating_mul(self.shape.defer_cell()),
+            )
+            .saturating_add(instance.saturating_mul(self.shape.latest_cell()))
+    }
+
+    /// The instance ring cell `cell` belongs to; `depth` is at least 1 from `new` on.
+    fn instance_of_cell(&self, cell: usize) -> usize {
+        cell.checked_div(self.shape.depth).unwrap_or(0)
     }
 
     fn ring_full(&self, cell: usize) -> bool {
-        self.u32_at(self.ring_at(cell) + 20) & FULL != 0
+        self.u32_at(self.ring_at(cell).saturating_add(20)) & FULL != 0
     }
 
     fn ring_seq(&self, cell: usize) -> u64 {
-        self.u64_at(self.ring_at(cell) + 8)
+        self.u64_at(self.ring_at(cell).saturating_add(8))
     }
 
     /// The key an answer orders a ring cell by: (time, instance, sequence).
     fn order_key(&self, cell: usize) -> OrderKey {
         (
             self.u64_at(self.ring_at(cell)),
-            cell / self.shape.depth,
+            self.instance_of_cell(cell),
             self.ring_seq(cell),
         )
     }
 
-    /// The length of the frame a deferred slot holds; `None` for a free slot.
+    /// The length of the frame a deferred slot holds; `None` for a free slot, whose word is 0.
     fn defer_len(&self, slot: usize) -> Option<usize> {
-        match self.u32_at(self.defer_at(slot) + 12) {
-            0 => None,
-            stored => Some(stored as usize - 1),
-        }
+        (self.u32_at(self.defer_at(slot).saturating_add(12)) as usize).checked_sub(1)
     }
 
     fn defer_seq(&self, slot: usize) -> u64 {
@@ -363,7 +412,7 @@ impl<'a> ReplayPublisher<'a> {
     }
 
     fn latest_held(&self, instance: usize) -> bool {
-        self.u32_at(self.latest_at(instance) + 12) & FULL != 0
+        self.u32_at(self.latest_at(instance).saturating_add(12)) & FULL != 0
     }
 
     /// Record `frame`, sent at `time` on instance `instance`, and give its sequence number. The
@@ -380,8 +429,8 @@ impl<'a> ReplayPublisher<'a> {
         if frame.len() > self.shape.frame_max {
             return Err(RecordRefused::FrameTooLong);
         }
-        let first = instance * self.shape.depth;
-        let last = first + self.shape.depth;
+        let first = instance.saturating_mul(self.shape.depth);
+        let last = first.saturating_add(self.shape.depth);
         // An empty cell if the ring has one, else the one of the lowest sequence, the oldest.
         let empty = (first..last).find(|&cell| !self.ring_full(cell));
         let cell = match empty {
@@ -393,13 +442,13 @@ impl<'a> ReplayPublisher<'a> {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         let at = self.ring_at(cell);
-        let bytes = &mut self.storage[..];
+        let bytes = &mut *self.storage;
         write_u64(bytes, at, time);
-        write_u64(bytes, at + 8, seq);
+        write_u64(bytes, at.saturating_add(8), seq);
         // The length is below `frame_max`, which `new` holds under 2^32 - 1.
-        write_u32(bytes, at + 16, frame.len() as u32);
-        write_u32(bytes, at + 20, FULL);
-        bytes[at + RING_HEADER..at + RING_HEADER + frame.len()].copy_from_slice(frame);
+        write_u32(bytes, at.saturating_add(16), frame.len() as u32);
+        write_u32(bytes, at.saturating_add(20), FULL);
+        write_bytes(bytes, at.saturating_add(RING_HEADER), frame);
         self.counts.recorded = self.counts.recorded.saturating_add(1);
         Ok(seq)
     }
@@ -422,11 +471,11 @@ impl<'a> ReplayPublisher<'a> {
             SendKind::Periodic => {
                 let replaced = self.latest_held(instance);
                 let at = self.latest_at(instance);
-                let bytes = &mut self.storage[..];
+                let bytes = &mut *self.storage;
                 write_u64(bytes, at, seq);
-                write_u32(bytes, at + 8, frame.len() as u32);
-                write_u32(bytes, at + 12, FULL);
-                bytes[at + LATEST_HEADER..at + LATEST_HEADER + frame.len()].copy_from_slice(frame);
+                write_u32(bytes, at.saturating_add(8), frame.len() as u32);
+                write_u32(bytes, at.saturating_add(12), FULL);
+                write_bytes(bytes, at.saturating_add(LATEST_HEADER), frame);
                 if replaced {
                     self.counts.periodic_replaced = self.counts.periodic_replaced.saturating_add(1);
                 }
@@ -445,12 +494,17 @@ impl<'a> ReplayPublisher<'a> {
                     }
                 };
                 let at = self.defer_at(slot);
-                let bytes = &mut self.storage[..];
+                let bytes = &mut *self.storage;
                 write_u64(bytes, at, seq);
                 // The instance is below `instances`, which `new` holds to 32 bits.
-                write_u32(bytes, at + 8, instance as u32);
-                write_u32(bytes, at + 12, frame.len() as u32 + 1);
-                bytes[at + DEFER_HEADER..at + DEFER_HEADER + frame.len()].copy_from_slice(frame);
+                write_u32(bytes, at.saturating_add(8), instance as u32);
+                // Below `frame_max`, itself below 2^32 - 1: the length plus one fits.
+                write_u32(
+                    bytes,
+                    at.saturating_add(12),
+                    (frame.len() as u32).saturating_add(1),
+                );
+                write_bytes(bytes, at.saturating_add(DEFER_HEADER), frame);
                 if overwrote {
                     self.counts.deferred_overwritten =
                         self.counts.deferred_overwritten.saturating_add(1);
@@ -468,7 +522,7 @@ impl<'a> ReplayPublisher<'a> {
         let latest = (0..self.shape.instances)
             .filter(|&instance| self.latest_held(instance))
             .count();
-        deferred + latest
+        deferred.saturating_add(latest)
     }
 
     /// How many frames the rings hold.
@@ -491,7 +545,7 @@ impl<'a> ReplayPublisher<'a> {
     ///
     /// Every answer that begins is ended by [`ReplayPublisher::end_answer`].
     pub fn begin_answer(&mut self, order: &mut [usize]) -> usize {
-        self.answers_in_progress += 1;
+        self.answers_in_progress = self.answers_in_progress.saturating_add(1);
         self.counts.answers = self.counts.answers.saturating_add(1);
         if self
             .drive(ReplayServingEvent::AnswerBegun)
@@ -499,11 +553,11 @@ impl<'a> ReplayPublisher<'a> {
         {
             self.holding = self.holds_sends;
         }
-        let mut listed = 0;
+        let mut listed = 0usize;
         let mut last: Option<OrderKey> = None;
         // Each pass takes the smallest key past the last one listed: at most one ring per
         // instance, and no allocation.
-        while listed < order.len() {
+        for slot in order.iter_mut() {
             let next = (0..self.shape.ring_cells())
                 .filter(|&cell| self.ring_full(cell))
                 .map(|cell| (self.order_key(cell), cell))
@@ -515,8 +569,8 @@ impl<'a> ReplayPublisher<'a> {
             let Some((key, cell)) = next else {
                 break;
             };
-            order[listed] = cell;
-            listed += 1;
+            *slot = cell;
+            listed = listed.saturating_add(1);
             last = Some(key);
         }
         listed
@@ -529,14 +583,14 @@ impl<'a> ReplayPublisher<'a> {
             return &[];
         }
         let at = self.ring_at(cell);
-        let len = self.u32_at(at + 16) as usize;
-        &self.storage[at + RING_HEADER..at + RING_HEADER + len]
+        let len = self.u32_at(at.saturating_add(16)) as usize;
+        read_bytes(self.storage, at.saturating_add(RING_HEADER), len)
     }
 
     /// The instance a ring cell belongs to; `None` for a cell the cache does not have.
     pub fn instance_of(&self, cell: usize) -> Option<usize> {
         if cell < self.shape.ring_cells() {
-            Some(cell / self.shape.depth)
+            Some(self.instance_of_cell(cell))
         } else {
             None
         }
@@ -549,7 +603,7 @@ impl<'a> ReplayPublisher<'a> {
         if self.answers_in_progress == 0 {
             return;
         }
-        self.answers_in_progress -= 1;
+        self.answers_in_progress = self.answers_in_progress.saturating_sub(1);
         if self.answers_in_progress == 0 {
             let _ = self.drive(ReplayServingEvent::AnswerEnded);
         }
@@ -583,14 +637,18 @@ impl<'a> ReplayPublisher<'a> {
             };
             let (at, header, len) = if periodic {
                 let at = self.latest_at(index);
-                (at, LATEST_HEADER, self.u32_at(at + 8) as usize)
+                (
+                    at,
+                    LATEST_HEADER,
+                    self.u32_at(at.saturating_add(8)) as usize,
+                )
             } else {
                 let at = self.defer_at(index);
                 (at, DEFER_HEADER, self.defer_len(index).unwrap_or(0))
             };
             // Free the cell: the flags of a latest cell and the length of a deferred one share
             // the word at 12.
-            write_u32(&mut self.storage[..], at + 12, 0);
+            write_u32(self.storage, at.saturating_add(12), 0);
             if len > out.len() {
                 if periodic {
                     self.counts.periodic_replaced = self.counts.periodic_replaced.saturating_add(1);
@@ -600,7 +658,10 @@ impl<'a> ReplayPublisher<'a> {
                 }
                 continue;
             }
-            out[..len].copy_from_slice(&self.storage[at + header..at + header + len]);
+            let held = read_bytes(self.storage, at.saturating_add(header), len);
+            if let Some(into) = out.get_mut(..held.len()) {
+                into.copy_from_slice(held);
+            }
             return Some(len);
         }
     }

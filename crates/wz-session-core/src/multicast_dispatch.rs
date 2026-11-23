@@ -1114,7 +1114,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let Some(idx) = self.find_by_src(src) else {
             return;
         };
-        if let Some(member) = self.peers[idx].member.as_mut() {
+        if let Some(member) = self
+            .peers
+            .get_mut(idx)
+            .and_then(|peer| peer.member.as_mut())
+        {
             member.scope(messages);
         }
     }
@@ -1145,7 +1149,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// [`Self::take_member_retractions`]; the slot is about to be freed.
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
     fn retire_member(&mut self, idx: usize) {
-        if let Some(member) = self.peers[idx].member.take() {
+        if let Some(member) = self.peers.get_mut(idx).and_then(|peer| peer.member.take()) {
             self.member_retractions.extend(member.retracted());
         }
     }
@@ -1168,7 +1172,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         src: SocketAddr,
     ) -> Option<&mut crate::multicast_member_scope::MemberDeclarations> {
         let idx = self.find_by_src(src)?;
-        self.peers[idx].member.as_mut()
+        self.peers.get_mut(idx)?.member.as_mut()
     }
 
     /// Hand `sink` the undeclarations of what the members that left since the last call held,
@@ -1275,8 +1279,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let Some(ns) = self.namespace.as_ref() else {
             return;
         };
-        if let Some(idx) = self.find_by_src(src) {
-            let ingress = self.peers[idx]
+        if let Some(peer) = self
+            .find_by_src(src)
+            .and_then(|idx| self.peers.get_mut(idx))
+        {
+            let ingress = peer
                 .namespace_ingress
                 .get_or_insert_with(|| NamespaceIngress::new(ns.clone()));
             crate::namespace::strip_outcome(ingress, outcome);
@@ -1315,10 +1322,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(idx) = self.find_by_src(src) else {
+        let Some(slot) = self
+            .find_by_src(src)
+            .and_then(|idx| self.peers.get_mut(idx))
+        else {
             return;
         };
-        let slot = &mut self.peers[idx];
         for msg in messages.iter_mut() {
             match msg {
                 NetworkMessage::Declare(declare) => {
@@ -1477,10 +1486,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
             return;
         };
-        let Some(idx) = self.find_by_src(src) else {
+        let Some(slot) = self
+            .find_by_src(src)
+            .and_then(|idx| self.peers.get_mut(idx))
+        else {
             return;
         };
-        let slot = &mut self.peers[idx];
         for msg in messages.iter() {
             let NetworkMessage::Declare(declare) = msg else {
                 continue;
@@ -1576,7 +1587,8 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// [`peer_state`](MulticastDispatcher::peer_state)).
     pub fn peer_state_by_src(&self, src: SocketAddr) -> Option<MulticastPeerState> {
         self.find_by_src(src)
-            .map(|idx| self.peers[idx].engine.get_current_state())
+            .and_then(|idx| self.peers.get(idx))
+            .map(|peer| peer.engine.get_current_state())
     }
 
     /// The zids of the live on-group peers that announced `whatami=Router` — the
@@ -1740,10 +1752,14 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             return JoinOutcome::SessionNotRunning;
         }
         if let Some(idx) = self.find_by_src(src) {
+            // The row the index found is one of the table's.
+            let Some(peer) = self.peers.get_mut(idx) else {
+                return JoinOutcome::Refreshed;
+            };
             // Known address: a Join is just another inbound message (§3.2
             // "Active: any msg refresh last_seen"). The FSM stays Active;
             // the baselines re-store from the fresh advertisement.
-            self.peers[idx].last_seen_ms = now_ms;
+            peer.last_seen_ms = now_ms;
             // §5.21 routing-namespace — a re-JOIN from the SAME address but a
             // DIFFERENT zid is a NEW peer reusing the slot before the old peer's
             // lease expired: drop the dead peer's per-peer namespace correlation
@@ -1758,8 +1774,8 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // fix: SN state is JOIN-authoritative-reset by seed_from_join, so the
             // namespace correlation must follow the same identity-reset rule.)
             #[cfg(feature = "routing-namespace")]
-            if !self.peers[idx].matches_zid(&zid) {
-                self.peers[idx].namespace_ingress = None;
+            if !peer.matches_zid(&zid) {
+                peer.namespace_ingress = None;
             }
             // §5.21 router-multicast-faces — the SAME in-place recycle hazard for the
             // per-peer DECLARATION state (I3a keyexpr aliases + the S2 remote-sub
@@ -1777,11 +1793,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // dead peer's ..." invariant on the in-place path (the keyexpr_table leak
             // predates S2 — the I3a R311y196 in-place gap — surfaced with remote_subs).
             #[cfg(feature = "multicast-declarations")]
-            if !self.peers[idx].matches_zid(&zid) {
-                self.peers[idx].keyexpr_table.clear();
-                self.peers[idx].remote_subs.clear();
+            if !peer.matches_zid(&zid) {
+                peer.keyexpr_table.clear();
+                peer.remote_subs.clear();
             }
-            self.peers[idx].zid = Some(zid);
+            peer.zid = Some(zid);
             // The re-seed is the Router's refresh, not `init_rx_seq`: the machine
             // states that duty for a peer entering Discovered, and an Active
             // peer's JOIN is another inbound message the machine does not see
@@ -1789,11 +1805,11 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // way). What it re-stores is the announcer's own advertisement, which
             // zenoh-pico re-copies at every JOIN, so a peer that restarted its SN
             // streams is believed rather than refused until its lease runs out.
-            self.peers[idx].seed_from_join(baseline, qos_next_sns);
+            peer.seed_from_join(baseline, qos_next_sns);
             // Refresh the peer's role from its latest JOIN. A peer's whatami is
             // stable, but a same-slot zid reuse is a different peer, and both the
             // member view and the DR candidate set (§5.21 I3b) must see its role.
-            self.peers[idx].whatami = baseline.whatami;
+            peer.whatami = baseline.whatami;
             return JoinOutcome::Refreshed;
         }
         let row = if self.active_peers() < self.member_cap() {
@@ -1801,16 +1817,17 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         } else {
             None
         };
-        let Some(idx) = row else {
+        // A free row is one of the table's, so its slot is there.
+        let Some((idx, peer)) = row.and_then(|idx| Some((idx, self.peers.get_mut(idx)?))) else {
             self.join_refusals = self.join_refusals.saturating_add(1);
             return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
         };
-        self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
-        self.by_src.admitted(src, idx);
+        peer.admit(src, zid, baseline, qos_next_sns, now_ms);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         if let Some(tags) = &mut self.member_tags {
-            self.peers[idx].member = Some(tags.admit());
+            peer.member = Some(tags.admit());
         }
+        self.by_src.admitted(src, idx);
         JoinOutcome::Admitted
     }
 
@@ -1942,8 +1959,10 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     #[cfg(feature = "reassembly")]
     pub fn record_peer_patch(&mut self, src: SocketAddr, announced: u8) {
         if let Some(idx) = self.find_by_src(src) {
-            self.peers[idx].patch =
-                crate::extpatch::negotiate_patch(crate::extpatch::CURRENT_PATCH, announced);
+            if let Some(peer) = self.peers.get_mut(idx) {
+                peer.patch =
+                    crate::extpatch::negotiate_patch(crate::extpatch::CURRENT_PATCH, announced);
+            }
         }
     }
 
@@ -2010,7 +2029,9 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let Some(idx) = self.find_by_src(src) else {
             return FrameIngest::UnknownPeer;
         };
-        let slot = &mut self.peers[idx];
+        let Some(slot) = self.peers.get_mut(idx) else {
+            return FrameIngest::UnknownPeer;
+        };
         // Liveness before validity (pico `_received = true` precedes the
         // SN gate): any frame from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
@@ -2075,7 +2096,9 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         let Some(idx) = self.find_by_src(src) else {
             return FragmentIngest::UnknownPeer;
         };
-        let slot = &mut self.peers[idx];
+        let Some(slot) = self.peers.get_mut(idx) else {
+            return FragmentIngest::UnknownPeer;
+        };
         // Liveness before validity (pico `_received = true` precedes the
         // SN gate): any fragment from a known address refreshes the lease.
         slot.last_seen_ms = now_ms;
@@ -2109,7 +2132,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// the sender only by its address.
     pub fn peer_zid_by_src(&self, src: SocketAddr) -> Option<&[u8]> {
         let idx = self.find_by_src(src)?;
-        self.peers[idx].zid.as_ref().map(|zid| zid.as_slice())
+        self.peers.get(idx)?.zid.as_ref().map(|zid| zid.as_slice())
     }
 
     /// Refresh a live peer's lease on any non-Join inbound message attributed
@@ -2118,9 +2141,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// `src`. The FSM is not driven (last_seen is Router-side state); the
     /// peer stays Active.
     pub fn refresh_by_src(&mut self, src: SocketAddr, now_ms: u64) -> bool {
-        match self.find_by_src(src) {
-            Some(idx) => {
-                self.peers[idx].last_seen_ms = now_ms;
+        match self
+            .find_by_src(src)
+            .and_then(|idx| self.peers.get_mut(idx))
+        {
+            Some(peer) => {
+                peer.last_seen_ms = now_ms;
                 true
             }
             None => false,
@@ -2189,7 +2215,9 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 on_evict(idx);
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                 self.retire_member(idx);
-                self.peers[idx].evict(reason, on_lost);
+                if let Some(peer) = self.peers.get_mut(idx) {
+                    peer.evict(reason, on_lost);
+                }
                 self.by_src.left(&src);
                 true
             }
@@ -2237,7 +2265,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             return 0;
         }
         let cap = self.config.lease_ms;
-        let mut expired = 0;
+        let mut expired = 0usize;
         for (idx, slot) in self.peers.iter_mut().enumerate() {
             if slot.is_free() {
                 continue;
@@ -2256,7 +2284,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 self.by_src.left(&src);
             }
             slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
-            expired += 1;
+            expired = expired.saturating_add(1);
         }
         expired
     }
@@ -2267,7 +2295,9 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
         if let Some(found) = self.by_src.lookup(&src) {
             if let Some(idx) = found {
                 debug_assert!(
-                    self.peers[idx].matches_src(src),
+                    self.peers
+                        .get(idx)
+                        .is_some_and(|peer| peer.matches_src(src)),
                     "the index names row {idx} for a member that row does not hold"
                 );
             }

@@ -623,7 +623,7 @@ impl NodeCensus {
             if !may_name_a_zid(head.kind) {
                 continue;
             }
-            let row = frames.row(start + at);
+            let row = frames.get(start + at).expect("a message the list holds");
             let frame: &PassiveFrame = &row;
             let Some((zid, whatami, kind)) = named_zid(frame) else {
                 continue;
@@ -1199,11 +1199,10 @@ impl NodeMemory {
                 return false;
             }
             let start = (mark.produced.max(first) - first) as usize;
-            if frames
-                .heads_from(start)
-                .enumerate()
-                .any(|(at, head)| may_name_a_zid(head.kind) && names_a_zid(&frames.row(start + at)))
-            {
+            if frames.heads_from(start).enumerate().any(|(at, head)| {
+                may_name_a_zid(head.kind)
+                    && names_a_zid(&frames.get(start + at).expect("a message the list holds"))
+            }) {
                 return false;
             }
         }

@@ -29,10 +29,10 @@
 //!
 //! # A bad table is a build error
 //!
-//! [`KeyCatalogue::new`] is a `const fn` that checks every property above, so a table the generator
-//! wrote wrongly stops the build that contains it, and a [`KeyCatalogue`] that exists is one whose
-//! reads cannot go out of range. [`KeyCatalogue::try_new`] is the same check that answers with the
-//! reason, for a test.
+//! [`KeyCatalogue::try_new`] is a `const fn` that checks every property above and answers with the
+//! reason, so a [`KeyCatalogue`] that exists is one whose reads cannot go out of range. The generated
+//! table is built by it in a `const` of the image's own crate, which stops the build on a refusal:
+//! a table the generator wrote wrongly is a build error there, and this crate holds no panic for it.
 
 /// How many [`EntityKind`]s there are: the width of a key's row of the selection table.
 pub const KINDS: usize = 5;
@@ -240,20 +240,14 @@ impl<'a> KeyCatalogue<'a> {
         }
     }
 
-    /// The table over the generated arrays. A bad table panics, and in a `const` it stops the
-    /// build, which is where the generated one is built.
-    pub const fn new(
-        text: &'a str,
-        ends: &'a [u16],
-        offsets: &'a [u16],
-        members: &'a [EntityId],
-        entities: &'a [EntityRow],
-    ) -> Self {
-        match Self::try_new(text, ends, offsets, members, entities) {
-            Ok(table) => table,
-            Err(error) => panic!("{}", error.describe()),
-        }
-    }
+    /// The table of no key: one row of offsets and nothing else, which every property holds.
+    pub const EMPTY: KeyCatalogue<'static> = KeyCatalogue {
+        text: "",
+        ends: &[],
+        offsets: &[0],
+        members: &[],
+        entities: &[],
+    };
 
     /// How many keys the set has.
     pub const fn key_count(&self) -> usize {
@@ -285,12 +279,13 @@ impl<'a> KeyCatalogue<'a> {
         let mut low = 0usize;
         let mut high = self.ends.len();
         while low < high {
-            let middle = low + (high - low) / 2;
+            // `low < high`: neither the difference nor the sum wraps.
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
             let (start, end) = self.span(middle)?;
             let key = self.text.as_bytes().get(start..end)?;
             match key.cmp(target) {
                 core::cmp::Ordering::Equal => return Some(KeyId::new(u16::try_from(middle).ok()?)),
-                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Less => low = middle.saturating_add(1),
                 core::cmp::Ordering::Greater => high = middle,
             }
         }
@@ -306,42 +301,41 @@ impl<'a> KeyCatalogue<'a> {
     /// local declaration asks, where [`Self::selection`] answers the one a message asks. A binary
     /// search, since entities are ascending by kind and then key.
     pub fn find_entity(&self, kind: EntityKind, key: KeyId) -> Option<EntityId> {
-        let (mut low, mut high) = (0usize, self.entities.len());
-        while low < high {
-            let middle = low + (high - low) / 2;
-            let row = self.entities.get(middle)?;
-            let order = (row.kind.index(), row.key.index()).cmp(&(kind.index(), key.index()));
-            match order {
-                core::cmp::Ordering::Equal => {
-                    return Some(EntityId::new(u16::try_from(middle).ok()?))
-                }
-                core::cmp::Ordering::Less => low = middle + 1,
-                core::cmp::Ordering::Greater => high = middle,
-            }
-        }
-        None
+        let wanted = (kind.index(), key.index());
+        let row = self
+            .entities
+            .binary_search_by(|row| (row.kind.index(), row.key.index()).cmp(&wanted))
+            .ok()?;
+        Some(EntityId::new(u16::try_from(row).ok()?))
     }
 
     /// The entities of `kind` whose pattern intersects `key`, in entity order: two reads of the
     /// offsets and one slice. Empty for an id that is not in the table.
     pub fn selection(&self, key: KeyId, kind: EntityKind) -> Selection<'a> {
-        let cell = key.index() * KINDS + kind.index();
-        let members = match (self.offsets.get(cell), self.offsets.get(cell + 1)) {
-            (Some(&from), Some(&to)) if key.index() < self.ends.len() => self
-                .members
-                .get(usize::from(from)..usize::from(to))
-                .unwrap_or(&[]),
-            _ => &[],
-        };
+        let members = self
+            .cell(key, kind)
+            .and_then(|cell| match self.offsets.get(cell..) {
+                Some(&[from, to, ..]) => self.members.get(usize::from(from)..usize::from(to)),
+                _ => None,
+            })
+            .unwrap_or(&[]);
         Selection { members }
+    }
+
+    /// The selection table's cell of `key` and `kind`, for a key of the table.
+    fn cell(&self, key: KeyId, kind: EntityKind) -> Option<usize> {
+        if key.index() >= self.ends.len() {
+            return None;
+        }
+        key.index().checked_mul(KINDS)?.checked_add(kind.index())
     }
 
     /// Where key `index` starts and ends in the text.
     fn span(&self, index: usize) -> Option<(usize, usize)> {
         let end = usize::from(*self.ends.get(index)?);
-        let start = match index {
-            0 => 0,
-            _ => usize::from(*self.ends.get(index - 1)?),
+        let start = match index.checked_sub(1) {
+            None => 0,
+            Some(previous) => usize::from(*self.ends.get(previous)?),
         };
         Some((start, end))
     }
@@ -366,36 +360,30 @@ impl<'a> KeyCatalogue<'a> {
 
     const fn check_keys(&self) -> Result<(), TableError> {
         let bytes = self.text.as_bytes();
-        let mut index = 0;
+        let mut ends = self.ends;
         let mut start = 0usize;
-        while index < self.ends.len() {
-            let end = self.ends[index] as usize;
+        // The key before this one; empty only before the first, since a key is never empty.
+        let mut previous: &[u8] = &[];
+        while let [end, rest @ ..] = ends {
+            let end = *end as usize;
             if end < start || end > bytes.len() {
                 return Err(TableError::KeyEnds);
             }
             if end == start {
                 return Err(TableError::KeyText);
             }
+            // `start < end <= bytes.len()`, checked above.
             let (head, _) = bytes.split_at(end);
             let (_, key) = head.split_at(start);
             if core::str::from_utf8(key).is_err() {
                 return Err(TableError::KeyText);
             }
-            if index > 0 {
-                let previous_end = start;
-                let previous_start = if index == 1 {
-                    0
-                } else {
-                    self.ends[index - 2] as usize
-                };
-                let (head, _) = bytes.split_at(previous_end);
-                let (_, previous) = head.split_at(previous_start);
-                if !bytes_less(previous, key) {
-                    return Err(TableError::KeyOrder);
-                }
+            if !previous.is_empty() && !bytes_less(previous, key) {
+                return Err(TableError::KeyOrder);
             }
+            previous = key;
             start = end;
-            index += 1;
+            ends = rest;
         }
         if start != bytes.len() {
             return Err(TableError::KeyEnds);
@@ -404,13 +392,13 @@ impl<'a> KeyCatalogue<'a> {
     }
 
     const fn check_entities(&self) -> Result<(), TableError> {
-        let mut index = 0;
-        while index < self.entities.len() {
-            if self.entities[index].key.index() >= self.ends.len() {
+        let mut rows = self.entities;
+        let mut before: Option<EntityRow> = None;
+        while let [this, rest @ ..] = rows {
+            if this.key.index() >= self.ends.len() {
                 return Err(TableError::EntityKey);
             }
-            if index > 0 {
-                let (before, this) = (self.entities[index - 1], self.entities[index]);
+            if let Some(before) = before {
                 let ascending = before.kind.index() < this.kind.index()
                     || (before.kind.index() == this.kind.index()
                         && before.key.index() < this.key.index());
@@ -418,39 +406,64 @@ impl<'a> KeyCatalogue<'a> {
                     return Err(TableError::EntityOrder);
                 }
             }
-            index += 1;
+            before = Some(*this);
+            rows = rest;
         }
         Ok(())
     }
 
     const fn check_selections(&self) -> Result<(), TableError> {
-        let cells = self.ends.len() * KINDS;
-        if self.offsets.len() != cells + 1
-            || self.offsets[0] != 0
-            || self.offsets[cells] as usize != self.members.len()
-        {
+        let Some(cells) = self.ends.len().checked_mul(KINDS) else {
+            return Err(TableError::Offsets);
+        };
+        let [first, cell_ends @ ..] = self.offsets else {
+            return Err(TableError::Offsets);
+        };
+        let [.., last] = self.offsets else {
+            return Err(TableError::Offsets);
+        };
+        if cell_ends.len() != cells || *first != 0 || *last as usize != self.members.len() {
             return Err(TableError::Offsets);
         }
-        let mut cell = 0;
-        while cell < cells {
-            let from = self.offsets[cell] as usize;
-            let to = self.offsets[cell + 1] as usize;
+        let mut from = 0usize;
+        let mut kind = 0usize;
+        let mut rest = cell_ends;
+        while let [to, tail @ ..] = rest {
+            let to = *to as usize;
             if to < from || to > self.members.len() {
                 return Err(TableError::Offsets);
             }
-            let kind = cell % KINDS;
-            let mut at = from;
-            while at < to {
-                let member = self.members[at].index();
-                if member >= self.entities.len() || self.entities[member].kind.index() != kind {
+            // `from <= to <= self.members.len()`, checked above.
+            let (head, _) = self.members.split_at(to);
+            let (_, mut selected) = head.split_at(from);
+            let mut before: Option<usize> = None;
+            while let [member, more @ ..] = selected {
+                let member = member.index();
+                if member >= self.entities.len() {
                     return Err(TableError::Members);
                 }
-                if at > from && self.members[at - 1].index() >= member {
+                let (_, from_member) = self.entities.split_at(member);
+                let [row, ..] = from_member else {
+                    return Err(TableError::Members);
+                };
+                if row.kind.index() != kind {
                     return Err(TableError::Members);
                 }
-                at += 1;
+                if let Some(before) = before {
+                    if before >= member {
+                        return Err(TableError::Members);
+                    }
+                }
+                before = Some(member);
+                selected = more;
             }
-            cell += 1;
+            // The next cell's kind: the cells of a key run through the kinds in order.
+            kind = kind.wrapping_add(1);
+            if kind == KINDS {
+                kind = 0;
+            }
+            from = to;
+            rest = tail;
         }
         Ok(())
     }
@@ -458,12 +471,13 @@ impl<'a> KeyCatalogue<'a> {
 
 /// Whether `a` sorts strictly before `b` by bytes, which `Ord` on slices is not in a `const`.
 const fn bytes_less(a: &[u8], b: &[u8]) -> bool {
-    let mut i = 0;
-    while i < a.len() && i < b.len() {
-        if a[i] != b[i] {
-            return a[i] < b[i];
+    let (mut a, mut b) = (a, b);
+    while let ([x, a_rest @ ..], [y, b_rest @ ..]) = (a, b) {
+        if *x != *y {
+            return *x < *y;
         }
-        i += 1;
+        a = a_rest;
+        b = b_rest;
     }
     a.len() < b.len()
 }
@@ -495,7 +509,10 @@ pub(crate) mod tests {
     ];
     /// The three-key table of these tests, for the tests of what is built on a catalogue.
     pub(crate) const TABLE: KeyCatalogue<'static> =
-        KeyCatalogue::new(TEXT, &ENDS, &OFFSETS, &MEMBERS, &ENTITIES);
+        match KeyCatalogue::try_new(TEXT, &ENDS, &OFFSETS, &MEMBERS, &ENTITIES) {
+            Ok(table) => table,
+            Err(_) => panic!("the test table is a table"),
+        };
 
     fn rebuilt(
         text: &str,

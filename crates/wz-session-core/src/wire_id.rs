@@ -71,7 +71,8 @@ pub type EntityId = u32;
 /// under a lock can apply it directly; [`u32_id_taken`] reads the result.
 pub const fn next_u32_id(held: u64) -> Option<u64> {
     if held <= u32::MAX as u64 {
-        Some(held + 1)
+        // `held` is at most `u32::MAX` here, so the next id fits.
+        Some(held.saturating_add(1))
     } else {
         None
     }

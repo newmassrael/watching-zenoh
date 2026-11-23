@@ -68,18 +68,21 @@ impl OldestInstant {
             return;
         };
         while let Some(&(first, end)) = self.runs.back() {
-            if !later(&instant_of, end - 1, at) {
+            // A run holds one row at least: `end` is past `first`.
+            let last = end.saturating_sub(1);
+            if !later(&instant_of, last, at) {
                 break;
             }
             // The candidates of one run carry instants that never fall, so the
             // ones later than `at` are a tail of it: the first is found by halving.
-            let (mut low, mut high) = (first, end - 1);
+            let (mut low, mut high) = (first, last);
             while low < high {
-                let mid = low + (high - low) / 2;
+                // `low < high`: neither the difference nor the sum wraps.
+                let mid = low.saturating_add(high.saturating_sub(low) / 2);
                 if later(&instant_of, mid, at) {
                     high = mid;
                 } else {
-                    low = mid + 1;
+                    low = mid.saturating_add(1);
                 }
             }
             if low == first {
@@ -92,18 +95,19 @@ impl OldestInstant {
             }
         }
         match self.runs.back_mut() {
-            Some(back) if back.1 == row => back.1 = row + 1,
-            _ => self.runs.push_back((row, row + 1)),
+            Some(back) if back.1 == row => back.1 = row.saturating_add(1),
+            _ => self.runs.push_back((row, row.saturating_add(1))),
         }
     }
 
     /// The rows up to and including produced-index `row` were released.
     pub fn release_through(&mut self, row: u64) {
         while let Some(front) = self.runs.front_mut() {
-            if front.1 <= row + 1 {
+            let next = row.saturating_add(1);
+            if front.1 <= next {
                 self.runs.pop_front();
             } else {
-                front.0 = front.0.max(row + 1);
+                front.0 = front.0.max(next);
                 break;
             }
         }

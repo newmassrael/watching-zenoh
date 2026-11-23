@@ -142,8 +142,13 @@ impl RowShape {
             align_of::<Row>() <= ARENA_ALIGN && align_of::<Slot>() <= ARENA_ALIGN,
             "a row asks for more alignment than an arena's spans start on"
         );
+        let link_end = match link_at.checked_add(size_of::<Link>()) {
+            Some(end) => end,
+            None => usize::MAX,
+        };
         assert!(
-            link_at % align_of::<Link>() == 0 && link_at + size_of::<Link>() <= size_of::<Slot>(),
+            matches!(link_at.checked_rem(align_of::<Link>()), Some(0))
+                && link_end <= size_of::<Slot>(),
             "a pool's row keeps its link inside it, aligned for it"
         );
         Self {
@@ -214,8 +219,15 @@ struct PoolState {
 /// start on an arena's alignment.
 const STATE_BYTES: usize = match Arena::span(size_of::<PoolState>()) {
     Some(bytes) => bytes,
-    None => panic!("a pool's state fits the address space"),
+    // Never taken: the assertion below stops the build that would take it.
+    None => usize::MAX,
 };
+
+// A pool's state fits the address space, or the build does not compile.
+const _: () = assert!(
+    Arena::span(size_of::<PoolState>()).is_some(),
+    "a pool's state fits the address space"
+);
 
 /// A shared pool, as the core reaches it: the start of the span it was lent (`RawSpace::lent_pool`).
 ///
@@ -240,10 +252,15 @@ impl Pool {
     fn slot(&self, shape: &RowShape, at: u16) -> NonNull<u8> {
         debug_assert!(at < self.state().top.get(), "a row past those written");
         // SAFETY: `at` is below `top`, at most the pool's rows, so the row lies inside the span:
-        // its rows start one state's span from its start, each `slot_bytes` long.
+        // its rows start one state's span from its start, each `slot_bytes` long. The offset is
+        // below the pool's bytes, which `RowShape::pool_bytes` summed checked when it was laid,
+        // so neither step wraps.
         unsafe {
-            self.base
-                .add(STATE_BYTES + usize::from(at) * shape.slot_bytes)
+            self.base.add(
+                usize::from(at)
+                    .wrapping_mul(shape.slot_bytes)
+                    .wrapping_add(STATE_BYTES),
+            )
         }
     }
 
@@ -296,7 +313,8 @@ impl Pool {
                     state.refused.set(state.refused.get().saturating_add(1));
                     return None;
                 }
-                state.top.set(top + 1);
+                // Below `rows`, so one more is a row of the pool.
+                state.top.set(top.saturating_add(1));
                 self.set_link(
                     shape,
                     top,
@@ -317,7 +335,7 @@ impl Pool {
         link.generation = link.generation.wrapping_add(1);
         link.next = next;
         self.set_link(shape, at, link);
-        let used = state.used.get() + 1;
+        let used = state.used.get().saturating_add(1);
         state.used.set(used);
         state.peak.set(state.peak.get().max(used));
         Some((at, link.generation))
@@ -336,7 +354,7 @@ impl Pool {
         link.next = state.free.get();
         self.set_link(shape, at, link);
         state.free.set(at);
-        state.used.set(state.used.get() - 1);
+        state.used.set(state.used.get().saturating_sub(1));
     }
 
     /// Whether `handle` names a row handed out by handle and held since.
@@ -355,7 +373,7 @@ impl Pool {
             rows: usize::from(state.rows),
             used: usize::from(state.used.get()),
             peak: usize::from(state.peak.get()),
-            untouched: usize::from(state.rows - state.top.get()),
+            untouched: usize::from(state.rows.saturating_sub(state.top.get())),
             refused: u32::from(state.refused.get()),
         }
     }
@@ -534,7 +552,7 @@ impl RawRows {
                 // SAFETY: `len` is below the span's rows, so the row lies inside the span, past the
                 // rows that hold items.
                 Lay::Own { base, rows } if self.len < rows => {
-                    Some(unsafe { base.add(self.len() * shape.item_bytes) })
+                    Some(unsafe { own_row(base, shape, self.len()) })
                 }
                 Lay::Own { .. } | Lay::Bare => None,
                 Lay::Pool(pool) => match pool.take(shape, NIL) {
@@ -548,7 +566,8 @@ impl RawRows {
         };
         match row {
             Some(row) => {
-                self.len += 1;
+                // Below the bound and the span's rows, both at most `MAX_POOL_ROWS`.
+                self.len = self.len.saturating_add(1);
                 Some(row)
             }
             None => {
@@ -596,7 +615,7 @@ impl RawRows {
         let place = (*at)?;
         let (row, next) = match self.lay() {
             Lay::Own { base, .. } => {
-                let next = place.at + 1;
+                let next = place.at.saturating_add(1);
                 // SAFETY: a place of a walk is below the table's length, inside its span.
                 let row = unsafe { own_row(base, shape, usize::from(place.at)) };
                 (row, (next < self.len).then_some(next))
@@ -662,16 +681,19 @@ impl RawRows {
                     // SAFETY: the row holds an item, dropped once, and the table no longer counts it.
                     unsafe { drop_item(shape, own_row(base, shape, at)) };
                 }
+                // A place of a walk is below the length, so the rows after it are `after`, exact.
+                let after = len.saturating_sub(at).saturating_sub(1);
                 // SAFETY: the rows past `at` up to the old length hold items, inside the span; they
-                // move down by one row as bytes, over the row that now holds none.
+                // move down by one row as bytes, over the row that now holds none. Their bytes are
+                // within the span's, which `RowShape::own_bytes` counted checked.
                 unsafe {
                     ptr::copy(
-                        own_row(base, shape, at + 1).as_ptr(),
+                        own_row(base, shape, at.saturating_add(1)).as_ptr(),
                         own_row(base, shape, at).as_ptr(),
-                        (len - at - 1) * shape.item_bytes,
+                        after.wrapping_mul(shape.item_bytes),
                     );
                 }
-                self.len = (len - 1) as u16;
+                self.len = len.saturating_sub(1) as u16;
                 (place.at < self.len).then_some(place)
             }
             Lay::Pool(pool) => {
@@ -681,7 +703,7 @@ impl RawRows {
                 } else {
                     pool.set_next(shape, place.prev, next);
                 }
-                self.len -= 1;
+                self.len = self.len.saturating_sub(1);
                 if drop {
                     // SAFETY: the row holds an item, dropped once; no table links to it any more,
                     // and it goes back after, so a drop that panics leaks the row.
@@ -724,15 +746,18 @@ impl RawRows {
 /// # Safety
 /// `at` is at most the span's rows: the row lies inside the span or at its end.
 unsafe fn own_row(base: NonNull<u8>, shape: &RowShape, at: usize) -> NonNull<u8> {
-    // SAFETY: the caller's contract.
-    unsafe { base.add(at * shape.item_bytes) }
+    // SAFETY: the caller's contract. The offset is at most the span's bytes, which
+    // `RowShape::own_bytes` counted checked when it was carved, so the product does not wrap.
+    unsafe { base.add(at.wrapping_mul(shape.item_bytes)) }
 }
 
 /// The start and end of `rows` rows of `shape` laid after `from` bytes of a span, aligned for
 /// them. `None` past [`MAX_POOL_ROWS`] or the address space.
 const fn place(from: usize, shape: &RowShape, rows: usize) -> Option<(usize, usize)> {
-    let start = match from.checked_add(shape.item_align - 1) {
-        Some(up) => up & !(shape.item_align - 1),
+    // An alignment is a power of two, so one less is its mask, exact.
+    let mask = shape.item_align.saturating_sub(1);
+    let start = match from.checked_add(mask) {
+        Some(up) => up & !mask,
         None => return None,
     };
     match shape.own_bytes(rows) {
@@ -783,7 +808,8 @@ impl OwnSpans {
 
     #[inline(never)]
     fn carve_raw(&mut self, shape: &RowShape, rows: usize) -> Result<RawSpace, LendRefused> {
-        let left = self.bytes - self.laid;
+        // What is laid is at most the span: `laid` only moves to an end checked against it.
+        let left = self.bytes.saturating_sub(self.laid);
         match place(self.laid, shape, rows) {
             Some((start, end)) if end <= self.bytes => {
                 self.laid = end;
@@ -797,7 +823,7 @@ impl OwnSpans {
                 })
             }
             placed => Err(LendRefused::Exhausted {
-                asked: placed.map(|(_, end)| end - self.laid),
+                asked: placed.map(|(_, end)| end.saturating_sub(self.laid)),
                 left,
             }),
         }
@@ -1339,7 +1365,7 @@ impl<'a> RowLender<'a> {
             return;
         }
         self.span = None;
-        let left = self.arena.bytes() - self.arena.high_water();
+        let left = self.arena.bytes().saturating_sub(self.arena.high_water());
         match bytes.map(|bytes| OwnSpans::lent(&mut *self.arena, bytes)) {
             Some(Ok(span)) => self.span = Some(span),
             Some(Err(why)) => self.refused = Some(why),
@@ -1609,7 +1635,7 @@ impl<'a, K: RowKind> Iterator for Rows<'a, K> {
     #[inline]
     fn next(&mut self) -> Option<K::Ref<'a>> {
         let (_, row) = self.raw.step(K::SHAPE, &mut self.at)?;
-        self.left -= 1;
+        self.left = self.left.saturating_sub(1);
         // SAFETY: the row is one the table holds, holding an item, and the table is borrowed for
         // `'a`, so the row is not written or given back meanwhile.
         Some(unsafe { K::get(row) })
@@ -1638,7 +1664,7 @@ impl<'a, K: RowKind> Iterator for RowsMut<'a, K> {
     #[inline]
     fn next(&mut self) -> Option<K::Mut<'a>> {
         let (_, row) = self.raw.step(K::SHAPE, &mut self.at)?;
-        self.left -= 1;
+        self.left = self.left.saturating_sub(1);
         // SAFETY: the table is borrowed mutably for `'a` by this walk alone, which visits each row
         // once, so no other reference to the row is handed out meanwhile.
         Some(unsafe { K::get_mut(row) })

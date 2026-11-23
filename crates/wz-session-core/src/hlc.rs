@@ -110,7 +110,8 @@ impl HlcCore {
     ) -> Result<(), ForwardStepRefused> {
         let now = now.as_word() & TIME_MASK;
         let remote = remote.as_word();
-        if remote > now && remote - now > max_delta.as_word() {
+        // Zero when the remote word is not ahead, which no bound refuses.
+        if remote.saturating_sub(now) > max_delta.as_word() {
             return Err(ForwardStepRefused);
         }
         let mut last = self.last.load(Ordering::Acquire);

@@ -394,7 +394,8 @@ where
 {
     let mut pos = 0usize;
     loop {
-        let msg = &bytes[pos..];
+        // `pos` steps by what each message took of the bytes, so it stays within them.
+        let msg = bytes.get(pos..).unwrap_or_default();
         #[cfg(feature = "alloc")]
         let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
         let next = dispatch_multicast_message(
@@ -413,7 +414,7 @@ where
             return next;
         }
         match multicast_message_len(msg) {
-            Some(consumed) => pos += consumed,
+            Some(consumed) => pos = pos.saturating_add(consumed),
             None => return MulticastRxNext::Done,
         }
     }
@@ -905,14 +906,14 @@ where
     let records_at = resume.unwrap_or(payload_at).min(bytes.len());
     let mut records = crate::multicast_dispatch::MemberRecords::of(dispatcher, src, on_event);
     let stopped_at = match crate::driver_loop::walk_lent_payload(
-        &bytes[records_at..],
+        bytes.get(records_at..).unwrap_or_default(),
         reliable,
         sn,
         priority,
         may_stop,
         &mut records,
     ) {
-        Ok((read, true)) => Some(records_at + read),
+        Ok((read, true)) => Some(records_at.saturating_add(read)),
         _ => None,
     };
     FrameRead {
@@ -1107,7 +1108,7 @@ fn walk_multicast_batch_reassembling<
     // at offset zero instead of the one that produced the verdict.
     let mut pos = 0usize;
     loop {
-        let msg = &bytes[pos..];
+        let msg = bytes.get(pos..).unwrap_or_default();
         #[cfg(feature = "alloc")]
         let msg_unit = origin.and_then(|unit| unit.subslice(pos..bytes.len()));
         // A member the message drops takes its chains with it, aborted before
@@ -1127,7 +1128,7 @@ fn walk_multicast_batch_reassembling<
         match next {
             MulticastRxNext::Done => match multicast_message_len(msg) {
                 Some(consumed) => {
-                    pos += consumed;
+                    pos = pos.saturating_add(consumed);
                     continue;
                 }
                 None => return,
@@ -1221,7 +1222,7 @@ fn reassembling_tail<
                     head.more,
                     head.priority(),
                     head.markers(),
-                    &msg[payload_at..],
+                    msg.get(payload_at..).unwrap_or_default(),
                     now_ms,
                     on_event,
                 );
@@ -1487,7 +1488,7 @@ where
             });
         }
         first = false;
-        let msg = &bytes[at..];
+        let msg = bytes.get(at..).unwrap_or_default();
         let next = if msg.first().map(|h| h & 0x1f) == Some(wire_const::T_MID_FRAME) {
             let read = dispatch_multicast_frame_in_place(
                 dispatcher,
@@ -1523,7 +1524,7 @@ where
             )
         };
         match next {
-            MulticastRxNext::Done => at += multicast_message_len(msg)?,
+            MulticastRxNext::Done => at = at.saturating_add(multicast_message_len(msg)?),
             other => {
                 reassembling_tail(dispatcher, reasm, msg, other, src, now_ms, on_event, stats);
                 return None;

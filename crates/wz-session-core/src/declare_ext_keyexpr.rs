@@ -114,7 +114,7 @@ pub fn build_ext_wireexpr(
 /// and the owned entry's are made in one place.
 #[cfg(feature = "alloc")]
 pub fn ext_wireexpr_body(mapping_id: crate::wire_id::ExprId, suffix: &str) -> Vec<u8> {
-    let mut body: Vec<u8> = Vec::with_capacity(2 + suffix.len());
+    let mut body: Vec<u8> = Vec::with_capacity(suffix.len().saturating_add(2));
     let has_suffix = if suffix.is_empty() {
         0
     } else {
@@ -216,7 +216,10 @@ pub fn set_ext_keyexpr_literal(
     if read_ext_keyexpr(Some(exts)).is_none() {
         return Ok(false);
     }
-    exts[index].body = build_ext_keyexpr(literal)?.body;
+    let Some(entry) = exts.get_mut(index) else {
+        return Ok(false);
+    };
+    entry.body = build_ext_keyexpr(literal)?.body;
     Ok(true)
 }
 

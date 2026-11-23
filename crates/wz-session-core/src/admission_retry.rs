@@ -86,7 +86,7 @@ impl AdmissionRetry {
     /// The longest the delays of this retry add up to, in milliseconds: the time a publish that
     /// finds no room spends waiting, besides the passes themselves.
     pub const fn max_wait_ms(self) -> u32 {
-        self.attempts as u32 * self.delay_ms as u32
+        (self.attempts as u32).saturating_mul(self.delay_ms as u32)
     }
 
     /// Whether this value is one [`Self::new`] would build. The fields are public, so a value

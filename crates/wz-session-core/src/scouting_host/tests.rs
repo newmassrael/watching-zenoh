@@ -152,7 +152,9 @@ fn a_table_keeps_locators_to_the_length_its_runtime_limits_state() {
     let long = "tcp/10.0.0.1:744700";
     assert_eq!((fits.len(), long.len()), (18, 19));
     let locator_len = table.locator_len;
-    let row = table.staged();
+    let row = table
+        .staged()
+        .expect("the table keeps a row past those it records");
     row.reset(0x09, None, [0x42u8].into());
     row.keep(fits, locator_len);
     row.keep(long, locator_len);

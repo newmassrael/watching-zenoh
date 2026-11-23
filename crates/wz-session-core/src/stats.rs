@@ -190,6 +190,15 @@ impl StatMedium {
         self as usize
     }
 
+    /// This medium's entry of a `[_; StatMedium::COUNT]` counter array.
+    pub fn of<T>(self, counters: &[T; Self::COUNT]) -> &T {
+        let [net, shm] = counters;
+        match self {
+            StatMedium::Net => net,
+            StatMedium::Shm => shm,
+        }
+    }
+
     /// Upstream's label for this medium — the JSON key it splits `n_msgs` on,
     /// and the OpenMetrics label value wz renders it as.
     pub const fn label(self) -> &'static str {
@@ -222,6 +231,15 @@ impl StatSpace {
     /// This variant's index into a `[_; StatSpace::COUNT]` counter array.
     pub const fn index(self) -> usize {
         self as usize
+    }
+
+    /// This space's entry of a `[_; StatSpace::COUNT]` counter array.
+    pub fn of<T>(self, counters: &[T; Self::COUNT]) -> &T {
+        let [admin, user] = counters;
+        match self {
+            StatSpace::Admin => admin,
+            StatSpace::User => user,
+        }
     }
 
     /// Upstream's label for this space.
@@ -281,6 +299,17 @@ impl StatMessage {
     /// This variant's index into a `[_; StatMessage::COUNT]` counter array.
     pub const fn index(self) -> usize {
         self as usize
+    }
+
+    /// This kind's entry of a `[_; StatMessage::COUNT]` counter array.
+    pub fn of<T>(self, counters: &[T; Self::COUNT]) -> &T {
+        let [put, del, query, reply] = counters;
+        match self {
+            StatMessage::Put => put,
+            StatMessage::Del => del,
+            StatMessage::Query => query,
+            StatMessage::Reply => reply,
+        }
     }
 
     /// Upstream's infix for this kind — the `<msg>` in `{tx,rx}_z_<msg>_msgs`.
@@ -596,24 +625,20 @@ pub struct DirectionReport {
 impl DirectionReport {
     /// The network-message count on one medium.
     pub fn n_msgs_on(&self, medium: StatMedium) -> usize {
-        self.n_msgs[medium.index()]
+        *medium.of(&self.n_msgs)
     }
 
     /// The payload counters for one (kind, space).
     pub fn payload_of(&self, message: StatMessage, space: StatSpace) -> PayloadCounters {
-        self.payload[message.index()][space.index()]
+        *space.of(message.of(&self.payload))
     }
 
     /// Network messages across every medium — the quantity a caller that does
     /// not care about the split wants, derived rather than counted separately.
     pub fn n_msgs_total(&self) -> usize {
-        let mut total = 0;
-        let mut i = 0;
-        while i < StatMedium::COUNT {
-            total += self.n_msgs[i];
-            i += 1;
-        }
-        total
+        self.n_msgs
+            .iter()
+            .fold(0, |total, &msgs| total.saturating_add(msgs))
     }
 
     /// Add `other`'s counters to these: the report of a session that stands on several links,
@@ -720,11 +745,17 @@ impl DirectionCounters {
     /// One network message, classified.
     #[inline]
     fn inc_network(&self, class: &NetworkStatsClass) {
-        self.n_msgs[class.medium.index()].fetch_add(1, Ordering::Relaxed);
+        class
+            .medium
+            .of(&self.n_msgs)
+            .fetch_add(1, Ordering::Relaxed);
         if let Some(p) = class.payload {
-            let (m, s) = (p.message.index(), p.space.index());
-            self.payload_msgs[m][s].fetch_add(1, Ordering::Relaxed);
-            self.payload_pl_bytes[m][s].fetch_add(p.pl_bytes, Ordering::Relaxed);
+            p.space
+                .of(p.message.of(&self.payload_msgs))
+                .fetch_add(1, Ordering::Relaxed);
+            p.space
+                .of(p.message.of(&self.payload_pl_bytes))
+                .fetch_add(p.pl_bytes, Ordering::Relaxed);
         }
     }
 
@@ -753,17 +784,14 @@ impl DirectionCounters {
 
     fn report(&self) -> DirectionReport {
         let load = |a: &AtomicUsize| a.load(Ordering::Relaxed);
-        let mut n_msgs = [0usize; StatMedium::COUNT];
-        for medium in StatMedium::ALL {
-            n_msgs[medium.index()] = load(&self.n_msgs[medium.index()]);
-        }
+        let n_msgs = self.n_msgs.each_ref().map(load);
         let mut payload = [[PayloadCounters::default(); StatSpace::COUNT]; StatMessage::COUNT];
-        for message in StatMessage::ALL {
-            for space in StatSpace::ALL {
-                let (m, s) = (message.index(), space.index());
-                payload[m][s] = PayloadCounters {
-                    msgs: load(&self.payload_msgs[m][s]),
-                    pl_bytes: load(&self.payload_pl_bytes[m][s]),
+        let kinds = self.payload_msgs.iter().zip(&self.payload_pl_bytes);
+        for (row, (msgs, bytes)) in payload.iter_mut().zip(kinds) {
+            for (cell, (msgs, bytes)) in row.iter_mut().zip(msgs.iter().zip(bytes)) {
+                *cell = PayloadCounters {
+                    msgs: load(msgs),
+                    pl_bytes: load(bytes),
                 };
             }
         }

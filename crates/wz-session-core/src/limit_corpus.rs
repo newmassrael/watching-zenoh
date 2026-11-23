@@ -224,7 +224,7 @@ pub fn cases() -> Vec<LimitCase> {
         cases.push(alike(
             "a limit of a session past its domain",
             format!("{{ {SUBS}: {past} }}"),
-            refused(outside(SUBS, domain, LimitValue::Integer(past))),
+            stated(SUBS, domain, LimitValue::Integer(past)),
         ));
     }
     // Refused by name before its scope or its value is asked, whatever the creator holds.
@@ -327,7 +327,7 @@ fn restated(
         LimitValue::Integer(value) => value.saturating_add(1),
         LimitValue::Unbounded => 1,
     });
-    (other, refused(outside(limit, domain, other)))
+    (other, stated(limit, domain, other))
 }
 
 /// The count one past the most `domain` allows, where that count is not the quota no bound is
@@ -339,11 +339,13 @@ fn past(domain: LimitDomain) -> Option<usize> {
         .filter(|past| !Quota::at_most(*past).is_unbounded())
 }
 
-/// The refusal of `value` for the limit `limit`, whose domain leaves it out.
-fn outside(limit: &'static str, domain: LimitDomain, value: LimitValue) -> Reason<'static> {
+/// What a statement of `value` for the limit `limit` resolves to: its refusal, naming why, where
+/// `domain` leaves the value out, which is every value the cases ask this of, and the value
+/// selected where it holds it.
+fn stated(limit: &'static str, domain: LimitDomain, value: LimitValue) -> Expected {
     match domain.check(value) {
-        Err(why) => Reason::LimitOutsideDomain { limit, value, why },
-        Ok(()) => panic!("the domain of `{limit}` holds `{value}`"),
+        Err(why) => refused(Reason::LimitOutsideDomain { limit, value, why }),
+        Ok(()) => Expected::Selected(vec![(limit, value)]),
     }
 }
 

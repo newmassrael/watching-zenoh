@@ -795,8 +795,7 @@ mod query_and_reply {
     fn response(i: usize) -> Vec<u8> {
         wz_session_core::response_build::ResponseReplyBuilder::new(
             RID,
-            0,
-            Some(KEY),
+            wz_session_core::wire_key::WireKey::literal(KEY).expect("a literal key"),
             &payload_of(i),
         )
         .build()

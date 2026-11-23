@@ -216,10 +216,14 @@ fn layer3_response_err_with_encoding_byte_equivalent() {
     // (response_build.rs:994-1001 panics otherwise), so the shape production emits is
     // N-flag + suffix + E-flag encoding — not the bare envelope the sibling test drives.
     const KEYEXPR: &str = "demo/err";
-    let owned = ResponseErrBuilder::new(0, 0, Some(KEYEXPR), PAYLOAD)
-        .encoding(ENCODING_ID, None)
-        .build()
-        .expect("wz err response with encoding builds");
+    let owned = ResponseErrBuilder::new(
+        0,
+        wz_session_core::wire_key::WireKey::literal(KEYEXPR).expect("a literal key"),
+        PAYLOAD,
+    )
+    .encoding(ENCODING_ID, None)
+    .build()
+    .expect("wz err response with encoding builds");
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned response")

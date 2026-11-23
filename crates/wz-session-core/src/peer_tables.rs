@@ -297,16 +297,16 @@ impl PeerTables<Lent> {
             tokens,
         ];
         let mut sum = 0usize;
-        let mut at = 0;
-        while at < spans.len() {
-            sum = match spans[at] {
-                Some(span) => match sum.checked_add(span) {
+        let mut rest: &[Option<usize>] = &spans;
+        while let [span, tail @ ..] = rest {
+            sum = match span {
+                Some(span) => match sum.checked_add(*span) {
                     Some(sum) => sum,
                     None => return None,
                 },
                 None => return None,
             };
-            at += 1;
+            rest = tail;
         }
         Some(sum)
     }
@@ -597,16 +597,16 @@ impl PeerPools {
 /// The sum of `spans`, or `None` when one is `None` or the sum is past the address space.
 const fn sum_spans(spans: &[Option<usize>]) -> Option<usize> {
     let mut sum = 0usize;
-    let mut at = 0;
-    while at < spans.len() {
-        sum = match spans[at] {
-            Some(span) => match sum.checked_add(span) {
+    let mut rest = spans;
+    while let [span, tail @ ..] = rest {
+        sum = match span {
+            Some(span) => match sum.checked_add(*span) {
                 Some(sum) => sum,
                 None => return None,
             },
             None => return None,
         };
-        at += 1;
+        rest = tail;
     }
     Some(sum)
 }

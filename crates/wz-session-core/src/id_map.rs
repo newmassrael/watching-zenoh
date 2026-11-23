@@ -181,7 +181,7 @@ impl<V, const N: usize> IdMap<V> for FixedIdMap<V, N> {
         if let Some((_, held)) = self.rows.iter_mut().find(|(k, _)| *k == id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.rows.len() + 1) {
+        if !admits(self.rows.len().saturating_add(1)) {
             self.refused = self.refused.saturating_add(1);
             return Err(CapacityFull(value));
         }
@@ -314,7 +314,7 @@ impl<V, const N: usize> IdMap<V> for PooledIdMap<V, N> {
         if let Some(held) = self.find_mut(id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.rows.len() + 1) {
+        if !admits(self.rows.len().saturating_add(1)) {
             self.rows.count_refused();
             return Err(CapacityFull(value));
         }
@@ -412,7 +412,7 @@ impl<V> IdMap<V> for GrowableIdMap<V> {
         if let Some(held) = self.map.get_mut(&id) {
             return Ok(Some(core::mem::replace(held, value)));
         }
-        if !admits(self.map.len() + 1) {
+        if !admits(self.map.len().saturating_add(1)) {
             self.refused = self.refused.saturating_add(1);
             return Err(CapacityFull(value));
         }

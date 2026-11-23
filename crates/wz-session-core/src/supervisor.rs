@@ -224,12 +224,13 @@ impl<const N: usize> Supervisor<N> {
         self.watched
     }
 
+    // `watched` is at most `N`, which `watching` holds it to.
     fn held(&self) -> &[Checkpoint] {
-        &self.checkpoints[..self.watched]
+        self.checkpoints.get(..self.watched).unwrap_or_default()
     }
 
     fn held_mut(&mut self) -> &mut [Checkpoint] {
-        &mut self.checkpoints[..self.watched]
+        self.checkpoints.get_mut(..self.watched).unwrap_or_default()
     }
 
     /// Begin supervising checkpoint `index`: its deadline is `timeout` ticks after `now`, and
