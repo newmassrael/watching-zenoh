@@ -216,6 +216,31 @@ pub(crate) fn begin_frame(
     parent_flags: u8,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
+    write_frame_head(&mut TxSink::new(buf), sn, parent_flags, ext_qos)
+}
+
+/// The Frame header [`begin_frame`] writes, into any sink: a sink that cannot
+/// refuse a write (`VecSink`) gets an error type with no value, so its caller
+/// holds no failure to handle.
+#[cfg(any(
+    feature = "alloc",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
+))]
+fn write_frame_head<K: sce_forge_runtime::codec::SceSink>(
+    w: &mut K,
+    sn: u64,
+    parent_flags: u8,
+    ext_qos: Option<Priority>,
+) -> Result<(), K::Error> {
     // The QoS ext, when present, is the chain's one entry; the document sets
     // the header's Z flag from the chain and clears the entry's own.
     #[cfg(feature = "transport-qos")]
@@ -236,10 +261,7 @@ pub(crate) fn begin_frame(
         sn,
         extensions,
     };
-    wz_codecs::transport_frame_header::TransportFrameHeaderWire::encode_source(
-        &head,
-        &mut TxSink::new(buf),
-    )
+    wz_codecs::transport_frame_header::TransportFrameHeaderWire::encode_source(&head, w)
 }
 
 /// R311jq — derive the link-driver [`Reliability`] of an already-encoded
@@ -1425,12 +1447,24 @@ pub fn build_fragment_wire(
             .saturating_add(usize::from(drop_marker))
             .saturating_add(qos_reserve),
     );
-    write_fragment_head(&mut wire, sn, reliable, more, first, drop_marker, ext_qos)
-        .expect("a Vec grows, so its sink is infallible");
+    let head = write_fragment_head_to(
+        &mut sce_forge_runtime::codec::VecSink::new(&mut wire),
+        sn,
+        reliable,
+        more,
+        first,
+        drop_marker,
+        ext_qos,
+    );
+    // A growing vector refuses no write: the error type has no value.
+    match head {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     // The payload is the codec's raw tail (`Fragment::encode` is
     // `write_vle_u64 + write_bytes`, no length prefix), so appending it after
     // the head is the bytes the codec writes for the two together.
-    TxBuf::append(&mut wire, payload).expect("a Vec grows, so its sink is infallible");
+    wire.extend_from_slice(payload);
     wire
 }
 
@@ -1454,6 +1488,29 @@ pub fn write_fragment_head(
     drop_marker: bool,
     ext_qos: Option<Priority>,
 ) -> Result<(), CodecError> {
+    write_fragment_head_to(
+        &mut TxSink::new(buf),
+        sn,
+        reliable,
+        more,
+        first,
+        drop_marker,
+        ext_qos,
+    )
+}
+
+/// The Fragment head [`write_fragment_head`] writes, into any sink: a sink
+/// that cannot refuse a write gets an error type with no value.
+#[cfg(all(feature = "codec-fragment", feature = "reassembly"))]
+fn write_fragment_head_to<K: sce_forge_runtime::codec::SceSink>(
+    w: &mut K,
+    sn: u64,
+    reliable: bool,
+    more: bool,
+    first: bool,
+    drop_marker: bool,
+    ext_qos: Option<Priority>,
+) -> Result<(), K::Error> {
     use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
 
     let mut header = wire_const::T_MID_FRAGMENT;
@@ -1496,10 +1553,7 @@ pub fn write_fragment_head(
         sn,
         extensions: Bounded::new(chain.get(..len).unwrap_or_default()),
     };
-    wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(
-        &head,
-        &mut TxSink::new(buf),
-    )
+    wz_codecs::transport_fragment_header::TransportFragmentHeaderWire::encode_source(&head, w)
 }
 
 /// Encode one `T_MID_FRAME` wire frame from its explicit fields: the Frame
@@ -1526,8 +1580,17 @@ pub fn build_frame_wire(
     // header + the widest VLE + a possible `[0x31][VLE(priority)]`, as
     // `encode_frame_envelope` reserves.
     let mut wire = Vec::with_capacity(payload.len().saturating_add(12));
-    begin_frame(&mut wire, sn, frame_flags(reliable), ext_qos)
-        .expect("a Vec grows, so its sink is infallible");
+    let head = write_frame_head(
+        &mut sce_forge_runtime::codec::VecSink::new(&mut wire),
+        sn,
+        frame_flags(reliable),
+        ext_qos,
+    );
+    // A growing vector refuses no write: the error type has no value.
+    match head {
+        Ok(()) => {}
+        Err(never) => match never {},
+    }
     wire.extend_from_slice(payload);
     wire
 }
