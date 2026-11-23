@@ -2348,8 +2348,6 @@ pub mod session_actions;
 /// and frees it when the last handle goes. Only under the `session-slot`
 /// selector, which is the MCU profile's and never a library crate's.
 #[cfg(all(feature = "session-unicast", feature = "session-slot"))]
-// Totality debt TD-123 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod session_slot;
 
 // A4 (session-reconnect) — re-dial + re-handshake support types: the
