@@ -6645,26 +6645,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let core = &mut core.0;
         let retracted = {
             let tables = core.tables.borrow();
-            tables
-                .tokens()
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(handle, row)| {
-                    // What its retraction names: the declaration's id and the length of the rest
-                    // of the key, read while the declaration stands.
-                    let names = row.key().names_key().then(|| {
-                        let form = tables.wire_of(row.key());
-                        (form.mapping, form.suffix.len())
+            let found =
+                tables
+                    .tokens()
+                    .iter()
+                    .find(|(_, row)| row.id() == id)
+                    .map(|(handle, row)| {
+                        // What its retraction names: the declaration's id and the length of the rest
+                        // of the key, read while the declaration stands.
+                        let names = row.key().names_key().then(|| {
+                            let form = tables.wire_of(row.key());
+                            (form.mapping, form.suffix.len())
+                        });
+                        // The declaration its key is named by, when the token is its last holder.
+                        let last = row.key().prefix().filter(|&prefix| {
+                            tables
+                                .keyexprs()
+                                .get(prefix)
+                                .is_some_and(|keyexpr| keyexpr.holds() <= 1)
+                        });
+                        (handle, names, last)
                     });
-                    // The declaration its key is named by, when the token is its last holder.
-                    let last = row.key().prefix().filter(|&prefix| {
-                        tables
-                            .keyexprs()
-                            .get(prefix)
-                            .is_some_and(|keyexpr| keyexpr.holds() <= 1)
-                    });
-                    (handle, names, last)
-                })
+            found
         };
         let Some((handle, names, last)) = retracted else {
             return;
@@ -6852,7 +6854,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         #[cfg(feature = "liveliness")]
         {
             let mut tables = core.tables.borrow_mut();
-            while let Some(handle) = tables.tokens().iter().next().map(|(handle, _)| handle) {
+            loop {
+                let Some(handle) = tables.tokens().iter().next().map(|(handle, _)| handle) else {
+                    break;
+                };
                 let _ = tables.undeclare_token(handle);
             }
         }

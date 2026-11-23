@@ -254,14 +254,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 Kind::Token => {
                     let tables = self.tables.borrow();
                     let row = tables.tokens().iter().nth(left);
-                    row.map_or(true, |(_, row)| {
+                    let told = row.map_or(true, |(_, row)| {
                         super::liveliness::declare_token(
                             actions,
                             row.id(),
                             row.key().as_str(),
                             tables.wire_of(row.key()),
                         )
-                    })
+                    });
+                    told
                 }
                 #[cfg(feature = "liveliness")]
                 Kind::LiveSub => self.live_subs[left].ask(actions),
@@ -411,14 +412,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             OnRefusal::Forget,
             |actions| {
                 let tables = tables.borrow();
-                tables.tokens().get(handle).is_some_and(|row| {
+                let taken = tables.tokens().get(handle).is_some_and(|row| {
                     super::liveliness::declare_token(
                         actions,
                         row.id(),
                         row.key().as_str(),
                         tables.wire_of(row.key()),
                     )
-                })
+                });
+                taken
             },
             |_| {},
         );
