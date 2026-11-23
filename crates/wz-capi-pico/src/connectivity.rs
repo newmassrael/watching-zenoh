@@ -440,8 +440,12 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
     if read.is_malformed() {
         return read.locator.to_owned();
     }
-    let config: Vec<String> = read.pairs().collect();
-    format!("{}{}", read.locator, config.join(";"))
+    // pico writes no separator between the locator and the config.
+    let mut len = 0usize;
+    read.write_text("", |piece| len = len.saturating_add(piece.len()));
+    let mut text = String::with_capacity(len);
+    read.write_text("", |piece| text.push_str(piece));
+    text
 }
 
 /// The link pico reports for one link of an established face.
