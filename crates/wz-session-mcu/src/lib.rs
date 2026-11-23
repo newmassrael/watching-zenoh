@@ -117,8 +117,6 @@ pub mod slot_host;
 pub mod slot_dial;
 // Room in a `static` for the parts of a node's loop that live as long as it runs: the slot profile's,
 // whichever node it is.
-// Totality debt TD-217 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 #[cfg(feature = "session-slot")]
 pub mod run_arena;
 // The admin node of the slot profile, over any stack: the connect manager, the admin space declared
