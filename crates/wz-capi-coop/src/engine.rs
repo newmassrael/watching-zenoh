@@ -3890,8 +3890,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let core = &mut held.0;
         core.listen_on_config()?;
         core.join_groups()?;
-        if !(core.config.endpoints.is_empty() && (core.listens() || !core.config.groups.is_empty()))
-        {
+        // Asked as the arena asked it, so the dial role's face dials exactly when its plan lent
+        // it a link.
+        if crate::arena::dials(&core.config) {
             core.faces[0].link = core.dial_from(0, OpenError::NoEndpoint)?;
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).

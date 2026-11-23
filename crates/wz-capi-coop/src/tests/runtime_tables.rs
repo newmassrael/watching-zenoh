@@ -29,16 +29,20 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
     assert_eq!(tables.rows.timers, caps::MAX_TIMERS);
 }
 
-/// A listener reserves a cell for the dial role's link, each face it admits and each handshake it
-/// holds, as its arena lays out a link for each.
+/// A listener reserves a cell for each face it admits and each handshake it holds, and for the dial
+/// role's link only when it dials, as its arena lays out a link for each.
 #[test]
 fn a_listener_reserves_a_cell_for_each_link_it_admits() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let listener = |endpoints: Vec<String>| CoopConfig {
+        endpoints,
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
         accept_pending: 2,
         ..client_config()
-    });
+    };
+    let tables = RuntimeTables::of::<PosixClock>(&listener(Vec::new()));
+    assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(3 + 2));
+    let tables = RuntimeTables::of::<PosixClock>(&listener(vec!["tcp/127.0.0.1:7447".to_owned()]));
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3 + 2));
 }
 

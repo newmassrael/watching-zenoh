@@ -73,8 +73,11 @@
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
 //! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
 //! (`Core::accept_face` counts it against `max_faces`): the plan lends a set of a face's tables for
-//! each of those and no more. One that listens holds the buffers of as many links again as
-//! `accept_pending` admits. The config's two numbers are held to the session's `MAX_FACES` and
+//! each of those and no more. The dial role's face is lent its set and its link's buffers only
+//! when the session dials (`dials`): one that only listens or only joins groups never gives that
+//! face a link or a peer, so the face holds a set of no rows and the session one link fewer. One
+//! that listens holds the buffers of as many links again as `accept_pending` admits. The config's
+//! two numbers are held to the session's `MAX_FACES` and
 //! `MAX_ACCEPT_PENDING` under the build's, which [`admitted_faces`] and [`admitted_handshakes`]
 //! give an ABI to state, and a config over either is refused. A group's face is no link of the
 //! session's: it has a set of tables and no buffers. These are the tables whose limits bind at the
@@ -246,6 +249,10 @@ pub struct FacePeers {
     pub rows: PeerRows,
     /// How many faces' tables.
     pub tables: usize,
+    /// Whether the first of the tables is the dial role's face's: `false` for a session that
+    /// dials nothing (`dials`), whose dial face never has a peer, so every table is for the
+    /// faces to come.
+    pub dial: bool,
     /// The rows of each pool of what the faces' peers write, which the faces share.
     pub pools: PeerPoolRows,
 }
@@ -473,6 +480,7 @@ impl ArenaPlan {
             rows: peer_rows(limits)?,
             tables: faces,
             pools: pool_rows(limits, faces)?,
+            dial: dials(config),
         };
         plan.put(
             "peer tables",
@@ -923,26 +931,36 @@ fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
-/// The faces a session `config` opens may hold at once: the dial role's, as many besides as
-/// `max_faces` admits, a link still in its handshake among them, and one for each group it joins.
-/// `None` past the address space.
+/// Whether a session `config` opens gives its dial role's face a link: it does when it lists an
+/// endpoint to dial, and when it lists none and has neither a port to listen on nor a group to join,
+/// whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks this). A session
+/// that only listens or only joins groups never dials from that face: a face it attaches later is
+/// one of `max_faces`.
+pub(crate) fn dials(config: &CoopConfig) -> bool {
+    !(config.endpoints.is_empty() && (!config.listen.is_empty() || !config.groups.is_empty()))
+}
+
+/// The faces a session `config` opens may hold at once: the dial role's when it dials
+/// (`dials`), as many besides as `max_faces` admits, a link still in its handshake among them,
+/// and one for each group it joins. `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
-    1usize
+    usize::from(dials(config))
         .checked_add(config.max_faces)?
         .checked_add(config.groups.len())
 }
 
-/// The links a session `config` opens may hold at once: the dial role's, as many besides as
-/// `max_faces` admits (each a link it attaches or accepts), and for a listener as many in their
-/// handshake as `accept_pending` admits. `None` past the address space. The runtime's task cells
-/// are reserved for as many (`engine::RuntimeTables`), a link's session being one task.
+/// The links a session `config` opens may hold at once: the dial role's when it dials
+/// (`dials`), as many besides as `max_faces` admits (each a link it attaches or accepts), and
+/// for a listener as many in their handshake as `accept_pending` admits. `None` past the address
+/// space. The runtime's task cells are reserved for as many (`engine::RuntimeTables`), a link's
+/// session being one task.
 pub(crate) fn links_of(config: &CoopConfig) -> Option<usize> {
     let handshakes = if config.listen.is_empty() {
         0
     } else {
         config.accept_pending
     };
-    1usize
+    usize::from(dials(config))
         .checked_add(config.max_faces)?
         .checked_add(handshakes)
 }
