@@ -5002,6 +5002,16 @@ impl SharedSession {
         self.retract_keyexpr_locked(&mut guard, mapping_id);
     }
 
+    /// One more holder of declaration `mapping_id`, which a holder already holds: it stays
+    /// declared until this holder lets go too ([`Self::release_keyexpr`]), and nothing goes on
+    /// the wire. A declaration no longer held takes none.
+    pub fn retain_keyexpr(&self, mapping_id: ExprId) {
+        let mut guard = self.lock();
+        if let Some(entry) = guard.kexprs.iter_mut().find(|e| e.id == mapping_id) {
+            entry.holders = entry.holders.saturating_add(1);
+        }
+    }
+
     /// The keyexpr declarations this session currently holds, `(id, keyexpr)`
     /// in declaration order — the SSOT every new face is replayed from.
     pub fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {

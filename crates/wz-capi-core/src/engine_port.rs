@@ -336,6 +336,10 @@ impl SessionEngine for SharedSession {
         SharedSession::release_keyexpr(self, mapping_id)
     }
 
+    fn retain_keyexpr(&self, mapping_id: wz_session_core::wire_id::ExprId) {
+        SharedSession::retain_keyexpr(self, mapping_id)
+    }
+
     fn keyexpr_declarations(&self) -> Vec<(wz_session_core::wire_id::ExprId, String)> {
         SharedSession::keyexpr_declarations(self)
     }

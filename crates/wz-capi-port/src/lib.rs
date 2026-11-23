@@ -427,7 +427,19 @@ pub struct WireKey {
     pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix, `None` when it covers the whole key.
     pub suffix: Option<String>,
-    keeps: Option<Arc<dyn Send + Sync>>,
+    keeps: Keeps,
+}
+
+/// What a key keeps alive for as long as a declaration made on it stays recorded.
+#[derive(Clone, Default)]
+enum Keeps {
+    /// Nothing.
+    #[default]
+    Nothing,
+    /// An object of the ABI's that retracts the declaration when the last holder lets it go.
+    Anchor(Arc<dyn Send + Sync>),
+    /// One hold on the declaration, counted by the engine itself.
+    Hold(KeyHold),
 }
 
 impl core::fmt::Debug for WireKey {
@@ -435,8 +447,59 @@ impl core::fmt::Debug for WireKey {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)
-            .field("keeps", &self.keeps.is_some())
+            .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
             .finish()
+    }
+}
+
+/// One hold on a keyexpr declaration of a session, taken from and given back to the engine's own
+/// count of the declaration's holders ([`SessionEngine::retain_keyexpr`],
+/// [`SessionEngine::release_keyexpr`]): a copy takes another hold, a drop lets its hold go. It
+/// keeps nothing of its own on the heap, and once the session is gone a copy and a drop do
+/// nothing.
+pub struct KeyHold {
+    engine: alloc::sync::Weak<dyn SessionEngine>,
+    mapping_id: wz_session_core::wire_id::ExprId,
+}
+
+impl KeyHold {
+    /// The hold on `mapping_id` that the caller took through `engine`
+    /// ([`SessionEngine::acquire_keyexpr`]), kept by this from here on.
+    pub fn taken(
+        engine: alloc::sync::Weak<dyn SessionEngine>,
+        mapping_id: wz_session_core::wire_id::ExprId,
+    ) -> Self {
+        Self { engine, mapping_id }
+    }
+
+    /// The declaration held.
+    pub fn mapping_id(&self) -> wz_session_core::wire_id::ExprId {
+        self.mapping_id
+    }
+
+    /// Whether the hold is on `engine`'s session, by address.
+    pub fn is_on(&self, engine: *const ()) -> bool {
+        core::ptr::addr_eq(self.engine.as_ptr(), engine)
+    }
+}
+
+impl Clone for KeyHold {
+    fn clone(&self) -> Self {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.retain_keyexpr(self.mapping_id);
+        }
+        Self {
+            engine: self.engine.clone(),
+            mapping_id: self.mapping_id,
+        }
+    }
+}
+
+impl Drop for KeyHold {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.upgrade() {
+            engine.release_keyexpr(self.mapping_id);
+        }
     }
 }
 
@@ -457,7 +520,14 @@ impl WireKey {
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
     pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Some(anchor);
+        self.keeps = Keeps::Anchor(anchor);
+        self
+    }
+
+    /// This key, holding the declaration `hold` holds for as long as a declaration made on it
+    /// stays recorded, in the engine's own count and with nothing of its own on the heap.
+    pub fn holding(mut self, hold: KeyHold) -> Self {
+        self.keeps = Keeps::Hold(hold);
         self
     }
 
