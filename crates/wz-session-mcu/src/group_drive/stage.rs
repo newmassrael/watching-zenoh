@@ -1246,6 +1246,14 @@ impl<T: GroupTransport> GroupTransport for GroupLink<T> {
         self.0.transport.borrow().wait_for_room(timeout_us)
     }
 
+    fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+        self.0.transport.borrow().room_wait()
+    }
+
+    fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+        self.0.transport.borrow().input_wait()
+    }
+
     fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
         self.0.transport.borrow().writability()
     }

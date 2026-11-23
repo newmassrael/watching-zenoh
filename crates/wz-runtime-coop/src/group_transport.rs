@@ -117,6 +117,34 @@ pub trait GroupTransport {
         true
     }
 
+    /// What a sender with nothing of the session held waits on, from outside the loop that owns
+    /// the transport, for the room [`Self::wait_for_room`] waits for: the group's half of
+    /// [`SessionDatagramLink::room_wait`](crate::session_drive::SessionDatagramLink::room_wait).
+    /// `None` for a stack that gives none; the heap profile's, as that one is.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    fn room_wait(&self) -> Option<crate::session_drive::WaitOn> {
+        None
+    }
+
+    /// What a host with nothing of the session held waits on, from outside the loop that owns the
+    /// transport, for the group's next inbound datagram: the group's half of
+    /// [`SessionDatagramLink::input_wait`](crate::session_drive::SessionDatagramLink::input_wait).
+    /// A host that steps the group waits on it, and on the group's deadlines, instead of looking
+    /// at the group on a tick. `None` for a stack that gives none; the heap profile's, as that one
+    /// is.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    fn input_wait(&self) -> Option<crate::session_drive::WaitOn> {
+        None
+    }
+
     /// [`Self::wait_for_room`] made from outside the loop that owns the transport, by a sender
     /// with nothing of the session held: the group's half of
     /// [`SessionDatagramLink::writability`](crate::session_drive::SessionDatagramLink::writability).
@@ -208,6 +236,16 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 
     fn wait_for_room(&self, timeout_us: u64) -> bool {
         (**self).wait_for_room(timeout_us)
+    }
+
+    #[cfg(feature = "session-unicast")]
+    fn room_wait(&self) -> Option<crate::session_drive::WaitOn> {
+        (**self).room_wait()
+    }
+
+    #[cfg(feature = "session-unicast")]
+    fn input_wait(&self) -> Option<crate::session_drive::WaitOn> {
+        (**self).input_wait()
     }
 
     #[cfg(feature = "session-unicast")]

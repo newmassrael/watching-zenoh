@@ -53,8 +53,8 @@ use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_session_core::app_link_table::{
-    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, OpenProgress, SendGate,
-    SendStep, StreamRead, DATAGRAM_MAX,
+    kind_for_locator, AcceptRead, AppLinkKind, DatagramRead, LinkHandle, LinkInterest,
+    OpenProgress, SendGate, SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
 use wz_session_core::byte_cells::LentByteCells;
@@ -64,8 +64,8 @@ use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::CellRc;
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
-    Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWritability, Locator,
-    OpenedLink, PendingDial, SessionLinks,
+    Dialled, LinkListener, LinkOpenError, LinkProto, LinkReadiness, LinkWait, LinkWaits,
+    LinkWritability, Locator, NoWaits, OpenedLink, PendingDial, SessionLinks, WaitOn,
 };
 use crate::stream_link::{
     StreamDial, StreamDriver, StreamListen, StreamSocket, STREAM_RX_CAPACITY,
@@ -370,14 +370,16 @@ fn socket_of(locator: &str) -> SocketAddr {
 /// `bound` gives a sleep of it.
 fn open_link(
     session: &SessionTransport,
+    waits: &AppWaits,
     kind: AppLinkKind,
     locator: &str,
     bound: Option<&OpenBound>,
 ) -> Result<Held, LinkOpenError> {
     let transport = &session.transport;
     let handle = session.begin_open(kind, locator);
-    // The link's waits are made with it, so the open's wait and every one after share its wake.
-    let waits = wait::Waits::new();
+    // The transport's one wake, so the open's wait and every wait after it, on this link or on
+    // several of the transport's at once, hand the table the same waker.
+    let waits = waits.wake.clone();
     let mut progress = OpenProgress::Opening;
     let opening = |waker: Option<&core::task::Waker>| {
         progress = transport.with(|table| table.poll_open(handle, waker));
@@ -406,18 +408,19 @@ fn open_link(
 struct Held {
     transport: Arc<AppTransport>,
     handle: LinkHandle,
-    /// The link's wake, which every wait on it hands the program's calls.
+    /// The transport's wake ([`AppWaits`]), which every wait on the link hands the program's
+    /// calls.
     waits: wait::Waits,
 }
 
 impl Held {
     /// A link the program opened on its own (a stream or a source it accepted on a listener),
-    /// held with a wake of its own.
-    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle) -> Self {
+    /// held with the wake of the transport it came on, `waits` (its listener's).
+    fn accepted(transport: &Arc<AppTransport>, waits: &wait::Waits, handle: LinkHandle) -> Self {
         Self {
             transport: Arc::clone(transport),
             handle,
-            waits: wait::Waits::new(),
+            waits: waits.clone(),
         }
     }
 
@@ -610,6 +613,86 @@ impl LinkReadiness for LinkInput {
     }
 }
 
+/// The waits of the links of one program's transport ([`LinkWaits`]): the transport, and its one
+/// wake, made with the stack and shared by every link it opens. Every wait on any of its links,
+/// the link's own loop's and a waiter's from outside over several of them, hands the table the
+/// same waker, so the one waker the table keeps for a side of a link is never another waiter's
+/// and the program's call that brings the side wakes them all; each looks again under its lock.
+#[derive(Clone)]
+pub struct AppWaits {
+    transport: Arc<AppTransport>,
+    wake: wait::Waits,
+}
+
+impl AppWaits {
+    /// The waits of the links of `transport`, with a wake of their own.
+    pub fn new(transport: Arc<AppTransport>) -> Self {
+        Self {
+            transport,
+            wake: wait::Waits::new(),
+        }
+    }
+
+    /// Whether `wait` has what it waits for now, keeping `waker` for each side it asks when it
+    /// has not: input, room when it asks for it, a link whose handle names none any more, or bytes
+    /// the link holds for a program that takes bytes now (it took part of a write), which a step
+    /// offers again and no call of the program's announces. A handle of another stack's is never
+    /// ready here; [`LinkWaits::wait`] bounds the wait at a look for it.
+    fn ready(&self, wait: LinkWait, waker: Option<&core::task::Waker>) -> bool {
+        let WaitOn::AppLink(handle) = wait.on else {
+            return false;
+        };
+        let interest = LinkInterest {
+            input: true,
+            room: wait.room,
+        };
+        self.transport.with(|table| {
+            let held = table.state(handle) == Some(wz_session_core::app_link::AppLinkState::Open)
+                && table.holds_remainder(handle);
+            held || match waker {
+                Some(waker) => table.wait_link(handle, interest, waker),
+                None => {
+                    table.state(handle).is_none()
+                        || table.poll_readable(handle, None)
+                        || (interest.room && table.poll_writable(handle, None))
+                }
+            }
+        })
+    }
+}
+
+impl LinkWaits for AppWaits {
+    fn wait(&self, on: &[LinkWait], timeout_ms: u32) {
+        if on.is_empty() {
+            return;
+        }
+        let foreign = on.iter().any(|wait| !matches!(wait.on, WaitOn::AppLink(_)));
+        let timeout_ms = if foreign {
+            timeout_ms.min(1)
+        } else {
+            timeout_ms
+        };
+        // `any` stops at the first that is ready, whose wait then ends: only a wait that goes on
+        // needs every waker kept, and it has asked every entry.
+        self.wake.wait_while(u64::from(timeout_ms), |waker| {
+            !on.iter().any(|wait| self.ready(*wait, waker))
+        });
+    }
+
+    fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
+        let WaitOn::AppLink(handle) = on else {
+            return true;
+        };
+        until_writable(
+            &self.transport,
+            handle,
+            &self.wake,
+            timeout_us.div_ceil(1_000),
+            || {},
+        )
+    }
+}
+
 /// A byte stream over the program's transport: this engine's [`StreamSocket`] over a link.
 pub struct AppStreamSocket {
     held: Held,
@@ -673,6 +756,13 @@ impl StreamSocket for AppStreamSocket {
     // A host parks the owner's thread until the program's calls wake it; an image has no thread to
     // park, and its link waits in its loop.
     #[cfg(feature = "host-lock")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.handle))
+    }
+
+    // A host parks the owner's thread until the program's calls wake it; an image has no thread to
+    // park, and its link waits in its loop.
+    #[cfg(feature = "host-lock")]
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         Some(Box::new(self.held.input()))
     }
@@ -682,6 +772,8 @@ impl StreamSocket for AppStreamSocket {
 #[derive(Clone)]
 pub struct AppStreamDial {
     transport: SessionTransport,
+    /// The waits of the transport, whose wake every link this opens shares ([`AppWaits`]).
+    waits: AppWaits,
     /// What an open waits on, when it is a clock of the session's ([`AppLinks::with_open_bound`]).
     open_bound: Option<OpenBound>,
 }
@@ -693,6 +785,7 @@ impl StreamDial for AppStreamDial {
         let locator = Locator::tcp(to).to_string();
         let held = open_link(
             &self.transport,
+            &self.waits,
             AppLinkKind::StreamDial,
             &locator,
             self.open_bound.as_ref(),
@@ -711,6 +804,7 @@ impl StreamDial for AppStreamDial {
         let locator = Locator::tcp(at).to_string();
         let held = open_link(
             &self.transport,
+            &self.waits,
             AppLinkKind::StreamListen,
             &locator,
             self.open_bound.as_ref(),
@@ -830,13 +924,19 @@ impl StreamListen for AppStreamListener {
         });
         match next {
             AcceptRead::Accepted((handle, peer)) => Ok(Some(AppStreamSocket {
-                held: Held::accepted(&self.held.transport, handle),
+                held: Held::accepted(&self.held.transport, &self.held.waits, handle),
                 local: self.at,
                 peer,
             })),
             AcceptRead::Empty => Ok(None),
             AcceptRead::End => Err(LinkOpenError::Unsupported),
         }
+    }
+
+    // Ready when the program has accepted a stream on the listener, which wakes it.
+    #[cfg(feature = "host-lock")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.handle))
     }
 
     // Ready when the program has accepted a stream on the listener, which wakes it.
@@ -858,20 +958,26 @@ pub struct AppDatagramSocket {
 }
 
 impl AppDatagramSocket {
-    /// Open a datagram link to `to` over `transport`, held to the session's queue bound.
-    pub fn dial(transport: &SessionTransport, to: SocketAddr) -> Result<Self, LinkOpenError> {
-        Self::dial_bounded(transport, to, None)
+    /// Open a datagram link to `to` over `transport`, held to the session's queue bound and waited
+    /// on with `waits`, the transport's ([`AppLinks::waits`](SessionLinks::waits)).
+    pub fn dial(
+        transport: &SessionTransport,
+        waits: &AppWaits,
+        to: SocketAddr,
+    ) -> Result<Self, LinkOpenError> {
+        Self::dial_bounded(transport, waits, to, None)
     }
 
     /// [`Self::dial`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]).
     pub fn dial_bounded(
         transport: &SessionTransport,
+        waits: &AppWaits,
         to: SocketAddr,
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
         let locator = Locator::udp(to).to_string();
-        let held = open_link(transport, AppLinkKind::Datagram, &locator, bound)?;
+        let held = open_link(transport, waits, AppLinkKind::Datagram, &locator, bound)?;
         Ok(Self {
             held,
             peer: to,
@@ -881,9 +987,14 @@ impl AppDatagramSocket {
 
     /// The datagram link of the source the program accepted on a datagram listener as `handle`,
     /// at `peer`, the address of the locator the program named for it.
-    fn accepted(transport: &Arc<AppTransport>, handle: LinkHandle, peer: SocketAddr) -> Self {
+    fn accepted(
+        transport: &Arc<AppTransport>,
+        waits: &wait::Waits,
+        handle: LinkHandle,
+        peer: SocketAddr,
+    ) -> Self {
         Self {
-            held: Held::accepted(transport, handle),
+            held: Held::accepted(transport, waits, handle),
             peer,
             reads_sources: false,
         }
@@ -912,6 +1023,10 @@ impl AppDatagramSocket {
 
 impl DatagramSocket for AppDatagramSocket {
     type Error = AppLinkError;
+
+    // Its links are a stack of [`AppLinks`], whose waits are the transport's ([`AppWaits`]), made
+    // with the stack; no stack of the platform's sockets is made of it, which is what these are.
+    type Waits = NoWaits;
 
     fn bind(_at: SocketAddr) -> Result<Self, AppLinkError> {
         Err(AppLinkError::NotCarried)
@@ -948,6 +1063,11 @@ impl DatagramSocket for AppDatagramSocket {
     }
 
     #[cfg(feature = "host-lock")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.handle))
+    }
+
+    #[cfg(feature = "host-lock")]
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         Some(Box::new(self.held.input()))
     }
@@ -970,19 +1090,30 @@ pub struct AppGroupTransport {
 impl AppGroupTransport {
     /// Join the group `locator` names (a `udp/` locator with `#iface=`) over `transport`, the
     /// group's link held to the session's queue bound.
-    pub fn join(transport: &SessionTransport, locator: &str) -> Result<Self, LinkOpenError> {
-        Self::join_bounded(transport, locator, None)
+    pub fn join(
+        transport: &SessionTransport,
+        waits: &AppWaits,
+        locator: &str,
+    ) -> Result<Self, LinkOpenError> {
+        Self::join_bounded(transport, waits, locator, None)
     }
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]).
     pub fn join_bounded(
         transport: &SessionTransport,
+        waits: &AppWaits,
         locator: &str,
         bound: Option<&OpenBound>,
     ) -> Result<Self, LinkOpenError> {
         Ok(Self {
-            held: Some(open_link(transport, AppLinkKind::Group, locator, bound)?),
+            held: Some(open_link(
+                transport,
+                waits,
+                AppLinkKind::Group,
+                locator,
+                bound,
+            )?),
             lent: alloc::vec::Vec::with_capacity(DATAGRAM_MAX),
             lent_from: None,
             kept: false,
@@ -1058,6 +1189,17 @@ impl GroupTransport for AppGroupTransport {
         }
     }
 
+    // The link's handle, by which the table answers its room; a group that was left gives none.
+    fn room_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.as_ref()?.handle))
+    }
+
+    // The link's handle, by which the table answers its input from outside the group's loop; a
+    // group that was left gives none.
+    fn input_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.as_ref()?.handle))
+    }
+
     fn writability(&self) -> Option<Box<dyn LinkWritability>> {
         let held = self.held.as_ref()?;
         Some(Box::new(GroupRoom {
@@ -1124,6 +1266,8 @@ impl GroupTransport for AppGroupTransport {
 /// of the session the links are made for.
 pub struct AppLinks {
     transport: SessionTransport,
+    /// The waits of the transport, made with the links: every link they open shares its wake.
+    waits: AppWaits,
     dial: AppStreamDial,
     datagram_rx: usize,
     open_bound: Option<OpenBound>,
@@ -1171,12 +1315,15 @@ impl OwnerWaits {
 impl AppLinks {
     /// Links over `transport`, as the session whose bound it carries opens them.
     pub fn new(transport: SessionTransport) -> Self {
+        let waits = AppWaits::new(Arc::clone(&transport.transport));
         Self {
             dial: AppStreamDial {
                 transport: transport.clone(),
+                waits: waits.clone(),
                 open_bound: None,
             },
             transport,
+            waits,
             datagram_rx: UDP_RX_CAPACITY,
             open_bound: None,
             lent: None,
@@ -1220,6 +1367,12 @@ impl SessionLinks for AppLinks {
 
     type Dial = AppDial;
 
+    type Waits = AppWaits;
+
+    fn waits(&self) -> AppWaits {
+        self.waits.clone()
+    }
+
     fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // A datagram port that takes whoever sends first is a socket of the system's; the
         // program's transport accepts streams and datagram sources on listeners
@@ -1238,6 +1391,7 @@ impl SessionLinks for AppLinks {
                     self.owner_waits.datagram(UdpDriver::initiator_in(
                         AppDatagramSocket::dial_bounded(
                             &self.transport,
+                            &self.waits,
                             to.at,
                             self.open_bound.as_ref(),
                         )?,
@@ -1277,7 +1431,7 @@ impl SessionLinks for AppLinks {
             held: Some(Held {
                 transport: Arc::clone(&self.transport.transport),
                 handle,
-                waits: wait::Waits::new(),
+                waits: self.waits.wake.clone(),
             }),
             buffers: Some(buffers),
             to: to.at,
@@ -1302,6 +1456,7 @@ impl SessionLinks for AppLinks {
                 let locator = Locator::udp(at.at).to_string();
                 let held = open_link(
                     &self.transport,
+                    &self.waits,
                     AppLinkKind::DatagramListen,
                     &locator,
                     self.open_bound.as_ref(),
@@ -1348,6 +1503,7 @@ impl SessionLinks for AppLinks {
         }
         Ok(Box::new(AppGroupTransport::join_bounded(
             &self.transport,
+            &self.waits,
             endpoint,
             self.open_bound.as_ref(),
         )?))
@@ -1388,7 +1544,7 @@ impl LinkListener<HeapLink> for AppDatagramListener {
         });
         let socket = match next {
             AcceptRead::Accepted((handle, peer)) => {
-                AppDatagramSocket::accepted(&self.held.transport, handle, peer)
+                AppDatagramSocket::accepted(&self.held.transport, &self.held.waits, handle, peer)
             }
             AcceptRead::Empty => return Ok(None),
             AcceptRead::End => return Err(LinkOpenError::Unsupported),
@@ -1405,6 +1561,12 @@ impl LinkListener<HeapLink> for AppDatagramListener {
                 .datagram(UdpDriver::initiator_in(socket, peer, rx, tx)),
         )
         .map(Some)
+    }
+
+    // Ready when the program has accepted a source on the listener, which wakes it.
+    #[cfg(feature = "host-lock")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        Some(WaitOn::AppLink(self.held.handle))
     }
 
     // Ready when the program has accepted a source on the listener, which wakes it.
@@ -1440,6 +1602,10 @@ impl LinkListener<HeapLink> for AppLinkListener {
             self.owner_waits.stream(StreamDriver::over(stream, rx, tx)),
         )
         .map(Some)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.listener.input_wait()
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -1544,6 +1710,7 @@ mod tests {
         let (script, transport) = transport();
         let stream = AppStreamDial {
             transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
             open_bound: None,
         }
         .dial(PEER)
@@ -1571,6 +1738,7 @@ mod tests {
         *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::WouldBlock];
         let stream = AppStreamDial {
             transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
             open_bound: None,
         }
         .dial(PEER)
@@ -1600,6 +1768,7 @@ mod tests {
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
         let stream = AppStreamDial {
             transport: session(&transport, 4),
+            waits: AppWaits::new(Arc::clone(&transport)),
             open_bound: None,
         }
         .dial(PEER)
@@ -1612,6 +1781,7 @@ mod tests {
         let (_script, transport) = transport();
         let stream = AppStreamDial {
             transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
             open_bound: None,
         }
         .dial(PEER)
@@ -1634,7 +1804,12 @@ mod tests {
     #[test]
     fn a_datagram_goes_whole_or_is_dropped() {
         let (script, transport) = transport();
-        let socket = AppDatagramSocket::dial(&session(&transport, 64), PEER).unwrap();
+        let socket = AppDatagramSocket::dial(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            PEER,
+        )
+        .unwrap();
         socket.send_to(PEER, b"whole").unwrap();
         *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock, ProgramSend::Wrote(1)];
         assert_eq!(
@@ -1662,9 +1837,12 @@ mod tests {
     #[test]
     fn a_group_is_joined_read_by_member_and_left_on_close() {
         let (script, transport) = transport();
-        let mut group =
-            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
-                .expect("joined");
+        let mut group = AppGroupTransport::join(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            "udp/239.7.7.7:7447#iface=lan7",
+        )
+        .expect("joined");
         assert!(group.open());
         assert!(group.carrier_up());
         let handle = group.held.as_ref().unwrap().handle;
@@ -1697,9 +1875,12 @@ mod tests {
     #[test]
     fn a_kept_group_datagram_is_lent_again_before_the_next() {
         let (_script, transport) = transport();
-        let mut group =
-            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
-                .expect("joined");
+        let mut group = AppGroupTransport::join(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            "udp/239.7.7.7:7447#iface=lan7",
+        )
+        .expect("joined");
         assert!(group.keeps_input());
         let handle = group.held.as_ref().unwrap().handle;
         for bytes in [b"one".as_slice(), b"two".as_slice()] {
@@ -1738,9 +1919,12 @@ mod tests {
     #[test]
     fn a_group_datagram_the_program_cannot_take_is_full_until_it_is_writable() {
         let (script, transport) = transport();
-        let mut group =
-            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
-                .expect("joined");
+        let mut group = AppGroupTransport::join(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            "udp/239.7.7.7:7447#iface=lan7",
+        )
+        .expect("joined");
         let handle = group.held.as_ref().unwrap().handle;
         let outside = group.writability().expect("a wait from outside the loop");
         assert_eq!(group.try_send_to_group(b"sent"), GroupSend::Sent);
@@ -1787,9 +1971,12 @@ mod tests {
     fn a_groups_wait_for_input_returns_when_the_program_hands_in_a_datagram() {
         use std::time::{Duration, Instant};
         let (_script, transport) = transport();
-        let joined =
-            AppGroupTransport::join(&session(&transport, 64), "udp/239.7.7.7:7447#iface=lan7")
-                .expect("joined");
+        let joined = AppGroupTransport::join(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            "udp/239.7.7.7:7447#iface=lan7",
+        )
+        .expect("joined");
         let handle = joined.held.as_ref().unwrap().handle;
         let mut group: Box<dyn GroupTransport> = Box::new(joined);
         let ready = group.readiness().expect("a wait from outside the loop");
@@ -2036,7 +2223,12 @@ mod tests {
         assert_eq!(socket.try_recv(&mut buf), Ok(Some((3, source))));
         assert_eq!(socket.try_recv(&mut buf), Ok(None));
         // A dialled link reads the source the program names.
-        let dialled = AppDatagramSocket::dial(&session(&transport, 64), PEER).unwrap();
+        let dialled = AppDatagramSocket::dial(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            PEER,
+        )
+        .unwrap();
         transport
             .received(dialled.held.handle, b"in", Some("udp/203.0.113.7:9"))
             .unwrap();
@@ -2162,8 +2354,12 @@ mod tests {
         };
         let opening = std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let opened =
-                AppDatagramSocket::dial_bounded(&session(&transport, 64), PEER, Some(&bound));
+            let opened = AppDatagramSocket::dial_bounded(
+                &session(&transport, 64),
+                &AppWaits::new(Arc::clone(&transport)),
+                PEER,
+                Some(&bound),
+            );
             (opened.is_err(), started.elapsed())
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2301,6 +2497,7 @@ mod tests {
         let (script, transport) = transport();
         let stream = AppStreamDial {
             transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
             open_bound: None,
         }
         .dial(PEER)
@@ -2409,7 +2606,12 @@ mod tests {
         );
         assert!(matches!(listener.accept(), Ok(Some(_))));
 
-        let socket = AppDatagramSocket::dial(&session(&transport, 64), PEER).unwrap();
+        let socket = AppDatagramSocket::dial(
+            &session(&transport, 64),
+            &AppWaits::new(Arc::clone(&transport)),
+            PEER,
+        )
+        .unwrap();
         let handle = socket.held.handle;
         let ready = socket.readiness().expect("a wait for the owner");
         let handing = {
@@ -2429,6 +2631,107 @@ mod tests {
             waited < Duration::from_secs(5),
             "woken by the datagram, not the end of the wait: {waited:?}"
         );
+    }
+
+    /// One wait over two links of a transport ends on the input of the second: every link shares
+    /// the transport's one wake, so the waker the table keeps for the second link reaches the
+    /// waiter. Turned red by a wake made per link, or by a wait that keeps a waker for its first
+    /// entry alone.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_wait_over_two_links_ends_on_the_second_ones_input() {
+        use std::time::{Duration, Instant};
+        let (_script, transport) = transport();
+        let waits = AppWaits::new(Arc::clone(&transport));
+        let first = AppDatagramSocket::dial(&session(&transport, 64), &waits, PEER).unwrap();
+        let second = AppDatagramSocket::dial(&session(&transport, 64), &waits, PEER).unwrap();
+        let on = [
+            LinkWait::input(first.input_wait().expect("a wait for the owner")),
+            LinkWait::input(second.input_wait().expect("a wait for the owner")),
+        ];
+        let started = Instant::now();
+        waits.wait(&on, 50);
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "nothing queued on either: the wait is waited out"
+        );
+        let handle = second.held.handle;
+        let handing = {
+            let transport = Arc::clone(&transport);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                transport
+                    .received(handle, b"d", Some("udp/198.51.100.3:50000"))
+                    .unwrap();
+            })
+        };
+        let started = Instant::now();
+        waits.wait(&on, 10_000);
+        let waited = started.elapsed();
+        handing.join().expect("the program's thread");
+        assert!(
+            waited < Duration::from_secs(5),
+            "woken by the second link's datagram: {waited:?}"
+        );
+    }
+
+    /// A link closed during the wait still gets the right verdict: the wait on it ends when the
+    /// link goes, a wait on its handle after that answers at once (a handle is never reused, so it
+    /// names no other link), and the read that follows, which is the verdict the session's step
+    /// makes under its lock, finds the link ended. Turned red by a wait that keeps waiting on a
+    /// link that has gone, or by a stale handle that is waited on as a live one.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_link_closed_during_the_wait_still_gets_the_right_verdict() {
+        use std::time::{Duration, Instant};
+        let (_script, transport) = transport();
+        let waits = AppWaits::new(Arc::clone(&transport));
+        let socket = AppDatagramSocket::dial(&session(&transport, 64), &waits, PEER).unwrap();
+        let on = [LinkWait::input(
+            socket.input_wait().expect("a wait for the owner"),
+        )];
+        let handle = socket.held.handle;
+        let closing = {
+            let transport = Arc::clone(&transport);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                transport.release(handle);
+            })
+        };
+        let started = Instant::now();
+        waits.wait(&on, 10_000);
+        let waited = started.elapsed();
+        closing.join().expect("the closing thread");
+        assert!(
+            waited < Duration::from_secs(5),
+            "woken by the link's end, not the end of the wait: {waited:?}"
+        );
+        let started = Instant::now();
+        waits.wait(&on, 10_000);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a wait on a link that has gone answers at once"
+        );
+        assert!(
+            waits.wait_room(on[0].on, 10_000_000),
+            "and so does a wait for its room: the send that follows reports"
+        );
+        let mut buf = [0u8; 8];
+        assert_eq!(socket.try_recv(&mut buf), Err(AppLinkError::Closed));
+    }
+
+    /// A handle of another stack's is not this transport's to wait on: the wait ends within a
+    /// look, not at its timeout. Turned red by a wait that sleeps its whole timeout on a handle
+    /// it cannot name.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_wait_on_a_handle_of_another_stack_is_a_look() {
+        use std::time::{Duration, Instant};
+        let (_script, transport) = transport();
+        let waits = AppWaits::new(Arc::clone(&transport));
+        let started = Instant::now();
+        waits.wait(&[LinkWait::input(WaitOn::Socket(3))], 10_000);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     /// Links opened to be waited on by their owner give the owner a wait for each link and do not

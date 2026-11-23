@@ -12,63 +12,80 @@
 
 use std::sync::{Arc, Mutex};
 
-use wz_runtime_coop::session_drive::LinkWritability;
+use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
 use crate::engine::{Holder, LinkRooms, Room};
 
-/// A link's wait for room that answers what the test set, and keeps how long each ask was for.
-struct Answer {
-    room: bool,
-    asked: Mutex<Vec<u64>>,
-}
+/// The waits of a test stack: the room each face's handle answers, as the test set it, and how
+/// long each ask of it was for.
+#[derive(Clone, Default)]
+struct Answers(Arc<Mutex<Vec<(usize, bool, Vec<u64>)>>>);
 
-impl LinkWritability for Answer {
-    fn wait_writable(&self, timeout_us: u64) -> bool {
-        self.asked.lock().unwrap().push(timeout_us);
-        self.room
+impl Answers {
+    /// A face's handle, `handle`, whose room answers `room`.
+    fn face(&self, handle: usize, room: bool) -> WaitOn {
+        self.0.lock().unwrap().push((handle, room, Vec::new()));
+        WaitOn::Socket(handle)
+    }
+
+    /// How long each ask of `handle` was for.
+    fn asked(&self, handle: usize) -> Vec<u64> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(held, ..)| *held == handle)
+            .map(|(.., asked)| asked.clone())
+            .unwrap_or_default()
     }
 }
 
-fn answer(room: bool) -> Arc<Answer> {
-    Arc::new(Answer {
-        room,
-        asked: Mutex::new(Vec::new()),
-    })
+impl LinkWaits for Answers {
+    fn wait(&self, _on: &[LinkWait], _timeout_ms: u32) {}
+
+    fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
+        let WaitOn::Socket(handle) = on else {
+            return true;
+        };
+        let mut faces = self.0.lock().unwrap();
+        match faces.iter_mut().find(|(held, ..)| *held == handle) {
+            Some((_, room, asked)) => {
+                asked.push(timeout_us);
+                *room
+            }
+            None => true,
+        }
+    }
 }
 
-fn held(rooms: &LinkRooms, face: u64, wait: &Arc<Answer>) {
-    let wait: Arc<dyn LinkWritability> = wait.clone();
-    rooms.hold(face, &wait);
+/// The rooms of a session over a stack whose waits are `answers`.
+fn rooms(answers: &Answers) -> LinkRooms<Answers> {
+    LinkRooms::new(answers.clone(), 4)
 }
 
 /// A session none of whose links gives a wait cannot be asked: the publish waits for the session.
 #[test]
 fn a_session_whose_links_give_no_wait_is_not_asked() {
-    assert_eq!(LinkRooms::default().within(1_000), Room::Unasked);
+    assert_eq!(rooms(&Answers::default()).within(1_000), Room::Unasked);
 }
 
 /// Each link that is up is asked, for the wait it is handed, and one that takes no bytes within it
 /// is the congestion; with room on every link, whoever holds the session is not waiting on one.
 #[test]
 fn each_link_is_asked_and_one_without_room_is_congestion() {
-    let rooms = LinkRooms::default();
-    let free = answer(true);
-    held(&rooms, 1, &free);
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, true));
     assert_eq!(
         rooms.within(1_234),
         Room::Free,
         "CONTROL: one link with room"
     );
-    assert_eq!(*free.asked.lock().unwrap(), [1_234]);
+    assert_eq!(answers.asked(10), [1_234]);
 
-    let full = answer(false);
-    held(&rooms, 2, &full);
+    rooms.hold(2, answers.face(20, false));
     assert_eq!(rooms.within(1_234), Room::Congested(vec![2]));
-    assert_eq!(
-        *full.asked.lock().unwrap(),
-        [1_234],
-        "the full link was asked"
-    );
+    assert_eq!(answers.asked(20), [1_234], "the full link was asked");
 }
 
 /// The congestion is the faces without room and no other: a face with room beside a full one is
@@ -76,25 +93,19 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
 /// asked without one, so the publish spends one deadline however many faces the session has.
 #[test]
 fn only_the_faces_without_room_are_the_congestion() {
-    let rooms = LinkRooms::default();
-    let full = answer(false);
-    let free = answer(true);
-    let also_full = answer(false);
-    held(&rooms, 1, &full);
-    held(&rooms, 2, &free);
-    held(&rooms, 3, &also_full);
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, false));
+    rooms.hold(2, answers.face(20, true));
+    rooms.hold(3, answers.face(30, false));
     assert_eq!(rooms.within(1_000), Room::Congested(vec![1, 3]));
+    assert_eq!(answers.asked(10), [1_000], "the first spends the wait");
     assert_eq!(
-        *full.asked.lock().unwrap(),
-        [1_000],
-        "the first spends the wait"
-    );
-    assert_eq!(
-        *free.asked.lock().unwrap(),
+        answers.asked(20),
         [0],
         "a face asked after the wait was spent is asked without one"
     );
-    assert_eq!(*also_full.asked.lock().unwrap(), [0]);
+    assert_eq!(answers.asked(30), [0]);
 }
 
 /// Under the pico profile a publish that finds the session held by another publish sending on a
@@ -106,9 +117,9 @@ fn only_the_faces_without_room_are_the_congestion() {
 #[test]
 fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
-    let rooms = LinkRooms::default();
-    let free = answer(true);
-    held(&rooms, 1, &free);
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, true));
     assert_eq!(
         rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000),
         Room::Held(7)
@@ -123,16 +134,13 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
         Room::Stepping,
         "a holder that is not a publish is waited for"
     );
-    assert!(
-        free.asked.lock().unwrap().is_empty(),
-        "the link was asked for room"
-    );
+    assert!(answers.asked(10).is_empty(), "the link was asked for room");
     assert_eq!(
         rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );
-    assert_eq!(*free.asked.lock().unwrap(), [1_000]);
+    assert_eq!(answers.asked(10), [1_000]);
 }
 
 /// A session held by a read working out its wait is tried again at once under either profile,
@@ -142,9 +150,9 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
 #[test]
 fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
-    let rooms = LinkRooms::default();
-    let free = answer(true);
-    held(&rooms, 1, &free);
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, true));
     for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
         assert_eq!(
             rooms.for_held(profile, Holder::Waiting, 1_000),
@@ -152,34 +160,41 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
             "{profile:?} tries the session again"
         );
     }
-    assert!(
-        free.asked.lock().unwrap().is_empty(),
-        "no link was asked for room"
-    );
+    assert!(answers.asked(10).is_empty(), "no link was asked for room");
     assert_eq!(
         rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
         Room::Free
     );
     assert_eq!(
-        *free.asked.lock().unwrap(),
+        answers.asked(10),
         [1_000],
         "CONTROL: behind a read step zenoh's profile asks the link"
     );
 }
 
-/// A link that has gone is not asked: its wait goes with its wire, and what is left is a session
-/// with no wait to ask.
+/// A face whose link was lost is not asked: its handle is let go of with the link, and what is
+/// left is a session with no wait to ask; a face's link made again names its handle anew, in place
+/// of the one before. Turned red by a handle kept past its link, or held twice for one face.
 #[test]
 fn a_link_that_has_gone_is_not_asked() {
-    let rooms = LinkRooms::default();
-    let full = answer(false);
-    held(&rooms, 1, &full);
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(1, answers.face(10, false));
     assert_eq!(
         rooms.within(1_000),
         Room::Congested(vec![1]),
         "CONTROL: while it is up"
     );
-    drop(full);
+    rooms.forget(1);
+    assert_eq!(rooms.within(1_000), Room::Unasked);
+    rooms.hold(1, answers.face(11, false));
+    rooms.hold(1, answers.face(12, true));
+    assert_eq!(
+        rooms.within(1_000),
+        Room::Free,
+        "the face's last link alone"
+    );
+    rooms.forget_all();
     assert_eq!(rooms.within(1_000), Room::Unasked);
 }
 

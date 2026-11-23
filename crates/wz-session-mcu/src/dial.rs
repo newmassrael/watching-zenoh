@@ -1252,6 +1252,10 @@ mod tests {
         impl SessionLinks for NoLinks {
             type Pump = wz_runtime_coop::link_cells::CellRc<crate::memory::MemoryEnd>;
             type Dial = wz_runtime_coop::session_drive::Dialled<Self::Pump>;
+            type Waits = wz_runtime_coop::session_drive::NoWaits;
+            fn waits(&self) -> Self::Waits {
+                wz_runtime_coop::session_drive::NoWaits
+            }
             fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)
             }

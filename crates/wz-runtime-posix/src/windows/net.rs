@@ -374,6 +374,12 @@ impl DatagramSocket for WindowsUdpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        type Waits = super::WindowsWaits;
+
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             super::SocketReadiness::of(self.socket)
@@ -390,6 +396,11 @@ wz_runtime_coop::with_heap_link_seams! {
             &self,
         ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {
             super::SocketReadiness::writable_of(self.socket)
+        }
+
+        /// What a wait for room on this socket names it by.
+        pub(crate) fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
         }
     }
 }

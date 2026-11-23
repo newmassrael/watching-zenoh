@@ -88,7 +88,6 @@ wz_runtime_coop::with_heap_link_seams! {
     /// is the bounded look the runtime gives a wait it cannot name to the system
     /// (`LinkReadiness::wait_readable_among`): it ends within a millisecond, and the step after it
     /// reads every link.
-    #[cfg(feature = "alloc")]
     pub(crate) const WAIT_SET_SOCKETS: usize = 64;
 }
 

@@ -501,7 +501,6 @@ pub(crate) fn name_of(
 wz_runtime_coop::with_heap_link_seams! {
 /// A wait of `timeout_ms` milliseconds as `WSAPoll` takes it; a longer one than it can say is the
 /// longest it can.
-#[cfg(feature = "alloc")]
 fn wait_ms(timeout_ms: u32) -> i32 {
     i32::try_from(timeout_ms).unwrap_or(i32::MAX)
 }
@@ -572,7 +571,6 @@ impl LinkWritability for SocketReadiness {
 }
 
 /// A `WSAPoll` entry for `socket` that asks for input, and for room as well when `room`.
-#[cfg(feature = "alloc")]
 fn wait_entry(socket: ws::SOCKET, room: bool) -> ws::WSAPOLLFD {
     ws::WSAPOLLFD {
         fd: socket,
@@ -640,6 +638,59 @@ impl LinkReadiness for SocketReadiness {
 impl Drop for SocketReadiness {
     fn drop(&mut self) {
         close(self.0);
+    }
+}
+
+/// The waits of this platform's sockets ([`LinkWaits`](wz_runtime_coop::session_drive::LinkWaits)):
+/// one `WSAPoll` over the sockets the links name, made by a thread other than the links' own with
+/// nothing of a session held. A socket is named by its handle and nothing holds it open: a handle
+/// a close freed and a new socket took is polled as that socket, a hint as every answer is, and the
+/// step that follows looks again under the session's lock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowsWaits;
+
+impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
+    fn wait(&self, on: &[wz_runtime_coop::session_drive::LinkWait], timeout_ms: u32) {
+        use wz_runtime_coop::session_drive::WaitOn;
+        if on.is_empty() {
+            return;
+        }
+        let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
+        let mut count = 0;
+        let mut look = false;
+        for wait in on {
+            match (wait.on, fds.get_mut(count)) {
+                (WaitOn::Socket(socket), Some(entry)) => {
+                    *entry = wait_entry(socket, wait.room);
+                    count += 1;
+                }
+                // A handle this cannot name to the system, or one past the set: the bounded look,
+                // so it is not starved behind a wait on the others.
+                _ => look = true,
+            }
+        }
+        let timeout_ms = if look { timeout_ms.min(1) } else { timeout_ms };
+        if count == 0 {
+            // `WSAPoll` refuses an empty set: the look is a sleep.
+            // SAFETY: a plain system call with a value argument.
+            unsafe { windows_sys::Win32::System::Threading::Sleep(timeout_ms) };
+            return;
+        }
+        // SAFETY: the first `count` entries of `fds` are written and live for the call, and the
+        // timeout bounds the wait. A failed wait is a quiet link: the step that follows reads and
+        // reports the error.
+        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) };
+    }
+
+    fn wait_room(&self, on: wz_runtime_coop::session_drive::WaitOn, timeout_us: u64) -> bool {
+        match on {
+            wz_runtime_coop::session_drive::WaitOn::Socket(socket) => poll_writable(
+                socket,
+                i32::try_from(timeout_us.div_ceil(1_000)).unwrap_or(i32::MAX),
+            ),
+            // Not a socket of this platform's: the send that follows answers.
+            wz_runtime_coop::session_drive::WaitOn::AppLink(_) => true,
+        }
     }
 }
 }

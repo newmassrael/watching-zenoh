@@ -42,6 +42,7 @@ const IPV6_JOIN: c_int = libc::IPV6_JOIN_GROUP;
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
+    use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 }
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
@@ -135,7 +136,6 @@ impl LinkWritability for FdReadiness {
 }
 
 /// What a wait on a socket asks `poll` for: input, and room as well when `room`.
-#[cfg(feature = "alloc")]
 fn wait_events(room: bool) -> libc::c_short {
     if room {
         libc::POLLIN | libc::POLLOUT
@@ -218,6 +218,71 @@ impl Drop for FdReadiness {
         // SAFETY: the duplicate is this value's own descriptor, closed exactly once.
         unsafe { libc::close(self.0) };
     }
+}
+
+wz_runtime_coop::with_heap_link_seams! {
+/// The waits of this platform's sockets ([`LinkWaits`]): one `poll` over the descriptors the
+/// links name, made by a thread other than the links' own with nothing of a session held. A
+/// descriptor is named by its number and nothing holds it open: one a close freed and a new socket
+/// took is polled as that socket, a hint as every answer is, and the step that follows looks again
+/// under the session's lock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PosixWaits;
+
+impl LinkWaits for PosixWaits {
+    fn wait(&self, on: &[LinkWait], timeout_ms: u32) {
+        if on.is_empty() {
+            return;
+        }
+        let mut fds = [libc::pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
+        }; crate::WAIT_SET_SOCKETS];
+        let mut count = 0;
+        let mut look = false;
+        for wait in on {
+            let fd = match wait.on {
+                WaitOn::Socket(handle) => c_int::try_from(handle).ok(),
+                WaitOn::AppLink(_) => None,
+            };
+            match (fd, fds.get_mut(count)) {
+                (Some(fd), Some(entry)) => {
+                    *entry = libc::pollfd {
+                        fd,
+                        events: wait_events(wait.room),
+                        revents: 0,
+                    };
+                    count += 1;
+                }
+                // A handle this cannot name to the kernel, or one past the set: the bounded look,
+                // so it is not starved behind a wait on the others.
+                _ => look = true,
+            }
+        }
+        let timeout_ms = if look { timeout_ms.min(1) } else { timeout_ms };
+        let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
+        // SAFETY: the first `count` entries of `fds` are written and live for the call, and the
+        // timeout bounds the wait. A failed or interrupted wait is a quiet link: the step that
+        // follows reads and reports the error.
+        unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, timeout) };
+    }
+
+    fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
+        match on {
+            WaitOn::Socket(handle) => {
+                c_int::try_from(handle).map_or(true, |fd| poll_writable(fd, timeout_us))
+            }
+            // Not a socket of this platform's: the send that follows answers.
+            WaitOn::AppLink(_) => true,
+        }
+    }
+}
+
+/// What a wait on the socket `fd` names it by.
+pub(crate) fn wait_on(fd: c_int) -> Option<WaitOn> {
+    usize::try_from(fd).ok().map(WaitOn::Socket)
+}
 }
 }
 
@@ -867,6 +932,12 @@ impl DatagramSocket for PosixUdpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        type Waits = PosixWaits;
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            wait_on(self.fd)
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             FdReadiness::of(self.fd)
@@ -881,6 +952,11 @@ wz_runtime_coop::with_heap_link_seams! {
         /// of its descriptor; `None` when the descriptor cannot be duplicated.
         pub(crate) fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
             FdReadiness::writable_of(self.fd)
+        }
+
+        /// What a wait for room on this socket names it by.
+        pub(crate) fn room_wait(&self) -> Option<WaitOn> {
+            wait_on(self.fd)
         }
     }
 }
@@ -1248,6 +1324,65 @@ mod tests {
                 started.elapsed() < Duration::from_millis(2_500),
                 "the datagram on the set's last socket ended the wait, took {:?}",
                 started.elapsed()
+            );
+        }
+
+        /// The stack's waits name each socket by its descriptor: a wait over a set whose last
+        /// socket has a datagram ends at once, one over quiet sockets sleeps its time, and one
+        /// that names a handle of another stack's, or more sockets than the set holds, is the
+        /// bounded look. A socket with room answers a wait for room. Turned red by a wait that
+        /// names only the first socket, or sleeps its whole time on what it cannot name.
+        #[test]
+        fn the_stacks_waits_name_each_socket_and_look_at_what_they_cannot() {
+            use std::time::{Duration, Instant};
+            use std::vec::Vec;
+
+            let (quiet, sender) = pair();
+            let ready = PosixUdpSocket::bind(LOOPBACK).expect("a socket");
+            let on = |socket: &PosixUdpSocket| {
+                LinkWait::input(socket.input_wait().expect("a socket names its descriptor"))
+            };
+            let mut set: Vec<LinkWait> = (0..crate::WAIT_SET_SOCKETS).map(|_| on(&quiet)).collect();
+
+            let started = Instant::now();
+            PosixWaits.wait(&set, 100);
+            assert!(
+                started.elapsed() >= Duration::from_millis(80),
+                "CONTROL: quiet sockets that fill the set sleep the wait's time"
+            );
+
+            let started = Instant::now();
+            PosixWaits.wait(&[on(&quiet), LinkWait::input(WaitOn::AppLink(7))], 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a handle of another stack's is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            set.push(on(&quiet));
+            let started = Instant::now();
+            PosixWaits.wait(&set, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(1_000),
+                "a wait past the set is the bounded look, took {:?}",
+                started.elapsed()
+            );
+
+            set.pop();
+            set.pop();
+            set.push(on(&ready));
+            sender.send_to(ready.local(), b"wake").expect("a send");
+            let started = Instant::now();
+            PosixWaits.wait(&set, 5_000);
+            assert!(
+                started.elapsed() < Duration::from_millis(2_500),
+                "the datagram on the set's last socket ended the wait, took {:?}",
+                started.elapsed()
+            );
+
+            assert!(
+                PosixWaits.wait_room(on(&quiet).on, 1_000),
+                "an idle datagram socket has room"
             );
         }
     }

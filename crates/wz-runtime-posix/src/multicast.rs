@@ -803,6 +803,16 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self.write.as_ref()?.room_wait()
+        }
+
+        // The joined socket's input, on a platform that names it; a group that was left names
+        // none.
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self.read.as_ref()?.input_wait()
+        }
+
         fn writability(
             &self,
         ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::session_drive::LinkWritability>> {

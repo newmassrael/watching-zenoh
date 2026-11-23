@@ -62,7 +62,7 @@ use crate::session_drive::{Dialled, LinkListener, OpenedLink, PendingDial, Sessi
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkReadiness, LinkWritability};
+use crate::session_drive::{LinkReadiness, LinkWritability, WaitOn};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::link_over;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -304,6 +304,16 @@ where
 
     fn lends_until_next_receive(&self) -> bool {
         either!(self, link => link.lends_until_next_receive())
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        either!(self, link => link.input_wait())
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn room_wait(&self) -> Option<WaitOn> {
+        either!(self, link => link.room_wait())
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -582,6 +592,14 @@ where
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
+    // The waits of the platform whose sockets these are: its streams, the secure channels over
+    // them and its groups name handles of the same platform as its datagram sockets do.
+    type Waits = U::Waits;
+
+    fn waits(&self) -> U::Waits {
+        U::Waits::default()
+    }
+
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
@@ -825,6 +843,10 @@ impl<U: DatagramSocket + 'static> LinkListener<HeapLink> for IpUdpListener<U> {
         .map(Some)
     }
 
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.port.input_wait()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.port.readiness()
     }
@@ -859,6 +881,10 @@ impl<T: StreamSocket + 'static> LinkListener<HeapLink> for IpTlsListener<T> {
         .map(Some)
     }
 
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.listener.input_wait()
+    }
+
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         self.listener.readiness()
     }
@@ -887,6 +913,10 @@ impl<S: StreamSocket + 'static> LinkListener<HeapLink> for IpListener<S> {
         // tables have none left for is closed, not left queued, as `IpAcceptor` closes it.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
         heap_link(self.shape.cells.as_ref(), self.shape.stream(stream, rx, tx)).map(Some)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.listener.input_wait()
     }
 
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
@@ -1239,6 +1269,8 @@ mod tests {
 
     impl<const V6: bool> DatagramSocket for Datagrams<V6> {
         type Error = NoIpv6;
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        type Waits = crate::session_drive::NoWaits;
         const IPV6: bool = V6;
         fn bind(at: SocketAddr) -> Result<Self, NoIpv6> {
             if at.is_ipv6() && !V6 {
@@ -2326,6 +2358,8 @@ mod tests {
 
         impl DatagramSocket for Inbox {
             type Error = ();
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            type Waits = crate::session_drive::NoWaits;
             fn bind(_at: SocketAddr) -> Result<Self, ()> {
                 Ok(Self {
                     queued: Queue::default(),

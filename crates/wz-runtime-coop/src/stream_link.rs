@@ -65,7 +65,7 @@ use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
 ))]
 use crate::session_drive::{LinkRead, OwnerRead, ReadWaited, RxLease};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{LinkReadiness, LinkWritability};
+use crate::session_drive::{LinkReadiness, LinkWritability, WaitOn};
 use crate::udp_link::{link_endpoints, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -161,6 +161,24 @@ pub trait StreamSocket: Sized {
     /// The zid of the key the peer proved when the stream was opened, for a stream that is a
     /// secure channel (decision D1); `None` for a plain connection, which proves nobody.
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        None
+    }
+
+    /// What a thread other than the link's waits on for this stream's input
+    /// ([`SessionDatagramLink::input_wait`]); `None` when the platform gives none (a secure
+    /// channel holds bytes of its own the socket's wait would not see), and then a link over the
+    /// stream waits in its own loop whatever it was asked.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        None
+    }
+
+    /// What a thread other than the link's waits on for room on this stream
+    /// ([`SessionDatagramLink::room_wait`]): the stream's own handle, a value a wait copies;
+    /// `None` when the platform gives none, and then a sender that finds the session held waits
+    /// for it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn room_wait(&self) -> Option<WaitOn> {
         None
     }
 
@@ -275,6 +293,15 @@ pub trait StreamListen {
     /// when the listener itself is broken, which no later call mends.
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError>;
 
+    /// What a thread other than the one that accepts waits on for a connection
+    /// ([`StreamSocket::input_wait`] is the stream's): ready when a connection is queued.
+    /// `None` when the platform gives none, and then the owner looks for a connection at a pace
+    /// of its own.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        None
+    }
+
     /// A wait for a connection that a thread other than the one that accepts can make
     /// ([`StreamSocket::readiness`] is the stream's): ready when a connection is queued.
     /// `None` when the platform gives none, and then the owner looks for a connection at a pace
@@ -298,6 +325,10 @@ impl<L: StreamListen + ?Sized> StreamListen for alloc::boxed::Box<L> {
 
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError> {
         (**self).accept()
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        (**self).input_wait()
     }
 
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
@@ -488,6 +519,16 @@ impl SessionDatagramLink for NoStream {
     }
 
     fn lends_until_next_receive(&self) -> bool {
+        match *self {}
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        match *self {}
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn room_wait(&self) -> Option<WaitOn> {
         match *self {}
     }
 
@@ -802,7 +843,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.readiness().is_some();
+        self.owner_waits = self.socket.input_wait().is_some();
         #[cfg(target_has_atomic = "ptr")]
         if self.owner_waits {
             self.owner_read = self.socket.reader().map(OwnerRead::new);
@@ -1354,6 +1395,21 @@ impl<S: StreamSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Sess
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        if self.owner_waits {
+            self.socket.input_wait()
+        } else {
+            None
+        }
+    }
+
+    // Whoever waits for input, room is the socket's alone, as for `writability` below.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.socket.room_wait()
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         if self.owner_waits {
             self.socket.readiness()
@@ -1625,6 +1681,11 @@ mod tests {
         }
 
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        fn room_wait(&self) -> Option<WaitOn> {
+            Some(WaitOn::Socket(PIPE_HANDLE))
+        }
+
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         fn writability(&self) -> Option<alloc::boxed::Box<dyn LinkWritability>> {
             Some(alloc::boxed::Box::new(Room(!self.full.get())))
         }
@@ -1638,6 +1699,11 @@ mod tests {
             Some(Broken)
         }
     }
+
+    /// The handle a pipe names for a wait on its room: a socket of no platform, which only the
+    /// tests compare.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    const PIPE_HANDLE: usize = 7;
 
     /// The pipe's room when its wait was handed out, as a wait from outside answers it.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -1667,6 +1733,18 @@ mod tests {
             !wait.wait_writable(1_000),
             "a stream whose peer reads nothing"
         );
+    }
+
+    /// A link names its socket's handle for a wait on its room whether or not its owner waits for
+    /// its input (none does here), and names nothing for its input then. Turned red by a link
+    /// whose room wait follows its owner's wait for input, or that names a handle for its input
+    /// while its own loop waits for it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_names_its_sockets_room_whether_or_not_its_owner_waits() {
+        let link = link();
+        assert_eq!(link.room_wait(), Some(WaitOn::Socket(PIPE_HANDLE)));
+        assert_eq!(link.input_wait(), None, "its own loop waits for its input");
     }
 
     /// Two slots of 32 bytes, for any profile.

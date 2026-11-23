@@ -243,6 +243,11 @@ impl StreamListen for WindowsTcpListener {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        // A listening socket polls readable while a connection is queued on it.
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             // A listening socket polls readable while a connection is queued on it.
@@ -491,6 +496,14 @@ impl StreamSocket for WindowsTcpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
+        }
+
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            Some(wz_runtime_coop::session_drive::WaitOn::Socket(self.socket))
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             super::SocketReadiness::of(self.socket)

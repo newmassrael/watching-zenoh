@@ -66,6 +66,8 @@ use crate::session_drive::LinkReadiness;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
 use crate::session_drive::{LinkProto, Locator, SessionDatagramLink};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
 /// The largest UDP payload the session receives in one datagram: the transport's own ceiling, so a
 /// whole batch always fits.
@@ -140,6 +142,20 @@ pub trait DatagramSocket: Sized {
     /// else its length and source.
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error>;
 
+    /// The waits of this platform's sockets ([`LinkWaits`]), which a stack of them waits on its
+    /// links with ([`crate::session_drive::SessionLinks::waits`]): one value, made when the stack
+    /// is asked for it.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits: LinkWaits + Clone + Default + 'static;
+
+    /// What a thread other than the link's waits on for this socket's input
+    /// ([`SessionDatagramLink::input_wait`]); `None` when the platform gives none, and then a
+    /// link over the socket waits in its own loop whatever it was asked.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        None
+    }
+
     /// A wait for this socket that a thread other than the link's can make
     /// ([`SessionDatagramLink::readiness`]); `None` when the platform gives none, and then a link
     /// over the socket waits in its own loop whatever it was asked.
@@ -197,6 +213,9 @@ pub enum NoDatagram {}
 
 impl DatagramSocket for NoDatagram {
     type Error = ();
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits = NoWaits;
 
     const CARRIED: bool = false;
 
@@ -406,7 +425,7 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = self.socket.readiness().is_some();
+        self.owner_waits = self.socket.input_wait().is_some();
         self
     }
 
@@ -735,6 +754,15 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        if self.owner_waits {
+            self.socket.input_wait()
+        } else {
+            None
+        }
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         if self.owner_waits {
             self.socket.readiness()
@@ -841,6 +869,11 @@ impl<S: DatagramSocket> UdpPort<S> {
     /// The address and port the socket is bound to.
     pub fn local(&self) -> SocketAddr {
         self.socket.local()
+    }
+
+    /// What another thread waits on for the socket's input, when the platform gives one.
+    pub fn input_wait(&self) -> Option<WaitOn> {
+        self.socket.input_wait()
     }
 
     /// A wait for the socket that another thread can make, when the platform gives one.
@@ -973,6 +1006,8 @@ impl<S: DatagramSocket> Drop for PortPeer<S> {
 impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
     type Error = PortPeerError<S::Error>;
 
+    type Waits = S::Waits;
+
     const CARRIED: bool = S::CARRIED;
 
     const IPV6: bool = S::IPV6;
@@ -1019,6 +1054,10 @@ impl<S: DatagramSocket> DatagramSocket for PortPeer<S> {
             return Ok(Some((len, self.peer)));
         }
         pumped.map(|()| None).map_err(PortPeerError::Socket)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.port.input_wait()
     }
 
     fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
@@ -1312,6 +1351,9 @@ mod tests {
 
     impl DatagramSocket for Loop {
         type Error = Refused;
+
+        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+        type Waits = crate::session_drive::NoWaits;
 
         fn bind(_at: SocketAddr) -> Result<Self, Refused> {
             Ok(Loop::default())

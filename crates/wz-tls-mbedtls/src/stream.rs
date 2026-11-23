@@ -189,6 +189,10 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
 
     // The same room, waited on from another thread: the stream's own wait, handed out.
     wz_runtime_coop::with_heap_link_seams! {
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self.lower.socket.room_wait()
+        }
+
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         fn writability(
             &self,

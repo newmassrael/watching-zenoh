@@ -244,6 +244,27 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// What the link's OWNER waits on for its next input ([`LinkWaits::wait`]), from any thread
+    /// and with nothing of the session held, for a link opened to be waited on that way: its
+    /// [`Self::service`] then does not wait, so the loop that drives it never sleeps under its
+    /// owner's lock. `None` for a link whose loop waits, which is every link that was not opened
+    /// otherwise. The heap profile's: a slot image's loop is the only thing that drives its links.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn input_wait(&self) -> Option<WaitOn> {
+        None
+    }
+
+    /// What a thread that does not drive the link waits on for room on its outbound side
+    /// ([`LinkWaits::wait_room`]), with nothing of the session held: a sender that finds the
+    /// session held by another, which may be waiting for room on this link up to
+    /// `wait_before_close`, asks this instead of waiting for the session, so that a message it may
+    /// drop is not held behind one it may not. `None` for a link that cannot tell. The heap
+    /// profile's, as [`Self::input_wait`] is.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn room_wait(&self) -> Option<WaitOn> {
+        None
+    }
+
     /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
     /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
     /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
@@ -426,6 +447,85 @@ pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
         [] => {}
         [only] => only.wait_readable(timeout_ms),
         [first, rest @ ..] => first.wait_readable_among(rest, timeout_ms),
+    }
+}
+
+/// What a wait on a link names: the link's handle in the stack that made it, a value copied into
+/// a wait set that holds nothing of the link. A handle whose link has gone may name another by
+/// the time it is waited on (a descriptor number a close freed for a new socket), so what a wait
+/// on it answers is a hint, as every wake is: the step that follows looks again under the
+/// session's lock.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOn {
+    /// A socket of the platform's: a POSIX or Zephyr descriptor, a Windows `SOCKET`.
+    Socket(usize),
+    /// A link of the program's transport by its handle (`wz_session_core::app_link_table`'s
+    /// `LinkHandle`), which is never reused: a wait on one whose link has gone answers at once.
+    AppLink(u64),
+}
+
+/// One entry of a wait over several links ([`LinkWaits::wait`]): the link, and whether the wait
+/// ends on its room as well as on its input. A link that owes its stack the rest of a frame
+/// ([`SessionDatagramLink::owes_write`]) is waited on for both, so the rest is written as soon as
+/// the stack takes it; one that owes nothing for its input alone, so a link with room does not
+/// wake its owner.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkWait {
+    /// The link waited on.
+    pub on: WaitOn,
+    /// Whether room on the link ends the wait as well.
+    pub room: bool,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl LinkWait {
+    /// A wait for the input of `on`.
+    pub const fn input(on: WaitOn) -> Self {
+        Self { on, room: false }
+    }
+
+    /// A wait for the input of `on` or for room on it.
+    pub const fn input_or_room(on: WaitOn) -> Self {
+        Self { on, room: true }
+    }
+}
+
+/// The waits of one stack's links, made by a thread that does not drive them and with nothing of
+/// the session held: one value for the stack, taken once when the session opens
+/// ([`SessionLinks::waits`]), that waits on the handles its links name ([`WaitOn`]) and holds
+/// nothing of any link.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub trait LinkWaits: Send + Sync {
+    /// Block until one of `on` has input, or room for an entry that asks for it, or `timeout_ms`
+    /// has passed; at once when one already has, and when `on` is empty. A failed wait is a
+    /// quiet link: the step that follows reads and reports the failure. An entry the stack cannot
+    /// name to its platform bounds the wait at a look of a millisecond, so it is not starved
+    /// behind a wait on the others.
+    fn wait(&self, on: &[LinkWait], timeout_ms: u32);
+
+    /// Wait up to `timeout_us` microseconds for `on` to take more bytes: `true` once it will
+    /// (or once it has failed or gone, which the send that follows reports), `false` when it
+    /// still would not when the time is up.
+    fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool;
+}
+
+/// The waits of a stack whose links name nothing to wait on: each of them waits in its own loop,
+/// so no wait is asked of this. One asked anyway ends at once, and a wait for room finds it.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoWaits;
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl LinkWaits for NoWaits {
+    fn wait(&self, on: &[LinkWait], timeout_ms: u32) {
+        let _ = (on, timeout_ms);
+    }
+
+    fn wait_room(&self, on: WaitOn, timeout_us: u64) -> bool {
+        let _ = (on, timeout_us);
+        true
     }
 }
 
@@ -676,6 +776,16 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     }
 
     #[cfg(feature = "alloc")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        (**self).input_wait()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn room_wait(&self) -> Option<WaitOn> {
+        (**self).room_wait()
+    }
+
+    #[cfg(feature = "alloc")]
     fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
         (**self).readiness()
     }
@@ -756,6 +866,16 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for crate::link_cells:
 
     fn lends_until_next_receive(&self) -> bool {
         (**self).lends_until_next_receive()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn input_wait(&self) -> Option<WaitOn> {
+        (**self).input_wait()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn room_wait(&self) -> Option<WaitOn> {
+        (**self).room_wait()
     }
 
     #[cfg(feature = "alloc")]
@@ -964,6 +1084,17 @@ pub trait SessionLinks {
     /// for that reason, as `Bind::IPV6` is on the slot profile.
     const IPV6: bool = true;
 
+    /// The waits of this stack's links ([`LinkWaits`]): what every handle its links, ports and
+    /// groups name ([`WaitOn`]) is waited on with. The heap profile's, as
+    /// [`SessionDatagramLink::input_wait`] is.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    type Waits: LinkWaits + Clone + 'static;
+
+    /// The waits of this stack's links, which a session takes once when it opens and makes every
+    /// wait of its links' with.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn waits(&self) -> Self::Waits;
+
     /// A UDP link that accepts: bound on `port`, with no peer until the first
     /// `InitSyn` it takes names one.
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
@@ -1062,6 +1193,13 @@ pub trait LinkListener<P> {
     /// (the connection is closed or stays queued, as the stack's listener says, and a later call
     /// tries again); [`LinkOpenError::Unsupported`] when the listener is broken for good.
     fn accept(&self) -> Result<Option<OpenedLink<P>>, LinkOpenError>;
+
+    /// What a thread other than the one that accepts waits on for a connection
+    /// ([`LinkWaits::wait`]); `None` when the stack gives none, and then the node looks for one
+    /// at a pace of its own.
+    fn input_wait(&self) -> Option<WaitOn> {
+        None
+    }
 
     /// A wait for a connection that a thread other than the one that accepts can make; `None`
     /// when the stack gives none, and then the node looks for one at a pace of its own.

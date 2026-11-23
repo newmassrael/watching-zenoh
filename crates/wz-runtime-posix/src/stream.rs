@@ -24,6 +24,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
+    use wz_runtime_coop::session_drive::WaitOn;
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     use wz_runtime_coop::session_drive::{LinkRead, ReadWaited};
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -213,6 +214,11 @@ impl StreamListen for PosixTcpListener {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        // A listening descriptor polls readable while a connection is queued on it.
+        fn input_wait(&self) -> Option<WaitOn> {
+            crate::net::wait_on(self.fd)
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             // A listening descriptor polls readable while a connection is queued on it.
@@ -447,6 +453,14 @@ impl StreamSocket for PosixTcpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        fn input_wait(&self) -> Option<WaitOn> {
+            crate::net::wait_on(self.fd)
+        }
+
+        fn room_wait(&self) -> Option<WaitOn> {
+            crate::net::wait_on(self.fd)
+        }
+
         #[cfg(feature = "alloc")]
         fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
             crate::net::FdReadiness::of(self.fd)

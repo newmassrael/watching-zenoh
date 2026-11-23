@@ -89,6 +89,12 @@ pub trait MulticastSocket: DatagramSocket {
     fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int);
 
     wz_runtime_coop::with_heap_link_seams! {
+        /// What a thread other than the one that owns the socket waits on for the room
+        /// [`Self::wait_writable`] waits for: the socket's handle, a value. `None` when the
+        /// platform names none.
+        #[cfg(feature = "host-multicast")]
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn>;
+
         /// [`Self::wait_writable`] made by a thread other than the one that owns the socket, on a
         /// handle of its own, so a wait made after the socket was closed asks one still open.
         /// `None` when the platform cannot give one.
@@ -287,6 +293,11 @@ impl MulticastSocket for PosixUdpSocket {
     }
 
     wz_runtime_coop::with_heap_link_seams! {
+        #[cfg(feature = "host-multicast")]
+        fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            PosixUdpSocket::room_wait(self)
+        }
+
         #[cfg(feature = "host-multicast")]
         fn writability(
             &self,
