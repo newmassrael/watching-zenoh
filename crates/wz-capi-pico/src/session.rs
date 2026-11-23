@@ -1900,10 +1900,6 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     } else {
         usize::from(stated.is_some()) + request.scouted.len()
     };
-    // The open writes each unicast endpoint's text into the row it lent for it, as pico's link of
-    // the scheme reads it (`crate::endpoint::with_engine_text`, judged at `open_request`), from
-    // the config's text where it lies or the scout's answer, and lets the config go with the
-    // writer, before anything is dialled or bound.
     let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
