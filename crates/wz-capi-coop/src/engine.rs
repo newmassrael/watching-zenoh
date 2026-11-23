@@ -72,7 +72,7 @@ use wz_runtime_coop::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::Accepted;
 use wz_runtime_coop::faces::{
-    DialEndpoint, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor, Moved,
+    Dial, DialEndpoint, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor, Moved,
 };
 use wz_runtime_coop::reassembly_rx::{
     LentChains, LentReassembly, LentReassemblyMaker, LENT_CHAINS,
@@ -1340,7 +1340,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// under way, the ports listened on and a read's waits are the driver's
     /// (`wz_runtime_coop::faces`). What is declared is declared over each face, and a get is
     /// asked of each.
-    links: LinkSupervisor<L, Face<C>>,
+    links: LinkSupervisor<L, Face<C, L::Pump>>,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     groups: Vec<GroupFace>,
@@ -1418,24 +1418,25 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
 
 /// One face of the session: the link it holds, and where the telling of the session's
 /// declarations to that link's peer stands (`replay`).
-struct Face<C: ClockSource + 'static> {
+struct Face<C: ClockSource + 'static, P> {
     id: FaceId,
-    link: Link<LinkSession<C>>,
+    link: Link<LinkSession<C>, P>,
     replay: Replay,
 }
 
-impl<C: ClockSource + 'static> FaceRecord for Face<C> {
+impl<C: ClockSource + 'static, P> FaceRecord for Face<C, P> {
     type Session = LinkSession<C>;
+    type Pump = P;
 
     fn id(&self) -> FaceId {
         self.id
     }
 
-    fn link(&self) -> &Link<LinkSession<C>> {
+    fn link(&self) -> &Link<LinkSession<C>, P> {
         &self.link
     }
 
-    fn link_mut(&mut self) -> &mut Link<LinkSession<C>> {
+    fn link_mut(&mut self) -> &mut Link<LinkSession<C>, P> {
         &mut self.link
     }
 }
@@ -2047,7 +2048,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// The dial role's face, which the session holds for its whole life.
-    fn dial(&self) -> &Face<C> {
+    fn dial(&self) -> &Face<C, L::Pump> {
         &self.links.faces()[0]
     }
 
@@ -2370,7 +2371,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         from: usize,
         mut last: OpenError,
-    ) -> Result<Link<LinkSession<C>>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
         for at in from..self.config.endpoints.len() {
             let mut pending = match self.begin_dial(DIAL_FACE, &self.config.endpoints[at]) {
                 Ok(pending) => pending,
@@ -2383,14 +2384,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let deadline_us = self.open_deadline_us();
             match pending.poll() {
                 None => {
-                    let held = self
-                        .links
-                        .hold_dial(DIAL_FACE, DialEndpoint::Listed(at), pending);
-                    debug_assert!(
-                        held,
-                        "a face holds one dial, and the table one for each face"
-                    );
-                    return Ok(Link::Dialing { next, deadline_us });
+                    return Ok(Link::Dialing {
+                        dial: Dial::new(DialEndpoint::Listed(at), pending),
+                        next,
+                        deadline_us,
+                    });
                 }
                 Some(answer) => {
                     let endpoint = DialEndpoint::Listed(at);
@@ -2420,7 +2418,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         next: usize,
         deadline_us: u64,
         answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
-    ) -> Result<Link<LinkSession<C>>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
         let opened = answer.map_err(|refused| {
             OpenError::Unreachable(EndpointRefusal::new(
                 self.endpoint_text(endpoint),
@@ -2455,7 +2453,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         from: usize,
         last: OpenError,
         redial_ms: Option<u64>,
-    ) -> Result<Link<LinkSession<C>>, OpenError> {
+    ) -> Result<Link<LinkSession<C>, L::Pump>, OpenError> {
         match (self.dial_from(from, last), redial_ms) {
             (Ok(link), _) => Ok(link),
             (Err(OpenError::EntropyUnavailable), _) => Err(OpenError::EntropyUnavailable),
@@ -2497,8 +2495,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
     /// gave no entropy.
     ///
-    /// What became of the link is the driver's to say (`LinkSupervisor::advance`); what it means
-    /// for the session is said here.
+    /// What became of the link is the driver's to say (`LinkSupervisor::advance`), and the link
+    /// stays in its face while what it means for the session is done here.
     fn poll_face(
         &mut self,
         at: usize,
@@ -2506,32 +2504,40 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         now_us: u64,
     ) -> Result<(), OpenError> {
         let now_ms = now_us / 1000;
-        let Some((id, link)) = self.links.take_link(at, now_us) else {
+        let Some(face) = self.links.faces().get(at) else {
             return Ok(());
         };
+        let id = face.id;
         // A link that is up goes on telling its peer what the session holds, when a turn is due.
         // A turn the replay is given up on (a refused send, at once without a pace or when the
         // pace says so) ends the link here, with no Close, as
         // zenoh-pico clears a transport its reopen could not send its declarations over
-        // (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`); the driver then
-        // finds it lost, so the dial role's face dials again and tells everything over the next
-        // link, and any other face goes.
-        if let Link::Up(wire) = &link {
-            if !wire.finished() && self.replay_turn(at, &wire.actions, now_ms) == TurnEnd::EndsLink
-            {
-                wire.abort();
+        // (`vendor/zenoh-pico/src/net/session.c` @ `_z_transport_clear(&s->_tp);`); the driver
+        // then finds it lost, so the dial role's face dials again and tells everything over the
+        // next link, and any other face goes.
+        let up = match &face.link {
+            Link::Up(wire) if !wire.finished() => Some(Rc::clone(&wire.actions)),
+            _ => None,
+        };
+        if let Some(actions) = up {
+            if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
+                self.abort_link(at);
                 self.local.run_until_idle();
             }
         }
-        let polled = match self.links.advance(at, link, now_us) {
+        let polled = match self.links.advance(at, now_us) {
             Moved::Stays => return Ok(()),
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
-            // that failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+            // that failed, a Close from the router
+            // (`vendor/zenoh-pico/src/transport/unicast/read.c` @
             // `return _zp_unicast_failed_result(ztu, executor);`).
-            Moved::Lost(wire) => {
+            Moved::Lost => {
                 // The face is read before the wire goes: what it was is what a watcher is told.
-                let snapshot = self.face_of(&wire.actions);
-                drop(wire);
+                let snapshot = self.links.faces()[at]
+                    .link
+                    .wire()
+                    .and_then(|wire| self.face_of(&wire.actions));
+                self.links.put_link(at, Link::Waiting { at_us: now_us });
                 self.lose_link(id);
                 self.report_face(FaceEventKind::Down, snapshot);
                 if id != DIAL_FACE {
@@ -2548,21 +2554,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             // The face table decides whether the node is held already, and installs the link
             // itself.
-            Moved::Established(wire) => {
-                self.admit(at, wire, now_us);
+            Moved::Established => {
+                self.bring_up(at, now_us);
                 return Ok(());
             }
-            Moved::HandshakeOver { wire, next } => {
-                let why = match (wire.actions.close_reason(), wire.finished()) {
-                    (Some(reason), _) => Refusal::HandshakeClosed(reason),
-                    (None, true) => Refusal::HandshakeEnded,
-                    (None, false) => Refusal::NoAnswerInTime,
+            Moved::HandshakeOver { next } => {
+                let why = match self.links.faces()[at].link.wire() {
+                    Some(wire) => match (wire.actions.close_reason(), wire.finished()) {
+                        (Some(reason), _) => Refusal::HandshakeClosed(reason),
+                        (None, true) => Refusal::HandshakeEnded,
+                        (None, false) => Refusal::NoAnswerInTime,
+                    },
+                    None => Refusal::HandshakeEnded,
                 };
                 #[cfg(feature = "listen")]
-                let node = wire.node();
-                wire.abort();
+                let node = self.links.faces()[at]
+                    .link
+                    .wire()
+                    .and_then(|wire| wire.node());
+                self.abort_link(at);
                 self.local.run_until_idle();
-                drop(wire);
+                self.links.put_link(at, Link::Waiting { at_us: now_us });
                 if id != DIAL_FACE {
                     self.remove_face(at);
                     return Ok(());
@@ -2585,7 +2597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // The dial under way was asked, never waited for: its link's handshake begins once it
             // is made. Refused, or not answered by its deadline, the dial role's face dials the
             // next endpoint, and any other face goes, as one whose handshake fails does.
-            Moved::DialAnswered {
+            Moved::DialOver {
                 answer,
                 endpoint,
                 next,
@@ -2593,10 +2605,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             } => {
                 let answered = match answer {
                     Some(answer) => {
-                        self.dial_answered(id, endpoint.as_ref(), next, deadline_us, answer)
+                        self.dial_answered(id, Some(&endpoint), next, deadline_us, answer)
                     }
                     None => Err(OpenError::Unreachable(EndpointRefusal::new(
-                        self.endpoint_text(endpoint.as_ref()),
+                        self.endpoint_text(Some(&endpoint)),
                         Refusal::NoAnswerInTime,
                     ))),
                 };
@@ -2622,11 +2634,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         Ok(())
     }
 
-    /// Bring up the face at `at`, whose handshake `wire` completed. The link was admitted in its
-    /// handshake (`install_link_admission`), so a link that got this far is the session's link to
-    /// its node, and no other link to the node is kept beside it.
-    fn admit(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
-        self.bring_up(at, wire, now_us);
+    /// End the task of the link of the face at `at`, if it holds one.
+    fn abort_link(&self, at: usize) {
+        if let Some(wire) = self.links.faces().get(at).and_then(|face| face.link.wire()) {
+            wire.abort();
+        }
     }
 
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
@@ -2654,22 +2666,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         told
     }
 
-    /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
-    /// here on, and the watchers of the faces are told it came up. A first turn the replay is
-    /// given up on ends the link at once, and the next pass over the faces takes it as lost
-    /// (`poll_face`).
-    fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
+    /// The face at `at`, whose handshake completed, holds its link up: what the session holds is
+    /// declared over it from here on, and the watchers of the faces are told it came up. The link
+    /// was admitted in its handshake (`install_link_admission`), so a link that got this far is
+    /// the session's link to its node, and no other link to the node is kept beside it. A first
+    /// turn the replay is given up on ends the link at once, and the next pass over the faces
+    /// takes it as lost (`poll_face`).
+    fn bring_up(&mut self, at: usize, now_us: u64) {
+        let Some(face) = self.links.faces().get(at) else {
+            return;
+        };
+        let Some(wire) = face.link.wire() else {
+            return;
+        };
         #[cfg(feature = "listen")]
         wire.admitted.grant();
         // A publish goes to the links that are up, so theirs are the rooms it asks.
         if let Some(wait) = wire.writability() {
-            self.rooms.hold(self.links.faces()[at].id, wait);
+            self.rooms.hold(face.id, wait);
         }
-        if self.begin_replay(at, &wire.actions, now_us / 1000) == TurnEnd::EndsLink {
-            wire.abort();
+        let actions = Rc::clone(&wire.actions);
+        if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
+            self.abort_link(at);
         }
-        let snapshot = self.face_of(&wire.actions);
-        self.links.put_link(at, Link::Up(wire));
+        let snapshot = self.face_of(&actions);
+        self.links.establish(at);
         self.report_face(FaceEventKind::Up, snapshot);
     }
 
@@ -2988,7 +3009,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// declarations at the pace the dial role's face is. Every face the open admits has its place
     /// in the table; one past them, which the callers refuse before they make it, is let go of
     /// with its tables.
-    fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>>) {
+    fn push_face(&mut self, id: FaceId, link: Link<LinkSession<C>, L::Pump>) {
         let pacing = self.dial().replay.pacing();
         let face = Face {
             id,
@@ -3522,8 +3543,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             rooms: Arc::new(LinkRooms::default()),
             #[cfg(feature = "connectivity")]
             watchers: Arc::new(FacePlane::default()),
-            // A face for each the config admits beside the dial role's, a port for each it
-            // listens on, and the waits a read makes at once, reserved here: none grows after.
+            // A face for each the config admits beside the dial role's, each with its dial, and the
+            // waits a read makes at once, reserved here: none grows after.
             links: LinkSupervisor::new(
                 links,
                 Face {
@@ -3532,7 +3553,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     replay: Replay::with_pacing(ReplayPacing::of_snapshot(&policy, &limits)),
                 },
                 config.max_faces.saturating_add(1),
-                config.listen.len(),
                 wait_room,
             ),
             #[cfg(feature = "group")]
@@ -3724,16 +3744,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.registry.borrow_mut().add_face(id);
         core.links.advance_face_id();
         let deadline_us = core.open_deadline_us();
-        let held = core
-            .links
-            .hold_dial(id, DialEndpoint::Named(String::from(endpoint)), pending);
-        debug_assert!(
-            held,
-            "a face holds one dial, and the table one for each face"
-        );
         core.push_face(
             id,
             Link::Dialing {
+                dial: Dial::new(DialEndpoint::Named(String::from(endpoint)), pending),
                 next: 0,
                 deadline_us,
             },

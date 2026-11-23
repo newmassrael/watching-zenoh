@@ -58,14 +58,17 @@ pub trait FaceRecord {
     /// The session's half of the face's link.
     type Session: FaceSession;
 
+    /// What the drive loop pumps for the face's link, which a dial under way makes.
+    type Pump;
+
     /// The face's number.
     fn id(&self) -> FaceId;
 
     /// The face's link.
-    fn link(&self) -> &Link<Self::Session>;
+    fn link(&self) -> &Link<Self::Session, Self::Pump>;
 
     /// The face's link, to replace.
-    fn link_mut(&mut self) -> &mut Link<Self::Session>;
+    fn link_mut(&mut self) -> &mut Link<Self::Session, Self::Pump>;
 }
 
 /// One link of a face: the session's half of it (`S`), the task that runs it, the link as the
@@ -132,8 +135,10 @@ impl<S> Deref for Wire<S> {
     }
 }
 
-/// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by.
-pub enum Link<S> {
+/// A face's link: up, in its handshake, being dialled, waiting to be dialled, or standing by. A
+/// dial under way is held in its face's link, so a face has one dial at most and the faces' table
+/// is the dials' table too.
+pub enum Link<S, P> {
     /// Established: the session's sends go through it.
     Up(Wire<S>),
     /// A handshake under way, given up at `deadline_us`. The dial role's face has dialled the
@@ -149,6 +154,8 @@ pub enum Link<S> {
     },
     /// A dial under way, given up at `deadline_us`, as is the handshake that follows it.
     Dialing {
+        /// The dial, asked at each move of the face ([`LinkSupervisor::advance`]).
+        dial: Dial<P>,
         /// The endpoint the dial role dials next when this one fails.
         next: usize,
         /// When the dial is given up.
@@ -168,7 +175,7 @@ pub enum Link<S> {
     },
 }
 
-impl<S> Link<S> {
+impl<S, P> Link<S, P> {
     /// The link's wire while it is up or in its handshake.
     pub fn wire(&self) -> Option<&Wire<S>> {
         match self {
@@ -199,10 +206,16 @@ impl DialEndpoint {
 }
 
 /// A face's dial under way: the endpoint it dials, and the network's answer still to come.
-struct Dial<P> {
-    face: FaceId,
+pub struct Dial<P> {
     endpoint: DialEndpoint,
     pending: Box<dyn PendingDial<P>>,
+}
+
+impl<P> Dial<P> {
+    /// The dial `pending` of `endpoint`.
+    pub fn new(endpoint: DialEndpoint, pending: Box<dyn PendingDial<P>>) -> Self {
+        Self { endpoint, pending }
+    }
 }
 
 /// A port the session listens on, the wait for a connection on it, and the endpoint its links are
@@ -213,29 +226,29 @@ struct Listening<P> {
     endpoint: Option<String>,
 }
 
-/// What became of a face's link when it was moved on ([`LinkSupervisor::advance`]). Every value
-/// but `Stays` leaves the face holding a placeholder the session replaces.
-pub enum Moved<S, P> {
-    /// Nothing for the session to do: the face holds its link as it was.
+/// What became of a face's link when it was moved on ([`LinkSupervisor::advance`]). The link stays
+/// where it is, in its face: the session reads it there and replaces it when it acts.
+pub enum Moved<P> {
+    /// Nothing for the session to do.
     Stays,
     /// The link was up and its task ended.
-    Lost(Wire<S>),
+    Lost,
     /// The link's handshake completed.
-    Established(Wire<S>),
+    Established,
     /// The link's task ended, or its deadline passed, before its handshake completed; `next` is
     /// the endpoint the dial role goes on to.
     HandshakeOver {
-        /// The link, not yet ended.
-        wire: Wire<S>,
         /// The endpoint the dial role dials next.
         next: usize,
     },
-    /// The face's dial was answered, or its deadline passed unanswered (`answer` `None`).
-    DialAnswered {
+    /// The face's dial was answered, or its deadline passed unanswered (`answer` `None`). The
+    /// dial is let go of, with what it held for its link, and the face waits from now until the
+    /// session gives it a link.
+    DialOver {
         /// The network's answer.
         answer: Option<Result<OpenedLink<P>, LinkOpenError>>,
-        /// The endpoint dialled, `None` when no dial of the face was under way.
-        endpoint: Option<DialEndpoint>,
+        /// The endpoint dialled.
+        endpoint: DialEndpoint,
         /// The endpoint the dial role dials next.
         next: usize,
         /// When the dial, and the handshake after it, are given up.
@@ -322,17 +335,17 @@ pub struct LinkSupervisor<L: SessionLinks, F> {
     links: L,
     faces: Vec<F>,
     face_room: usize,
-    dialing: Vec<Dial<L::Pump>>,
     listeners: Vec<Listening<L::Pump>>,
     waits: Vec<Arc<dyn LinkReadiness>>,
     next_face: FaceId,
 }
 
-impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
+impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump>> LinkSupervisor<L, F> {
     /// The faces of a session over `links`, `dial` the dial role's: room for `faces` faces in
-    /// all (one at least, the dial role's) and a dial under way for each, `ports` ports, and
-    /// `waits` waits a read makes at once, reserved now. Faces taken after are numbered from 1.
-    pub fn new(links: L, dial: F, faces: usize, ports: usize, waits: usize) -> Self {
+    /// all (one at least, the dial role's), each with a dial under way at most, and `waits` waits
+    /// a read makes at once, reserved now. The ports are the open's, taken as it listens
+    /// ([`Self::listen`]). Faces taken after are numbered from 1.
+    pub fn new(links: L, dial: F, faces: usize, waits: usize) -> Self {
         let face_room = faces.max(1);
         let mut table = Vec::with_capacity(face_room);
         table.push(dial);
@@ -340,8 +353,7 @@ impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
             links,
             faces: table,
             face_room,
-            dialing: Vec::with_capacity(face_room),
-            listeners: Vec::with_capacity(ports),
+            listeners: Vec::new(),
             waits: Vec::with_capacity(waits),
             next_face: 1,
         }
@@ -372,12 +384,9 @@ impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
         self.next_face = self.next_face.saturating_add(1);
     }
 
-    /// Add `face`, or hand it back when every face the table was reserved for is taken; a dial
-    /// already held for a face handed back is let go of.
+    /// Add `face`, or hand it back when every face the table was reserved for is taken.
     pub fn push_face(&mut self, face: F) -> Result<(), F> {
         if self.faces.len() >= self.face_room {
-            let id = face.id();
-            self.dialing.retain(|dial| dial.face != id);
             return Err(face);
         }
         self.faces.push(face);
@@ -392,27 +401,6 @@ impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
     /// Begin a dial of `to`, which the network answers later.
     pub fn begin_dial(&self, to: Locator) -> Result<Box<dyn PendingDial<L::Pump>>, LinkOpenError> {
         self.links.begin_initiator(to)
-    }
-
-    /// Hold the dial `pending` of face `face`, to `endpoint`, in place of any the face held: it
-    /// is asked at each move of the face ([`Self::advance`]). `false` when the table has no room,
-    /// and the dial is let go of.
-    pub fn hold_dial(
-        &mut self,
-        face: FaceId,
-        endpoint: DialEndpoint,
-        pending: Box<dyn PendingDial<L::Pump>>,
-    ) -> bool {
-        self.dialing.retain(|dial| dial.face != face);
-        if self.dialing.len() >= self.face_room {
-            return false;
-        }
-        self.dialing.push(Dial {
-            face,
-            endpoint,
-            pending,
-        });
-        true
     }
 
     /// Listen on `at`, whose links are stated for `endpoint` when the session states one.
@@ -455,68 +443,81 @@ impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
         })
     }
 
-    /// Take the link of the face at `at` out to move it on, leaving it waiting from `now_us`
-    /// until the session puts a link back ([`Self::put_link`], or [`Self::advance`]).
-    pub fn take_link(&mut self, at: usize, now_us: u64) -> Option<(FaceId, Link<F::Session>)> {
-        let face = self.faces.get_mut(at)?;
-        let link = core::mem::replace(face.link_mut(), Link::Waiting { at_us: now_us });
-        Some((face.id(), link))
-    }
-
-    /// Give the face at `at` the link `link`.
-    pub fn put_link(&mut self, at: usize, link: Link<F::Session>) {
+    /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
+    pub fn put_link(&mut self, at: usize, link: Link<F::Session, L::Pump>) {
         if let Some(face) = self.faces.get_mut(at) {
             *face.link_mut() = link;
         }
     }
 
-    /// Move `link`, taken off the face at `at` ([`Self::take_link`]), on at `now_us`: what became
-    /// of it. A link that stays as it was is put back; anything else is handed to the session.
-    pub fn advance(
-        &mut self,
-        at: usize,
-        link: Link<F::Session>,
-        now_us: u64,
-    ) -> Moved<F::Session, L::Pump> {
-        let id = match self.faces.get(at) {
-            Some(face) => face.id(),
-            None => return Moved::Stays,
+    /// Move the link of the face at `at` on at `now_us`: what became of it. The link stays in its
+    /// face whatever became of it, for the session to read and replace, but for a dial that is over,
+    /// which is let go of here ([`Moved::DialOver`]).
+    pub fn advance(&mut self, at: usize, now_us: u64) -> Moved<L::Pump> {
+        let Some(face) = self.faces.get(at) else {
+            return Moved::Stays;
         };
-        let kept = match link {
-            Link::Up(wire) if wire.finished() => return Moved::Lost(wire),
-            Link::Opening { wire, .. } if wire.established() => return Moved::Established(wire),
+        let id = face.id();
+        match face.link() {
+            Link::Up(wire) if wire.finished() => Moved::Lost,
+            Link::Opening { wire, .. } if wire.established() => Moved::Established,
             Link::Opening {
                 wire,
                 next,
                 deadline_us,
-            } if wire.finished() || now_us >= deadline_us => {
-                return Moved::HandshakeOver { wire, next }
-            }
-            Link::Dialing { next, deadline_us } => {
-                let under_way = self.dialing.iter().position(|dial| dial.face == id);
-                let answer = under_way
-                    .and_then(|slot| self.dialing.get_mut(slot))
-                    .and_then(|dial| dial.pending.poll());
-                if answer.is_none() && under_way.is_some() && now_us < deadline_us {
-                    Link::Dialing { next, deadline_us }
-                } else {
-                    let endpoint = under_way
-                        .filter(|slot| *slot < self.dialing.len())
-                        .map(|slot| self.dialing.swap_remove(slot).endpoint);
-                    return Moved::DialAnswered {
-                        answer,
-                        endpoint,
-                        next,
-                        deadline_us,
-                    };
-                }
-            }
-            Link::Waiting { at_us } if now_us >= at_us => return Moved::Due,
-            Link::Held { zid } if !self.node_is_held(&zid, id) => return Moved::Due,
-            link => link,
+            } if wire.finished() || now_us >= *deadline_us => Moved::HandshakeOver { next: *next },
+            Link::Dialing { .. } => self.ask_dial(at, now_us),
+            Link::Waiting { at_us } if now_us >= *at_us => Moved::Due,
+            Link::Held { zid } if !self.node_is_held(zid, id) => Moved::Due,
+            _ => Moved::Stays,
+        }
+    }
+
+    /// Ask the dial of the face at `at` whether its link is made: [`Moved::Stays`] while it is
+    /// still being made before its deadline, and once it is answered or its deadline has passed,
+    /// the answer, with the dial let go of and the face waiting from `now_us`.
+    fn ask_dial(&mut self, at: usize, now_us: u64) -> Moved<L::Pump> {
+        let Some(face) = self.faces.get_mut(at) else {
+            return Moved::Stays;
         };
-        self.put_link(at, kept);
-        Moved::Stays
+        let link = face.link_mut();
+        let Link::Dialing {
+            dial,
+            next,
+            deadline_us,
+        } = &mut *link
+        else {
+            return Moved::Stays;
+        };
+        let answer = dial.pending.poll();
+        if answer.is_none() && now_us < *deadline_us {
+            return Moved::Stays;
+        }
+        let (next, deadline_us) = (*next, *deadline_us);
+        let endpoint = core::mem::replace(&mut dial.endpoint, DialEndpoint::Listed(0));
+        // The dial is let go of now, with what it held for its link (a socket, the link's
+        // buffers), before the face is dialled anew.
+        *link = Link::Waiting { at_us: now_us };
+        Moved::DialOver {
+            answer,
+            endpoint,
+            next,
+            deadline_us,
+        }
+    }
+
+    /// The face at `at`, whose handshake completed ([`Moved::Established`]), holds its link up.
+    pub fn establish(&mut self, at: usize) {
+        let Some(face) = self.faces.get_mut(at) else {
+            return;
+        };
+        let link = face.link_mut();
+        if let Link::Opening { .. } = link {
+            if let Link::Opening { wire, .. } = core::mem::replace(link, Link::Waiting { at_us: 0 })
+            {
+                *link = Link::Up(wire);
+            }
+        }
     }
 
     /// Whether a face other than `id` holds the node `zid` or brings a link to it up: its link is
@@ -662,7 +663,12 @@ impl<L: SessionLinks, F: FaceRecord> LinkSupervisor<L, F> {
 
     /// Let go of every dial under way, whose connection is then not made, and of every port.
     pub fn end_dials_and_ports(&mut self) {
-        self.dialing.clear();
+        for face in &mut self.faces {
+            let link = face.link_mut();
+            if let Link::Dialing { .. } = link {
+                *link = Link::Waiting { at_us: u64::MAX };
+            }
+        }
         self.listeners.clear();
     }
 
@@ -722,23 +728,26 @@ mod tests {
         }
     }
 
+    type TestLink = Link<Session, Rc<Quiet>>;
+
     struct TestFace {
         id: FaceId,
-        link: Link<Session>,
+        link: TestLink,
     }
 
     impl FaceRecord for TestFace {
         type Session = Session;
+        type Pump = Rc<Quiet>;
 
         fn id(&self) -> FaceId {
             self.id
         }
 
-        fn link(&self) -> &Link<Session> {
+        fn link(&self) -> &TestLink {
             &self.link
         }
 
-        fn link_mut(&mut self) -> &mut Link<Session> {
+        fn link_mut(&mut self) -> &mut TestLink {
             &mut self.link
         }
     }
@@ -760,7 +769,7 @@ mod tests {
         }
     }
 
-    /// A network that opens nothing: the dials of these tests are held by hand.
+    /// A network that opens nothing: the dials of these tests are made by hand.
     struct Net;
 
     impl SessionLinks for Net {
@@ -781,6 +790,20 @@ mod tests {
     impl PendingDial<Rc<Quiet>> for Answer {
         fn poll(&mut self) -> Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>> {
             self.0.take()
+        }
+    }
+
+    /// A face dialling `endpoint` with a dial that answers `answer`.
+    fn dialing(
+        endpoint: DialEndpoint,
+        answer: Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>,
+        next: usize,
+        deadline_us: u64,
+    ) -> TestLink {
+        Link::Dialing {
+            dial: Dial::new(endpoint, Box::new(Answer(answer))),
+            next,
+            deadline_us,
         }
     }
 
@@ -807,86 +830,57 @@ mod tests {
         Wire::new(session, task, link.clone(), link, None, None)
     }
 
-    fn supervisor(link: Link<Session>, faces: usize) -> LinkSupervisor<Net, TestFace> {
-        LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 0, 2)
-    }
-
-    /// Move the dial role's link on at `now_us`.
-    fn advance(
-        faces: &mut LinkSupervisor<Net, TestFace>,
-        now_us: u64,
-    ) -> Moved<Session, Rc<Quiet>> {
-        let (_, link) = faces.take_link(0, now_us).expect("the dial role's face");
-        faces.advance(0, link, now_us)
+    fn supervisor(link: TestLink, faces: usize) -> LinkSupervisor<Net, TestFace> {
+        LinkSupervisor::new(Net, TestFace { id: 100, link }, faces, 2)
     }
 
     #[test]
     fn a_waiting_face_stays_until_its_time_and_is_then_due() {
         let mut faces = supervisor(Link::Waiting { at_us: 100 }, 1);
-        assert!(matches!(advance(&mut faces, 99), Moved::Stays));
+        assert!(matches!(faces.advance(0, 99), Moved::Stays));
         assert!(
             matches!(faces.faces()[0].link, Link::Waiting { at_us: 100 }),
-            "the link it stays with is the one it had"
+            "the link stays as it was"
         );
-        assert!(matches!(advance(&mut faces, 100), Moved::Due));
+        assert!(matches!(faces.advance(0, 100), Moved::Due));
+        assert!(
+            matches!(faces.advance(1, 100), Moved::Stays),
+            "no face there"
+        );
     }
 
     #[test]
-    fn a_dial_is_asked_until_its_deadline_and_answered_with_its_endpoint() {
-        let mut faces = supervisor(
-            Link::Dialing {
-                next: 2,
-                deadline_us: 10,
-            },
-            1,
-        );
-        assert!(faces.hold_dial(100, DialEndpoint::Listed(1), Box::new(Answer(None))));
+    fn a_dial_is_asked_until_its_deadline_and_then_let_go_of_with_its_endpoint() {
+        let mut faces = supervisor(dialing(DialEndpoint::Listed(1), None, 2, 10), 1);
         assert!(
-            matches!(advance(&mut faces, 5), Moved::Stays),
+            matches!(faces.advance(0, 5), Moved::Stays),
             "not answered yet"
         );
+        assert!(matches!(faces.faces()[0].link, Link::Dialing { .. }));
         assert!(matches!(
-            advance(&mut faces, 10),
-            Moved::DialAnswered {
+            faces.advance(0, 10),
+            Moved::DialOver {
                 answer: None,
-                endpoint: Some(DialEndpoint::Listed(1)),
+                endpoint: DialEndpoint::Listed(1),
                 next: 2,
                 deadline_us: 10,
             }
         ));
-        // The dial was let go of with its answer: a face still dialling has none under way.
-        faces.put_link(
-            0,
-            Link::Dialing {
-                next: 2,
-                deadline_us: 10,
-            },
+        assert!(
+            matches!(faces.faces()[0].link, Link::Waiting { at_us: 10 }),
+            "the dial was let go of"
         );
-        assert!(matches!(
-            advance(&mut faces, 0),
-            Moved::DialAnswered {
-                answer: None,
-                endpoint: None,
-                ..
-            }
-        ));
     }
 
     #[test]
     fn a_refused_dial_is_answered_at_once_whatever_its_deadline() {
-        let mut faces = supervisor(
-            Link::Dialing {
-                next: 1,
-                deadline_us: 1_000,
-            },
-            1,
-        );
-        let refused = Box::new(Answer(Some(Err(LinkOpenError::Refused))));
-        assert!(faces.hold_dial(100, DialEndpoint::Named("tcp/[::1]:7447".into()), refused));
-        match advance(&mut faces, 0) {
-            Moved::DialAnswered {
+        let named = DialEndpoint::Named(String::from("tcp/[::1]:7447"));
+        let refused = Some(Err(LinkOpenError::Refused));
+        let mut faces = supervisor(dialing(named, refused, 1, 1_000), 1);
+        match faces.advance(0, 0) {
+            Moved::DialOver {
                 answer: Some(Err(LinkOpenError::Refused)),
-                endpoint: Some(endpoint),
+                endpoint,
                 ..
             } => assert_eq!(endpoint.text(&[]), "tcp/[::1]:7447"),
             _ => panic!("the refusal is the answer"),
@@ -898,29 +892,35 @@ mod tests {
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
         let mut faces = supervisor(Link::Up(wire(&local, session(true, None), false, false)), 1);
-        assert!(matches!(advance(&mut faces, 0), Moved::Stays), "running");
+        assert!(matches!(faces.advance(0, 0), Moved::Stays), "running");
         faces.put_link(0, Link::Up(wire(&local, session(true, None), false, true)));
-        assert!(matches!(advance(&mut faces, 0), Moved::Lost(_)));
+        assert!(matches!(faces.advance(0, 0), Moved::Lost));
+        assert!(
+            matches!(faces.faces()[0].link, Link::Up(_)),
+            "a lost link stays for the session to read"
+        );
         let opening = |established, finished| Link::Opening {
             wire: wire(&local, session(established, None), false, finished),
             next: 3,
             deadline_us: 50,
         };
         faces.put_link(0, opening(true, false));
-        assert!(matches!(advance(&mut faces, 0), Moved::Established(_)));
+        assert!(matches!(faces.advance(0, 0), Moved::Established));
+        faces.establish(0);
+        assert!(matches!(faces.faces()[0].link, Link::Up(_)), "brought up");
         faces.put_link(0, opening(false, false));
         assert!(
-            matches!(advance(&mut faces, 49), Moved::Stays),
+            matches!(faces.advance(0, 49), Moved::Stays),
             "before its deadline"
         );
         assert!(matches!(
-            advance(&mut faces, 50),
-            Moved::HandshakeOver { next: 3, .. }
+            faces.advance(0, 50),
+            Moved::HandshakeOver { next: 3 }
         ));
         faces.put_link(0, opening(false, true));
         assert!(matches!(
-            advance(&mut faces, 0),
-            Moved::HandshakeOver { next: 3, .. }
+            faces.advance(0, 0),
+            Moved::HandshakeOver { next: 3 }
         ));
     }
 
@@ -940,9 +940,9 @@ mod tests {
             !faces.node_is_held(&node, 1),
             "a face does not hold the node for itself"
         );
-        assert!(matches!(advance(&mut faces, 0), Moved::Stays));
+        assert!(matches!(faces.advance(0, 0), Moved::Stays));
         assert!(faces.remove_face(1).is_some());
-        assert!(matches!(advance(&mut faces, 0), Moved::Due));
+        assert!(matches!(faces.advance(0, 0), Moved::Due));
     }
 
     #[test]
@@ -971,7 +971,7 @@ mod tests {
         assert_eq!(DialEndpoint::Listed(0).text(&listed), "udp/10.0.0.1:7447");
         assert_eq!(DialEndpoint::Listed(1).text(&listed), "", "past the list");
         assert_eq!(
-            DialEndpoint::Named("tcp/1.2.3.4:1".into()).text(&listed),
+            DialEndpoint::Named(String::from("tcp/1.2.3.4:1")).text(&listed),
             "tcp/1.2.3.4:1"
         );
     }
@@ -988,13 +988,7 @@ mod tests {
             faces.idle_wait(10, &mut now, || true, []),
             IdleWait::Sleep(4)
         ));
-        faces.put_link(
-            0,
-            Link::Dialing {
-                next: 0,
-                deadline_us: 0,
-            },
-        );
+        faces.put_link(0, dialing(DialEndpoint::Listed(0), None, 0, 0));
         assert!(matches!(
             faces.idle_wait(10, &mut now, || true, []),
             IdleWait::Sleep(1)
@@ -1017,14 +1011,20 @@ mod tests {
     }
 
     #[test]
-    fn ending_the_faces_tells_established_peers_and_keeps_the_dial_role_alone() {
+    fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
         let runtime = CoopRuntime::new(Still);
         let local = CoopLocalSet::new(&runtime);
+        let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None, 1, 10), 3);
+        faces.end_dials_and_ports();
+        assert!(
+            matches!(faces.faces()[0].link, Link::Waiting { at_us: u64::MAX }),
+            "a dial under way is let go of"
+        );
         let up = session(true, None);
         let up_ended = up.ended.clone();
         let opening = session(false, None);
         let opening_ended = opening.ended.clone();
-        let mut faces = supervisor(Link::Up(wire(&local, up, false, false)), 2);
+        faces.put_link(0, Link::Up(wire(&local, up, false, false)));
         let other = TestFace {
             id: 1,
             link: Link::Opening {
