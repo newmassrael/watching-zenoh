@@ -2209,7 +2209,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
             // A cookie past the build's bound is refused as the slot profile's storing refuses
             // it, and not read only to be left out of the Open that echoes it.
-            #[cfg(all(feature = "limits-lent-at-open", not(feature = "session-slot")))]
+            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
             refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
             refuse_as_decoded(
                 wire_const::T_MID_INIT,
@@ -2239,7 +2239,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             view.body.clone().try_into_owned_in::<HandshakeStorage>()?;
             // A cookie past the build's bound is refused as the slot profile's storing refuses
             // it, and not read only to be left out of the Open that echoes it.
-            #[cfg(all(feature = "limits-lent-at-open", not(feature = "session-slot")))]
+            #[cfg(all(feature = "session-fixed-storage", not(feature = "session-slot")))]
             refuse_unkept_cookie(view.body.cookie.as_ref().map(|cookie| *cookie.inner()))?;
             refuse_as_decoded(
                 wire_const::T_MID_OPEN,
@@ -2328,7 +2328,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
     feature = "alloc",
     feature = "codec-frame",
     feature = "session-unicast",
-    feature = "limits-lent-at-open",
+    feature = "session-fixed-storage",
     not(feature = "session-slot"),
     any(feature = "codec-init-body", feature = "codec-open-body")
 ))]
@@ -3669,7 +3669,7 @@ mod control_read_tests {
     /// longer, as the slot profile's storing does, and reads one of exactly that size.
     #[cfg(all(
         feature = "codec-init-body",
-        feature = "limits-lent-at-open",
+        feature = "session-fixed-storage",
         not(feature = "session-slot")
     ))]
     #[test]

@@ -18,7 +18,7 @@
 //! `wz-ap-demo`, and the `fixture_session_init_params` test-support
 //! builder) resolve unchanged. A DP3 leaf out of `session_glue.rs`.
 
-#[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+#[cfg(not(feature = "session-fixed-storage"))]
 use alloc::vec::Vec;
 
 use wz_codecs::whatami::WhatAmI;
@@ -51,10 +51,7 @@ const _: () = assert!(
     COOKIE_MAX >= 1 && COOKIE_MAX <= COOKIE_FIELD_MAX,
     "HANDSHAKE_COOKIE_BYTES is in 1..=65535, the INIT cookie field's capacity"
 );
-#[cfg(all(
-    any(feature = "session-slot", feature = "limits-lent-at-open"),
-    feature = "session-unicast-accept"
-))]
+#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast-accept"))]
 const _: () = assert!(
     COOKIE_MAX >= crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES,
     "HANDSHAKE_COOKIE_BYTES is at least the widest cookie an accepting node issues"
@@ -63,24 +60,23 @@ const _: () = assert!(
 /// Bytes a session keeps for the length of one handshake: a zid, a cookie.
 ///
 /// A growable vector on the heap profile. An array of `N` bytes held in the session's own
-/// storage, where a value that does not fit is refused rather than grown into, on the heap-free
-/// per-session profile (`session-slot`, fixed-memory step S5) and on a build whose limits are its
-/// build's values (`limits-lent-at-open`, the cooperative C library): a session there holds no
-/// handshake byte on the heap.
-#[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+/// storage, where a value that does not fit is refused rather than grown into, where the session's
+/// storage is fixed at its open (`session-fixed-storage`, which `session-slot` and the C
+/// library's cooperative presets turn on): a session there holds no handshake byte on the heap.
+#[cfg(not(feature = "session-fixed-storage"))]
 pub type SessionBytes<const N: usize> = Vec<u8>;
 /// See the growable form of this alias.
-#[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+#[cfg(feature = "session-fixed-storage")]
 pub type SessionBytes<const N: usize> = heapless::Vec<u8, N>;
 
 /// Copy `src` into session bytes, or `None` when `N` cannot hold it (which only
 /// the fixed form can say: the growable one always fits).
 pub fn session_bytes<const N: usize>(src: &[u8]) -> Option<SessionBytes<N>> {
-    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+    #[cfg(not(feature = "session-fixed-storage"))]
     {
         Some(src.to_vec())
     }
-    #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+    #[cfg(feature = "session-fixed-storage")]
     {
         heapless::Vec::from_slice(src).ok()
     }
@@ -897,9 +893,9 @@ mod cookie_bound_tests {
         assert!((1..=COOKIE_FIELD_MAX).contains(&COOKIE_MAX));
         assert!(session_bytes::<8>(&[7; 8]).is_some());
         let too_long = session_bytes::<8>(&[7; 9]);
-        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+        #[cfg(feature = "session-fixed-storage")]
         assert!(too_long.is_none());
-        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         assert_eq!(too_long.map(|b| b.len()), Some(9));
     }
 }

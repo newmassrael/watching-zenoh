@@ -3765,8 +3765,9 @@ driven = "remote"
 default = 176
 storage = "capacity"
 scope = "session"
-# Its fixed profiles are a `session-slot` build and a build whose limits are its build's values
-# (`limits-lent-at-open`), which hold the cookie in storage of fixed size.
+# Its fixed profile is a build whose session storage is fixed at its open (`session-fixed-storage`,
+# which `session-slot` and the C library's cooperative presets turn on), which holds the cookie
+# in storage of fixed size.
 binding_heap = "open"
 binding_fixed = "build"
 # `wire` is none: within the limit no byte a peer sees changes; past it, the cookie is left out.

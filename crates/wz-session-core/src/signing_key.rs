@@ -50,18 +50,18 @@ use zeroize::Zeroizing;
 /// any other value type but cannot accidentally serialise it or
 /// log its inner bytes.
 ///
-/// Under `session-slot` (the heap-free per-session profile, fixed-memory step
-/// S5) and on a build whose limits are its build's values (`limits-lent-at-open`)
+/// Where the session's storage is fixed at its open (`session-fixed-storage`,
+/// which `session-slot` and the C library's cooperative presets turn on)
 /// the bytes are an array of `SIGNING_KEY_MAX` held in the key itself, and a
 /// key longer than that is stored as its SHA-256, which is the same key to HMAC:
 /// RFC 2104 defines a key longer than the block as that key hashed.
 #[derive(Clone)]
 pub struct SigningKey {
-    #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+    #[cfg(not(feature = "session-fixed-storage"))]
     bytes: Zeroizing<Vec<u8>>,
-    #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+    #[cfg(feature = "session-fixed-storage")]
     bytes: Zeroizing<[u8; SIGNING_KEY_MAX]>,
-    #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+    #[cfg(feature = "session-fixed-storage")]
     len: usize,
 }
 
@@ -101,7 +101,7 @@ pub const SIGNING_KEY_BYTES: usize = 32;
 
 /// How many key bytes a [`SigningKey`] holds under `session-slot`: the HMAC-SHA256
 /// block, which is also the longest key HMAC uses as it stands.
-#[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+#[cfg(feature = "session-fixed-storage")]
 pub const SIGNING_KEY_MAX: usize = 64;
 
 impl SigningKey {
@@ -142,13 +142,13 @@ impl SigningKey {
     ) -> Result<Self, crate::entropy::EntropyUnavailable> {
         // Zeroizing FIRST, so a partially-filled buffer is wiped on the `?`
         // rather than left on the heap for the allocator to hand out.
-        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         {
             let mut bytes = Zeroizing::new(alloc::vec![0u8; SIGNING_KEY_BYTES]);
             source.try_fill_bytes(&mut bytes)?;
             Ok(Self { bytes })
         }
-        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+        #[cfg(feature = "session-fixed-storage")]
         {
             let mut bytes = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
             source.try_fill_bytes(&mut bytes[..SIGNING_KEY_BYTES])?;
@@ -172,13 +172,13 @@ impl SigningKey {
             let _ = Zeroizing::new(bytes);
             return Err(SigningKeyTooShort(0)); // length already inspected
         }
-        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         {
             Ok(Self {
                 bytes: Zeroizing::new(bytes),
             })
         }
-        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+        #[cfg(feature = "session-fixed-storage")]
         {
             let bytes = Zeroizing::new(bytes);
             Self::from_slice(&bytes)
@@ -193,13 +193,13 @@ impl SigningKey {
         if bytes.len() < SIGNING_KEY_BYTES {
             return Err(SigningKeyTooShort(0));
         }
-        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         {
             Ok(Self {
                 bytes: Zeroizing::new(bytes.to_vec()),
             })
         }
-        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+        #[cfg(feature = "session-fixed-storage")]
         {
             let mut out = Zeroizing::new([0u8; SIGNING_KEY_MAX]);
             let len = if bytes.len() <= SIGNING_KEY_MAX {
@@ -233,11 +233,11 @@ impl SigningKey {
 
     /// Crate-internal slice view; not exposed to consumers.
     fn as_slice(&self) -> &[u8] {
-        #[cfg(not(any(feature = "session-slot", feature = "limits-lent-at-open")))]
+        #[cfg(not(feature = "session-fixed-storage"))]
         {
             &self.bytes
         }
-        #[cfg(any(feature = "session-slot", feature = "limits-lent-at-open"))]
+        #[cfg(feature = "session-fixed-storage")]
         {
             &self.bytes[..self.len]
         }
