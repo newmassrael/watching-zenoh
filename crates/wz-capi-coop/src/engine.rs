@@ -4116,6 +4116,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         tables(&self.core.lock().0.registry).subscribers().len()
     }
 
+    /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order:
+    /// what a test reads of the session's tables.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
+        self.live()
+            .map(|core| {
+                tables(&core.0.registry)
+                    .keyexprs()
+                    .iter()
+                    .map(|(_, row)| (row.id(), String::from(row.key())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// How many rounds of deliveries were handed out since the open: what a test of the cost of
     /// one received sample counts.
     #[cfg(all(test, feature = "std"))]
@@ -6013,19 +6028,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
         Some(self)
-    }
-
-    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)> {
-        self.live()
-            .map(|core| {
-                let tables = tables(&core.0.registry);
-                tables
-                    .keyexprs()
-                    .iter()
-                    .map(|(_, row)| (row.id(), String::from(row.key())))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     fn declare_matching_listener(

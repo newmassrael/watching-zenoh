@@ -281,9 +281,6 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Let go of one hold on declaration `mapping_id`; the last one retracts it.
     fn release_keyexpr(&self, mapping_id: ExprId);
 
-    /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
-    fn keyexpr_declarations(&self) -> Vec<(ExprId, String)>;
-
     /// Where the C ABI's objects keep their keys when the session keeps a key arena: each text
     /// once, in a block every holder counts, shared with any key of the same text the arena keeps.
     /// `None`, the provided answer, from an engine that keeps none, whose callers keep a copy of
