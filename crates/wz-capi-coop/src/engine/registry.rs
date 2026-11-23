@@ -1148,7 +1148,11 @@ mod tests {
             &SessionLimits::defaults(),
             arena.arena_mut(),
             keys,
-            ObserverRows::default(),
+            // A row for a liveliness subscriber, which the tests of retractions register.
+            ObserverRows {
+                liveliness_subscribers: 1,
+                ..ObserverRows::default()
+            },
             gets,
             peers,
         )
