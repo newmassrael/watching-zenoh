@@ -1095,8 +1095,6 @@ pub mod zid_hex;
 /// (no `serde_json`) admin / config JSON emitters (`adminspace`, `config`).
 /// `alloc`-only; ungated by any admin/routing cfg so every emitter reaches it.
 #[cfg(feature = "storage-profile")]
-// Totality debt TD-140 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod json;
 
 // One document, two encodings: the structured writer (`doc_out::DocOut`) a
