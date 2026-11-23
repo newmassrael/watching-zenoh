@@ -6064,6 +6064,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-batching",
         feature = "transport-keepalive",
     ))]
+    // Out of line: every send path ends here, and a copy inlined into each of them cost more
+    // than the call.
+    #[inline(never)]
     fn emit_on_link(
         &self,
         link: &LinkState<R>,
@@ -6397,6 +6400,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             ),
         )
     ))]
+    // Out of line for the same reason as `emit_on_link`: every lend-only refusal reaches it.
+    #[inline(never)]
     fn refuse_tx(&self, cause: crate::link::LinkDropCause) -> crate::link::LinkDropCause {
         R::with_mutex_mut(&self.tx_refusals, |counts| match cause {
             crate::link::LinkDropCause::NoTxSlot => counts.no_slot = counts.no_slot.wrapping_add(1),
@@ -11350,11 +11355,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // wait does not wait for it either: it goes ahead only when it can drain every
             // conduit now, and is told there is no room otherwise.
             #[cfg(feature = "alloc")]
-            if !self.drain_conduits(|idx| idx != control, !probing) {
+            if !self.drain_conduits(&|idx| idx != control, !probing) {
                 return Ok(Dispatched::NoRoom);
             }
             #[cfg(not(feature = "alloc"))]
-            self.drain_conduits(|idx| idx != control, true);
+            self.drain_conduits(&|idx| idx != control, true);
         }
         // The barrier's second half: a message staged on another conduit than the Control one
         // follows the control messages left open there, which leave first. A control message
@@ -11364,11 +11369,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && TxConduits::<R>::conduit_index(priority) != control
         {
             #[cfg(feature = "alloc")]
-            if !self.drain_conduits(|idx| idx == control, !probing) {
+            if !self.drain_conduits(&|idx| idx == control, !probing) {
                 return Ok(Dispatched::NoRoom);
             }
             #[cfg(not(feature = "alloc"))]
-            self.drain_conduits(|idx| idx == control, true);
+            self.drain_conduits(&|idx| idx == control, true);
         }
         // The same barrier on the link's side. Handing the staged data over is not leaving the
         // link first: a link that serves its priorities in strict order sends a Control frame
@@ -12335,7 +12340,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // ascending band: a conduit is still emitted whole under one hold, so
         // its frames keep their SN order, and the order across conduits is the
         // walk's.
-        self.drain_conduits(|_| true, true);
+        self.drain_conduits(&|_| true, true);
     }
 
     /// The drain an express message asks for, once it is staged on `priority`'s conduit: that
@@ -12361,7 +12366,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn flush_express(&self, priority: Priority) {
         let band = TxConduits::<R>::conduit_index(self.conduit_priority(priority));
-        self.drain_conduits(|idx| idx <= band, true);
+        self.drain_conduits(&|idx| idx <= band, true);
     }
 
     /// [`Self::flush_open_batch`] for the link's writer, which must never WAIT for a conduit's
@@ -12385,15 +12390,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`DispatchStage::Probe`]).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
-        self.drain_conduits(|_| true, false)
+        self.drain_conduits(&|_| true, false)
     }
 
     /// Send the frames open in the conduits whose index `takes` answers `true` for, in
     /// ascending band, each under its own lock: waited for when `wait`, and otherwise taken only
     /// if free. Whether every conduit walked was taken and drained; a conduit whose lock a
     /// sender held is left as it was.
+    // One body for every walk: generic over the predicate it was one inlined copy per caller.
     #[cfg(feature = "transport-batching")]
-    fn drain_conduits(&self, takes: impl Fn(usize) -> bool, wait: bool) -> bool {
+    #[inline(never)]
+    fn drain_conduits(&self, takes: &dyn Fn(usize) -> bool, wait: bool) -> bool {
         let mut every_conduit = true;
         for idx in (0..TX_CONDUITS).filter(|&idx| takes(idx)) {
             // The walk is over BANDS, not slots: the index names a priority and
