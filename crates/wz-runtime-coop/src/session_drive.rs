@@ -40,6 +40,8 @@ use alloc::rc::Rc;
 use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 #[cfg(feature = "session-slot")]
@@ -1679,7 +1681,7 @@ where
 {
     let runtime = local.runtime().clone();
     local.spawn_local_with(move || RouterSessionTask {
-        parts: Some(PumpParts {
+        place: Becomes::new(PumpParts {
             runtime,
             link,
             actions,
@@ -1687,7 +1689,6 @@ where
             config,
             make_router,
         }),
-        place: InPlace::empty(),
         on_event,
         _pinned: core::marker::PhantomPinned,
     })
@@ -1705,9 +1706,8 @@ where
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
 {
-    /// What the pump is made of, until the task first runs.
-    parts: Option<PumpParts<C, L, M>>,
-    place: InPlace<SessionPump<C, L, dyn BoxedLinkDriver, R>>,
+    /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
+    place: Becomes<PumpParts<C, L, M>, SessionPump<C, L, dyn BoxedLinkDriver, R>>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
@@ -1739,10 +1739,10 @@ where
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<DriverOutcome> {
-        // SAFETY: nothing is moved out of the pinned task but `parts`, which nothing points
+        // SAFETY: nothing is moved out of the pinned task but the parts, which nothing points
         // into; the pump is built in `place` and stays there, as the task does (`PhantomPinned`).
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some(parts) = this.parts.take() {
+        let built = this.place.build(|parts, slot| {
             let PumpParts {
                 runtime,
                 link,
@@ -1751,14 +1751,12 @@ where
                 config,
                 make_router,
             } = parts;
-            this.place.build(|slot| {
-                SessionPump::with_router_in(slot, runtime, link, actions, clock, config, |router| {
-                    make_router.make_in(router)
-                })
-            });
-        }
+            SessionPump::with_router_in(slot, runtime, link, actions, clock, config, |router| {
+                make_router.make_in(router)
+            })
+        });
         // A pump its maker did not build in its place is no session to drive: the task ends.
-        let Some(pump) = this.place.get_mut() else {
+        let Some(pump) = built else {
             return core::task::Poll::Ready(DriverOutcome::Terminated);
         };
         match pump.step(&mut this.on_event) {
@@ -1788,63 +1786,94 @@ where
     crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F>>()
 }
 
-/// A value built where its holder lies and dropped with it: the place a task's future keeps its
-/// pump in, so the pump is written in the future's own memory and not moved into it. Before it is
-/// built it holds nothing, and dropping it drops nothing.
+/// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts
+/// and the pump share them, so the task's cell is as large as the larger of the two and not their
+/// sum. The parts are taken out whole before the pump is written over them, and whichever the place
+/// holds is dropped with it.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct InPlace<T> {
-    value: MaybeUninit<T>,
-    built: bool,
+struct Becomes<P, T> {
+    place: MaybeUninit<Shared<P, T>>,
+    stage: Stage,
+}
+
+/// The parts or the value, in one place.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+union Shared<P, T> {
+    parts: ManuallyDrop<P>,
+    value: ManuallyDrop<T>,
+}
+
+/// What a [`Becomes`] holds.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The parts, not yet taken.
+    Parts,
+    /// The value, built of them.
+    Built,
+    /// Nothing: the parts were taken and no value was built.
+    Empty,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<T> InPlace<T> {
-    /// A place with nothing in it.
-    const fn empty() -> Self {
+impl<P, T> Becomes<P, T> {
+    /// A place that holds `parts`.
+    fn new(parts: P) -> Self {
         Self {
-            value: MaybeUninit::uninit(),
-            built: false,
+            place: MaybeUninit::new(Shared {
+                parts: ManuallyDrop::new(parts),
+            }),
+            stage: Stage::Parts,
         }
     }
 
-    /// Have `make` write the value in this place and lend it back, and lend it on; a maker that
-    /// builds nothing answers `None`, and so does this. A maker that
-    /// lends back anything but the place it was handed has not written it there, and is refused:
-    /// `None`, and the place holds nothing still. Built once: the place is the value's for as long
-    /// as the holder lives.
+    /// The value built here, built first when the place still holds its parts: they are taken
+    /// out and handed to `make`, which writes the value in the place it is handed and lends it
+    /// back. A maker that builds nothing answers `None`, and so does this; one that lends back
+    /// anything but the place it was handed has not written it there, and is refused the same way.
+    /// Either way the place holds nothing after, and `None` is the answer from then on.
     fn build(
         &mut self,
-        make: impl FnOnce(&mut MaybeUninit<T>) -> Option<&mut T>,
+        make: impl FnOnce(P, &mut MaybeUninit<T>) -> Option<&mut T>,
     ) -> Option<&mut T> {
-        debug_assert!(!self.built, "a place is built once");
-        let place: *const T = self.value.as_ptr();
-        let made: *const T = make(&mut self.value)?;
-        if !core::ptr::eq(made, place) {
+        let at = self.place.as_mut_ptr();
+        if self.stage == Stage::Parts {
+            // SAFETY: the place holds the parts, untaken; they are read out once, and the stage
+            // says the place holds nothing before anything else is done with it.
+            let parts = ManuallyDrop::into_inner(unsafe {
+                core::ptr::read(core::ptr::addr_of!((*at).parts))
+            });
+            self.stage = Stage::Empty;
+            // SAFETY: the value's field of the place, as the uninitialised place
+            // `MaybeUninit<T>` lays out as a `T`, as `ManuallyDrop<T>` does.
+            let slot =
+                unsafe { &mut *core::ptr::addr_of_mut!((*at).value).cast::<MaybeUninit<T>>() };
+            let place: *const T = slot.as_ptr();
+            let made: *const T = make(parts, slot)?;
+            if !core::ptr::eq(made, place) {
+                return None;
+            }
+            self.stage = Stage::Built;
+        }
+        if self.stage != Stage::Built {
             return None;
         }
-        self.built = true;
-        // SAFETY: `make` lent back this place as a `T`, which safe code does only by writing a
-        // `T` there (`MaybeUninit::write`).
-        Some(unsafe { self.value.assume_init_mut() })
-    }
-
-    /// The value built here; `None` while nothing is.
-    fn get_mut(&mut self) -> Option<&mut T> {
-        if !self.built {
-            return None;
-        }
-        // SAFETY: `built` is set only once `build` saw the value written here.
-        Some(unsafe { self.value.assume_init_mut() })
+        // SAFETY: the stage says the value is written here, by the maker that lent it back.
+        Some(unsafe { &mut *core::ptr::addr_of_mut!((*at).value).cast::<T>() })
     }
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<T> Drop for InPlace<T> {
+impl<P, T> Drop for Becomes<P, T> {
     fn drop(&mut self) {
-        if self.built {
-            // SAFETY: `built` is set only once `build` saw the value written here, and the value
-            // is dropped here alone, once.
-            unsafe { self.value.assume_init_drop() };
+        let at = self.place.as_mut_ptr();
+        // SAFETY: the stage says which of the two the place holds; it is dropped here alone, once.
+        unsafe {
+            match self.stage {
+                Stage::Parts => ManuallyDrop::drop(&mut *core::ptr::addr_of_mut!((*at).parts)),
+                Stage::Built => ManuallyDrop::drop(&mut *core::ptr::addr_of_mut!((*at).value)),
+                Stage::Empty => {}
+            }
         }
     }
 }
@@ -2892,7 +2921,7 @@ mod wake_budget_tests {
 
 #[cfg(all(test, feature = "reassembly", not(feature = "session-slot")))]
 mod in_place_tests {
-    use super::InPlace;
+    use super::Becomes;
     use alloc::boxed::Box;
     use core::cell::Cell;
 
@@ -2905,28 +2934,51 @@ mod in_place_tests {
         }
     }
 
-    /// The value is written where the place lies, lent on, and dropped once, with the place.
+    /// The parts are handed to the maker, which writes the value where they lay; the value is
+    /// lent on each time after and dropped once, with the place, and the parts are not dropped
+    /// again.
     #[test]
-    fn a_value_built_in_place_is_dropped_once_with_its_holder() {
-        let drops = Cell::new(0);
+    fn the_value_is_built_of_the_parts_in_their_place_and_each_is_dropped_once() {
+        let (parts_drops, value_drops) = (Cell::new(0), Cell::new(0));
         {
-            let mut place = InPlace::empty();
+            let mut place = Becomes::new(Counted(&parts_drops));
             let value = place
-                .build(|slot| Some(slot.write(Counted(&drops))))
+                .build(|parts, slot| {
+                    drop(parts);
+                    Some(slot.write(Counted(&value_drops)))
+                })
                 .expect("written in its place");
             assert_eq!(value.0.get(), 0, "built and lent, not dropped");
-            assert!(place.get_mut().is_some(), "and lent again once built");
+            assert_eq!(parts_drops.get(), 1, "the parts were taken and let go of");
+            assert!(
+                place.build(|_parts, _slot| None).is_some(),
+                "built once, lent again"
+            );
         }
-        assert_eq!(drops.get(), 1, "dropped once, with the place");
+        assert_eq!(value_drops.get(), 1, "dropped once, with the place");
+        assert_eq!(parts_drops.get(), 1);
+    }
+
+    /// Parts never built into a value are dropped once, with the place.
+    #[test]
+    fn parts_never_built_are_dropped_with_the_place() {
+        let drops = Cell::new(0);
+        {
+            let _place = Becomes::<Counted<'_>, u32>::new(Counted(&drops));
+        }
+        assert_eq!(drops.get(), 1);
     }
 
     /// A maker that lends back a value it did not write in the place is refused, and the place,
-    /// not taken as built, lends nothing and drops nothing.
+    /// its parts taken and nothing built, lends nothing and drops nothing from then on.
     #[test]
     fn a_maker_that_lends_back_another_value_is_refused() {
         let elsewhere: &'static mut u32 = Box::leak(Box::new(7));
-        let mut place = InPlace::<u32>::empty();
-        assert!(place.build(|_slot| Some(elsewhere)).is_none());
-        assert!(place.get_mut().is_none(), "nothing was built");
+        let mut place = Becomes::<(), u32>::new(());
+        assert!(place.build(|(), _slot| Some(elsewhere)).is_none());
+        assert!(
+            place.build(|(), _slot| None).is_none(),
+            "nothing was built, and the parts are gone"
+        );
     }
 }
