@@ -26,7 +26,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use crate::app_link_table::{
-    AppLinkKind, AppLinkTable, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
+    AppLinkKind, AppLinkTable, Due, Effects, InboundRefusal, LinkHandle, ProgramEvent, ProgramOpen,
     ProgramSend,
 };
 use crate::limit_binding::Quota;
@@ -88,23 +88,23 @@ impl AppTransport {
     }
 
     /// Do what a table method asked for, with the lock let go: the program's close of each link
-    /// named, the drained links told to the program, then the wakes.
+    /// due, the drained links told to the program, then the wakes, each taken from the table in
+    /// turn ([`AppLinkTable::next_due`]), so nothing is collected to do it. What a close's report
+    /// makes due is done in the same turn.
     pub fn perform(&self, effects: Effects) {
-        let Effects {
-            close,
-            drained,
-            wake,
-        } = effects;
-        for link in close {
-            self.port.close(link);
-            let done = self.with(|table| table.close_done(link));
-            self.perform(done);
+        if effects.is_empty() {
+            return;
         }
-        for link in drained {
-            self.port.drained(link);
-        }
-        for waker in wake {
-            waker.wake();
+        while let Some(due) = self.with(AppLinkTable::next_due) {
+            match due {
+                Due::Close(link) => {
+                    self.port.close(link);
+                    // What the report makes due is the table's, and this loop takes it.
+                    let _ = self.with(|table| table.close_done(link));
+                }
+                Due::Drained(link) => self.port.drained(link),
+                Due::Wake(waker) => waker.wake(),
+            }
         }
     }
 
@@ -183,6 +183,14 @@ impl SessionTransport {
             transport,
             queue: limits.app_link_queue_bytes(),
         }
+    }
+
+    /// Take now, in the transport's table, the rows of the session's `links` links, each with the
+    /// storage of the session's bound ([`AppLinkTable::provision`]): a link the session opens or
+    /// the program accepts later then allocates nothing.
+    pub fn provision(&self, links: usize) {
+        let queue = self.queue;
+        self.transport.with(|table| table.provision(links, queue));
     }
 
     /// [`AppTransport::begin_open`] of a link held to the session's bound.

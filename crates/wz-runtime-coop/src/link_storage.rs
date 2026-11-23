@@ -481,6 +481,14 @@ impl LinkTables {
         Some((rx, SlottedTx::new(tx, self.slot_len)))
     }
 
+    /// How many links the tables hold storage for: the session's link places.
+    pub const fn links(&self) -> usize {
+        match self.places {
+            Some(places) => places.capacity(),
+            None => self.tx.capacity(),
+        }
+    }
+
     /// The length of every receive buffer: the largest batch a link of these tables takes.
     pub const fn rx_len(&self) -> usize {
         self.rx.size()
