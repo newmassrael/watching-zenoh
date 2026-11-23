@@ -612,8 +612,6 @@ pub mod header_internals;
 // of the unstable surface.
 #[cfg(feature = "instance-key")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-174 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
