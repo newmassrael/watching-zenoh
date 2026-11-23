@@ -3473,10 +3473,11 @@ id = "RX_POOL_BUFFERS"
 kconfig = "WZ_LIMIT_RX_POOL_BUFFERS"
 kind = "parameter"
 range = [1, 4294967295]
+on_heap = "quota"
 default = 4
-storage = "capacity"
+storage = "both"
 scope = "session"
-binding_heap = "none"
+binding_heap = "open"
 binding_fixed = "open"
 read = "snapshot"
 # `wire` is none: a link that finds no buffer free leaves what its peer sent in its stack until
