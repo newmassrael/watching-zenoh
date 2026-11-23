@@ -63,8 +63,9 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 pub fn sleep(unit: Unit, time: usize) {
     let time = time as u64;
     let (secs, nanos) = match unit {
-        Unit::Micro => (time / 1_000_000, (time % 1_000_000) * 1_000),
-        Unit::Milli => (time / 1_000, (time % 1_000) * 1_000_000),
+        // A remainder of a second scaled to nanoseconds is below 1e9.
+        Unit::Micro => (time / 1_000_000, (time % 1_000_000).wrapping_mul(1_000)),
+        Unit::Milli => (time / 1_000, (time % 1_000).wrapping_mul(1_000_000)),
         Unit::Second => (time, 0),
     };
     let mut ask = libc::timespec {
@@ -120,11 +121,14 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
         Unit::Milli => (1_000, 1_000_000),
         Unit::Second => (1, 0),
     };
-    let secs = wide(instant.tv_sec) - wide(epoch.tv_sec);
+    // Two readings of one clock differ by far less than an `i64` spans, as their nanoseconds,
+    // each below a second, do.
+    let secs = wide(instant.tv_sec).wrapping_sub(wide(epoch.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
-    if nsec_div != 0 {
-        let nsecs = wide(instant.tv_nsec) - wide(epoch.tv_nsec);
-        elapsed = elapsed.saturating_add(nsecs / nsec_div);
+    // The seconds unit has no divisor: it drops the sub-second part.
+    let nsecs = wide(instant.tv_nsec).wrapping_sub(wide(epoch.tv_nsec));
+    if let Some(part) = nsecs.checked_div(nsec_div) {
+        elapsed = elapsed.saturating_add(part);
     }
     if elapsed > 0 {
         c_ulong::try_from(elapsed).unwrap_or(c_ulong::MAX)
@@ -146,15 +150,19 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
 /// a `long` holds on every host, so the sum with `tv_nsec` stays below 2e9 on a 32-bit one too.
 pub fn clock_advance(clock: &mut Clock, unit: Unit, duration: c_ulong) {
     let (secs, nsecs) = match unit {
-        Unit::Micro => (duration / 1_000_000, (duration % 1_000_000) * 1_000),
-        Unit::Milli => (duration / 1_000, (duration % 1_000) * 1_000_000),
+        Unit::Micro => (
+            duration / 1_000_000,
+            (duration % 1_000_000).wrapping_mul(1_000),
+        ),
+        Unit::Milli => (duration / 1_000, (duration % 1_000).wrapping_mul(1_000_000)),
         Unit::Second => (duration, 0),
     };
     clock.tv_sec = clock.tv_sec.wrapping_add(secs as libc::time_t);
-    clock.tv_nsec += nsecs as libc::c_long;
+    // Below 2e9, as said above, and back below 1e9 after the one carry.
+    clock.tv_nsec = clock.tv_nsec.wrapping_add(nsecs as libc::c_long);
     if clock.tv_nsec >= 1_000_000_000 {
         clock.tv_sec = clock.tv_sec.wrapping_add(1);
-        clock.tv_nsec -= 1_000_000_000;
+        clock.tv_nsec = clock.tv_nsec.wrapping_sub(1_000_000_000);
     }
 }
 
@@ -189,11 +197,13 @@ pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
         Unit::Second => (1, 0),
     };
     let now = wall_now();
-    let secs = wide(now.tv_sec) - wide(time.tv_sec);
+    // As in `clock_elapsed_between`: the differences of two readings fit an `i64`.
+    let secs = wide(now.tv_sec).wrapping_sub(wide(time.tv_sec));
     let mut elapsed = secs.saturating_mul(sec_scale);
-    if usec_div != 0 {
-        let usecs = wide(now.tv_usec) - wide(time.tv_usec);
-        elapsed = elapsed.saturating_add(usecs / usec_div);
+    // The seconds unit has no divisor: it drops the sub-second part.
+    let usecs = wide(now.tv_usec).wrapping_sub(wide(time.tv_usec));
+    if let Some(part) = usecs.checked_div(usec_div) {
+        elapsed = elapsed.saturating_add(part);
     }
     // The wrapping cast IS the contract here. Truncating the 64-bit result to a 32-bit host's
     // `unsigned long` gives what pico's 32-bit `long` arithmetic wraps to.
@@ -254,11 +264,12 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
     while filled < len {
         let got = libc::getrandom(
             buf.cast::<u8>().add(filled).cast::<c_void>(),
-            len - filled,
+            // Below `len` by the loop's condition.
+            len.wrapping_sub(filled),
             0,
         );
         if got > 0 {
-            filled += got as usize;
+            filled = filled.saturating_add(got as usize);
         }
         // A negative return is EINTR / EAGAIN; upstream spins, and so does this,
         // because there is no error channel on the export.
@@ -288,10 +299,11 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
         let got = libc::read(
             fd,
             buf.cast::<u8>().add(filled).cast::<c_void>(),
-            len - filled,
+            // Below `len` by the loop's condition.
+            len.wrapping_sub(filled),
         );
         if got > 0 {
-            filled += got as usize;
+            filled = filled.saturating_add(got as usize);
         } else if got == 0 || *libc::__get_errno_ptr() != libc::EINTR {
             libc::close(fd);
             libc::abort();
@@ -565,11 +577,12 @@ mod threads {
     /// macOS wait differs from the others is tested where the tests run.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn relative_deadline(now: Clock, abs: Clock) -> Clock {
-        let mut sec = abs.tv_sec - now.tv_sec;
-        let mut nsec = abs.tv_nsec - now.tv_nsec;
+        // Both readings' nanoseconds are below 1e9, so the borrow leaves them in range.
+        let mut sec = abs.tv_sec.saturating_sub(now.tv_sec);
+        let mut nsec = abs.tv_nsec.wrapping_sub(now.tv_nsec);
         if nsec < 0 {
-            sec -= 1;
-            nsec += 1_000_000_000;
+            sec = sec.saturating_sub(1);
+            nsec = nsec.wrapping_add(1_000_000_000);
         }
         if sec < 0 {
             return libc::timespec {

@@ -441,8 +441,6 @@ compile_error!(
      and `scout-mcu` is the cooperative engine's window over one datagram socket"
 );
 
-// Totality debt TD-178 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod abi;
 // The doors of the additional features (end-to-end protection, stream supervision, instance keys, the
 // replay cache, the message catalog) are a layer over this core that names it only through its C
@@ -466,16 +464,10 @@ pub mod abi;
 #[cfg(not(wz_additional_apart))]
 pub mod additional;
 #[cfg(feature = "admin-space")]
-// Totality debt TD-193 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod admin_space;
 #[cfg(feature = "advanced")]
-// Totality debt TD-162 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod advanced;
 #[cfg(feature = "advanced")]
-// Totality debt TD-184 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
@@ -503,8 +495,6 @@ pub mod revision;
 // `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits
 // inside `#ifdef Z_FEATURE_UNSTABLE_API` and `#if Z_FEATURE_QUERY == 1`.
 #[cfg(all(feature = "unstable-api", feature = "query"))]
-// Totality debt TD-179 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod codec;
 // Totality debt TD-158 (docs/c-abi-architecture.md section 7).
@@ -556,8 +546,6 @@ mod e2e;
 // surface.
 #[cfg(feature = "e2e-receiver")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-195 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod e2e_receiver;
 // The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "e2e-sender")]
@@ -570,8 +558,6 @@ pub mod e2e_sender;
 pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the event ring of the observation plane).
-// Totality debt TD-172 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod encoding;
 // zenoh-pico's reading of an endpoint's text, for the cooperative engine's open and the link a
 // group is reported by.
@@ -593,13 +579,9 @@ pub mod event_log;
     feature = "message-catalog",
     feature = "replay-cache"
 ))]
-// Totality debt TD-186 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod ext_interface;
 // The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
 // (the supervision deadline of the observation plane).
-// Totality debt TD-180 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 mod ffi;
 #[cfg(feature = "query")]
 // Totality debt TD-169 (docs/c-abi-architecture.md section 7).
@@ -608,8 +590,6 @@ pub mod get;
 // A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
 // `targeted-query` policy is off.
 #[cfg(feature = "query")]
-// Totality debt TD-187 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod get_to_peer;
 // Totality debt TD-176 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::unreachable, clippy::arithmetic_side_effects)]
@@ -622,8 +602,6 @@ pub mod header_internals;
 // of the unstable surface.
 #[cfg(feature = "instance-key")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-174 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod instance_key;
 // The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
@@ -644,15 +622,11 @@ pub mod matching;
 // unstable surface, over the reader of `wz-app-frame`.
 #[cfg(feature = "message-catalog")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-177 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod message_catalog;
 // A catalog message's payload set and read field by field under the program's `.proto` files:
 // wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
 #[cfg(feature = "message-payload")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-182 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod message_payload;
 // The doors through which a program reserves the process pools itself and reads them: wz doors
 // (`wz_ext.h`) of the unstable surface.
@@ -664,11 +638,7 @@ pub mod object_pool;
 // pools where the build has them, the heap's otherwise.
 mod object_slot;
 mod option_fields;
-// Totality debt TD-155 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod os;
-// Totality debt TD-197 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod platform;
 // The places of the objects a program holds that no session holds for it, reserved once for the
 // process: in every library without the tokio engine, and in one with it that has their doors.
@@ -694,24 +664,16 @@ pub mod qos;
 #[allow(clippy::arithmetic_side_effects)]
 pub mod querier;
 #[cfg(feature = "queryable")]
-// Totality debt TD-183 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
 // doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-159 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_publisher;
 #[cfg(feature = "replay-cache")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-175 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod replay_subscriber;
 #[cfg(any(feature = "query", feature = "queryable"))]
-// Totality debt TD-173 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod reply_keyexpr;
 pub mod result;
 #[cfg(any(feature = "scout", feature = "scout-mcu"))]
@@ -721,8 +683,6 @@ pub mod scout;
 // The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]
-// Totality debt TD-189 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod segment_sender;
 // Totality debt TD-160 (docs/c-abi-architecture.md section 7).
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
@@ -746,28 +706,18 @@ pub mod snapshot;
 // supervisor of `wz-session-core`.
 #[cfg(feature = "e2e-supervision")]
 #[cfg(not(wz_additional_apart))]
-// Totality debt TD-198 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod stream_supervision;
-// Totality debt TD-190 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod string_array;
 #[cfg(feature = "supervision")]
 pub mod supervision;
 // pico's multi-threaded arm's host surface: mutex, condvar and task.
 #[cfg(feature = "multi-thread")]
-// Totality debt TD-191 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod sync;
 // A time base the program supplies, which the timers of a session run on in place of the system's
 // clock: wz doors (`wz_ext.h`) of the unstable surface, over the time base of `wz-node-time`, for
 // whichever engine the build has.
 #[cfg(feature = "time-base")]
-// Totality debt TD-199 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::arithmetic_side_effects)]
 pub mod time_base;
-// Totality debt TD-192 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 pub mod whatami;
 mod write_filter;
 // Totality debt TD-161 (docs/c-abi-architecture.md section 7).

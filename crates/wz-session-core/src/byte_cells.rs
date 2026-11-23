@@ -163,7 +163,7 @@ impl LentByteCells {
             (
                 NonNull::new_unchecked(self.taken.as_ptr().add(at)),
                 // `at` is below the count, so the cell's offset is inside the table.
-                self.bytes.as_ptr().add(at.saturating_mul(self.size)),
+                self.bytes.as_ptr().add(at.wrapping_mul(self.size)),
             )
         };
         Some(ByteBuf {

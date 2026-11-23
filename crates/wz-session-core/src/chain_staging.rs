@@ -464,7 +464,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
             return Err(StagingError::ChainCapExceeded);
         }
         // `fits` held the end to the capacity, which is the buffer's length.
-        let end = chain.len.saturating_add(payload.len());
+        let end = chain.len.wrapping_add(payload.len());
         let into = self
             .bufs
             .get_mut(chain.at)
@@ -499,7 +499,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
         if !self.fits(chain, want) {
             return Err(StagingError::ChainCapExceeded);
         }
-        let end = chain.len.saturating_add(want);
+        let end = chain.len.wrapping_add(want);
         let lent = self
             .bufs
             .get_mut(chain.at)
@@ -515,7 +515,8 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
             return Err(StagingError::ChainCapExceeded);
         }
         // The buffer never grew for the reservation, so what was filled is what the chain gains.
-        chain.len = chain.len.saturating_add(filled);
+        // What was filled is at most what was reserved, which `fits` held to the capacity.
+        chain.len = chain.len.wrapping_add(filled);
         chain.reserved = 0;
         Ok(())
     }

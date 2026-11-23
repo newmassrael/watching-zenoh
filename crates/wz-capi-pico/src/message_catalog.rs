@@ -672,7 +672,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_supervise(
                 return code;
             }
             *out_streams.add(n) = stream;
-            *written = n + 1;
+            // `n` is a place among the rows, so the count after it does not wrap.
+            *written = n.wrapping_add(1);
         }
         Z_OK
     })

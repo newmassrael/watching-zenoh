@@ -159,7 +159,8 @@ impl TxBuf for SliceTxBuf<'_> {
 
     fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         // A write past the end finds no window, and is refused whole.
-        let end = self.len.saturating_add(bytes.len());
+        // A sum past `usize` would wrap below `len`, which names no window: refused all the same.
+        let end = self.len.wrapping_add(bytes.len());
         let into = self
             .storage
             .get_mut(self.len..end)
@@ -170,7 +171,7 @@ impl TxBuf for SliceTxBuf<'_> {
     }
 
     fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
-        let end = self.len.saturating_add(n);
+        let end = self.len.wrapping_add(n);
         let window = self
             .storage
             .get_mut(self.len..end)

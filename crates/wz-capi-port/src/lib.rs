@@ -51,6 +51,22 @@
 //! in every build.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Total functions in release code (docs/c-abi-architecture.md, P6): no panic is reachable from
+// input. A module not yet converted is allowed by name with its row of the totality debt register
+// (section 7 of that document), which scripts/lib/totality_debt_gate.py holds to these attributes.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::arithmetic_side_effects
+    )
+)]
 
 extern crate alloc;
 
@@ -61,6 +77,8 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::link_restriction::LinkRestriction;
 use wz_session_core::sink::SampleView;
 
+// Totality debt TD-228 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod cancellation;
 pub mod decl_watch;
 mod drive;
@@ -68,6 +86,8 @@ mod engine;
 pub mod entity_place;
 pub mod group;
 pub mod held_key;
+// Totality debt TD-229 (docs/c-abi-architecture.md section 7).
+#[allow(clippy::arithmetic_side_effects)]
 pub mod listeners;
 // What the doors of the observation plane do, for every C ABI: one behaviour, named by each ABI
 // for itself. Only the features of the instruments compile it.

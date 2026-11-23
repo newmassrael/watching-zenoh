@@ -1535,23 +1535,26 @@ fn write_fragment_head_to<K: sce_forge_runtime::codec::SceSink>(
         body: ExtEntryPartsBody::CodecZenohExtUnit(&marker),
     };
     let mut chain = [unit_entry(FRAGMENT_FIRST_EXT_HEADER); 3];
-    #[cfg(feature = "transport-qos")]
-    let qos_entry = qos.as_ref().map(qos_entry);
-    #[cfg(not(feature = "transport-qos"))]
-    let qos_entry = {
-        let _ = ext_qos;
-        None
-    };
-    let wanted = [
-        qos_entry,
-        first.then(|| unit_entry(FRAGMENT_FIRST_EXT_HEADER)),
-        drop_marker.then(|| unit_entry(FRAGMENT_DROP_EXT_HEADER)),
-    ];
-    // At most the three entries the chain has room for.
+    // At most the three entries the chain has room for, so every one finds its slot and the
+    // count stays below the array's length.
     let mut len = 0usize;
-    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
-        *slot = entry;
-        len = len.saturating_add(1);
+    let mut push = |entry| {
+        if let Some(slot) = chain.get_mut(len) {
+            *slot = entry;
+            len = len.wrapping_add(1);
+        }
+    };
+    #[cfg(feature = "transport-qos")]
+    if let Some(value) = &qos {
+        push(qos_entry(value));
+    }
+    #[cfg(not(feature = "transport-qos"))]
+    let _ = ext_qos;
+    if first {
+        push(unit_entry(FRAGMENT_FIRST_EXT_HEADER));
+    }
+    if drop_marker {
+        push(unit_entry(FRAGMENT_DROP_EXT_HEADER));
     }
     let head = wz_codecs::transport_fragment_header::TransportFragmentHeaderParts {
         header,

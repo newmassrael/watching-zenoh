@@ -57,10 +57,9 @@ pub unsafe extern "C" fn z_whatami_to_view_string(
         return crate::result::Z_ERR_INVALID;
     }
     let idx = whatami as usize;
-    let (text, res) = if idx == 0 || idx >= WHATAMI_STRINGS.len() {
-        (WHATAMI_STRINGS[0], crate::result::Z_ERR_INVALID)
-    } else {
-        (WHATAMI_STRINGS[idx], crate::result::Z_OK)
+    let (text, res) = match WHATAMI_STRINGS.get(idx) {
+        Some(text) if idx != 0 => (*text, crate::result::Z_OK),
+        _ => (WHATAMI_STRINGS[0], crate::result::Z_ERR_INVALID),
     };
     // The rendered strings are `'static`, so the view aliases program storage
     // that outlives any caller — the same lifetime pico's own map has.
