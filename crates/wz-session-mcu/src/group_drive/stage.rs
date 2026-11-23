@@ -62,6 +62,15 @@ use wz_session_core::qos::Priority;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::tx_deadline::PushOutcome;
 
+/// Why [`GroupTxStage::push_encoded`] took nothing of a message lent for the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LentPushRefused {
+    /// Another push holds the conduits: the message was pushed from inside that push's wait for
+    /// room, and a message lent for the call cannot be kept for their release as an owned one
+    /// is. The caller sends it again once that push returns, or gives it up.
+    Reentrant,
+}
+
 /// What a producer that may wait for room does while the lane its message takes is full: the
 /// host runs its tasks, the group's pump among them, which writes what the group's socket takes;
 /// the socket is waited on; and the wait is spent on the host's clock.
@@ -203,19 +212,19 @@ impl GroupTxStage {
     /// Push `message`, a message of the session lent for the call (its body written by its encoder
     /// where the frame is built), as [`Self::push`] pushes an owned one. A message lent for the
     /// call cannot be kept for the release of the conduits another push holds, as an owned one is:
-    /// pushed while they are held (from inside that push's wait for room), it is a congestion drop,
-    /// counted on its lane.
+    /// pushed while they are held (from inside that push's wait for room), it is refused
+    /// ([`LentPushRefused::Reentrant`]) with nothing minted, queued or counted, and the caller
+    /// decides what becomes of it.
     pub fn push_encoded(
         &self,
         message: &MulticastTxEncoded<'_>,
         pace: &dyn GroupTxPace,
-    ) -> PushOutcome {
+    ) -> Result<PushOutcome, LentPushRefused> {
         let inner = &*self.inner;
-        let conduit = multicast_tx_encoded_conduit(message, &inner.params);
         let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
-            inner.lanes.borrow_mut().bound.dropped(conduit);
-            return PushOutcome::Congested;
+            return Err(LentPushRefused::Reentrant);
         };
+        let conduit = multicast_tx_encoded_conduit(message, &inner.params);
         let params = &inner.params;
         let outcome = self.push_on(
             &mut conduits,
@@ -228,7 +237,7 @@ impl GroupTxStage {
         );
         drop(conduits);
         self.push_deferred();
-        outcome
+        Ok(outcome)
     }
 
     /// Put `item`, a reply, on the stage without waiting, whatever its lane holds, counted on the
@@ -717,7 +726,7 @@ mod tests {
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
-    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, Queued};
+    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, LentPushRefused, Queued};
     use crate::group_drive::MulticastPump;
 
     /// A clock that never moves: the beacon, due at every step, is what moves the pump.
@@ -907,10 +916,10 @@ mod tests {
     }
 
     /// A message lent for the call is put on its lane as an owned one is; one pushed while another
-    /// push holds the conduits, which cannot be kept for their release, is a congestion drop
-    /// counted on its lane, and leaves nothing on it.
+    /// push holds the conduits, which cannot be kept for their release, is refused to its caller,
+    /// is counted as no drop, and leaves nothing on the lanes.
     #[test]
-    fn a_lent_message_is_queued_and_one_pushed_inside_another_push_is_dropped() {
+    fn a_lent_message_is_queued_and_one_pushed_inside_another_push_is_refused() {
         let params = params();
         let stage = GroupTxStage::new(&params);
         let nothing = || {};
@@ -923,11 +932,18 @@ mod tests {
             size: 64,
             body: &body,
         };
-        assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Pushed);
+        assert_eq!(stage.push_encoded(&lent, &host), Ok(PushOutcome::Pushed));
         let held = stage.inner.conduits.borrow_mut();
-        assert_eq!(stage.push_encoded(&lent, &host), PushOutcome::Congested);
+        assert_eq!(
+            stage.push_encoded(&lent, &host),
+            Err(LentPushRefused::Reentrant)
+        );
         drop(held);
-        assert_eq!(stage.drops(multicast_tx_encoded_conduit(&lent, &params)), 1);
+        assert_eq!(
+            stage.drops(multicast_tx_encoded_conduit(&lent, &params)),
+            0,
+            "a refusal is the caller's to answer, and no drop"
+        );
         let datagram = stage.take().expect("the lent message is on its lane");
         assert!(datagram.bytes.ends_with(b"first"));
         assert!(

@@ -285,7 +285,7 @@ mod stage;
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
-pub use stage::{GroupLink, GroupTxPace, GroupTxStage};
+pub use stage::{GroupLink, GroupTxPace, GroupTxStage, LentPushRefused};
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic
