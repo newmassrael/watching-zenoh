@@ -938,11 +938,7 @@ pub mod scout_initiator;
     target_has_atomic = "ptr"
 ))]
 // Totality debt TD-032 (docs/c-abi-architecture.md section 7).
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::arithmetic_side_effects
-)]
+#[allow(clippy::expect_used)]
 pub mod scouting_host;
 
 // R311ky — deferred callback firing (the F-6 structural fix): the

@@ -238,7 +238,7 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-023 | `wz-session-core` | `policy` | `indexing_slicing`, `panic` | 29 | generated |
 | TD-030 | `wz-session-core` | `chunk_log` | `indexing_slicing`, `arithmetic_side_effects` | 25 | open |
 | TD-031 | `wz-session-core` | `lent_push` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
-| TD-032 | `wz-session-core` | `scouting_host` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 25 | open |
+| TD-032 | `wz-session-core` | `scouting_host` | `expect_used` | 25 | open |
 | TD-035 | `wz-session-core` | `accept_state` | `indexing_slicing`, `arithmetic_side_effects` | 23 | open |
 | TD-036 | `wz-session-core` | `drive` | `indexing_slicing`, `unreachable`, `arithmetic_side_effects` | 23 | open |
 | TD-037 | `wz-session-core` | `network_message` | `indexing_slicing`, `arithmetic_side_effects` | 23 | open |
@@ -375,7 +375,10 @@ cannot fail. That is a change to SCE, reviewed by an SCE session, and a pin move
 leaves with them. TD-099 (`lent_control`) waits on the same change: `chain_of` is the
 fixed-capacity twin of `one_entry`, and `NamedKeyexpr::entry` holds a body of at most
 `NAMED_KEYEXPR_BYTES` as a slice of the `ZBuf`'s u32 bound, which a constructor from a list
-whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
+whose capacity is within the bound (checked in a `const`, as `From<heapless::Vec>` is) proves.
+TD-032 (`scouting_host`) is the Scout's zid, a `SessionZid` of one to sixteen bytes by its
+constructor, handed to the codec's `Bounded<&[u8], 16, 1>` through `Bounded::new`: the same
+constructor from a value whose type holds the bound pays it. TD-132 (`app_transport`'s table lock that must run the call it is given) waits
 for the drivers (L0) and the façade (L4) to land, whose crates hold its callers.
 
 TD-017 (`frame_encode`) keeps one `expect`: `encode_frame_envelope` writes through `TxSink`,
