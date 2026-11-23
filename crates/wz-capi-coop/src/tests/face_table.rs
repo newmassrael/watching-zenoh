@@ -62,7 +62,7 @@ fn a_declaration_and_a_put_reach_every_face() {
             Arc::new(|| Box::new(|_: &dyn SampleView| {})),
         )
     };
-    subscribe("demo/early/**");
+    subscribe("demo/early/**").expect("a session with ids left declares");
     until(&engine, "the first router to see it", || {
         first.seen(|s| s.declares) >= 1
     });
@@ -80,7 +80,7 @@ fn a_declaration_and_a_put_reach_every_face() {
     });
 
     let (before_first, before_second) = (first.seen(|s| s.declares), second.seen(|s| s.declares));
-    subscribe("demo/late/**");
+    subscribe("demo/late/**").expect("a session with ids left declares");
     until(&engine, "both routers to see the later one", || {
         first.seen(|s| s.declares) > before_first && second.seen(|s| s.declares) > before_second
     });
