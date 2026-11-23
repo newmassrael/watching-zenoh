@@ -4687,7 +4687,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// A publish's leg to the session's own subscribers, when its destination admits them: the
     /// subscribers whose origin admits it, as the registry's loopback finds them, are each handed
     /// it here, with no lock of the session held, inside the put as zenoh-pico's does
-    /// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), by the
+    /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`), by the
     /// callback each one's row holds, copied out under the session's lock. A callback is called
     /// through a shared borrow ([`LiveCallback`]): one running on another thread is called beside
     /// it, and one the putting thread is inside of is called again from inside itself, as pico's

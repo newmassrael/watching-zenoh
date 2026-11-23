@@ -760,7 +760,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // upstreams do the replay inside their register function
         // (zenoh-pico `_z_register_liveliness_subscriber` calls
         // `_z_liveliness_subscription_trigger_history` between the register
-        // and the Interest emit, `src/net/liveliness.c:196-209`; zenoh runs
+        // and the Interest emit, `vendor/zenoh-pico/src/net/liveliness.c`
+        // @ `_z_liveliness_subscription_trigger_history(_Z_RC_IN_VAL(zn)`; zenoh runs
         // it before `send_interest`, `zenoh/src/api/session.rs`
         // @ `let known_tokens = if history {`), and so
         // does this — folding it in is what makes both wz declare paths

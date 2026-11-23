@@ -117,7 +117,7 @@ pub type FilterId = u64;
 /// ([`Self::call`]), from any thread and at any depth, a call from inside itself included:
 /// zenoh-pico calls its subscriptions' callbacks with no lock of its session held, so a put a
 /// callback makes on a key its own subscription matches calls it again from inside itself
-/// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), and
+/// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`), and
 /// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
 /// the engine is done with it, after its last call has returned: its drop is the program's.
 pub enum SubscriberSink {
