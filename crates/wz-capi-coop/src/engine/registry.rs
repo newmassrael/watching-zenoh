@@ -1323,12 +1323,12 @@ mod tests {
         let mut dialling = held_as(1, own_spans, true);
         assert!(
             dialling.registry.add_face(5).is_err(),
-            "the one set is the dial face's: none is left for the face that comes"
+            "CONTROL: the one set is the dial face's: none is left for the face that comes"
         );
         assert_eq!(
-            declared(&mut dialling, 5),
-            (false, false),
-            "CONTROL: the one set is the dial face's, so the face that comes holds nothing"
+            dialling.registry.held_at(5),
+            None,
+            "CONTROL: the face that comes holds no set"
         );
 
         let mut listening = held_as(1, own_spans, false);
