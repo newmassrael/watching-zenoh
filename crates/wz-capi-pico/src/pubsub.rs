@@ -1797,6 +1797,96 @@ mod put_options_tests {
         z_timestamp_t,
     };
 
+    /// A session's put and its delete read their QoS and destination through one body: the same
+    /// stated priority, congestion control and express flag give the same QoS through either
+    /// door, each keeps its own kind, and a priority stated differently is read as stated.
+    #[test]
+    fn a_put_and_a_delete_state_their_qos_through_one_body() {
+        use super::{
+            session_delete_options, session_put_options, z_delete_options_default,
+            z_delete_options_t, z_put_options_default, z_put_options_t,
+        };
+        use wz_session_core::sample::SampleKind;
+        // SAFETY: each pointer handed over points at a live value of its type, which outlives
+        // the call.
+        unsafe {
+            let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
+            z_put_options_default(put.as_mut_ptr());
+            let mut put = put.assume_init();
+            let mut del = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
+            z_delete_options_default(del.as_mut_ptr());
+            let mut del = del.assume_init();
+            put.priority = 2;
+            put.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
+            put.is_express = true;
+            del.priority = 2;
+            del.congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
+            del.is_express = true;
+            let stated_put = session_put_options(&put);
+            let stated_del = session_delete_options(&del);
+            assert!(stated_put.qos.is_some(), "the stated QoS is set");
+            assert_eq!(stated_put.qos, stated_del.qos);
+            assert_eq!(stated_put.reliability, stated_del.reliability);
+            assert_eq!(
+                stated_put.allowed_destination,
+                stated_del.allowed_destination
+            );
+            assert!(matches!(stated_put.kind, SampleKind::Put));
+            assert!(matches!(stated_del.kind, SampleKind::Del));
+            del.priority = 6;
+            assert_ne!(
+                session_delete_options(&del).qos,
+                stated_put.qos,
+                "the delete's own priority is read"
+            );
+        }
+    }
+
+    /// A session's put consumes its payload and its options' moved attachment on every path, as
+    /// pico's drops all three whatever the write answered: refused for no session, and refused
+    /// for no payload, the attachment is spent either way.
+    #[test]
+    fn a_refused_put_spends_its_payload_and_its_attachment() {
+        use super::{z_put, z_put_options_default, z_put_options_t};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::result::{Z_ERR_NULL, Z_OK};
+        let moved = |bytes: &[u8]| {
+            let mut owned = z_owned_bytes_t::null_value();
+            // SAFETY: `owned` is writable and `bytes` readable for its length.
+            let copied = unsafe {
+                crate::bytes::z_bytes_copy_from_buf(&mut owned, bytes.as_ptr(), bytes.len())
+            };
+            assert_eq!(copied, Z_OK);
+            z_moved_bytes_t { _this: owned }
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut options = core::mem::MaybeUninit::<z_put_options_t>::uninit();
+            z_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+
+            let mut payload = moved(b"payload");
+            let mut attachment = moved(b"attachment");
+            options.attachment = &mut attachment;
+            let rc = z_put(core::ptr::null(), core::ptr::null(), &mut payload, &options);
+            assert_eq!(rc, Z_ERR_NULL, "no session");
+            assert!(payload._this.handle.is_null(), "the payload is spent");
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
+
+            let mut attachment = moved(b"attachment");
+            options.attachment = &mut attachment;
+            let rc = z_put(
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                &options,
+            );
+            assert_eq!(rc, Z_ERR_NULL, "no payload");
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
+        }
+    }
+
     /// A publisher's put whose options carry nothing has no options built for it, NULL ones and
     /// default ones alike, and is sent from what its publisher was declared with; one whose
     /// options carry a timestamp has them built, the timestamp in them.
@@ -2217,11 +2307,14 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
         source_info,
     }
     .fold(opts);
-    opts.with_priority(crate::qos::priority_from_pico((*options).priority))
-        .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
-        .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability()))
-        .with_locality((*options).allowed_destination())
+    StatedQos {
+        priority: (*options).priority,
+        congestion_control: (*options).congestion_control,
+        is_express: (*options).is_express,
+        reliability: (*options).reliability(),
+        destination: (*options).allowed_destination(),
+    }
+    .apply(opts)
 }
 
 /// Fold a caller's `z_delete_options_t` into wz's [`PublishOptions`], as the
@@ -2235,12 +2328,14 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
     if options.is_null() {
         return opts;
     }
-    opts = opts
-        .with_priority(crate::qos::priority_from_pico((*options).priority))
-        .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
-        .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability()))
-        .with_locality((*options).allowed_destination());
+    opts = StatedQos {
+        priority: (*options).priority,
+        congestion_control: (*options).congestion_control,
+        is_express: (*options).is_express,
+        reliability: (*options).reliability(),
+        destination: (*options).allowed_destination(),
+    }
+    .apply(opts);
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
@@ -2251,10 +2346,59 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
     opts
 }
 
-/// Publish a payload on a session (pico `z_put`). Consumes the moved payload.
+/// The QoS and the destination a session's put and delete state, read the same way from
+/// `z_put_options_t` and `z_delete_options_t`, whose layouts differ.
+struct StatedQos {
+    priority: crate::qos::z_priority_t,
+    congestion_control: crate::qos::z_congestion_control_t,
+    is_express: bool,
+    reliability: z_reliability_t,
+    destination: Locality,
+}
+
+impl StatedQos {
+    /// `opts` with the stated QoS and destination. One body for both session doors, out of line
+    /// so that neither holds a copy of the five setters and the moves of the options between them.
+    #[inline(never)]
+    fn apply(self, opts: PublishOptions) -> PublishOptions {
+        opts.with_priority(crate::qos::priority_from_pico(self.priority))
+            .with_congestion_control(push_congestion_from_pico(self.congestion_control))
+            .with_express(self.is_express)
+            .with_reliability(reliability_from_pico(self.reliability))
+            .with_locality(self.destination)
+    }
+}
+
+/// Publish `payload` on a session's key with `opts`: the body `z_put` and `z_delete` share, out
+/// of line so that neither export holds a copy of it. The key is read where it lies and named as
+/// its declaration names it on this session ([`wire_key_of`]), which is the reason
+/// `z_declare_keyexpr` exists: pico's `_z_write` reads the same discriminant off its
+/// `_z_declared_keyexpr_t`. Each face resolves the literal from its own outbound mapping table,
+/// so this is right for a face that joined after the declaration and got it by replay.
 ///
-/// R311y559 — the options are now READ. See [`z_put_options_t`] for what was
-/// being dropped and why the two put paths had drifted.
+/// # Safety
+/// `zs` and `keyexpr` must be null or live loans.
+#[inline(never)]
+unsafe fn session_publish(
+    zs: *const z_loaned_session_t,
+    keyexpr: *const z_loaned_keyexpr_t,
+    payload: &[u8],
+    opts: &PublishOptions,
+) -> ZResult {
+    let Some(state) = session_handle(zs) else {
+        return Z_ERR_NULL;
+    };
+    let Some(ke) = keyexpr_str(keyexpr) else {
+        return Z_ERR_INVALID;
+    };
+    let engine = engine_ref(state);
+    let wire = wire_key_of(keyexpr, engine);
+    publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
+}
+
+/// Publish a payload on a session (pico `z_put`). Consumes the moved payload, and the options'
+/// moved encoding and attachment, on every path, as pico's `z_put` drops all three whatever
+/// `_z_write` answered.
 #[no_mangle]
 pub unsafe extern "C" fn z_put(
     zs: *const z_loaned_session_t,
@@ -2263,48 +2407,20 @@ pub unsafe extern "C" fn z_put(
     options: *const z_put_options_t,
 ) -> ZResult {
     guarded(|| {
-        // Consume the moved payload FIRST so it is freed on every path (pico's
-        // "z_move consumes on all paths" contract): the owned `Vec` is dropped
-        // on any early error below, and `take_moved_bytes` already nulled the
-        // caller's source struct.
-        let buf = match take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
-        };
-        let state = match session_handle(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k,
-            None => return Z_ERR_INVALID,
-        };
-        // A keyexpr that carries a live declaration publishes ALIASED — the
-        // wire carries the id instead of the literal, which is the entire
-        // reason `z_declare_keyexpr` exists (pico's `_z_write` reads the same
-        // discriminant off its `_z_declared_keyexpr_t`). Each face resolves the
-        // literal from its own outbound mapping table, so this is correct even
-        // for a face that joined after the declaration and got it by replay.
-        // Resolved AFTER the payload is taken and BEFORE any keyexpr branch, so
-        // the moved encoding / attachment are consumed on every path.
         let resolved = session_put_options(options);
-        // R2959 — the key's own wire form: its declaration's id plus the rest
-        // of the key when it is this session's, which a PREFIX declaration now
-        // makes a real case rather than only the whole-key one.
-        let engine = engine_ref(state);
-        let Some(wire) = wire_key_of(keyexpr, engine) else {
-            return Z_ERR_INVALID;
+        let Some(buf) = take_moved_bytes(payload) else {
+            return Z_ERR_NULL;
         };
-        publish_code(engine.publish_on_wire_all(ke, &wire, &buf, &resolved))
+        session_publish(zs, keyexpr, &buf, &resolved)
     })
 }
 
 /// Publish a DELETE on a session (pico `z_delete`).
 ///
-/// R311y559 — this export did not exist. A Del is not a Put with an empty
-/// payload: it carries a different inner body, and a subscriber reads
-/// `z_sample_kind` to tell them apart, so a program deleting a key had no way
-/// to say so through this ABI at all.
+/// A Del is not a Put with an empty payload: it carries a different inner body,
+/// and a subscriber reads `z_sample_kind` to tell them apart. The empty payload
+/// handed to the shared body is the Del body's own shape, not a stand-in for a
+/// missing one: `_z_msg_del_t` has no payload field.
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session; `keyexpr` must be null or a live
@@ -2315,24 +2431,7 @@ pub unsafe extern "C" fn z_delete(
     keyexpr: *const z_loaned_keyexpr_t,
     options: *const z_delete_options_t,
 ) -> ZResult {
-    guarded(|| {
-        let state = match session_handle(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        let ke = match keyexpr_str(keyexpr) {
-            Some(k) => k,
-            None => return Z_ERR_INVALID,
-        };
-        let resolved = session_delete_options(options);
-        // The empty payload is the Del body's own shape, not a stand-in for a
-        // missing one: `_z_msg_del_t` has no payload field.
-        let engine = engine_ref(state);
-        let Some(wire) = wire_key_of(keyexpr, engine) else {
-            return Z_ERR_INVALID;
-        };
-        publish_code(engine.publish_on_wire_all(ke, &wire, &[], &resolved))
-    })
+    guarded(|| session_publish(zs, keyexpr, &[], &session_delete_options(options)))
 }
 
 /// Publish a DELETE through a declared publisher (pico `z_publisher_delete`).
@@ -2639,13 +2738,13 @@ unsafe fn subscriber_wire(
     keyexpr: *const z_loaned_keyexpr_t,
     shared: &Engine,
     key: &DeclaredKeyexpr,
-) -> Option<WireKey> {
-    let wire = wire_key_of(keyexpr, shared)?;
+) -> WireKey {
+    let wire = wire_key_of(keyexpr, shared);
     let anchor: Arc<dyn Send + Sync> = Arc::new((
         key.declaration_hold(),
         declared_of(keyexpr).and_then(DeclaredKeyexpr::declaration_hold),
     ));
-    Some(wire.keeping(anchor))
+    wire.keeping(anchor)
 }
 
 /// The traffic a subscriber declared with `options` admits: its `allowed_origin` with
@@ -2790,9 +2889,7 @@ unsafe fn declare_subscriber_with(
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
     let engine = engine_of(state);
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, ke, declared_of(keyexpr))?;
-    let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
-        return Err(Z_ERR_INVALID);
-    };
+    let wire = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
     // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's
     // key the announce went out on. A background subscriber's entry keeps that declaration

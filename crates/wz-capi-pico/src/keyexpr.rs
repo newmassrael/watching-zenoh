@@ -79,19 +79,17 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 ///
 /// pico `_z_declared_keyexpr_alias_to_wire`
 /// (`vendor/zenoh-pico/src/session/keyexpr.c`), which every message that names
-/// a caller's key goes through. `None` when `ke` is null or not UTF-8.
+/// a caller's key goes through. Every caller has read the key's text first
+/// ([`keyexpr_str`]), which refuses a null or non-UTF-8 key, so the text is not
+/// read again here: only the declaration is.
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
-pub(crate) unsafe fn wire_key_of(
-    ke: *const z_loaned_keyexpr_t,
-    shared: &Engine,
-) -> Option<WireKey> {
-    keyexpr_str(ke)?;
-    Some(match declared_of(ke) {
+pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
+    match declared_of(ke) {
         Some(declared) => declared.wire(shared),
         None => WireKey::literal(),
-    })
+    }
 }
 
 /// pico `_z_keyexpr_wire_declaration_t` behind its refcount: ONE keyexpr
