@@ -10308,7 +10308,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "codec-open-body")]
             crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts {
                 is_ack: false,
-                cookie,
+                cookie: Some(cookie),
                 ..
             }) => {
                 // R89 — Accepting-side OpenSyn arrival: capture the
@@ -10317,11 +10317,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // Closes the loop opened by R86 (outbound cookie
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
-                if let Some(cookie) = cookie {
-                    R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                        *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
-                    });
-                }
+                R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
+                    *slot = crate::session_init_params::session_bytes::<COOKIE_MAX>(cookie);
+                });
                 // R2782 — the cookie is the ONLY thing taken off an OpenSyn
                 // here, because the admission predicate needs it. The RX SN
                 // seed and the lease capture that stood here are applied
@@ -10348,7 +10346,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // fails before rx.c:88), and the FSM tears the session down on
         // the FramingError projection anyway. R294 — the stamp shares
         // the monotonic epoch with the drive loop's clock.
-        if !matches!(facts, crate::inbound::ControlFacts::Unread) {
+        if !matches!(facts, crate::inbound::ControlFacts::Unread(_)) {
             self.stamp_rx_activity();
         }
     }

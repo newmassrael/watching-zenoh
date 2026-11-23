@@ -602,7 +602,10 @@ pub enum ControlFacts<'f> {
     Refused,
     /// A message this read does not take: an id this build has no reader for. It is refused as
     /// [`Self::Refused`] is, and it is no sign of the peer's life, since it was not read.
-    Unread,
+    ///
+    /// It carries the borrow of the facts' lifetime because a build with no handshake reader has
+    /// no other variant that does, and a lifetime parameter nothing names is refused.
+    Unread(core::marker::PhantomData<&'f ()>),
 }
 
 /// The facts of an Init the judgement reads ([`ControlFacts::Init`]).
@@ -711,7 +714,7 @@ impl InboundFrame {
             InboundFrame::Oam { .. } => ControlFacts::Refused,
             #[cfg(all(feature = "alloc", feature = "codec-frame"))]
             InboundFrame::Network { .. } => ControlFacts::Refused,
-            InboundFrame::Unknown { .. } => ControlFacts::Unread,
+            InboundFrame::Unknown { .. } => ControlFacts::Unread(core::marker::PhantomData),
         }
     }
 }
@@ -1704,7 +1707,7 @@ pub(crate) fn control_event(
         // transition in wz's unicast machine: gaining the ability to DECODE a
         // message must not change what the session FSM does with it, so they stay
         // the framing error an unknown MID is.
-        ControlFacts::Refused | ControlFacts::Unread => Some(E::FramingError),
+        ControlFacts::Refused | ControlFacts::Unread(_) => Some(E::FramingError),
     }
 }
 
@@ -1751,7 +1754,9 @@ pub(crate) enum ControlRead<'a> {
     Refused,
     /// A message this reader does not take ([`ControlFacts::Unread`]): a `Frame` or a
     /// `Fragment` that reaches it, or an id this build has no reader for.
-    Unread,
+    ///
+    /// It carries the unit's lifetime for the reason [`ControlFacts::Unread`] carries the facts'.
+    Unread(core::marker::PhantomData<&'a ()>),
 }
 
 #[cfg(all(
@@ -1804,7 +1809,7 @@ impl ControlRead<'_> {
             #[cfg(feature = "codec-keep-alive")]
             ControlRead::KeepAlive { .. } => ControlFacts::KeepAlive,
             ControlRead::Refused => ControlFacts::Refused,
-            ControlRead::Unread => ControlFacts::Unread,
+            ControlRead::Unread(_) => ControlFacts::Unread(core::marker::PhantomData),
         }
     }
 
@@ -1828,7 +1833,9 @@ impl ControlRead<'_> {
             ControlRead::KeepAlive { extensions } => {
                 judge_transport_chain(wire_const::T_MID_KEEP_ALIVE, extensions)
             }
-            ControlRead::Refused | ControlRead::Unread => crate::ext_admit::ExtAdmission::Unjudged,
+            ControlRead::Refused | ControlRead::Unread(_) => {
+                crate::ext_admit::ExtAdmission::Unjudged
+            }
         }
     }
 }
@@ -1919,7 +1926,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
         // refusals, so the walk of the unit steps over it as the decoder's reading does.
         #[cfg(feature = "codec-join")]
         wire_const::T_MID_JOIN => {
-            let (frame, used) = decode_join(bytes)?;
+            let (frame, used) = decode_join_message(bytes)?;
             refuse_unnamed_zid(&frame)?;
             return Ok((ControlRead::Refused, used));
         }
@@ -1934,7 +1941,7 @@ pub(crate) fn read_control(bytes: &[u8]) -> Result<(ControlRead<'_>, usize), Inb
             crate::ext_chain::check_ext_chain(crate::ext_view::walked(view.extensions.as_ref()))?;
             ControlRead::Refused
         }
-        _ => return Ok((ControlRead::Unread, 0)),
+        _ => return Ok((ControlRead::Unread(core::marker::PhantomData), 0)),
     };
     Ok((read, bytes.len() - cursor.remaining()))
 }
@@ -2978,7 +2985,7 @@ mod control_read_tests {
         ) {
             let (message, used) = read.unwrap_or_else(|err| panic!("{wire:02x?}: {err:?}"));
             assert!(
-                matches!(message.facts(), ControlFacts::Unread),
+                matches!(message.facts(), ControlFacts::Unread(_)),
                 "{wire:02x?}"
             );
             assert_eq!(used, 0, "{wire:02x?}");
@@ -3000,7 +3007,7 @@ mod control_read_tests {
                     format!("{:?}", inbound_to_fsm_event(&frame)),
                     "{wire:02x?}"
                 );
-                if !matches!(facts, ControlFacts::Refused | ControlFacts::Unread) {
+                if !matches!(facts, ControlFacts::Refused | ControlFacts::Unread(_)) {
                     assert_eq!(
                         format!("{:?}", message.ext_admission()),
                         format!("{:?}", frame.ext_admission()),
@@ -3098,7 +3105,7 @@ mod control_read_tests {
         assert!(matches!(message.facts(), ControlFacts::Refused));
         assert_eq!(used, 2);
         let (message, used) = read_control(&[0x1F]).expect("an unread id");
-        assert!(matches!(message.facts(), ControlFacts::Unread));
+        assert!(matches!(message.facts(), ControlFacts::Unread(_)));
         assert_eq!(used, 0);
     }
 }
