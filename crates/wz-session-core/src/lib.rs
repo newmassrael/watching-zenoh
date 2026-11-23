@@ -1838,8 +1838,6 @@ pub mod extcompression;
 /// mmap'd segment off /dev/shm). The std POSIX segment lives in
 /// `wz-runtime-tokio::shm_provider` behind the resolver trait.
 #[cfg(feature = "transport-shm")]
-// Totality debt TD-059 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod extshm;
 
 /// What a reader of an extension chain asks of one entry (identifier, encoding,
