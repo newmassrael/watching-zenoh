@@ -4536,6 +4536,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let reliable = opts.reliable_bool();
         let express = meta.is_express();
         let priority = opts.priority_band();
+        // The key as the session's tables name it: by the declaration the ABI named it by while
+        // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
+        let Some(named) = core.tables.borrow().named_by(keyexpr, wire.mapping_id) else {
+            return (Err(FanoutError::ExceedsCapacity), None);
+        };
         let mut outcome = Ok(0);
         #[cfg(not(feature = "listen"))]
         let _ = pass;
@@ -4548,17 +4553,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, face);
-            // Each link names the key as its own key-wire form says.
-            let wire = on_link(actions, keyexpr, wire);
-            let suffix = wire.suffix.as_deref();
-            // A publication is written from the borrowed key, bytes and metadata into the slot its
-            // link lends, a plain Put by its own shorter writer, unless the session or the build
-            // leaves it to the owned send below.
-            let (mapping_id, lent_suffix) = if wire.is_literal() {
-                (0, Some(keyexpr))
-            } else {
-                (wire.mapping_id, suffix)
-            };
+            // Each link names the key as its own key-wire form says. A publication is written from
+            // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
+            // own shorter writer, unless the session or the build leaves it to the owned send below.
+            let key = key_on_link(actions, named);
             let plain = opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos();
             // A send that may not wait is told apart from one whose link has room: one with none
             // ends the fan-out at this face, and a chain of fragments, which such a send does not
@@ -4566,25 +4564,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "listen")]
             if pass.probe {
                 let probed = if plain {
-                    actions.try_send_plain_put_qos(
-                        mapping_id,
-                        lent_suffix,
-                        payload,
-                        meta.qos,
-                        reliable,
-                        express,
-                        priority,
-                    )
+                    actions
+                        .try_send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
                 } else {
                     actions.try_send_publication_qos(
-                        mapping_id,
-                        lent_suffix,
-                        opts.kind,
-                        payload,
-                        meta,
-                        reliable,
-                        express,
-                        priority,
+                        key, opts.kind, payload, meta, reliable, express, priority,
                     )
                 };
                 match probed {
@@ -4601,25 +4585,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 }
             }
             let lent = if plain {
-                actions.send_plain_put_qos(
-                    mapping_id,
-                    lent_suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    priority,
-                )
+                actions.send_plain_put_qos(key, payload, meta.qos, reliable, express, priority)
             } else {
                 actions.send_publication_qos(
-                    mapping_id,
-                    lent_suffix,
-                    opts.kind,
-                    payload,
-                    meta,
-                    reliable,
-                    express,
-                    priority,
+                    key, opts.kind, payload, meta, reliable, express, priority,
                 )
             };
             let sent = if let Some(lent) = lent {
@@ -4628,12 +4597,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 // No send of this build declines one, so the owned builders are not linked.
                 Err(FanoutError::ExceedsCapacity)
             } else {
-                let push = match (opts.kind, wire.mapping_id) {
+                let suffix = key.wire().suffix();
+                let push = match (opts.kind, key.wire().id()) {
                     (SampleKind::Put, 0) => {
-                        push_build::build_push_literal_with_meta(keyexpr, payload, meta)
+                        push_build::build_push_literal_with_meta(key.text(), payload, meta)
                     }
                     (SampleKind::Del, 0) => {
-                        push_build::build_push_del_literal_with_meta(keyexpr, meta)
+                        push_build::build_push_del_literal_with_meta(key.text(), meta)
                     }
                     (SampleKind::Put, mapping_id) => {
                         push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, meta)
@@ -6156,13 +6126,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if core.ups().any(|actions| actions.rewrites_originated_keys()) {
             return FilteredPut::NotPlain;
         }
-        let suffix = (mapping_id == 0).then_some(keyexpr);
+        // The key as the session's tables name it, and each link as its key-wire form says.
+        let Some(named) = core.tables.borrow().named_by(keyexpr, mapping_id) else {
+            return FilteredPut::NotPlain;
+        };
         let mut outcome = Ok(0);
         for actions in core.ups() {
             let sent = leg(actions
                 .send_plain_put_qos(
-                    mapping_id,
-                    suffix,
+                    key_on_link(actions, named),
                     payload,
                     params.qos,
                     params.reliable,

@@ -3624,6 +3624,34 @@ mod tests {
             .expect("literal-mode safe keyexpr");
     }
 
+    /// The link names a key by the declaration it holds while the declaration begins the key: the
+    /// declaration's id and the rest of the key, or the id alone for the whole of it. A key the
+    /// declaration does not begin, an id the link never declared and the id 0 are named whole; an
+    /// empty key is no key.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn a_link_names_a_key_by_the_declaration_it_holds() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions.send_declare_keyexpr(7, "home/").expect("declared");
+        let named = actions.named_by("home/temp", 7).expect("a key");
+        assert_eq!(named.text(), "home/temp");
+        assert_eq!(
+            (named.wire().id(), named.wire().suffix()),
+            (7, Some("temp"))
+        );
+        let whole = actions.named_by("home/", 7).expect("a key");
+        assert_eq!((whole.wire().id(), whole.wire().suffix()), (7, None));
+        for (key, id) in [("away/temp", 7), ("home/temp", 99), ("home/temp", 0)] {
+            let named = actions.named_by(key, id).expect("a key");
+            assert_eq!(
+                (named.text(), named.wire().id(), named.wire().suffix()),
+                (key, 0, Some(key)),
+                "{key} by {id}"
+            );
+        }
+        assert_eq!(actions.named_by("", 7), None);
+    }
+
     #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_queryable_inherits_gate() {
@@ -5414,8 +5442,7 @@ mod batch_tx_tests {
 
         actions
             .send_plain_put_qos(
-                0,
-                Some("home/ex"),
+                wz_session_core::named_key::NamedKey::literal("home/ex").expect("a key"),
                 b"EXEXEXEX",
                 None,
                 true,

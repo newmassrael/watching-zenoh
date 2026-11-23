@@ -345,8 +345,7 @@ fn a_single_frame_its_encoder_refuses_is_refused_and_spends_no_sn() {
     let actions = new_session_actions(link.clone(), params_with_sn_7(None), TokioTime::new());
     let long_key = "k".repeat(usize::from(u16::MAX) + 1);
     let refused = actions.send_plain_put_qos(
-        0,
-        Some(&long_key),
+        wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
         b"v",
         None,
         true,
@@ -1027,8 +1026,7 @@ fn a_message_its_encoder_refuses_mid_window_is_refused_and_spends_no_sn() {
     actions.batch_start().expect("batch_start");
     let long_key = "k".repeat(usize::from(u16::MAX) + 1);
     let refused = actions.send_plain_put_qos(
-        0,
-        Some(&long_key),
+        wz_session_core::named_key::NamedKey::literal(&long_key).expect("a key"),
         b"v",
         None,
         true,

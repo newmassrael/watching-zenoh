@@ -5866,7 +5866,7 @@ impl SharedSession {
                 if session.peer_wants_no_put_on(keyexpr) {
                     continue;
                 }
-                match session.publish_plain_declared(mapping_id, payload, params) {
+                match session.publish_plain_declared(keyexpr, mapping_id, payload, params) {
                     Ok(()) => {}
                     // Per-face and transient, as in the general fan-out: the surviving faces
                     // still receive the sample.

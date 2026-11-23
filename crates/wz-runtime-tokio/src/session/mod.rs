@@ -1996,16 +1996,17 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 && meta.is_plain_apart_from_qos()
                 && !self.egress_policy_active()
             {
-                match Tp::send_plain_put_qos(
-                    &self.transport,
-                    wire.mapping_id,
-                    wire.suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    priority,
-                ) {
+                match Tp::named_by(&self.transport, keyexpr, wire.mapping_id).and_then(|key| {
+                    Tp::send_plain_put_qos(
+                        &self.transport,
+                        key,
+                        payload,
+                        meta.qos,
+                        reliable,
+                        express,
+                        priority,
+                    )
+                }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -5186,15 +5187,21 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 && !self.egress_policy_active()
             {
                 // This body is the unicast session's, so the bundle is the send seam.
-                match self.actions().send_plain_put_qos(
-                    mapping_id,
-                    inline_suffix,
-                    payload,
-                    meta.qos,
-                    reliable,
-                    express,
-                    opts.priority_band(),
-                ) {
+                // The bundle names the key from its record of the session's declarations: the
+                // declared literal and the suffix the caller names, or the whole key.
+                let actions = self.actions();
+                match actions
+                    .named_by(loopback_keyexpr, mapping_id)
+                    .and_then(|key| {
+                        actions.send_plain_put_qos(
+                            key,
+                            payload,
+                            meta.qos,
+                            reliable,
+                            express,
+                            opts.priority_band(),
+                        )
+                    }) {
                     Some(sent) => {
                         sent?;
                         true
@@ -5717,6 +5724,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// refusal and not a send.
     pub fn publish_plain_declared(
         &self,
+        keyexpr: &str,
         mapping_id: wz_session_core::wire_id::ExprId,
         payload: &[u8],
         params: &PlainPutParams,
@@ -5731,22 +5739,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         }
         #[cfg(feature = "codec-push")]
         {
-            match self.actions().send_plain_put_qos(
-                mapping_id,
-                None,
-                payload,
-                params.qos,
-                params.reliable,
-                params.express,
-                params.priority,
-            ) {
+            // `keyexpr` is the whole key the declaration names; the bundle names it by that
+            // declaration from its own record.
+            let actions = self.actions();
+            match actions.named_by(keyexpr, mapping_id).and_then(|key| {
+                actions.send_plain_put_qos(
+                    key,
+                    payload,
+                    params.qos,
+                    params.reliable,
+                    params.express,
+                    params.priority,
+                )
+            }) {
                 Some(sent) => Ok(sent?),
                 None => Err(PublishError::ExceedsCapacity),
             }
         }
         #[cfg(not(feature = "codec-push"))]
         {
-            let _ = (mapping_id, payload, params);
+            let _ = (keyexpr, mapping_id, payload, params);
             Err(PublishError::ExceedsCapacity)
         }
     }

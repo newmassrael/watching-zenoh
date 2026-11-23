@@ -5121,10 +5121,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the message addresses, asked only for a payload class of a session that holds a filter,
     /// and never while the metrics are held, since resolving an alias takes the mapping table.
     #[cfg(feature = "transport-stats")]
-    pub(crate) fn stats_keys_of(
+    pub(crate) fn stats_keys_of<K: AsRef<str>>(
         &self,
         class: crate::stats::NetworkStatsClass,
-        keyexpr: impl FnOnce() -> Option<alloc::string::String>,
+        keyexpr: impl FnOnce() -> Option<K>,
     ) -> crate::stats::NetworkStatsClass {
         if class.payload.is_none()
             || R::with_mutex_mut(&self.metrics, |metrics| metrics.key_filters().is_empty())
@@ -5135,7 +5135,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return class;
         };
         let keys = R::with_mutex_mut(&self.metrics, |metrics| {
-            metrics.key_filters().matching(&keyexpr)
+            metrics.key_filters().matching(keyexpr.as_ref())
         });
         class.with_keys(keys)
     }
@@ -14342,9 +14342,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// A plain `Put` (no timestamp, encoding, source info or attachment), with the QoS the
-    /// publisher set, encoded from the caller's own text and bytes, on the key
-    /// `(mapping_id, suffix)`: `(0, Some(key))` is the literal key and any other id is a key
-    /// this session declared. The wire of
+    /// publisher set, encoded from the caller's own text and bytes, on `key`: named on the wire
+    /// as the caller's table names it, its whole text what the counters and filters read. The wire of
     /// [`crate::push_build::build_push_literal_with_meta`] with none of what that builder
     /// makes to be encoded once and dropped (an owned keyexpr, an owned payload, the
     /// extension chain, and the `Box` the network message travels in), which was the larger
@@ -14368,8 +14367,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_plain_put_at(
         &self,
         stage: DispatchStage,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14386,19 +14384,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = qos;
             crate::sample::QosLevel::DEFAULT
         };
+        let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
         #[cfg(feature = "transport-stats")]
-        let class = {
-            let resolve = |id| self.resolve_outbound_mapping(id);
-            let class = crate::network_message::plain_put_stats_class(
-                mapping_id,
-                suffix,
-                value.len(),
-                resolve,
-            );
-            self.stats_keys_of(class, || {
-                crate::network_message::stats_keyexpr_of_key(mapping_id, suffix, &resolve)
-            })
-        };
+        let class = self.stats_keys_of(
+            crate::network_message::named_put_stats_class(key.text(), value.len()),
+            || Some(key.text()),
+        );
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         // The Put's own size, worked out from its parts: a Push has no size constant (its
@@ -14436,8 +14427,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn send_plain_put_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14446,8 +14436,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<(), SendWireError>> {
         self.send_plain_put_at(
             DispatchStage::Fresh,
-            mapping_id,
-            suffix,
+            key,
             value,
             qos,
             reliable,
@@ -14465,8 +14454,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn try_send_plain_put_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         reliable: bool,
@@ -14475,8 +14463,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Probed, SendWireError>> {
         let probed = self.send_plain_put_at(
             DispatchStage::Probe,
-            mapping_id,
-            suffix,
+            key,
             value,
             qos,
             reliable,
@@ -14488,8 +14475,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_plain_put_at(
                 DispatchStage::Fresh,
-                mapping_id,
-                suffix,
+                key,
                 value,
                 qos,
                 reliable,
@@ -14521,8 +14507,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_publication_at(
         &self,
         stage: DispatchStage,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14532,9 +14517,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Dispatched, SendWireError>> {
         #[cfg(feature = "transport-stats")]
         {
-            let _ = (
-                stage, mapping_id, suffix, kind, value, meta, reliable, express, priority,
-            );
+            let _ = (stage, key, kind, value, meta, reliable, express, priority);
             None
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -14546,6 +14529,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if meta.ts_stack.is_some() {
                 return None;
             }
+            let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
             #[cfg(feature = "pubsub-qos")]
             let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
             #[cfg(not(feature = "pubsub-qos"))]
@@ -14591,8 +14575,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn send_publication_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14602,8 +14585,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<(), SendWireError>> {
         self.send_publication_at(
             DispatchStage::Fresh,
-            mapping_id,
-            suffix,
+            key,
             kind,
             value,
             meta,
@@ -14624,8 +14606,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[allow(clippy::too_many_arguments)]
     pub fn try_send_publication_qos(
         &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         kind: crate::sample::SampleKind,
         value: &[u8],
         meta: &crate::metadata::PushMetadata,
@@ -14635,8 +14616,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Result<Probed, SendWireError>> {
         let probed = self.send_publication_at(
             DispatchStage::Probe,
-            mapping_id,
-            suffix,
+            key,
             kind,
             value,
             meta,
@@ -14648,8 +14628,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_publication_at(
                 DispatchStage::Fresh,
-                mapping_id,
-                suffix,
+                key,
                 kind,
                 value,
                 meta,
@@ -14691,13 +14670,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-stats")]
             let class = self.stats_keys_of(
-                crate::network_message::plain_put_stats_class(
-                    0,
-                    Some(keyexpr_suffix),
-                    value.len(),
-                    |_| None,
-                ),
-                || Some(alloc::string::String::from(keyexpr_suffix)),
+                crate::network_message::named_put_stats_class(keyexpr_suffix, value.len()),
+                || Some(keyexpr_suffix),
             );
             #[cfg(not(feature = "transport-stats"))]
             let class = crate::stats::NetworkStatsClass::unread();
@@ -15762,6 +15736,56 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             keys.space().resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
+    }
+
+    /// `key`, which the caller names by the declaration this link's session calls `mapping_id`
+    /// (`0` for none), as this link sends it: named by that declaration while the link knows it
+    /// (its own record of the session's declarations, or the dictionary of shared key ids) and
+    /// it begins the key, and whole otherwise. The declaration's literal is read under the
+    /// link's lock into a buffer on the stack, so naming a key makes no string. `None` for an
+    /// empty key.
+    #[cfg(feature = "alloc")]
+    pub fn named_by<'k>(
+        &self,
+        key: &'k str,
+        mapping_id: crate::wire_id::ExprId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        let declared = crate::wire_key::MappedId::new(mapping_id).and_then(|id| {
+            let mut literal = crate::wireexpr_resolve::KeyexprBuf::new();
+            match self.append_own_mapping(mapping_id, &mut literal) {
+                Some(Ok(())) => crate::named_key::NamedKey::under(
+                    key,
+                    crate::named_key::Prefix::of(id, literal.as_str()),
+                ),
+                _ => self.named_by_shared_key(key, id),
+            }
+        });
+        declared.or_else(|| crate::named_key::NamedKey::literal(key))
+    }
+
+    /// `key` named by the shared key id `id` while the dictionary holds it and its entry begins
+    /// the key (`shared-key-ids`).
+    #[cfg(all(feature = "alloc", feature = "shared-key-ids"))]
+    fn named_by_shared_key<'k>(
+        &self,
+        key: &'k str,
+        id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        R::with_mutex_mut(&self.link_keys, |keys| {
+            let entry = keys.ids()?.key_of(id.get())?;
+            crate::named_key::NamedKey::under(key, crate::named_key::Prefix::of(id, entry))
+        })
+    }
+
+    /// A build without the shared key ids has no dictionary to name a key by.
+    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
+    #[inline(always)]
+    fn named_by_shared_key<'k>(
+        &self,
+        _key: &'k str,
+        _id: crate::wire_key::MappedId,
+    ) -> Option<crate::named_key::NamedKey<'k>> {
+        None
     }
 
     /// Run `f` on the key `(mapping_id, suffix)` names as this link resolves it: its whole text,

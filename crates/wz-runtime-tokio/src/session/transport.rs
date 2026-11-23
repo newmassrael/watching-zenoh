@@ -170,20 +170,30 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// (`SessionLinkActions::send_plain_put_qos`). The network counters count the plain Put as
     /// its owned message.
     #[cfg(feature = "codec-push")]
-    #[allow(clippy::too_many_arguments)]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: wz_session_core::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: wz_session_core::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,
         reliable: bool,
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Option<Result<(), SendWireError>> {
-        let _ = (
-            payload, mapping_id, suffix, value, qos, reliable, express, priority,
-        );
+        let _ = (payload, key, value, qos, reliable, express, priority);
+        None
+    }
+
+    /// `keyexpr`, which the caller names by the declaration `mapping_id` (`0` for none), as this
+    /// transport sends a plain Put on it ([`Self::send_plain_put_qos`]): named by the declaration
+    /// while the transport's table holds it. `None` for a transport with no plain Put, whose
+    /// caller takes the owned publish.
+    #[cfg(feature = "codec-push")]
+    fn named_by<'k>(
+        payload: &Self::Payload,
+        keyexpr: &'k str,
+        mapping_id: wz_session_core::wire_id::ExprId,
+    ) -> Option<wz_session_core::named_key::NamedKey<'k>> {
+        let _ = (payload, keyexpr, mapping_id);
         None
     }
 
@@ -502,15 +512,24 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(feature = "codec-push")]
     fn send_plain_put_qos(
         payload: &Self::Payload,
-        mapping_id: wz_session_core::wire_id::ExprId,
-        suffix: Option<&str>,
+        key: wz_session_core::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<wz_session_core::sample::QosLevel>,
         reliable: bool,
         express: bool,
         priority: wz_session_core::qos::Priority,
     ) -> Option<Result<(), SendWireError>> {
-        payload.send_plain_put_qos(mapping_id, suffix, value, qos, reliable, express, priority)
+        payload.send_plain_put_qos(key, value, qos, reliable, express, priority)
+    }
+
+    // The unicast bundle names the key from its own record of the session's declarations.
+    #[cfg(feature = "codec-push")]
+    fn named_by<'k>(
+        payload: &Self::Payload,
+        keyexpr: &'k str,
+        mapping_id: wz_session_core::wire_id::ExprId,
+    ) -> Option<wz_session_core::named_key::NamedKey<'k>> {
+        payload.named_by(keyexpr, mapping_id)
     }
 }
 
