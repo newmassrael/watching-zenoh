@@ -186,9 +186,9 @@ impl LimitSpec for DeliveryLaneCallbacks {
     const LIMIT: &'static str = "DELIVERY_LANE_CALLBACKS";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
     const READ_FROM_SNAPSHOT: bool = true;
-    const CAPACITY: Option<usize> = None;
+    const CAPACITY: Option<usize> = Some(caps::DELIVERY_LANE_CALLBACKS);
     const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
-    const DEFAULT: Quota = Quota::from_build(caps::DELIVERY_LANE_CALLBACKS, false);
+    const DEFAULT: Quota = Quota::at_most(caps::DELIVERY_LANE_CALLBACKS);
 }
 
 const _: LimitDomain = DeliveryLaneCallbacks::DOMAIN;

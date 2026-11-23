@@ -108,6 +108,7 @@ config WZ_LIMIT_DELIVERY_LANE_BYTES
 
 config WZ_LIMIT_DELIVERY_LANE_CALLBACKS
 	int "DELIVERY_LANE_CALLBACKS"
+	default 64 if WZ_LIMITS_ZENOH_PICO
 	default 256
 	help
 	  How many callback invocations a delivery lane owes at once. A host that admits
