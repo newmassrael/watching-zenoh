@@ -407,7 +407,7 @@ impl Link {
             .iter()
             .map(|received| received.bytes.len())
             .sum::<usize>()
-            - self.rx_front_taken
+            .saturating_sub(self.rx_front_taken)
     }
 
     /// After a read: a link that refused the program for being full and is now read down to half
@@ -520,7 +520,7 @@ impl AppLinkTable {
 
     fn take_handle(&mut self) -> LinkHandle {
         let handle = self.next;
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         handle
     }
 
@@ -592,7 +592,7 @@ impl AppLinkTable {
                 effects
             }
             ProgramEvent::Writable => {
-                link.writables += 1;
+                link.writables = link.writables.saturating_add(1);
                 link.drive(handle, AppLinkEvent::LinkWritable)
             }
         })
@@ -667,7 +667,7 @@ impl AppLinkTable {
         }
         // Past the bound nothing is taken, and the program learns when to hand it in again. An
         // empty queue takes anything, so a datagram larger than the bound is not refused forever.
-        if !link.rx.is_empty() && !link.admits(link.queued() + bytes.len()) {
+        if !link.rx.is_empty() && !link.admits(link.queued().saturating_add(bytes.len())) {
             link.refused_full = true;
             return Err(InboundRefusal::Full);
         }
@@ -693,16 +693,21 @@ impl AppLinkTable {
         let Some(link) = self.links.get_mut(&handle) else {
             return StreamRead::End;
         };
-        let mut copied = 0;
-        while copied < buf.len() {
-            let Some(front) = link.rx.front() else {
+        let mut copied = 0usize;
+        while let Some(front) = link.rx.front() {
+            // What the front run has left, and what `buf` has left: each is a tail of its own.
+            let available = front.bytes.get(link.rx_front_taken..).unwrap_or_default();
+            let room = buf.get_mut(copied..).unwrap_or_default();
+            if room.is_empty() {
+                break;
+            }
+            let n = available.len().min(room.len());
+            let (Some(into), Some(from)) = (room.get_mut(..n), available.get(..n)) else {
                 break;
             };
-            let available = &front.bytes[link.rx_front_taken..];
-            let n = available.len().min(buf.len() - copied);
-            buf[copied..copied + n].copy_from_slice(&available[..n]);
-            copied += n;
-            link.rx_front_taken += n;
+            into.copy_from_slice(from);
+            copied = copied.saturating_add(n);
+            link.rx_front_taken = link.rx_front_taken.saturating_add(n);
             if link.rx_front_taken == front.bytes.len() {
                 link.rx.pop_front();
                 link.rx_front_taken = 0;
@@ -887,7 +892,7 @@ impl AppLinkTable {
         if link.is_gone() {
             return Err(InboundRefusal::Closed);
         }
-        if !link.admits(link.remainder.len() + bytes.len()) {
+        if !link.admits(link.remainder.len().saturating_add(bytes.len())) {
             return Err(InboundRefusal::Full);
         }
         link.remainder.extend_from_slice(bytes);

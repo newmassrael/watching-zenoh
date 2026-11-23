@@ -2628,8 +2628,6 @@ pub mod app_link {
 // and its waiters. Gated as the machine is. Documented in its own `//!`; see the note at
 // `event_ring`.
 #[cfg(feature = "app-link")]
-// Totality debt TD-056 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod app_link_table;
 
 // A transport the program supplies as every engine reads it: the program's calls, the table
