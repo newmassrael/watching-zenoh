@@ -19,7 +19,11 @@
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::boxed::Box;
-#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    any(test, feature = "udp-listen")
+))]
 use alloc::rc::Rc;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use core::net::{IpAddr, SocketAddr};
