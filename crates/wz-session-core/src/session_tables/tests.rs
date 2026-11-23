@@ -1072,7 +1072,7 @@ fn a_query_reaches_the_table_sets_queryables_by_the_registrys_rule() {
     // The table set is the session's subscribers too, whose trait names the same verbs.
     let mut tables = Tables::new();
     for (key, origin, complete, callback) in [
-        ("q/**", Locality::Any, false, 1),
+        ("q/a", Locality::Any, false, 1),
         ("q/a", Locality::Remote, true, 2),
         ("q/a", Locality::SessionLocal, true, 3),
         ("other", Locality::Any, true, 4),

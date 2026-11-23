@@ -1861,6 +1861,7 @@ mod tests {
     /// must be replayed it. Before this round the replay compared the slot
     /// pattern against the stored token keyexpr as a LITERAL, so the concrete
     /// subscriber was owed nothing.
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn a_history_subscriber_is_replayed_a_wildcard_token_it_intersects() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1923,6 +1924,7 @@ mod tests {
     /// the shared `fan_to_matching_slots` would satisfy every count below
     /// except that one — subscriber A would be told a second time about
     /// tokens it was told about live.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_second_history_subscriber_is_replayed_the_tokens_already_known() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -1980,6 +1982,7 @@ mod tests {
     /// rather than the fan, because the claim is about a value DERIVED from the
     /// envelope: a test that passed `historical` by hand would pass with the
     /// derivation deleted.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_historical_token_is_withheld_from_a_future_only_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2090,6 +2093,7 @@ mod tests {
     /// — so a historical Delete is withheld from a future-only subscriber for
     /// the same reason its Put was: that subscriber was never told the token
     /// existed, and a Delete for a token it never saw is a phantom retraction.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_historical_undeclaration_is_withheld_from_a_future_only_subscriber() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2348,6 +2352,7 @@ mod tests {
     /// FIRST one — an implementation that suppressed the callback but still
     /// overwrote the table would satisfy a count-only assertion and then name
     /// the wrong keyexpr as dead. `Entry::Vacant` suppresses both.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_repeated_decl_token_for_a_known_id_fires_no_second_put() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2397,6 +2402,7 @@ mod tests {
     /// The ANTI-VACUITY twin of the gate above: a DISTINCT id declared after the
     /// first still fires. Without it, "no second Put" would be satisfied by a
     /// registry that had stopped firing Puts altogether.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_second_distinct_token_id_still_fires_its_own_put() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2420,6 +2426,7 @@ mod tests {
     /// every token declared by its keyexpr: the next peer's token on the same keyexpr is told as a
     /// first, not dropped as a repeat.
     #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_forgotten_peer_holds_no_token_declared_by_its_keyexpr() {
         let mut reg = LivelinessSubscriberRegistry::new();
@@ -2523,6 +2530,7 @@ mod tests {
     /// The message is built by the PRODUCTION builder
     /// [`build_undeclare_token_with_keyexpr`](crate::declare_build::build_undeclare_token_with_keyexpr),
     /// not a hand-rolled fixture, so what the reader accepts is what wz emits.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn an_undecl_token_for_an_unknown_id_falls_back_to_its_ext_keyexpr() {
         use crate::declare_build::build_undeclare_token_with_keyexpr;
@@ -2591,6 +2599,7 @@ mod tests {
     /// successful `remote_tokens.remove` (`api/session.rs:2665-2679`), so a
     /// retraction whose ext disagrees with the observed declaration retracts what
     /// was actually declared.
+    #[cfg(feature = "keyexpr-wildcard-double")]
     #[test]
     fn a_known_id_retracts_by_its_remembered_keyexpr_not_the_ext() {
         use crate::declare_build::build_undeclare_token_with_keyexpr;
@@ -2742,6 +2751,7 @@ mod tests {
         assert_eq!(reg.peer_token_count(), 0);
     }
 
+    #[cfg(feature = "keyexpr-wildcard-single")]
     #[test]
     fn aliased_keyexpr_resolves_through_peer_table() {
         let mut reg = LivelinessSubscriberRegistry::new();
