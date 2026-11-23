@@ -1239,8 +1239,8 @@ impl<
     ///
     /// `make_router` writes the Router in the place it is handed and lends it back, which safe
     /// code does only by writing it there ([`MaybeUninit::write`]); one that lends back anything
-    /// else is refused with a panic, before the pump is used. `place` is overwritten without
-    /// dropping what it held.
+    /// else has written no Router, and the pump is not built: `None`, with what it was to be made
+    /// of dropped. `place` is overwritten without dropping what it held.
     #[cfg(feature = "reassembly")]
     pub fn with_router_in(
         place: &mut MaybeUninit<Self>,
@@ -1250,10 +1250,18 @@ impl<
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
-    ) -> &mut Self {
-        Self::build_in(place, runtime, link, actions, clock, config, make_router);
-        // SAFETY: `build_in` wrote every field of the pump into `place`.
-        unsafe { place.assume_init_mut() }
+    ) -> Option<&mut Self> {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is `place`, valid for writes of a `Self`, and the receive's field is lent as
+        // the uninitialised place `MaybeUninit<UnicastRx<R>>` lays out as a `UnicastRx<R>`.
+        let rx =
+            unsafe { &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>() };
+        UnicastRx::init_in(rx, make_router)?;
+        // SAFETY: the receive is written, and the rest of the pump is written by `build_in`.
+        unsafe {
+            Self::build_in(place, runtime, link, actions, clock, config, |_| {});
+            Some(place.assume_init_mut())
+        }
     }
 
     /// What `Self::new` and [`Self::with_reassembly_arena`] share: the pump as a value, made by
@@ -1268,11 +1276,15 @@ impl<
         reasm: R,
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
-        Self::build_in(&mut place, runtime, link, actions, clock, config, |slot| {
-            slot.write(reasm)
-        });
-        // SAFETY: `build_in` wrote every field of the pump into `place`.
-        unsafe { place.assume_init() }
+        // SAFETY: the receive is written in the place it is handed: `MaybeUninit::write` lends back
+        // the place it wrote, so `init_in` takes it as written. Then `build_in` has written every
+        // field of the pump into `place`.
+        unsafe {
+            Self::build_in(&mut place, runtime, link, actions, clock, config, |rx| {
+                let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+            });
+            place.assume_init()
+        }
     }
 
     /// Build the pump IN `place`: the engine is made in its field and initialised there, and
@@ -1284,21 +1296,21 @@ impl<
     /// sequence number) is on the stack for as long as it runs. Inlined into the caller of a
     /// slot, that caller's frame would be under all of it.
     ///
-    /// A panic in the middle leaves `place` partly written, and it is not dropped: a leak, and
-    /// on the profiles that build this (`panic = "abort"` on a board) not even that.
+    /// The receive is written first, by `write_rx` in its field (one already written, which
+    /// [`Self::with_router_in`] checked, is left as it is), so a receive whose Router could not be
+    /// made is refused before any other part is taken.
     ///
-    /// The receive's Router is written in its field by `make_router`, which lends it back from
-    /// there: a maker that lends back anything but the place it was handed has not written it, and
-    /// is refused with a panic (`UnicastRx::init_in`).
+    /// # Safety
+    /// `write_rx` leaves the receive written in the place it is handed, or finds it written.
     #[inline(never)]
-    fn build_in(
+    unsafe fn build_in(
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D>,
         link: L,
         actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-        make_router: impl FnOnce(&mut MaybeUninit<R>) -> &mut R,
+        write_rx: impl FnOnce(&mut MaybeUninit<UnicastRx<R>>),
     ) {
         let SessionDriveConfig {
             timeouts,
@@ -1310,6 +1322,7 @@ impl<
         // exactly once below through its own address, and the engine is used only after its
         // field is written.
         unsafe {
+            write_rx(&mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>());
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
@@ -1335,9 +1348,6 @@ impl<
             core::ptr::addr_of_mut!((*at).actions).write(actions);
             core::ptr::addr_of_mut!((*at).clock).write(clock);
             core::ptr::addr_of_mut!((*at).timers).write(TransportTimers::new(timeouts));
-            let rx = &mut *core::ptr::addr_of_mut!((*at).rx).cast::<MaybeUninit<UnicastRx<R>>>();
-            let built = UnicastRx::init_in(rx, make_router).is_some();
-            assert!(built, "the Router is written in the field it was handed");
             #[cfg(feature = "session-slot")]
             core::ptr::addr_of_mut!((*at).pending_role).write(Some(role));
             core::ptr::addr_of_mut!((*at).iter).write(0);
@@ -1771,14 +1781,18 @@ impl<T> InPlace<T> {
         }
     }
 
-    /// Have `make` write the value in this place and lend it back, and lend it on. A maker that
+    /// Have `make` write the value in this place and lend it back, and lend it on; a maker that
+    /// builds nothing answers `None`, and so does this. A maker that
     /// lends back anything but the place it was handed has not written it there, and is refused:
     /// `None`, and the place holds nothing still. Built once: the place is the value's for as long
     /// as the holder lives.
-    fn build(&mut self, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> Option<&mut T> {
+    fn build(
+        &mut self,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> Option<&mut T>,
+    ) -> Option<&mut T> {
         debug_assert!(!self.built, "a place is built once");
         let place: *const T = self.value.as_ptr();
-        let made: *const T = make(&mut self.value);
+        let made: *const T = make(&mut self.value)?;
         if !core::ptr::eq(made, place) {
             return None;
         }
@@ -2139,10 +2153,15 @@ impl<
                 actions,
                 clock,
                 config,
+                // `MaybeUninit::write` lends back the place it wrote, so the receive is written.
                 #[cfg(feature = "reassembly")]
-                |slot| slot.write(reasm),
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(reasm));
+                },
                 #[cfg(not(feature = "reassembly"))]
-                |slot| slot.write(()),
+                |rx| {
+                    let _ = UnicastRx::init_in(rx, |slot| slot.write(()));
+                },
             );
         }
         Ok(PumpRef { cell })
@@ -2867,7 +2886,7 @@ mod in_place_tests {
         {
             let mut place = InPlace::empty();
             let value = place
-                .build(|slot| slot.write(Counted(&drops)))
+                .build(|slot| Some(slot.write(Counted(&drops))))
                 .expect("written in its place");
             assert_eq!(value.0.get(), 0, "built and lent, not dropped");
             assert!(place.get_mut().is_some(), "and lent again once built");
@@ -2881,7 +2900,7 @@ mod in_place_tests {
     fn a_maker_that_lends_back_another_value_is_refused() {
         let elsewhere: &'static mut u32 = Box::leak(Box::new(7));
         let mut place = InPlace::<u32>::empty();
-        assert!(place.build(|_slot| elsewhere).is_none());
+        assert!(place.build(|_slot| Some(elsewhere)).is_none());
         assert!(place.get_mut().is_none(), "nothing was built");
     }
 }
