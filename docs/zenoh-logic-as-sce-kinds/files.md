@@ -172,11 +172,13 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/host_group.rs` | S7 | |
 | `crates/wz-capi-coop/src/lane.rs` | S7 | |
 | `crates/wz-capi-coop/src/lib.rs` | S7 | |
+| `crates/wz-capi-coop/src/open_source.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout.rs` | S7 | |
 | `crates/wz-capi-coop/src/scout/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/scout_datagram.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/advanced.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/app_listen.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/arena.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/closure_drops.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
@@ -200,6 +202,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/program_clock.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/queryable.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/redial_heap.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/redial_wait.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/runtime_tables.rs` | excluded: test | Test-only file by its name. |
@@ -207,6 +210,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/timestamps.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/tx_pool.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tls.rs` | S7 | |
 | `crates/wz-capi-core/src/caller_span.rs` | S7 | |
 | `crates/wz-capi-core/src/codec.rs` | S7 | |
@@ -426,10 +430,12 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/atomic.rs` | S5 | |
 | `crates/wz-runtime-coop/src/cs.rs` | S5 | |
 | `crates/wz-runtime-coop/src/executor.rs` | S5 | |
+| `crates/wz-runtime-coop/src/faces.rs` | S5 | |
 | `crates/wz-runtime-coop/src/group_transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/ip_stack.rs` | S5 | |
 | `crates/wz-runtime-coop/src/join_handle.rs` | S5 | |
 | `crates/wz-runtime-coop/src/lib.rs` | S5, S10, S12 | |
+| `crates/wz-runtime-coop/src/link_cells.rs` | S5 | |
 | `crates/wz-runtime-coop/src/link_storage.rs` | S5 | |
 | `crates/wz-runtime-coop/src/local.rs` | S5 | |
 | `crates/wz-runtime-coop/src/reassembly_rx.rs` | S5 | |
