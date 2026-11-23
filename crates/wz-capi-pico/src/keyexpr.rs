@@ -15,7 +15,7 @@ use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
 
-use wz_capi_port::{HeldKey, KeyAsk, KeyNotHeld, WireKey};
+use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::WhatAmI;
 
@@ -109,37 +109,22 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
     }
 }
 
-/// pico `_z_keyexpr_wire_declaration_t` behind its refcount: ONE keyexpr
-/// declaration on ONE session, retracted when the last key holding it lets go.
-///
-/// Shared by every key that names it — the owned keyexpr `z_declare_keyexpr`
-/// returns, its clones, the keys `z_keyexpr_concat` / `z_keyexpr_join` build on
-/// it, and an entity declared on it — exactly as pico shares the
-/// `_z_keyexpr_wire_declaration_rc_t`. Its `Drop` is pico's
-/// `_z_keyexpr_wire_declaration_clear`, which undeclares
-/// (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// pico `_z_keyexpr_wire_declaration_t`: ONE keyexpr declaration on ONE session, held by every
+/// key that names it — the owned keyexpr `z_declare_keyexpr` returns, its clones, the keys
+/// `z_keyexpr_concat` / `z_keyexpr_join` build on it, and an entity declared on it — and retracted
+/// when the last lets go, as pico's refcount does (`vendor/zenoh-pico/src/session/keyexpr.c` @
 /// `void _z_keyexpr_wire_declaration_clear(`).
 ///
-/// The session is held WEAKLY, as pico holds `_z_session_weak_t`: a key that
-/// outlives its session must not keep the session alive, and retracting on a
-/// session that is gone is moot.
+/// Each holder keeps one hold of the engine's own count of the declaration's holders
+/// ([`KeyHold`]): a copy takes one more and a drop lets its own go, so the count has one owner and
+/// a holder keeps nothing on the heap. The session is held WEAKLY, as pico holds
+/// `_z_session_weak_t`: a key that outlives its session does not keep it alive, and a hold on a
+/// session that is gone lets go of nothing.
+#[derive(Clone)]
 pub(crate) struct WireDeclaration {
-    session: Weak<Engine>,
-    id: wz_session_core::wire_id::ExprId,
+    hold: KeyHold,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
-}
-
-impl Drop for WireDeclaration {
-    /// Let go of this declaration's hold on the key. The key itself goes only
-    /// when no other declaration of the same key holds it: pico's resource table
-    /// counts its holders, and a second declaration of a key it already has is
-    /// the same id with one more (the engine's `acquire_keyexpr`).
-    fn drop(&mut self) {
-        if let Some(session) = self.session.upgrade() {
-            session.release_keyexpr(self.id);
-        }
-    }
 }
 
 /// A key's text as an object of this ABI keeps it: a block of its session's key arena when the
@@ -265,7 +250,7 @@ fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
 /// `StringState`).
 pub(crate) struct DeclaredKeyexpr {
     literal: KeyText,
-    declaration: Option<Arc<WireDeclaration>>,
+    declaration: Option<WireDeclaration>,
 }
 
 impl DeclaredKeyexpr {
@@ -285,7 +270,7 @@ impl DeclaredKeyexpr {
     /// Another holder of the declaration that covers a prefix of the key, if any, without the
     /// key's text: what keeps the declaration on the session for something that names the key by
     /// it.
-    pub(crate) fn declaration_hold(&self) -> Option<Arc<WireDeclaration>> {
+    pub(crate) fn declaration_hold(&self) -> Option<WireDeclaration> {
         self.declaration.clone()
     }
 
@@ -335,13 +320,13 @@ impl DeclaredKeyexpr {
         }
     }
 
-    fn declared_on(&self, shared: &Engine) -> Option<&Arc<WireDeclaration>> {
+    fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
         self.declaration
             .as_ref()
             // By ADDRESS: both are fat pointers to one engine, and their vtable halves are
             // not guaranteed to be one copy, so comparing them whole could say a session is
             // not itself.
-            .filter(|d| core::ptr::addr_eq(d.session.as_ptr(), shared as *const Engine))
+            .filter(|d| d.hold.is_on((shared as *const Engine).cast::<()>()))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
@@ -359,10 +344,11 @@ impl DeclaredKeyexpr {
             .declared_on(shared)
             .and_then(|d| Some((d, self.literal().get(d.prefix_len..)?)))
         {
-            Some((d, rest)) => {
-                let anchor: Arc<dyn Send + Sync> = d.clone();
-                WireKey::aliased(d.id, (!rest.is_empty()).then(|| rest.to_owned())).keeping(anchor)
-            }
+            Some((d, rest)) => WireKey::aliased(
+                d.hold.mapping_id(),
+                (!rest.is_empty()).then(|| rest.to_owned()),
+            )
+            .holding(d.hold.clone()),
             None => WireKey::literal(),
         }
     }
@@ -470,13 +456,17 @@ impl DeclaredKeyexpr {
         })?;
         Ok(Self {
             literal: text,
-            declaration: Some(Arc::new(WireDeclaration {
-                session: Arc::downgrade(shared),
-                id,
+            declaration: Some(WireDeclaration {
+                hold: KeyHold::taken(engine_hold_of(shared), id),
                 prefix_len,
-            })),
+            }),
         })
     }
+}
+
+/// The session `shared` as a key's hold names it: weakly, through the engine's door for keys.
+fn engine_hold_of(shared: &Arc<Engine>) -> Weak<dyn wz_capi_port::SessionEngine> {
+    Arc::downgrade(shared)
 }
 
 /// pico `_z_keyexpr_non_wild_prefix_len`, as the prefix itself: the key up to the `/` before
@@ -1058,7 +1048,7 @@ unsafe fn owned_keyexpr_input<'a>(
 ///
 /// R2959 — the clone SHARES the source's declaration. This used to make every
 /// clone a literal, on the argument that a clone carrying the id would publish
-/// on a declaration it held no reference to. The declaration is refcounted now
+/// on a declaration it held no reference to. The declaration is held now
 /// (`WireDeclaration`), so the clone holds exactly such a reference, and a
 /// literal clone is no longer the safe direction but a divergence: upstream's
 /// copy clones the refcount (`vendor/zenoh-pico/src/session/keyexpr.c` @
@@ -2053,6 +2043,33 @@ mod arena_key_tests {
         drop((shared, second));
         assert!(room_for(&engine, 10), "and given back with their holders");
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// A declaration stays as long as any key holds it, each holder one hold of the engine's own
+    /// count: a share and a wire key outlive the key they were made from, and the last holder let
+    /// go retracts it. Turned red by a copy that takes no hold of its own, which lets the
+    /// declaration go with the first holder.
+    #[test]
+    fn a_declaration_lasts_as_long_as_its_last_holder() {
+        let (session, engine) = listening();
+        let declared = |engine: &Arc<Engine>| {
+            engine
+                .keyexpr_declarations()
+                .iter()
+                .any(|(_, key)| key == "demo/hold/a")
+        };
+        let key = DeclaredKeyexpr::declare(&engine, "demo/hold/a", None).expect("declared");
+        assert!(declared(&engine));
+        let shared = key.share();
+        let wire = key.wire(Arc::as_ref(&engine));
+        assert_ne!(wire.mapping_id, 0, "the wire names the declaration");
+        drop(key);
+        assert!(declared(&engine), "the share holds it");
+        drop(shared);
+        assert!(declared(&engine), "the wire key holds it");
+        drop(wire);
+        assert!(!declared(&engine), "the last holder retracts it");
         close(session);
     }
 
