@@ -91,6 +91,9 @@ pub struct StreamReadDriver<R> {
     /// waiting. The quic comment saying wz "already carries the signal" is true
     /// of quic and only of quic.
     expiry: Option<Arc<ExpirySignal>>,
+    /// What this link has taken off the wire, counted for the link's outbound queue
+    /// ([`Self::hearing`]); `None` on a link whose queue does not ask.
+    hearing: Option<crate::writer_queue::LinkHearing>,
     /// R2750 — WHICH READ BODY this link uses, decided once, lazily.
     ///
     /// Upstream dispatches at rx-task start
@@ -361,6 +364,7 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
             read_state: ReadState::Idle,
             lowlatency,
             expiry: None,
+            hearing: None,
             arena,
             #[cfg(all(
                 feature = "runtime-tokio-uring",
@@ -384,6 +388,13 @@ impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
     #[cfg(not(feature = "runtime-zero-copy"))]
     pub fn pooled_rx_buffers(&self) -> usize {
         self.arena.free_buffers()
+    }
+
+    /// This link, counting each frame it reads in `hearing`, which its outbound queue reads
+    /// ([`crate::writer_queue::OutboundTx::set_hearing`]).
+    pub(crate) fn hearing(mut self, hearing: crate::writer_queue::LinkHearing) -> Self {
+        self.hearing = Some(hearing);
+        self
     }
 
     /// What settles this link's RX pool with the batch its handshake negotiates: handed to
@@ -580,6 +591,17 @@ impl<R: AsyncRead + Unpin + RingReadable> LinkDriver for StreamReadDriver<R> {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
+        let event = self.read_event().await;
+        if let (LinkEvent::Rx(_), Some(hearing)) = (&event, &self.hearing) {
+            hearing.heard();
+        }
+        event
+    }
+}
+
+impl<R: AsyncRead + Unpin + RingReadable> StreamReadDriver<R> {
+    /// The next event of the link's read half: a frame, or the link's end.
+    async fn read_event(&mut self) -> LinkEvent {
         // R2750 — the dispatch, at the moment upstream dispatches: the first
         // time this link asks to read. See `RingChoice` and the `ring` field.
         #[cfg(all(
