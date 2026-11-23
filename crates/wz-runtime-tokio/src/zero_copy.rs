@@ -19,7 +19,10 @@
 //! The default arena ([`wz_session_core::chain_staging::HeapStaging`]) grows a
 //! `Vec` per chain on demand: zero idle cost, and a chain's cost is what it
 //! actually staged. This one reserves `SLOT_COUNT * SLOT_SIZE` bytes once, at
-//! construction, and never allocates again.
+//! construction, and allocates again only for a message longer than a slot,
+//! which moves to a heap buffer as it outgrows its slot (`Stage::Spilled`):
+//! the slot size is how long a message may be and still cost no allocation,
+//! and the session's `transport/link/rx/max_message_size` is how long it may be.
 //!
 //! For a general deploy that is strictly worse. For the deploy `preset-ap-full`
 //! names it is the point: an AUTOSAR-adjacent node wants its reassembly arena
@@ -90,30 +93,43 @@ struct PoolHome {
     slots: Mutex<Box<ReassemblyPoolAp>>,
 }
 
-/// One chain's reservation: a pool slot plus how much of it is written.
+/// One chain's reservation: a pool slot plus how much of it is written, or,
+/// once the chain outgrew its slot, the heap buffer it moved to.
 ///
 /// The `Slot<CpuMut>` handle is the reservation — the generated type is
 /// `#[must_use]` and its transitions consume `self`, so a chain cannot hand its
 /// slot to the link's TX path and keep staging into it. Rust rejects that at
 /// compile time here, where the pre-seam `BoundedVec` had nothing to reject.
-///
-/// `data` is the slot's first byte, taken from the generated `write` accessor
-/// when the slot was acquired, so staging into the chain needs no lock: the
-/// handle is this chain's alone, and nothing else reads or writes the slot
-/// until it is released or lent.
 pub struct PooledChain {
-    slot: Slot<CpuMut>,
-    data: *mut u8,
+    stage: Stage,
+    /// Bytes staged so far — the offset the next append lands at.
     len: usize,
     /// Bytes lent out by the most recent [`ChainStaging::buf`] and not yet
     /// resolved by [`ChainStaging::commit`].
     ///
-    /// This backing never grows to lend -- the slot is already full width --
-    /// so the reservation is bookkeeping rather than storage. It is here so
-    /// `commit` can refuse a caller that reports more than it was lent, which
-    /// the heap backing refuses by construction, and the two arms answer the
-    /// same.
+    /// In a slot this is bookkeeping rather than storage -- the slot is already
+    /// full width -- so `commit` can refuse a caller that reports more than it
+    /// was lent, which the heap backing refuses by construction, and the two arms
+    /// answer the same. In a heap buffer it is storage, as it is on the heap
+    /// backing: the buffer is grown to lend it and cut back at the commit.
     reserved: usize,
+}
+
+/// Where a chain's bytes are.
+enum Stage {
+    /// In its pool slot. `data` is the slot's first byte, taken from the
+    /// generated `write` accessor when the slot was acquired, so staging into
+    /// the chain needs no lock: the handle is this chain's alone, and nothing
+    /// else reads or writes the slot until it is released or lent.
+    Slot { slot: Slot<CpuMut>, data: *mut u8 },
+    /// In a heap buffer, because the chain grew past a slot. The slot went home
+    /// when the chain moved, so a chain longer than a slot holds no slot: the
+    /// pool's reservation is for the messages that fit it, and a longer message
+    /// is bounded by the session's `transport/link/rx/max_message_size`, as on
+    /// the heap backing, rather than refused for the arena's unit. The buffer
+    /// holds the staged bytes and, between a `buf` and its `commit`, the
+    /// reservation after them.
+    Spilled(Vec<u8>),
 }
 
 // SAFETY: the only reason this is not automatic is the raw pointer, and it
@@ -124,10 +140,13 @@ pub struct PooledChain {
 unsafe impl Send for PooledChain {}
 
 impl PooledChain {
-    /// Pool index of this chain's slot. Tracing / test observability, and the
-    /// `buf_index` [`crate::uring`] submits under; the Router never reads it.
-    pub fn slot_idx(&self) -> usize {
-        self.slot.idx()
+    /// Pool index of this chain's slot, or `None` once the chain has moved to
+    /// the heap. Tracing / test observability; the Router never reads it.
+    pub fn slot_idx(&self) -> Option<usize> {
+        match &self.stage {
+            Stage::Slot { slot, .. } => Some(slot.idx()),
+            Stage::Spilled(_) => None,
+        }
     }
 
     /// Bytes staged so far — the offset the next append lands at.
@@ -162,8 +181,9 @@ unsafe impl Sync for LentSlot {}
 impl RxStorage for LentSlot {
     fn as_slice(&self) -> &[u8] {
         // SAFETY: see the `Send` impl: `data` is the first byte of a slot of the
-        // table `_home` keeps alive, `len <= CAP <= SLOT_SIZE` was checked when
-        // the chain was staged, and no one writes the slot while this exists.
+        // table `_home` keeps alive, `len <= SLOT_SIZE` holds for a chain still in
+        // its slot (a longer one moved to the heap and is not lent as a slot), and
+        // no one writes the slot while this exists.
         unsafe { std::slice::from_raw_parts(self.data, self.len) }
     }
 }
@@ -321,17 +341,48 @@ impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
     // arithmetic on the slot.
 }
 
+impl<const SLOTS: usize, const CAP: usize> PooledStaging<SLOTS, CAP> {
+    /// Move `chain` out of its slot into a heap buffer with room for `end`
+    /// bytes, and send the slot home: what a chain does the first time it would
+    /// grow past a slot. A chain already on the heap is left as it is.
+    ///
+    /// The bytes staged so far are copied once, at most a slot's worth; every
+    /// fragment after lands in the buffer. Upstream stages every chain that way
+    /// (its defragmentation buffer grows with the chain), so a message longer
+    /// than a slot costs here what it costs there, and one that fits a slot keeps
+    /// costing no allocation.
+    fn spill(&mut self, chain: &mut PooledChain, end: usize) {
+        let Stage::Slot { data, .. } = chain.stage else {
+            return;
+        };
+        let mut bytes = Vec::with_capacity(end);
+        // SAFETY: the first `len` bytes of the chain's own slot, which only this
+        // chain writes and which the arena's table keeps alive; the slot is still
+        // the chain's until it is returned below.
+        bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(data, chain.len) });
+        let Stage::Slot { slot, .. } = std::mem::replace(&mut chain.stage, Stage::Spilled(bytes))
+        else {
+            unreachable!("matched as a slot above");
+        };
+        // A poisoned lock forfeits the slot rather than panicking on a path a
+        // peer can drive, as `release` does.
+        if let Ok(mut guard) = self.home.slots.lock() {
+            slot.pool_return(&mut guard);
+        }
+    }
+}
+
 impl<const SLOTS: usize, const CAP: usize> BuildsOwnStorage<SLOTS, CAP>
     for PooledStaging<SLOTS, CAP>
 {
+    /// The Router's `SLOTS` are held against the pool's slot count. Its `CAP`
+    /// is not held against the slot size: a chain longer than a slot moves to
+    /// the heap ([`Stage::Spilled`]), so the slot size is how long a message
+    /// may be and still cost no allocation, not how long it may be.
     fn new() -> Self {
         assert!(
             SLOTS <= SLOT_COUNT,
             "the Router wants more chains than the pool has slots"
-        );
-        assert!(
-            CAP <= SLOT_SIZE,
-            "the Router's per-chain cap exceeds the pool's slot width"
         );
         Self {
             home: Arc::new(PoolHome {
@@ -361,8 +412,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         let data = slot.write(pool).as_mut_ptr();
         self.staged += 1;
         Some(PooledChain {
-            slot,
-            data,
+            stage: Stage::Slot { slot, data },
             len: 0,
             reserved: 0,
         })
@@ -370,10 +420,14 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
 
     fn release(&mut self, chain: Self::Chain) {
         self.staged = self.staged.saturating_sub(1);
-        // A poisoned lock forfeits the slot rather than panicking on a path a
-        // peer can drive; the only code that holds it does freelist bookkeeping.
-        if let Ok(mut guard) = self.home.slots.lock() {
-            chain.slot.pool_return(&mut guard);
+        // A chain on the heap gave its slot back when it moved; its buffer is
+        // dropped with it.
+        if let Stage::Slot { slot, .. } = chain.stage {
+            // A poisoned lock forfeits the slot rather than panicking on a path a
+            // peer can drive; the only code that holds it does freelist bookkeeping.
+            if let Ok(mut guard) = self.home.slots.lock() {
+                slot.pool_return(&mut guard);
+            }
         }
     }
 
@@ -385,24 +439,36 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         if end > CAP {
             return Err(StagingError::ChainCapExceeded);
         }
-        // SAFETY: `[len, end)` lies in the slot (`end <= CAP <= SLOT_SIZE`), the
-        // slot is this chain's alone (its handle), and `payload` is a borrow of
-        // the caller's, which cannot overlap a slot the pool reserved.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                chain.data.add(chain.len),
-                payload.len(),
-            );
+        if end > SLOT_SIZE {
+            self.spill(chain, end);
+        }
+        match &mut chain.stage {
+            Stage::Slot { data, .. } => {
+                // SAFETY: `[len, end)` lies in the slot (`end <= SLOT_SIZE`, or the
+                // chain would have moved to the heap above), the slot is this
+                // chain's alone (its handle), and `payload` is a borrow of the
+                // caller's, which cannot overlap a slot the pool reserved.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        data.add(chain.len),
+                        payload.len(),
+                    );
+                }
+            }
+            Stage::Spilled(bytes) => bytes.extend_from_slice(payload),
         }
         chain.len = end;
         Ok(())
     }
 
     fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
-        // SAFETY: the first `len` bytes of the chain's own slot, which only
-        // this chain writes and which the arena's table keeps alive.
-        unsafe { std::slice::from_raw_parts(chain.data, chain.len) }
+        match &chain.stage {
+            // SAFETY: the first `len` bytes of the chain's own slot, which only
+            // this chain writes and which the arena's table keeps alive.
+            Stage::Slot { data, .. } => unsafe { std::slice::from_raw_parts(*data, chain.len) },
+            Stage::Spilled(bytes) => &bytes[..chain.len],
+        }
     }
 
     fn buf<'a>(
@@ -410,10 +476,6 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         chain: &'a mut Self::Chain,
         want: usize,
     ) -> Result<&'a mut [u8], StagingError> {
-        // THE POINT OF THE WHOLE SEAM: the slot is already `SLOT_SIZE` wide, so
-        // this hands back a window into it and nothing is allocated, zeroed or
-        // moved. A filler writing here writes where the chain already is, which
-        // is what makes `append`'s copy avoidable rather than merely cheaper.
         let start = chain.len;
         let end = start
             .checked_add(want)
@@ -421,14 +483,34 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         if end > CAP {
             return Err(StagingError::ChainCapExceeded);
         }
+        if end > SLOT_SIZE {
+            self.spill(chain, end);
+        }
         // The chain's length does NOT advance here -- `commit` records what the
         // filler actually used. Keeping the two apart is why a short read
         // cannot stage bytes nobody wrote.
         chain.reserved = want;
-        // SAFETY: `[start, end)` lies in the slot (`end <= CAP <= SLOT_SIZE`)
-        // and the slot is this chain's alone; the returned borrow is tied to
-        // `&mut chain`, so nothing else can reach the bytes while it lives.
-        Ok(unsafe { std::slice::from_raw_parts_mut(chain.data.add(start), want) })
+        match &mut chain.stage {
+            // THE POINT OF THE WHOLE SEAM: the slot is already `SLOT_SIZE` wide,
+            // so this hands back a window into it and nothing is allocated,
+            // zeroed or moved. A filler writing here writes where the chain
+            // already is, which is what makes `append`'s copy avoidable rather
+            // than merely cheaper.
+            //
+            // SAFETY: `[start, end)` lies in the slot (`end <= SLOT_SIZE`, or the
+            // chain would have moved to the heap above) and the slot is this
+            // chain's alone; the returned borrow is tied to `&mut chain`, so
+            // nothing else can reach the bytes while it lives.
+            Stage::Slot { data, .. } => {
+                Ok(unsafe { std::slice::from_raw_parts_mut(data.add(start), want) })
+            }
+            // A chain on the heap lends as the heap backing does: the buffer is
+            // grown by the reservation, which `commit` cuts back to what was used.
+            Stage::Spilled(bytes) => {
+                bytes.resize(end, 0);
+                Ok(&mut bytes[start..end])
+            }
+        }
     }
 
     fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
@@ -442,9 +524,13 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
         if end > CAP {
             return Err(StagingError::ChainCapExceeded);
         }
-        // Nothing is copied or truncated: the bytes are already in the slot and
-        // only the length moves. The heap backing gives its unused tail back
-        // instead -- opposite mechanics, identical observable.
+        // In a slot nothing is copied or truncated: the bytes are already there
+        // and only the length moves. On the heap the unused tail of the
+        // reservation is given back, as the heap backing does -- opposite
+        // mechanics, identical observable.
+        if let Stage::Spilled(bytes) = &mut chain.stage {
+            bytes.truncate(end);
+        }
         chain.len = end;
         chain.reserved = 0;
         Ok(())
@@ -462,11 +548,19 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
     /// ARCHITECTURE section 9.3 -- the completed chain handed up AS its slot.
     /// The slot's shared view is reused when the slot has been lent before
     /// (no allocation), and made once otherwise; the handle is kept here until
-    /// the last range of the view drops and the slot is reclaimed.
+    /// the last range of the view drops and the slot is reclaimed. A chain that
+    /// moved to the heap is handed up as its buffer, moved, as the heap backing
+    /// hands up its own.
     fn lend(&mut self, chain: Self::Chain) -> Result<RxBytes, Self::Chain> {
-        let PooledChain {
-            slot, data, len, ..
-        } = chain;
+        let PooledChain { stage, len, .. } = chain;
+        let (slot, data) = match stage {
+            Stage::Slot { slot, data } => (slot, data),
+            Stage::Spilled(mut bytes) => {
+                bytes.truncate(len);
+                self.staged = self.staged.saturating_sub(1);
+                return Ok(RxBytes::lend(bytes));
+            }
+        };
         let lent = &mut self.lent[slot.idx()];
         debug_assert!(lent.handle.is_none(), "a slot is lent once at a time");
         let view = match lent.view.as_mut() {
@@ -477,8 +571,7 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for PooledSt
                     // Unreachable by the argument above; giving the chain back
                     // keeps the bytes correct (it is delivered borrowed).
                     return Err(PooledChain {
-                        slot,
-                        data,
+                        stage: Stage::Slot { slot, data },
                         len,
                         reserved: 0,
                     });
@@ -1036,6 +1129,148 @@ mod tests {
             SLOTS,
             "the heap arena counts a lent buffer back at once"
         );
+    }
+
+    /// A Router whose chain bound is the AP's: none of the build's
+    /// (`crate::reassembly::REASSEMBLY_CHAIN_CAP`), so only a chain's own length
+    /// decides whether it fits a slot.
+    const LONG: usize = usize::MAX;
+    type PooledLong = ReassemblyDispatcher<SLOTS, LONG, PooledStaging<SLOTS, LONG>>;
+
+    /// THE DEBT THIS ARM REPAID: a message longer than a slot is rejoined
+    /// whole. Until the fan-in lane measured it, the slot was the chain's bound
+    /// and a 4,000,000-byte sample was dropped by every wz receiver. The chain
+    /// stages in its slot until a fragment would take it past the slot, then
+    /// moves to a heap buffer and sends the slot home at once, so a long message
+    /// holds no slot while it is staged and is handed up as its buffer.
+    #[test]
+    fn a_chain_longer_than_a_slot_moves_to_the_heap_and_is_delivered_whole() {
+        let mut router: PooledLong = ReassemblyDispatcher::new(ReassemblyConfig::new(4, 5_000));
+        // 18 fragments of a TCP batch's size: the 17th takes the chain past the
+        // slot, the 18th completes it.
+        let message: Vec<u8> = (0..SLOT_SIZE + 70_000).map(|i| (i % 251) as u8).collect();
+        let parts: Vec<&[u8]> = message.chunks(65_535).collect();
+        assert_eq!(parts.len(), 18);
+        let mut got: Option<RxBytes> = None;
+        let mut staged = 0usize;
+        for (sn, part) in parts.iter().enumerate() {
+            let more = u8::from(sn + 1 < parts.len());
+            let outcome =
+                router.ingest_lending(frag(b"peer-a", sn as u64, more, part), MASK, 0, |chain| {
+                    got = Some(match chain {
+                        ChainBytes::Lent(bytes) => bytes,
+                        ChainBytes::Borrowed(_) => {
+                            panic!("a chain on the heap is lent as its buffer")
+                        }
+                    })
+                });
+            assert!(
+                !matches!(
+                    outcome,
+                    IngestOutcome::Aborted(_) | IngestOutcome::Refused(_)
+                ),
+                "fragment {sn} ended the chain: {outcome:?}"
+            );
+            staged += part.len();
+            if more == 1 {
+                let expected_free = if staged > SLOT_SIZE {
+                    SLOT_COUNT
+                } else {
+                    SLOT_COUNT - 1
+                };
+                assert_eq!(
+                    router.staging().free_count(),
+                    expected_free,
+                    "after {staged} bytes the chain holds a slot only while it fits one"
+                );
+            }
+        }
+        let bytes = got.expect("the chain completed");
+        assert_eq!(bytes.as_slice(), message.as_slice());
+        assert_eq!(
+            router.staging().slot_of(bytes.as_ptr()),
+            None,
+            "a chain longer than a slot is not delivered from one"
+        );
+        assert_eq!(router.staging().lent_out(), 0);
+        assert_eq!(
+            router.active_chains() + router.staging_available(),
+            SLOTS,
+            "the chain that moved is counted back when it is handed up"
+        );
+        assert_eq!(router.staging().free_count(), SLOT_COUNT);
+
+        // The borrowed delivery reads the same bytes out of the buffer.
+        let mut copied: Option<Vec<u8>> = None;
+        for (sn, part) in parts.iter().enumerate() {
+            let more = u8::from(sn + 1 < parts.len());
+            router.ingest(frag(b"peer-b", sn as u64, more, part), MASK, 0, |bytes| {
+                copied = Some(bytes.to_vec())
+            });
+        }
+        assert_eq!(copied.as_deref(), Some(message.as_slice()));
+        assert_eq!(router.staging().free_count(), SLOT_COUNT);
+    }
+
+    /// A reservation that would end past the slot moves the chain before it is
+    /// lent, keeps what the chain had staged, and is resolved as the heap
+    /// backing resolves one: a short fill stages only what was written. The
+    /// Router's bound still holds on the heap, on the reservation as on a commit.
+    #[test]
+    fn a_reservation_past_the_slot_moves_the_chain_and_keeps_its_bytes() {
+        const PAST: usize = SLOT_SIZE + 16;
+        let mut arena: PooledStaging<SLOTS, PAST> = BuildsOwnStorage::new();
+        let mut chain = ChainStaging::<SLOTS, PAST>::acquire(&mut arena).expect("slots");
+        let head = ChainStaging::<SLOTS, PAST>::buf(&mut arena, &mut chain, SLOT_SIZE - 2)
+            .expect("a reservation the slot holds");
+        head.fill(0x11);
+        head[..3].copy_from_slice(b"abc");
+        ChainStaging::<SLOTS, PAST>::commit(&mut arena, &mut chain, SLOT_SIZE - 2)
+            .expect("all of it");
+        assert!(
+            chain.slot_idx().is_some(),
+            "a chain that fits stays in its slot"
+        );
+        assert_eq!(arena.free_count(), SLOT_COUNT - 1);
+
+        let tail = ChainStaging::<SLOTS, PAST>::buf(&mut arena, &mut chain, 8)
+            .expect("a reservation past the slot, inside the bound");
+        tail.copy_from_slice(b"12345678");
+        ChainStaging::<SLOTS, PAST>::commit(&mut arena, &mut chain, 5).expect("5 of 8");
+        assert!(chain.slot_idx().is_none(), "the chain moved to the heap");
+        assert_eq!(
+            arena.free_count(),
+            SLOT_COUNT,
+            "its slot went home when it moved"
+        );
+
+        let bytes = ChainStaging::<SLOTS, PAST>::bytes(&arena, &chain);
+        assert_eq!(
+            bytes.len(),
+            SLOT_SIZE + 3,
+            "the three unwritten bytes are not staged"
+        );
+        assert_eq!(&bytes[..3], b"abc");
+        assert!(bytes[3..SLOT_SIZE - 2].iter().all(|b| *b == 0x11));
+        assert_eq!(&bytes[SLOT_SIZE - 2..], b"12345");
+
+        assert!(
+            ChainStaging::<SLOTS, PAST>::buf(&mut arena, &mut chain, 14).is_err(),
+            "one byte past the bound is refused on the heap too"
+        );
+        ChainStaging::<SLOTS, PAST>::buf(&mut arena, &mut chain, 13).expect("up to the bound");
+        ChainStaging::<SLOTS, PAST>::commit(&mut arena, &mut chain, 13).expect("all of it");
+        assert!(
+            ChainStaging::<SLOTS, PAST>::append(&mut arena, &mut chain, b"x").is_err(),
+            "an append past the bound is refused on the heap too"
+        );
+        assert_eq!(
+            ChainStaging::<SLOTS, PAST>::bytes(&arena, &chain).len(),
+            PAST
+        );
+        ChainStaging::<SLOTS, PAST>::release(&mut arena, chain);
+        assert_eq!(ChainStaging::<SLOTS, PAST>::available(&arena), SLOTS);
+        assert_eq!(arena.free_count(), SLOT_COUNT);
     }
 
     /// The Router's reach to its arena for a reclaim, for these tests: the

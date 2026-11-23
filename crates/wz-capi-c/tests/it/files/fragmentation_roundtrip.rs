@@ -281,20 +281,18 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
 /// Chains of many fragments, up to the largest message a session sends, arrive
 /// whole: the receiver rejoins what the sender let through.
 ///
-/// 1044480 is the boundary case, and it is here to check the UNIT of the
-/// sender's refusal, not just its existence. The sender refuses a chain whose
-/// reassembled body exceeds its reassembly slot; the receiver stages that same
-/// body. If those two were measuring different things — the framed bytes on
-/// one side, the caller's payload on the other — there would be a band just
-/// under the slot that the sender accepts and the receiver still drops, a loss
-/// no caller could see. This size sits in that band (4 KiB under 1 MiB, so its
-/// envelope cannot push it over), and it must arrive. The receiver is this ABI's
-/// because it rejoins up to zenoh's `transport/link/rx/max_message_size` default
-/// and so up to the slot; zenoh-pico's ABI rejoins no message past pico's
-/// `FRAG_MAX_SIZE`, as pico, and its own test holds that.
+/// 1044480 was the boundary case while the sender refused a chain past the AP
+/// reassembly slot (1 MiB): it sat 4 KiB under the slot, in the band a sender and
+/// a receiver that measured different things would have disagreed on. 4000000 is
+/// the fan-in lane's camera sample (Round 4617), which the slot made every wz
+/// receiver drop and every wz sender refuse; with the slot no longer a message's
+/// bound it must arrive like the rest. The receiver is this ABI's because it
+/// rejoins up to zenoh's `transport/link/rx/max_message_size` default (1 GiB);
+/// zenoh-pico's ABI rejoins no message past pico's `FRAG_MAX_SIZE`, as pico, and
+/// its own test holds that.
 #[test]
 fn a_chain_up_to_the_largest_message_sent_arrives_whole() {
-    const LONG: &[usize] = &[131_072, 262_144, 1_044_480];
+    const LONG: &[usize] = &[131_072, 262_144, 1_044_480, 4_000_000];
     let port = free_port();
     let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
     unsafe {
@@ -370,6 +368,46 @@ fn reliable_sequence_numbers(stream: &[u8]) -> Vec<u64> {
         .collect()
 }
 
+/// Whether the extension chain at the head of `exts` holds a QoS extension (id 1).
+/// Each extension is a header byte (id in the low nibble, encoding in bits 5-6,
+/// another follows when bit 7 is set) and a body: none for a unit, a varint for a
+/// Z64, a varint length and that many bytes for a ZBuf.
+fn carries_qos(exts: &[u8]) -> bool {
+    let varint = |at: &mut usize| -> u64 {
+        let (mut value, mut shift) = (0u64, 0);
+        while let Some(&byte) = exts.get(*at) {
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        value
+    };
+    let mut at = 0;
+    while let Some(&head) = exts.get(at) {
+        at += 1;
+        if head & 0x0f == 0x01 {
+            return true;
+        }
+        match (head >> 5) & 0x03 {
+            0 => {}
+            1 => {
+                varint(&mut at);
+            }
+            _ => {
+                let len = varint(&mut at) as usize;
+                at += len;
+            }
+        }
+        if head & 0x80 == 0 {
+            break;
+        }
+    }
+    false
+}
+
 /// Every transport batch of the stream as `(header byte, length, reliable SN)`, so a
 /// failure shows the whole writing and not only the numbers it judged.
 fn batches(stream: &[u8]) -> Vec<(u8, usize, Option<u64>)> {
@@ -386,47 +424,57 @@ fn batches(stream: &[u8]) -> Vec<(u8, usize, Option<u64>)> {
             continue;
         };
         let mut reliable_sn = None;
-        // A batch with the extension flag (`0x80`) carries a QoS extension: it rides
-        // another priority's conduit, which counts from its own start (the
-        // declarations, here). Only a batch with none is a value's, on the default
-        // priority conduit this test judges.
-        if matches!(header & 0x1f, 0x05 | 0x06) && header & 0x20 != 0 && header & 0x80 == 0 {
-            let (mut sn, mut shift) = (0u64, 0);
-            for &byte in &batch[1..] {
+        if matches!(header & 0x1f, 0x05 | 0x06) && header & 0x20 != 0 {
+            let (mut sn, mut shift, mut at) = (0u64, 0, 1);
+            while let Some(&byte) = batch.get(at) {
+                at += 1;
                 sn |= u64::from(byte & 0x7f) << shift;
                 if byte & 0x80 == 0 {
                     break;
                 }
                 shift += 7;
             }
-            reliable_sn = Some(sn);
+            // A batch whose extensions carry a QoS one (id 1) rides another
+            // priority's conduit, which counts from its own start (the
+            // declarations, here). Only a batch without one is a value's, on the
+            // default priority conduit this test judges: a fragment's chain
+            // markers (`0x2 First`, `0x3 Drop`) are extensions too, and the first
+            // fragment of every chain carries one.
+            if header & 0x80 == 0 || !carries_qos(&batch[at..]) {
+                reliable_sn = Some(sn);
+            }
         }
         out.push((header, len, reliable_sn));
     }
     out
 }
 
-/// A value larger than the session sends is refused before anything leaves, with a
-/// code of its own, and uses no sequence number.
+/// A value past the AP reassembly slot is sent and arrives whole, the door says the
+/// session refuses no message for its size, and the long chain leaves no hole in
+/// the reliable sequence.
 ///
-/// MEASURED on a device: after a 1 MiB value was refused, the next value's frame
-/// went out one sequence number ahead (`..a5, a7`, `a6` never written) and the
-/// device closed the session at once, while the process said the later value was
-/// sent. The wire is the gate: every reliable frame the dialer writes carries the
-/// number after the one before it, across the refusal.
+/// Until the fan-in lane measured it (Round 4617) the slot, 1 MiB, was the
+/// sender's bound, and this value was refused with `WZ_CAPI_C_E_VALUE_TOO_LARGE`
+/// while every peer configured as upstream would have taken it. The bound is gone,
+/// as upstream's sender has none. What a refusal must not do to the sequence
+/// (MEASURED on a device: after a 1 MiB value was refused, the next value's frame
+/// went out one sequence number ahead and the device closed the session) is held
+/// where a refusal can still be made, the session's own
+/// (`layer3_reassembly_tx`, a send past a declared bound). Here the wire is the
+/// gate for the chain: every reliable frame and fragment the dialer writes carries
+/// the number after the one before it, across the value that used to be refused.
 #[test]
-fn a_value_past_the_cap_is_refused_with_its_own_code_and_leaves_no_hole() {
+fn a_value_past_the_old_slot_arrives_whole_and_leaves_no_hole() {
     use wz_capi_c::limits::wz_capi_c_session_max_message_bytes;
-    use wz_capi_c::result::WZ_CAPI_C_E_VALUE_TOO_LARGE;
 
     let (acceptor_port, relay_port) = (free_port(), free_port());
     let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
     let relay = Relay::start(relay_port, acceptor_port);
-    // The control values are told apart by their length; the refused one is past
-    // the cap whatever the key adds.
+    // The values are told apart by their length; the long one is past the old
+    // 1 MiB cap whatever the key adds.
     const BEFORE: usize = 4;
     const AFTER: usize = 5;
-    let too_large = 1_048_576 + 1024;
+    let long = 1_048_576 + 1024;
 
     unsafe {
         let acceptor = open(
@@ -488,16 +536,14 @@ fn a_value_past_the_cap_is_refused_with_its_own_code_and_leaves_no_hole() {
             wz_capi_c_session_max_message_bytes(z_session_loan(&dialer), &mut cap),
             Z_OK
         );
-        assert_eq!(cap, 1_048_576, "the cap the door reports is the slot size");
-        assert!(too_large > cap, "the refused value must be past the cap");
+        assert_eq!(
+            cap,
+            usize::MAX,
+            "the session refuses no message for its size"
+        );
 
         arrive(BEFORE);
-        let refused = put(too_large);
-        assert_eq!(
-            refused, WZ_CAPI_C_E_VALUE_TOO_LARGE,
-            "a value past the cap has a code of its own, not the generic one"
-        );
-        assert_ne!(refused, wz_capi_c::result::Z_EINVAL);
+        arrive(long);
         arrive(AFTER);
 
         let wire = relay.seen.lock().unwrap().clone();
@@ -511,16 +557,12 @@ fn a_value_past_the_cap_is_refused_with_its_own_code_and_leaves_no_hole() {
             assert_eq!(
                 pair[1].wrapping_sub(pair[0]) & 0xffff_ffff,
                 1,
-                "a reliable frame skipped a sequence number across the refusal: {sns:?}; the \
+                "a reliable frame skipped a sequence number across the long value: {sns:?}; the \
                  peer closes the session at the hole. Every batch the dialer wrote, as \
                  (header, length, reliable SN): {:?}",
                 batches(&wire)
             );
         }
-        assert!(
-            delivered.lock().unwrap().get(&too_large).is_none(),
-            "the refused value was delivered"
-        );
 
         z_undeclare_subscriber(
             (&mut sub as *mut z_owned_subscriber_t).cast::<z_moved_subscriber_t>(),

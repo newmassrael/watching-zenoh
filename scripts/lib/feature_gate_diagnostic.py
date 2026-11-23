@@ -457,7 +457,6 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # `pub(super)`, so no public item carries the feature.
             "tracing-spans",
             "transport-compression",
-            "transport-fragmentation",
             "transport-link-tls-keylog",
         )
     },
@@ -666,6 +665,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `shared-key-ids` gates one method of this package, `Session::install_link_keys`,
                 # which hands a face session the dictionary and its link's key-wire form.
                 "shared-key-ids",
+                # `transport-fragmentation` JOINED from this package's `NO_PUBLIC_PATH`, and the
+                # round that made that claim false is the one that typed this: it gates one
+                # method, `RouterForwarder::set_max_reassembly_bytes`, the node's own bound on
+                # the publication it originates (the fan-in lane's refused put, Round 4617).
+                "transport-fragmentation",
             )
         },
         # The THIRD reason, and the axis found it by building the probe and

@@ -383,11 +383,12 @@ use wz_session_core::linkstate_oam::{
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::read_push_source;
 use wz_session_core::qos::Priority;
 use wz_session_core::query::QueryResponder;
+use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::wire_id::peer_key;
 use wz_session_core::wireexpr_resolve::{
     id_and_suffix, resolve_wireexpr, resolve_wireexpr_into, wireexpr_is_empty,
@@ -3422,6 +3423,14 @@ pub struct RouterForwarder {
     /// handed ([`Self::with_limits`]); the build's until it is stated. The replies a hosted
     /// queryable writes are staged under its reply bounds.
     limits: wz_session_core::limits::SessionLimits,
+    /// The longest message this node originates, in bytes as a receiver stages it: the bound
+    /// each face the node opens is handed for its own sends (`SessionLinkActions::set_max_reassembly_bytes`,
+    /// wired in [`crate::session_glue::new_session_actions`] from
+    /// `crate::reassembly::REASSEMBLY_CHAIN_CAP`), which the node's own publication is held to
+    /// before any face is sent it ([`Self::set_max_reassembly_bytes`]). `usize::MAX` declares
+    /// none, and that is the AP build's.
+    #[cfg(feature = "transport-fragmentation")]
+    max_reassembly_bytes: std::sync::atomic::AtomicUsize,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
     /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
@@ -4754,7 +4763,7 @@ impl RouterForwarder {
     }
 
     /// The router's `publish`, with the sends it must wait for made after its tables are released.
-    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError> {
+    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), PublishError> {
         self.publishing(|on| on.publish(keyexpr, payload))
     }
 
@@ -4765,7 +4774,7 @@ impl RouterForwarder {
         keyexpr: &str,
         payload: &[u8],
         options: &PublishOptions,
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), PublishError> {
         self.publishing(|on| on.publish_with(keyexpr, payload, options))
     }
 
@@ -4789,15 +4798,46 @@ impl RouterForwarder {
         payload: &[u8],
         priority: Priority,
         express: bool,
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), PublishError> {
         self.publishing(|on| on.publish_qos(keyexpr, payload, priority, express))
     }
 
     /// The router's `publish_delete`, with the sends it must wait for made after its tables are
     /// released.
     #[cfg(feature = "pubsub-delete")]
-    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), PublishError> {
         self.publishing(|on| on.publish_delete(keyexpr))
+    }
+
+    /// Declare the longest message this node originates, in bytes as a receiver stages it: the
+    /// node twin of `SessionLinkActions::set_max_reassembly_bytes`, which every face the node
+    /// opens is handed the build's bound through. A publication of the node's own session past it
+    /// is refused before any face is sent it ([`PublishError::ExceedsCapacity`]), which a face
+    /// cannot do for the node: each face refuses on its own, a fragment chain on a thread of its
+    /// own, after the node has answered its caller.
+    ///
+    /// The build's bound is set at construction (`crate::reassembly::REASSEMBLY_CHAIN_CAP`, none
+    /// on the AP build), so this is for a host whose faces are built with a smaller one.
+    #[cfg(feature = "transport-fragmentation")]
+    pub fn set_max_reassembly_bytes(&self, bytes: usize) {
+        self.max_reassembly_bytes
+            .store(bytes, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Refuse `push` when it is longer than [`Self::set_max_reassembly_bytes`] declared: the
+    /// one refusal a face would make for the message itself, whatever the face, so it is made
+    /// once here, before the node routes the message anywhere. Measured as a receiver stages it,
+    /// the Push's encoded body, which is what each face's own refusal measures
+    /// (`SessionLinkActions`' `emit_fragment_chain`).
+    #[cfg(feature = "transport-fragmentation")]
+    fn refuse_past_reassembly_bound(&self, push: &PushOwned) -> Result<(), PublishError> {
+        let bound = self
+            .max_reassembly_bytes
+            .load(std::sync::atomic::Ordering::Acquire);
+        if bound != usize::MAX && wz_codecs::push::PushWire::measure(push).len() > bound {
+            return Err(PublishError::ExceedsCapacity);
+        }
+        Ok(())
     }
 }
 
@@ -5349,6 +5389,10 @@ impl RouterForwarder {
             clock,
             policy: *policy,
             limits: wz_session_core::limits::SessionLimits::BUILD,
+            #[cfg(feature = "transport-fragmentation")]
+            max_reassembly_bytes: std::sync::atomic::AtomicUsize::new(
+                crate::reassembly::REASSEMBLY_CHAIN_CAP,
+            ),
         }
     }
 }
@@ -12128,7 +12172,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// would fold those answers into one (the reason
     /// [`register_local_subscriber`](Self::register_local_subscriber) returns
     /// none either). The error is the build's.
-    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError> {
+    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), PublishError> {
         self.publish_qos(keyexpr, payload, Priority::DEFAULT, false)
     }
 
@@ -12144,7 +12188,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         payload: &[u8],
         priority: Priority,
         express: bool,
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), PublishError> {
         // A default publish carries no quality of service extension. The level is set on the
         // field and not through the builders, which exist only where `pubsub-qos` does: the node
         // sends the extension whatever the features of the build that holds it.
@@ -12164,7 +12208,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Put to the same key would, and has no payload slot and no qos twin (a
     /// `MsgDel` carries neither, and QoS belongs to the publisher).
     #[cfg(feature = "pubsub-delete")]
-    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), PublishError> {
         self.publish_with(keyexpr, &[], &PublishOptions::del())
     }
 
@@ -12174,12 +12218,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// session's own subscribers get the sample the options describe, as a session's loopback
     /// does, and the other faces get the Push. `keyexpr` is the session's: under its namespace,
     /// if it has one ([`RouterForwarder::with_local_namespace`]).
+    ///
+    /// Refused, with nothing sent and no subscriber handed it, when the codec cannot build the
+    /// Push or the Push is longer than the node may send
+    /// ([`RouterForwarder::set_max_reassembly_bytes`]); either is the same on every face, and
+    /// the faces' own answers come too late to be this one (a face sends a fragment chain on a
+    /// thread of its own). What a face does with a message it was handed is not reported here, as
+    /// upstream's routed put reports none.
     pub fn publish_with(
         &self,
         keyexpr: &str,
         payload: &[u8],
         options: &PublishOptions,
-    ) -> Result<(), CodecError> {
+    ) -> Result<(), PublishError> {
         #[cfg(feature = "pubsub-delete")]
         use wz_session_core::push_build::{
             build_push_del_literal, build_push_del_literal_with_meta,
@@ -12188,16 +12239,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let wire = self.fwd.wire_key(keyexpr);
         let meta = options.push_metadata();
         let push = match options.kind {
-            SampleKind::Put if meta.is_empty() => build_push_literal(&wire, payload)?,
-            SampleKind::Put => build_push_literal_with_meta(&wire, payload, &meta)?,
+            SampleKind::Put if meta.is_empty() => build_push_literal(&wire, payload),
+            SampleKind::Put => build_push_literal_with_meta(&wire, payload, &meta),
             #[cfg(feature = "pubsub-delete")]
-            SampleKind::Del if meta.is_empty() => build_push_del_literal(&wire)?,
+            SampleKind::Del if meta.is_empty() => build_push_del_literal(&wire),
             #[cfg(feature = "pubsub-delete")]
-            SampleKind::Del => build_push_del_literal_with_meta(&wire, &meta)?,
+            SampleKind::Del => build_push_del_literal_with_meta(&wire, &meta),
             // A build without the delete has none to send.
             #[cfg(not(feature = "pubsub-delete"))]
             SampleKind::Del => return Ok(()),
-        };
+        }
+        // The session's send answers a codec refusal so; the node's is the same refusal.
+        .map_err(|e| PublishError::from(SendWireError::Codec(e)))?;
+        #[cfg(feature = "transport-fragmentation")]
+        self.refuse_past_reassembly_bound(&push)?;
         // What the session's own subscribers are handed: the key the router names, and the one
         // the session does (the same one when it has no namespace).
         let own = options.loopback_sample(&wire, payload);
@@ -23426,6 +23481,58 @@ mod tests {
         assert!(!fwd.unwatch_faces(watch), "a watch that is gone says so");
         fwd.deregister(FaceId(1));
         assert_eq!(told.lock().unwrap().len(), 3, "an ended watch is not told");
+    }
+
+    /// A publication of the node's own session longer than the node may send is refused, and the
+    /// refusal is the publish's answer: no face is sent it and no subscriber of the session is
+    /// handed it. The faces cannot answer for the node, because a face refuses on its own and a
+    /// fragment chain on a thread of its own, after the publish has returned; before this the node
+    /// answered `Ok` whatever its faces refused (the fan-in lane, Round 4617).
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_publication_past_the_nodes_bound_is_refused_before_any_face_is_sent_it() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/pub"));
+        let heard = Arc::new(std::sync::Mutex::new(0usize));
+        let counted = heard.clone();
+        fwd.host_subscriber_from(
+            "demo/pub",
+            wz_session_core::locality::Locality::Any,
+            Box::new(move |_: &dyn SampleView| *counted.lock().unwrap() += 1),
+        );
+
+        // The build's bound is none: a message of any length is routed.
+        sink.reset();
+        fwd.publish_with("demo/pub", &[0x5A; 200], &PublishOptions::put())
+            .expect("no bound, no refusal");
+        assert_eq!(sink.frame_count(), 1);
+        assert_eq!(*heard.lock().unwrap(), 1);
+
+        // A bound the Push of a 200-byte payload is past, and one a 20-byte payload's is within.
+        fwd.set_max_reassembly_bytes(100);
+        sink.reset();
+        assert_eq!(
+            fwd.publish_with("demo/pub", &[0x5A; 200], &PublishOptions::put()),
+            Err(PublishError::ExceedsCapacity),
+            "a publication past the bound is the publish's own refusal"
+        );
+        assert_eq!(
+            sink.frame_count(),
+            0,
+            "no face is sent a refused publication"
+        );
+        assert_eq!(
+            *heard.lock().unwrap(),
+            1,
+            "no subscriber of the session is handed a refused publication"
+        );
+        fwd.publish("demo/pub", &[0x5A; 20])
+            .expect("a publication within the bound is routed");
+        assert_eq!(sink.frame_count(), 1);
+        assert_eq!(*heard.lock().unwrap(), 2);
     }
 
     /// A publication of the node's own session goes where its destination admits: the session's

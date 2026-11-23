@@ -494,7 +494,9 @@ pub(crate) fn publish_promoted(
 
 /// Publish `payload` on `keyexpr` as the session of `node`: to the subscribers it hosts and to
 /// the faces whose subscriptions match, as the partition of its south lets the message pass. The
-/// codec's refusal is the one the registry reports, a message too large to send.
+/// node's refusal (a codec that cannot build the message, or a message longer than the node may
+/// send, both decided before any face is sent it) is the one the registry reports, a message too
+/// large to send.
 #[cfg(feature = "router-node")]
 pub(crate) fn node_publish(
     forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,

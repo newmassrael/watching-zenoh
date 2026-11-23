@@ -32,29 +32,37 @@
 
   slot-size was 65536 until it was raised to 1 MiB. The old value was
   derived from the 1472-byte AP LINK mtu of this deploy (44*1472 =
-  64768, rounded up to 65536) — correct for that link, but it is the
-  per-chain reassembly CAP for EVERY AP link, and a TCP unicast link
+  64768, rounded up to 65536) — correct for that link, but it was then
+  the per-chain reassembly CAP for EVERY AP link, and a TCP unicast link
   negotiates a 65535-byte batch. A chain only forms when the frame
   exceeds the batch, so on TCP the reassembly window was
-  (65535, 65536] — one byte wide. Every fragmented message a TCP peer
-  sent was therefore staged past the cap and dropped, which is what
-  made `transport-fragmentation` unobservable end-to-end on the AP
-  profile (the sender fragmented correctly; the receiver could never
-  absorb the chain). 1 MiB restores a usable window: at the 65535-byte
-  batch it is 16 fragments, well inside `max-fragments-per-message` 44,
-  and it bounds a peer's staging at `per-peer-quota` 8 x 1 MiB.
+  (65535, 65536] — one byte wide, which made `transport-fragmentation`
+  unobservable end-to-end on the AP profile.
 
-  Cost is a cap, not an allocation: the AP dispatcher is the `alloc`
-  backing (`TokioReassembly`), which stages each chain on the heap and
-  reads slot-size only as the per-chain limit it enforces. SCE also
-  emits a `ReassemblyPoolAp` struct holding a literal
-  `[[u8; SLOT_SIZE]; SLOT_COUNT]`, but the AP host never instantiates
-  it (see the §5.E note below), so the raise adds no static footprint.
+  slot-size is no longer a bound on a message. The 1 MiB cap it became
+  was still below upstream's: the fan-in lane measured 4,000,000-byte
+  samples arriving 0% wherever wz was on either end, because the AP
+  Router type was built with slot-size as its per-chain cap and the
+  sender refused by the same value. An AP chain is now bounded only by
+  the session's configured transport/link/rx/max_message_size
+  (upstream's 1 GiB by default), as upstream's defragmentation buffer is
+  (wz-runtime-tokio's reassembly module, REASSEMBLY_CHAIN_CAP).
+  max-fragments-per-message is likewise not enforced by the AP Router.
 
-  Only the five reassembly constants are consumed by wz; the buffer-pool
-  template's §5.E DMA slot-lifecycle API (Slot<S> / pool struct) is part
-  of SCE's emit but unused by the AP host (the dispatcher owns its own
-  strict-in-order staging) and compiles as dead code.
+  What slot-size is, per arena: the default AP arena (`alloc`,
+  HeapStaging) does not read it at all and stages each chain on the
+  heap, so an idle chain costs nothing. The reserved arena
+  (`runtime-zero-copy`, PooledStaging) allocates the 32 x 1 MiB table
+  once and stages a chain in a slot while it fits one, so a message of
+  up to 1 MiB costs no allocation; a longer chain moves to a heap
+  buffer as it outgrows its slot and sends the slot home. slot-count is
+  how many chains either arena stages at once.
+
+  The default arena consumes the reassembly constants only. The
+  buffer-pool template's §5.E slot-lifecycle API (Slot<S> / pool struct)
+  is consumed by the reserved arena (wz-runtime-tokio's zero_copy
+  module: pool_acquire_for_encode / write / pool_return), and compiles
+  as dead code in a build without it.
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
