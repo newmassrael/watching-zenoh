@@ -523,12 +523,13 @@ fn memory_basis(
 }
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
-/// session's drop glue stays in that engine's crate (`SessionState::into_drive`); the cooperative
+/// session's drop glue stays in that engine's crate, and hands out its engine beside it
+/// (`SessionState::into_drive`); the cooperative
 /// engine hands its own `Arc`, which the handle keeps by value, so its open makes no box for it,
 /// and it is the engine's own type: the one engine of the build, or with `app-transport` either of
 /// the two the build opens ([`PicoDrive`]).
 #[cfg(feature = "engine-tokio")]
-pub(crate) type HeldDrive = Box<dyn wz_capi_port::SessionDrive>;
+pub(crate) type HeldDrive = wz_capi_core::CoreDrive;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "app-transport")))]
 pub(crate) type HeldDrive = wz_capi_coop::CoopDrive<HostLinks, SessionClockOf>;
 #[cfg(all(not(feature = "engine-tokio"), feature = "app-transport"))]
