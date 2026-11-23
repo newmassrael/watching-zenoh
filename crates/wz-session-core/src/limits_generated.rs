@@ -1811,7 +1811,10 @@ impl SessionLimits {
         match_memo_slots: Limited::build_default(),
         delivery_lane_events: Limited::build_default(),
         delivery_lane_bytes: Limited::preset_or_build(4768, LimitValue::Integer(4768)),
-        delivery_lane_callbacks: Limited::build_default(),
+        delivery_lane_callbacks: Limited::preset_or_build(
+            Quota::at_most(64),
+            LimitValue::Integer(64),
+        ),
         max_queryables: Limited::build_default(),
         max_pending_queries: Limited::preset_or_build(Quota::at_most(2), LimitValue::Integer(2)),
         link_noted_requests: Limited::build_default(),
