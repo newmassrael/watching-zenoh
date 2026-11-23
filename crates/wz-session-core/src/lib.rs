@@ -733,8 +733,6 @@ pub mod serial_link;
 // (Round 1998 moved it out of wz-runtime-tokio, which never drove it and
 // charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
-// Totality debt TD-011 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod raweth_link;
 
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
