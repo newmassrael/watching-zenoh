@@ -21,8 +21,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use wz_capi_port::{
-    QblId, QueryCallback, QueryHolder, QueryableSink, SessionEngine, SubId, SubscriberSink, Ticker,
-    WireKey,
+    QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubId,
+    SubscriberSink, Ticker, WireKey,
 };
 use wz_session_core::group_membership::{
     decode_member, decode_net_event, encode_member, encode_net_event, GroupNetEvent, Member,
@@ -96,7 +96,7 @@ impl NodeCopy {
             .engine
             .get_on_wire(&key, &WireKey::literal(), &options, None, &mut || {
                 let copy = Arc::clone(&copy);
-                Box::new(move |reply: &dyn ReplyView| {
+                ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     if let Ok(member) = decode_member(reply.payload()) {
                         copy.table().insert(member.clone(), copy.engine.now_ms());
                         copy.agg.apply(copy.via, GroupEvent::Join(member));

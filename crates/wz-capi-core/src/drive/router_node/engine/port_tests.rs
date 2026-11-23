@@ -253,7 +253,7 @@ fn a_queryable_declared_through_the_port_answers_a_get_through_the_port() {
                 None,
                 &mut || {
                     let replies = Arc::clone(&replies);
-                    Box::new(move |reply: &dyn ReplyView| {
+                    wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         if reply.kind() == ReplyKind::Put {
                             replies
                                 .lock()
@@ -516,7 +516,7 @@ fn a_liveliness_get_through_the_port_finds_the_tokens_alive() {
             .liveliness_get_on_wire(key, &WireKey::literal(), 0, None, &mut || {
                 let keys = Arc::clone(&keys);
                 let end = Ended(Arc::clone(&ended));
-                Box::new(move |reply: &dyn ReplyView| {
+                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     let _ = &end;
                     if reply.kind() == ReplyKind::Put {
                         keys.lock().unwrap().push(reply.keyexpr().to_owned());
@@ -1243,7 +1243,7 @@ mod shared_memory {
                 None,
                 &mut || {
                     let sink = Arc::clone(&sink);
-                    Box::new(move |reply: &dyn ReplyView| {
+                    wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                         if reply.kind() == ReplyKind::Put {
                             let shared = reply
                                 .payload_shared()
@@ -1278,7 +1278,7 @@ mod shared_memory {
             None,
             &mut || {
                 let sink = Arc::clone(&sink);
-                Box::new(move |reply: &dyn ReplyView| {
+                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     if reply.kind() == ReplyKind::Put {
                         let shared = reply
                             .payload_shared()
