@@ -64,7 +64,8 @@ const MIN_BLOCK: u32 = (BLOCK_HEADER + BLOCK_ALIGN) as u32;
 /// No block: the end of the free list, and where an empty key points.
 const NIL: u32 = u32::MAX;
 
-/// The header word that holds a block's length.
+/// The header word that holds a block's length: its bytes for a free block, and for a held one its
+/// key's length with the granules the block took past the key's own (`held_word`).
 const SIZE: u32 = 0;
 
 /// The header word that holds how many keys hold a block, or the next free block of a free one.
@@ -73,6 +74,28 @@ const LINK: u32 = 1;
 /// The most bytes of blocks an arena of keys holds: every offset and length is a `u32`, and the
 /// largest `u32` marks no block.
 pub const MAX_KEY_ARENA_BYTES: usize = (u32::MAX - BLOCK_ALIGN as u32) as usize;
+
+/// The longest key a block's length word records (`held_word`).
+const MAX_KEY_LEN: usize = (u32::MAX >> 2) as usize;
+
+const _: () = assert!(
+    BLOCK_ALIGN == 4 && MIN_BLOCK - (BLOCK_ALIGN as u32) < 4 * BLOCK_ALIGN as u32,
+    "a held block's slack is at most three granules, which the length word's two low bits count"
+);
+
+/// The length word of a held block: the key's `len`, and the `slack` bytes the block holds past
+/// the key's own block (a free block's remainder too short to be a block of its own), counted in
+/// granules in the two low bits. A walk of the blocks reads each key's length from it
+/// ([`KeySpace::kept`]).
+const fn held_word(len: u32, slack: u32) -> u32 {
+    (len << 2) | (slack / BLOCK_ALIGN as u32)
+}
+
+/// The bytes of a held block whose length word is `word`.
+const fn held_bytes(word: u32) -> u32 {
+    let own = ((word >> 2) + (BLOCK_HEADER + BLOCK_ALIGN - 1) as u32) & !(BLOCK_ALIGN as u32 - 1);
+    own + (word & 3) * BLOCK_ALIGN as u32
+}
 
 /// The bytes a key of `len` bytes takes as a block: its header and its bytes, rounded up to
 /// [`BLOCK_ALIGN`]. `None` past [`MAX_KEY_ARENA_BYTES`].
@@ -148,6 +171,18 @@ impl KeyStore {
         }
     }
 
+    /// The `len` bytes of the key the held block at `at` keeps.
+    fn text(&self, at: u32, len: u32) -> &[u8] {
+        // SAFETY: a held block holds its header and its key's `len` bytes after it, inside the
+        // blocks, which nothing writes while a holder of the block lives.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.blocks.as_ptr().add(at as usize + BLOCK_HEADER),
+                len as usize,
+            )
+        }
+    }
+
     /// Make `to` follow `prev` in the free list, or head it when `prev` is [`NIL`].
     fn link(&self, prev: u32, to: u32) {
         if prev == NIL {
@@ -188,10 +223,9 @@ impl KeyStore {
         Some(top)
     }
 
-    /// Give the block at `at` back: into the free list in address order, merged with a free block
-    /// on either side, and to the bump area when it ends where that starts.
-    fn give_back(&self, at: u32) {
-        let mut size = self.word(at, SIZE);
+    /// Give the block of `size` bytes at `at` back: into the free list in address order, merged
+    /// with a free block on either side, and to the bump area when it ends where that starts.
+    fn give_back(&self, at: u32, mut size: u32) {
         // The free blocks around `at`: `before` the last below it, with the one before that, and
         // `after` the first above it.
         let (mut before_prev, mut before, mut after) = (NIL, NIL, self.free.get());
@@ -354,12 +388,14 @@ impl KeySpace {
             store.refused.set(store.refused.get().wrapping_add(1));
             KeysExhausted { asked }
         };
-        let Some(need) = block_bytes(text.len()) else {
+        let Some(need) = block_bytes(text.len()).filter(|_| text.len() <= MAX_KEY_LEN) else {
             return Err(refused(None));
         };
         let Some(at) = store.take(need as u32) else {
             return Err(refused(Some(need)));
         };
+        let size = store.word(at, SIZE);
+        store.set_word(at, SIZE, held_word(text.len() as u32, size - need as u32));
         store.set_word(at, LINK, 1);
         // SAFETY: the block at `at` holds its header and at least `text.len()` bytes after it,
         // inside the blocks, and no key reads them until this one is made.
@@ -370,7 +406,7 @@ impl KeySpace {
                 text.len(),
             );
         }
-        let used = store.used.get() + store.word(at, SIZE);
+        let used = store.used.get() + size;
         store.used.set(used);
         store.peak.set(store.peak.get().max(used));
         Ok(KeyRef {
@@ -378,6 +414,47 @@ impl KeySpace {
             at,
             len: text.len() as u32,
         })
+    }
+
+    /// The key of the arena whose text is `text`, one holder more of its block, when a block holds
+    /// it now, or `None`: one walk of the blocks in address order, the free ones known by the free
+    /// list, which is in the same order. A key a row or an object outside the owner's lock asks
+    /// for then takes no second block for a text the arena keeps already, whoever holds it.
+    pub fn kept(&self, text: &str) -> Option<KeyRef> {
+        let store = self.store();
+        store.assert_owner_lock();
+        let (mut at, mut free) = (0, store.free.get());
+        while at < store.top.get() {
+            let word = store.word(at, SIZE);
+            if at == free {
+                free = store.word(at, LINK);
+                at += word;
+                continue;
+            }
+            if (word >> 2) as usize == text.len() && store.text(at, word >> 2) == text.as_bytes() {
+                store.set_word(at, LINK, store.word(at, LINK) + 1);
+                return Some(KeyRef {
+                    store: self.store,
+                    at,
+                    len: word >> 2,
+                });
+            }
+            at += held_bytes(word);
+        }
+        None
+    }
+
+    /// The key a holder kept as [`KeyRef::into_raw`] gave it, one of its block's holders again.
+    ///
+    /// # Safety
+    /// `at` and `len` are what `into_raw` gave for a key of this arena, whose holder they still
+    /// are, and are not used again.
+    pub unsafe fn adopt(&self, at: u32, len: u32) -> KeyRef {
+        KeyRef {
+            store: self.store,
+            at,
+            len,
+        }
     }
 
     /// Keep the arena behind its owner's one lock from now on: in a build with debug assertions a
@@ -475,15 +552,8 @@ impl KeyRef {
             return "";
         }
         // SAFETY: a key with a block points at a store that outlives it (`KeySpace::over`), and
-        // its block holds the `len` bytes of the `str` it was made from, which nothing writes
-        // while a holder of the block lives.
-        unsafe {
-            let store = self.store.as_ref();
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                store.blocks.as_ptr().add(self.at as usize + BLOCK_HEADER),
-                self.len as usize,
-            ))
-        }
+        // its block holds the `len` bytes of the `str` it was made from.
+        unsafe { core::str::from_utf8_unchecked(self.store.as_ref().text(self.at, self.len)) }
     }
 
     /// The bytes of the block the key holds, header included; none for the empty key.
@@ -492,7 +562,15 @@ impl KeyRef {
             return 0;
         }
         // SAFETY: as `as_str`.
-        unsafe { self.store.as_ref() }.word(self.at, SIZE) as usize
+        held_bytes(unsafe { self.store.as_ref() }.word(self.at, SIZE)) as usize
+    }
+
+    /// The key as its block's place and its length, still one of the block's holders, which
+    /// nothing counts while it is apart: for a holder outside the arena owner's lock, which hands
+    /// them back to [`KeySpace::adopt`] under it to share or let go of the key.
+    pub fn into_raw(self) -> (u32, u32) {
+        let this = core::mem::ManuallyDrop::new(self);
+        (this.at, this.len)
     }
 
     /// Let go of the key now and leave the empty key, which holds no block, in its place: for a
@@ -537,8 +615,9 @@ impl Drop for KeyRef {
             store.set_word(self.at, LINK, holders);
             return;
         }
-        store.used.set(store.used.get() - store.word(self.at, SIZE));
-        store.give_back(self.at);
+        let size = held_bytes(store.word(self.at, SIZE));
+        store.used.set(store.used.get() - size);
+        store.give_back(self.at, size);
     }
 }
 
@@ -873,6 +952,88 @@ mod tests {
         assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
         drop((key, shared));
         assert_eq!(keys.counts().used, 0, "an empty key gives nothing back");
+    }
+
+    /// A key asked for by its text is found in whichever block holds it, one holder more of that
+    /// block, past a free block before it; the start of a kept key, a text past one and the empty
+    /// text are no block's, and a block given back holds no key.
+    #[test]
+    fn a_kept_key_is_found_by_its_text_past_free_blocks() {
+        let keys = keys_of(256);
+        let gone = keys.key("demo/kept/gone").expect("room");
+        let held = keys.key("demo/kept/a").expect("room");
+        drop(gone);
+        assert_eq!(
+            free_blocks(&keys).len(),
+            1,
+            "CONTROL: a free block lies before the key"
+        );
+        let used = keys.counts().used;
+        let found = keys.kept("demo/kept/a").expect("the block that holds it");
+        assert_eq!(found.as_str(), "demo/kept/a");
+        assert_eq!(keys.counts().used, used, "a found key takes no block");
+        assert!(keys.kept("demo/kept/").is_none(), "the start of a kept key");
+        assert!(
+            keys.kept("demo/kept/ab").is_none(),
+            "a text past a kept key"
+        );
+        assert!(keys.kept("").is_none(), "the empty text");
+        drop(held);
+        assert_eq!(keys.counts().used, used, "the found key holds the block");
+        drop(found);
+        assert_eq!(keys.counts().used, 0);
+        assert!(
+            keys.kept("demo/kept/a").is_none(),
+            "a block given back holds no key"
+        );
+    }
+
+    /// A key that takes a free block too short to split keeps the block's slack: its length still
+    /// reads from the block, a walk finds it and steps over the slack to the next key, and the
+    /// whole block goes back with it.
+    #[test]
+    fn a_key_in_a_block_with_slack_reads_and_gives_back_the_whole_block() {
+        let keys = keys_of(256);
+        let wide = keys.key("demo/slack/abcd").expect("room");
+        let after = keys.key("demo/after").expect("room");
+        let wide_bytes = wide.block_bytes();
+        drop(wide);
+        let narrow = keys.key("demo/slack/a").expect("the free block");
+        assert!(
+            block_bytes("demo/slack/a".len()).expect("short") < wide_bytes,
+            "CONTROL: the key's own block is shorter than the free block it took"
+        );
+        assert_eq!(
+            narrow.block_bytes(),
+            wide_bytes,
+            "the slack stays with the key"
+        );
+        assert_eq!(narrow.as_str(), "demo/slack/a");
+        let found = keys.kept("demo/slack/a").expect("found with its slack");
+        let next = keys
+            .kept("demo/after")
+            .expect("the walk steps over the slack");
+        assert_eq!(next.as_str(), "demo/after");
+        drop((narrow, found, after, next));
+        assert_eq!(keys.counts().used, 0);
+        assert!(
+            free_blocks(&keys).is_empty(),
+            "every block went back to the bump area"
+        );
+    }
+
+    /// A key kept apart as its raw parts is still one of its block's holders: adopted back, it
+    /// reads its text and lets go of the block as the key would have.
+    #[test]
+    fn a_key_kept_apart_is_adopted_back_as_its_holder() {
+        let keys = keys_of(128);
+        let (at, len) = keys.key("demo/raw").expect("room").into_raw();
+        assert!(keys.counts().used > 0, "the raw parts hold the block");
+        // SAFETY: the parts are the raw form of a key of this arena, adopted once.
+        let key = unsafe { keys.adopt(at, len) };
+        assert_eq!(key.as_str(), "demo/raw");
+        drop(key);
+        assert_eq!(keys.counts().used, 0);
     }
 
     /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered
