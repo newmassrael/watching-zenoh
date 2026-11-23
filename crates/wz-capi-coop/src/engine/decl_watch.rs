@@ -577,7 +577,7 @@ mod tests {
             SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
         let keys = arena
             .arena_mut()
-            .lend_keys(1024)
+            .lend_keys(1024, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
         let mut app = App::lent(
             arena.arena_mut(),

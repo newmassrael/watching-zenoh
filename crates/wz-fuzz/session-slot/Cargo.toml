@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The session target of the per-session slot profile (fuzz_targets/slot_session.rs):
+# the MCU client node's feature set of the session shell, with no allocator in
+# the session, read in place. A package of its own so the features cargo
+# unifies for it are this profile's alone (../README.md).
+[package]
+name = "wz-fuzz-session-slot"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+wz-fuzz-ingress-common = { path = "../ingress-common" }
+wz-runtime-coop = { path = "../../wz-runtime-coop", default-features = false, features = [
+    "session-slot",
+    "host-lock",
+] }
+wz-session-core = { path = "../../wz-session-core", default-features = false, features = [
+    "session-slot",
+] }
+wz-session-mcu = { path = "../../wz-session-mcu", default-features = false, features = [
+    "client-slot",
+    "reassembly",
+] }
+
+[[bin]]
+name = "slot_session"
+path = "fuzz_targets/slot_session.rs"
+test = false
+doc = false
+bench = false

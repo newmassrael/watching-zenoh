@@ -35,7 +35,7 @@
 use wz_runtime_coop::executor::SpawnRefusal;
 pub use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::session_drive::{
-    spawn_pump, LinkOpenError, PumpSlots, SessionDriveConfig, SessionSpawnRefused,
+    spawn_pump, LinkOpenError, PumpRef, PumpSlots, SessionDriveConfig, SessionSpawnRefused,
 };
 use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
@@ -160,9 +160,9 @@ where
     /// and run the session as a task. `lane` is the listener's lane for an accepted session and
     /// `None` for a dialled one.
     ///
-    /// `on_event` is made from the session's own handle, after its slot is claimed and before its
-    /// pump is, since an application layer is written against the handle of the session it
-    /// serves.
+    /// `on_event` is made from the session's own handle, since an application layer is written
+    /// against the handle of the session it serves, once the session's slot and pump are built:
+    /// a pump cell that refuses leaves no layer made.
     ///
     /// A refusal at any step returns what that step and the ones before it took: the driver, the
     /// entropy source, the lane and the handle are dropped, so the slot, the cell and the lane
@@ -204,7 +204,6 @@ where
         let driver = claim.driver_handle();
         let actions = new_session_in_slot(claim, params, CoopTime::new(runtime));
         let pump_link = self.stack.pump(driver, lane);
-        let on_event = on_event(&actions);
         let Ok(pump) = self.pumps.claim(
             runtime.with_driver(),
             pump_link,
@@ -214,13 +213,31 @@ where
         ) else {
             return Err(OpenRefused::PumpCell);
         };
-        match spawn_pump(&self.local, pump, on_event) {
-            Ok(task) => Ok(OpenedSession { actions, task }),
-            Err(SessionSpawnRefused::Task(why)) => Err(OpenRefused::Task(why)),
+        let task = self.spawn_session(pump, &actions, on_event)?;
+        Ok(OpenedSession { actions, task })
+    }
+
+    /// Make the session's application layer from its handle and run its pump as a task. Never
+    /// inlined, for the stack: the layer holds the session's application tables (a getter's
+    /// pending queries among them), and made in [`Self::open_claimed`] it is a value in the
+    /// frame that builds the pump, under the pump's build, its first engine turn and that turn's
+    /// send, the deepest path a dial takes. Made here, it is beside that path and not on it.
+    #[inline(never)]
+    fn spawn_session<F>(
+        &self,
+        pump: PumpRef<C, T::Pump, T::Driver>,
+        actions: &SessionHandle<C, T::Driver>,
+        on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
+    ) -> Result<CoopLocalJoinHandle<DriverOutcome>, OpenRefused>
+    where
+        F: EventSink + 'static,
+    {
+        spawn_pump(&self.local, pump, on_event(actions)).map_err(|refused| match refused {
+            SessionSpawnRefused::Task(why) => OpenRefused::Task(why),
             // `spawn_pump` is handed a pump that is already claimed, so the pump table cannot be
             // what refuses it.
-            Err(SessionSpawnRefused::NoPumpCell) => Err(OpenRefused::PumpCell),
-        }
+            SessionSpawnRefused::NoPumpCell => OpenRefused::PumpCell,
+        })
     }
 
     /// Dial: `bind` opens the socket of the link (a cell of the pool the image declared, a port

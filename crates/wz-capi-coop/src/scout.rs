@@ -14,6 +14,7 @@
 //! expects, and what zenoh-pico's own `__z_scout_loop` does. It needs no `std`: a host library
 //! built without it scouts as the one with it does.
 
+#[cfg(all(test, feature = "std", unix))]
 use alloc::sync::Arc;
 use core::ffi::c_int;
 use core::net::IpAddr;
@@ -21,8 +22,10 @@ use core::net::IpAddr;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::scouting::ScoutMembers;
+#[cfg(all(test, feature = "std", unix))]
+use wz_session_core::scouting_host::ScoutingActions;
 use wz_session_core::scouting_host::{
-    deliver_in_upstream_order, ScoutWindowPlace, ScoutingActions,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
 };
 use wz_session_core::session_zid::SessionZid;
 
@@ -32,9 +35,6 @@ pub use wz_session_core::scouting_host::{
     parse_multicast_locator, ScoutParams, ScoutedHello, MULTICAST_LOCATOR_DEFAULT,
     SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT,
 };
-
-/// The most a single datagram can carry over UDP, which sizes the read buffer.
-const MAX_DATAGRAM: usize = 65507;
 
 /// How long a window waits for a datagram when none has arrived, before it reads its clock again:
 /// a few milliseconds, so the window ends close to its budget without spinning, and a Hello that
@@ -54,18 +54,54 @@ fn interface_addresses() -> Vec<IpAddr> {
 /// `clock` is the host's: the window's budget is measured against it. A window with no member, or
 /// whose Scout could not leave by any, ends at once (the machine returns to `Idle` on a failed
 /// send), as a window nobody answers does.
+#[cfg(all(test, feature = "std", unix))]
 fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
-    mut members: ScoutMembers<S>,
+    members: ScoutMembers<S>,
     params: ScoutParams,
 ) -> Arc<ScoutingActions<CoopRuntime<C>>> {
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
     let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
     let window = place.build(params);
-    let actions = window.actions().clone();
+    let actions = Arc::clone(
+        window
+            .shared_actions()
+            .expect("a window built over its params shares its state"),
+    );
+    // The most a single datagram can carry over UDP.
+    let mut buffer = vec![0u8; 65_507];
+    pump(clock, members, window, &mut buffer);
+    actions
+}
+
+/// [`run_window`] recording its Hellos in `table` and reading each datagram into `buffer`, both
+/// the host's where it keeps the scout's state, which the window clears and holds only until it
+/// returns. Its own state lies in this frame's place: the window makes no allocation.
+fn run_window_over<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+    clock: &C,
+    members: ScoutMembers<S>,
+    params: ScoutParams,
+    table: &mut HelloTable,
+    buffer: &mut [u8],
+) {
+    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    // SAFETY: `table` outlives the place, which this frame drops before it returns, nothing else
+    // reaches it while the window is pumped, and the window is pumped where the place holds it.
+    let window = unsafe { place.build_over(params, table) };
+    pump(clock, members, window, buffer);
+}
+
+/// Pump `window` over `members` until it resolves, reading each datagram into `buffer`: a
+/// datagram longer than it is read cut short, and is no Hello the window takes.
+fn pump<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+    clock: &C,
+    mut members: ScoutMembers<S>,
+    window: &mut ScoutWindow<CoopRuntime<C>>,
+    buffer: &mut [u8],
+) {
     if members.is_empty() {
-        return actions;
+        return;
     }
     let sent = window.open().is_some_and(|scout| members.send(&scout));
     // The budget is the least time the window stays open, so the start is read rounded UP to the
@@ -73,9 +109,8 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     // millisecond inside its budget (measured, 299.917 ms of a 300 ms one).
     let now_ms = |clock: &C| clock.now_us() / 1000;
     window.sent(clock.now_us().div_ceil(1000), sent);
-    let mut buffer = vec![0u8; MAX_DATAGRAM];
     while !window.resolved() {
-        let any = members.drain(&mut buffer, |datagram| window.datagram(datagram));
+        let any = members.drain(buffer, |datagram| window.datagram(datagram));
         window.tick(now_ms(clock));
         if window.resolved() || members.is_empty() {
             break;
@@ -84,18 +119,21 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
             members.wait(IDLE_WAIT_MS);
         }
     }
-    actions
 }
 
-/// Scout `group:port` for `budget_ms` over the host's sockets `S` and hand each peer that answered
-/// to `on_hello`, in the order upstream delivers them (after the window, last responder first), as
-/// both C ABIs' `z_scout` does. The number delivered.
+/// Scout `group:port` for `budget_ms` over the host's sockets `S`, recording the peers that
+/// answered in `table`, and lend each to `on_hello` as the table holds it, in the order upstream
+/// delivers them (after the window, last responder first), as both C ABIs' `z_scout` does. The
+/// number delivered. `table` and `buffer`, which each datagram is read into, are the caller's,
+/// where it keeps the scout's state: zenoh-pico reads a scout into a buffer of its multicast
+/// batch.
 ///
 /// A socket that cannot be bound is a smaller window, and no window at all is a window nobody
 /// answers: `0`, not an error, as both C ABIs report success and simply find nothing.
 ///
 /// `zid` is the asker the Scout names, `None` for none; a configured zid that is not one is the
 /// ABI's to refuse before it scouts.
+#[allow(clippy::too_many_arguments)]
 pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
@@ -103,17 +141,23 @@ pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
-    on_hello: impl FnMut(&ScoutedHello),
+    table: &mut HelloTable,
+    buffer: &mut [u8],
+    on_hello: impl FnMut(&HelloRow),
 ) -> usize {
-    let hellos = window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, false);
-    deliver_in_upstream_order(&hellos, on_hello)
+    window_hellos::<S, C>(
+        clock, group, port, what, zid, budget_ms, false, table, buffer,
+    );
+    deliver_rows_in_upstream_order(table, on_hello)
 }
 
 /// Scout for `budget_ms` and answer the FIRST node that replies, or `None` when none does in the
 /// window: zenoh-pico's open-time lookup, which `_z_open` runs when its config names no locator
 /// (`vendor/zenoh-pico/src/net/session.c` @
 /// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`). The
-/// `true` is `exit_on_first`: the window ends at the first Hello.
+/// `true` is `exit_on_first`: the window ends at the first Hello. `table` is where the window
+/// records it and `buffer` what it reads into, as [`run_scout`]'s.
+#[allow(clippy::too_many_arguments)]
 pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
@@ -121,12 +165,16 @@ pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     what: u8,
     zid: Option<SessionZid>,
     budget_ms: u64,
+    table: &mut HelloTable,
+    buffer: &mut [u8],
 ) -> Option<ScoutedHello> {
-    window_hellos::<S, C>(clock, group, port, what, zid, budget_ms, true)
-        .into_iter()
-        .next()
+    window_hellos::<S, C>(
+        clock, group, port, what, zid, budget_ms, true, table, buffer,
+    );
+    table.first().map(HelloRow::to_hello)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     clock: &C,
     group: IpAddr,
@@ -135,7 +183,9 @@ fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     zid: Option<SessionZid>,
     budget_ms: u64,
     exit_on_first: bool,
-) -> Vec<ScoutedHello> {
+    table: &mut HelloTable,
+    buffer: &mut [u8],
+) {
     let members = ScoutMembers::<S>::open(group, port, &interface_addresses());
     let params = ScoutParams {
         what,
@@ -145,7 +195,7 @@ fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
         timeout_ms: budget_ms,
         exit_on_first,
     };
-    run_window(clock, members, params).scouted_hellos()
+    run_window_over(clock, members, params, table, buffer);
 }
 
 // The tests run responders on threads of `std`.

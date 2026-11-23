@@ -12,12 +12,21 @@ use wz_runtime_coop::udp_link::DatagramSocket;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::scouting::ScoutMember;
 use wz_runtime_posix::PosixClock;
+use wz_session_core::caps;
 use wz_session_core::scout_initiator::ScoutRxIgnored;
-use wz_session_core::scouting_host::{decode_scouted_hello, ScoutWindow};
+use wz_session_core::scouting_host::{
+    decode_scouted_hello, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+};
 
 use super::*;
 
 const WHAT: u8 = 0x03;
+
+/// A table for a window, where a test keeps it: on the heap, as a host's scout keeps none of its
+/// own on a stack.
+fn table() -> Box<HelloTable> {
+    Box::new(HelloTable::new())
+}
 
 /// A Hello datagram `[S_MID_HELLO | L][version][cbyte][zid][n][len][locator]...`: `whatami` in the
 /// low two bits of the cbyte and the zid length less one in the high nibble, as the wire spells
@@ -200,7 +209,8 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         WHAT,
         Some([0xAA, 0xBB].into()),
         5_000,
-        2048,
+        &mut table(),
+        &mut [0u8; 2048],
     )
     .expect("the responder answered");
     assert_eq!(first.zid[0], 0x11);
@@ -213,7 +223,8 @@ fn the_window_over_one_datagram_socket_finds_who_answers() {
         WHAT,
         Some([0xAA, 0xBB].into()),
         300,
-        2048,
+        &mut table(),
+        &mut [0u8; 2048],
         |hello| seen.push(hello.zid[0]),
     );
     assert_eq!(delivered, 2);
@@ -237,7 +248,8 @@ fn the_window_over_one_datagram_socket_asks_an_ipv6_responder() {
         WHAT,
         Some([0xAA, 0xBB].into()),
         5_000,
-        2048,
+        &mut table(),
+        &mut [0u8; 2048],
     )
     .expect("the IPv6 responder answered");
     assert_eq!(first.zid[0], 0x66);
@@ -255,7 +267,8 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
         WHAT,
         None,
         100,
-        2048,
+        &mut table(),
+        &mut [0u8; 2048],
     );
     assert!(none.is_none());
 }
@@ -282,7 +295,8 @@ fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
     // The Scout the window itself sends, as a host that loops its multicast back hears it.
     let own_scout = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(3_000, true))
         .open()
-        .expect("a window opens with a Scout");
+        .expect("a window opens with a Scout")
+        .to_vec();
     let truncated = vec![0x22, 0x09];
     let locatorless = hello_datagram(0, &[0x33; 4], &[]);
     let answer = hello_datagram(0, &[0x44; 4], &["tcp/10.0.0.4:7447"]);
@@ -377,6 +391,8 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         WHAT,
         Some([0x77; 16].into()),
         150,
+        &mut table(),
+        &mut [0u8; 2048],
         |_| seen += 1,
     );
     assert_eq!((delivered, seen), (0, 0));
@@ -388,6 +404,146 @@ fn the_public_window_finds_nothing_on_a_group_nobody_answers() {
         WHAT,
         Some([0x77; 16].into()),
         100,
+        &mut table(),
+        &mut [0u8; 2048],
     )
     .is_none());
+}
+
+/// The Rust preset's window keeps zenoh's collection: it records every Hello, past the rows a lent
+/// table has, each with its locators. A window over a lent table records `MAX_SCOUT_HELLOS` and
+/// counts the rest. Turned red by a bound on the collection, or a lent table that grows past its
+/// rows.
+#[test]
+fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
+    let past = caps::MAX_SCOUT_HELLOS + 2;
+    let hellos: Vec<Vec<u8>> = (1..=past)
+        .map(|zid| hello_datagram(1, &[zid as u8], &["tcp/10.0.0.1:7447"]))
+        .collect();
+    let params = ScoutParams {
+        what: WHAT,
+        zid: Some([0xAA].into()),
+        timeout_ms: 1_000,
+        exit_on_first: false,
+    };
+    let pump = |window: &mut ScoutWindow<CoopRuntime<PosixClock>>| {
+        assert!(window.open().is_some());
+        window.sent(0, true);
+        for datagram in &hellos {
+            window.datagram(datagram);
+        }
+    };
+
+    let mut collected = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
+    pump(&mut collected);
+    let all = collected.actions().scouted_hellos();
+    assert_eq!(all.len(), past, "the collection records every Hello");
+    assert_eq!(all[past - 1].locators, ["tcp/10.0.0.1:7447"]);
+    assert_eq!(collected.actions().hellos_refused(), 0);
+
+    let mut lent = table();
+    {
+        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        // SAFETY: `lent` outlives the place, dropped at the end of this block, and nothing else
+        // reaches it meanwhile.
+        let window = unsafe { place.build_over(params, &mut lent) };
+        pump(window);
+        assert_eq!(window.actions().hellos_refused(), 2);
+    }
+    assert_eq!(lent.len(), caps::MAX_SCOUT_HELLOS);
+    assert_eq!(lent.refused(), 2);
+    assert_eq!(lent.first().map(|row| row.zid[0]), Some(1));
+}
+
+/// A window's state holds no table, so neither its actions nor the place the window is built in
+/// carries the table's rows on a stack: the table is its holder's, lent by pointer. Turned red by a
+/// table, or one of its rows, moved into the window's state.
+#[test]
+fn a_windows_state_holds_no_table() {
+    let actions = core::mem::size_of::<ScoutingActions<CoopRuntime<PosixClock>>>();
+    let row = core::mem::size_of::<HelloRow>();
+    assert!(
+        actions < row,
+        "the actions ({actions} bytes) are smaller than one row ({row} bytes)"
+    );
+    assert!(
+        core::mem::size_of::<HelloTable>() > caps::MAX_SCOUT_HELLOS * row,
+        "CONTROL: the table holds its rows inline"
+    );
+}
+
+/// A window built over a lent table in its place holds its state there: it shares no `Arc`, opens
+/// to the Scout a window by value opens, keeps no list of the datagrams it drops but counts each
+/// verdict, and reads what it discovered from the table's rows. Turned red by a window over a lent
+/// table whose state is shared on the heap, or that keeps a list of what it drops.
+#[test]
+fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
+    let mut by_value = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(1_000, false));
+    assert!(
+        by_value.shared_actions().is_some(),
+        "CONTROL: a window by value shares its state"
+    );
+    let mut lent = table();
+    let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+    // SAFETY: `lent` outlives the place, nothing else reaches it meanwhile, and the window is
+    // pumped where the place holds it.
+    let window = unsafe { place.build_over(params(1_000, false), &mut lent) };
+    assert!(
+        window.shared_actions().is_none(),
+        "a window over a lent table shares no state"
+    );
+    let scout = window.open().expect("a window opens with a Scout");
+    assert_eq!(Some(scout), by_value.open(), "the same Scout either way");
+    window.sent(0, true);
+    // Its own Scout looped back, a Hello cut short, and an answer.
+    window.datagram(&scout);
+    window.datagram(&[0x22, 0x09]);
+    window.datagram(&hello_datagram(1, &[0x44; 4], &["tcp/10.0.0.4:7447"]));
+    let actions = window.actions();
+    let counts = actions.ignored_counts();
+    assert_eq!((counts.self_echo, counts.undecodable), (1, 1));
+    assert_eq!(
+        counts.total(),
+        2,
+        "every datagram not taken is counted once"
+    );
+    assert!(
+        actions.ignored_datagrams().is_empty(),
+        "a window over a lent table keeps no list of what it drops"
+    );
+    assert_eq!(
+        actions.discovered_locator().as_deref(),
+        Some("tcp/10.0.0.4:7447"),
+        "what it discovered is the table's first row with a locator"
+    );
+    assert_eq!(actions.hellos_refused(), 0);
+}
+
+/// The window reads each datagram into the buffer its caller lends and no further: a Hello longer
+/// than the buffer is read cut short and is no Hello, as zenoh-pico's read into its multicast batch
+/// cuts one. Turned red by a window that reads into a buffer of its own.
+#[test]
+fn the_window_reads_into_the_buffer_its_caller_lends() {
+    let responder = Responder::start(vec![hello_datagram(1, &[0x55; 4], &["tcp/10.0.0.5:7447"])]);
+    let short = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
+        &PosixClock,
+        responder.at,
+        WHAT,
+        Some([0xAA, 0xBB].into()),
+        300,
+        &mut table(),
+        &mut [0u8; 8],
+    );
+    assert!(short.is_none(), "a Hello cut to the buffer is no Hello");
+    let whole = crate::scout_datagram::scout_first::<PosixUdpSocket, _>(
+        &PosixClock,
+        responder.at,
+        WHAT,
+        Some([0xAA, 0xBB].into()),
+        5_000,
+        &mut table(),
+        &mut [0u8; 2048],
+    )
+    .expect("CONTROL: a buffer of the batch reads the whole Hello");
+    assert_eq!(whole.zid[0], 0x55);
 }

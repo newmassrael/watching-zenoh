@@ -717,6 +717,149 @@ pub fn owned_records(
     }
 }
 
+/// The test stand-in for this build's receive: `outcome`, a frame a test wrote as owned messages
+/// (a `FramePayload`, or the plain-put lane's `FramePlainPuts`), is handed to `on_event` as the
+/// receive of this build delivers that frame. Where the tables read owned records
+/// ([`OWNED_RECORDS`]) that is the outcome itself. The build that lends every record raises no
+/// outcome that carries a message, and its tables read none, so there the frame's batch is walked
+/// where it lies and each record handed on lent (`report_lent_record`), as its receive hands it;
+/// an outcome that carries no batch is handed as it is. A test of a table states its claim once
+/// and checks it in the form the build ships.
+// Its callers are the tests of the tables, each under the features of its own table; a test build
+// with none of them leaves it unused.
+#[cfg(all(test, feature = "alloc"))]
+#[allow(dead_code)]
+pub(crate) fn deliver_frame(
+    outcome: &DriverLoopOutcome,
+    mut on_event: impl FnMut(IterationEvent<'_, '_>),
+) {
+    #[cfg(all(
+        feature = "codec-frame",
+        feature = "session-unicast",
+        feature = "rx-lent-only",
+        feature = "rx-lent-control",
+        not(feature = "transport-stats"),
+        not(feature = "routing-namespace"),
+        not(feature = "multicast-declarations"),
+        not(feature = "multicast-ingress-gate"),
+        not(feature = "transport-compression")
+    ))]
+    if lent_delivery::deliver(outcome, &mut on_event) {
+        return;
+    }
+    on_event(IterationEvent::Poll(outcome));
+}
+
+/// `deliver_frame` in the build that lends every record: the build [`OWNED_RECORDS`] names, with
+/// the unicast receive whose walk lends the records.
+#[cfg(all(
+    test,
+    feature = "alloc",
+    feature = "codec-frame",
+    feature = "session-unicast",
+    feature = "rx-lent-only",
+    feature = "rx-lent-control",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace"),
+    not(feature = "multicast-declarations"),
+    not(feature = "multicast-ingress-gate"),
+    not(feature = "transport-compression")
+))]
+mod lent_delivery {
+    use super::{
+        report_lent_record, DriverLoopOutcome, EventSink, FrameRecords, IterationEvent,
+        OWNED_RECORDS,
+    };
+    use crate::network_message::{new_record_buf, try_for_each_record, NetworkMessage, RecordForm};
+    use alloc::vec::Vec;
+
+    // The gate of this module is the condition of `OWNED_RECORDS`, written again: a condition
+    // added to one and not to the other stops this build rather than feeding its tables a form
+    // they do not read.
+    const _: () = assert!(
+        !OWNED_RECORDS,
+        "the lent delivery of the tests is the build whose tables read no owned record"
+    );
+
+    /// Walk the batch `outcome` carries where it lies and hand each record to `on_event` lent, a
+    /// batch with no record as the empty frame the walk reports; `false`, with nothing handed,
+    /// for an outcome that carries no batch.
+    pub(super) fn deliver(outcome: &DriverLoopOutcome, on_event: &mut dyn EventSink) -> bool {
+        let (batch, reliable, sn, priority) = match outcome {
+            DriverLoopOutcome::FramePayload {
+                reliable,
+                sn,
+                priority,
+                messages,
+                ..
+            } => (batch_of(messages), *reliable, *sn, *priority),
+            DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                sn,
+                priority,
+                payload,
+                ..
+            } => (payload.to_vec(), *reliable, *sn, *priority),
+            _ => return false,
+        };
+        let mut record = new_record_buf();
+        let mut walked = false;
+        try_for_each_record(&batch, &mut record, RecordForm::LentControl, |one| {
+            report_lent_record(one, reliable, sn, priority, &mut *on_event);
+            walked = true;
+            Ok(())
+        })
+        .expect("a frame a test writes is walked whole");
+        if !walked {
+            on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+                reliable,
+                sn,
+                messages: FrameRecords::new(),
+                has_ext: false,
+                extensions: Vec::new(),
+                priority,
+            }));
+        }
+        true
+    }
+
+    /// The batch a peer writes for `messages`: each record's bytes, in order.
+    fn batch_of(messages: &[NetworkMessage]) -> Vec<u8> {
+        let mut batch = Vec::new();
+        for message in messages {
+            let record = match message {
+                #[cfg(feature = "codec-request")]
+                NetworkMessage::Request(request) => {
+                    request.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                #[cfg(feature = "codec-push")]
+                NetworkMessage::Push(push) => {
+                    push.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                #[cfg(feature = "codec-response-final")]
+                NetworkMessage::ResponseFinal(done) => {
+                    done.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                NetworkMessage::Oam(oam) => oam.try_as_borrowed().expect("a view").encode_to_vec(),
+                NetworkMessage::Interest(interest) => {
+                    interest.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                #[cfg(feature = "codec-response")]
+                NetworkMessage::Response(response) => {
+                    response.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                #[cfg(feature = "codec-declare")]
+                NetworkMessage::Declare(declare) => {
+                    declare.try_as_borrowed().expect("a view").encode_to_vec()
+                }
+                NetworkMessage::Unknown { body, .. } => body.clone(),
+            };
+            batch.extend_from_slice(&record);
+        }
+        batch
+    }
+}
+
 /// The records a [`DriverLoopOutcome::FramePayload`] carries: the owned messages where the tables
 /// read them ([`OWNED_RECORDS`]), and, in the build that lends every record, a list of no size that
 /// is always empty, so an outcome dropped there (a handshake's, a refusal, an empty frame) links no

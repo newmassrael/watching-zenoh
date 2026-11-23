@@ -95,6 +95,9 @@ mod prelude {
     pub(crate) use alloc::string::{String, ToString};
     pub(crate) use alloc::vec;
     pub(crate) use alloc::vec::Vec;
+    // The operations of the session's engine, which a build of one engine reaches as its own
+    // type rather than as a trait object.
+    pub(crate) use wz_capi_port::SessionEngine as _;
 }
 
 // A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
@@ -579,16 +582,20 @@ pub mod message_catalog;
 #[cfg(feature = "message-payload")]
 #[cfg(not(wz_additional_apart))]
 pub mod message_payload;
-// Fixed pools, one per slot size, that the objects behind the owned handles are taken from in
-// place of the heap: wz doors (`wz_ext.h`) of the unstable surface.
+// The doors through which a program reserves the process pools itself and reads them: wz doors
+// (`wz_ext.h`) of the unstable surface.
 #[cfg(feature = "object-pool")]
 pub mod object_pool;
-// Where the object behind an owned handle is placed and let go: a slot of the pools when the
-// program reserved them, the heap's otherwise.
+// Where an object a program holds outside a session is placed and let go: a slot of the process
+// pools where the build has them, the heap's otherwise.
 mod object_slot;
 mod option_fields;
 mod os;
 pub mod platform;
+// The places of the objects a program holds that no session holds for it, reserved once for the
+// process: in every library without the tokio engine, and in one with it that has their doors.
+#[cfg(wz_process_pools)]
+mod process_pool;
 // One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema: the instance keys' and the message payloads'.
 #[cfg(any(feature = "instance-key", feature = "message-payload"))]
@@ -620,6 +627,9 @@ pub mod segment_sender;
 pub mod serde;
 pub mod session;
 mod session_ext;
+// The cooperative engine's session handle lies in a place of the session's arena.
+#[cfg(not(feature = "engine-tokio"))]
+mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]

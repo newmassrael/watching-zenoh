@@ -55,9 +55,9 @@ use wz_session_core::caps;
 use wz_session_core::query::QueryResponder;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query_options::QueryOptions;
-use wz_session_core::query_sink::{QueryView, ReplyOut};
+use wz_session_core::query_sink::{QueryView, ReplyError, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
-use wz_session_core::reply_stage::ReplyStage;
+use wz_session_core::reply_stage::{ReplyParts, StagesReplies};
 use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo};
 
 use super::queued::Queued;
@@ -124,10 +124,39 @@ pub(super) fn responder_for<'a>(
     keyexpr: &str,
     parameters: Option<&[u8]>,
     qos: QosLevel,
-    replies: &'a mut ReplyStage,
+    replies: &'a mut dyn StagesReplies,
 ) -> QueryResponder<'a> {
     let accept = ReplyKeyExpr::from_parameter_bytes(parameters);
     QueryResponder::new(rid, keyexpr.to_owned(), accept, qos, replies)
+}
+
+/// Where a query's replies go as its queryable makes them: each one onto the link the query came in
+/// on, written into the link's transmit slot under the session's lock
+/// ([`ResponseSink::send_reply_parts`](wz_session_core::response_sink::ResponseSink)), or to the
+/// session's own get. Nothing is staged, as zenoh-pico stages nothing: `z_query_reply` sends its
+/// reply at the call (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `if (_z_send_n_msg(zn, &z_msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL) != _Z_RES_OK) {`),
+/// so a query is answered with no buffer of its replies and as many replies as its queryable makes;
+/// the payload bound the session states (`MAX_REPLY_PAYLOAD_BYTES`) still refuses a longer one.
+/// The query's Final follows when its hold is let go of ([`CoopEngine::answer`]).
+pub(super) struct Onward<'a, L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: &'a CoopEngine<L, C>,
+    generation: u64,
+}
+
+impl<'a, L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Onward<'a, L, C> {
+    /// The replies to a query that came in under `generation`.
+    pub(super) fn to(engine: &'a CoopEngine<L, C>, generation: u64) -> Self {
+        Self { engine, generation }
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> StagesReplies
+    for Onward<'_, L, C>
+{
+    fn stage_reply(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
+        self.engine.send_reply(self.generation, parts)
+    }
 }
 
 /// One request's Final, held while a callback or a kept query may still answer it.
@@ -613,25 +642,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> HeldQuery for 
         let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) else {
             return;
         };
-        let mut replies = ReplyStage::held_to(engine.reply_bounds);
+        let mut onward = Onward::to(&engine, generation);
         {
             let mut responder = responder_for(
                 rid,
                 &self.keyexpr,
                 self.parameters.as_deref(),
                 self.qos,
-                &mut replies,
+                &mut onward,
             );
             answer(&mut responder);
         }
-        engine.answer(generation, rid, replies, false);
+        engine.answer(generation, rid, false);
     }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopHeld<L, C> {
     fn drop(&mut self) {
         if let (Some((generation, rid)), Some(engine)) = (self.held, self.engine.upgrade()) {
-            engine.answer(generation, rid, ReplyStage::new(), true);
+            engine.answer(generation, rid, true);
         }
     }
 }

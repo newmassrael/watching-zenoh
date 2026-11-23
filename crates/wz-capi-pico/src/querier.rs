@@ -518,7 +518,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // null-callback return, which is a path they must also be freed on. The
         // sibling `z_get` takes its bytes first for the same reason.
         let (payload, attachment, value_meta, token) = if options.is_null() {
-            (None, None, crate::get::PicoQueryValueMeta::default(), None)
+            (
+                Ok(None),
+                Ok(None),
+                crate::get::PicoQueryValueMeta::default(),
+                None,
+            )
         } else {
             (
                 crate::pubsub::take_moved_bytes((*options).payload),
@@ -537,6 +542,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             return Z_ERR_NULL;
         }
         let closure = crate::get::adopt_reply_closure(callback);
+        // A payload or an attachment the program moved out of a callback's sample is copied, and
+        // with no room for the copy the get is refused; `closure` drops, reporting it over.
+        let (payload, attachment) = match (payload, attachment) {
+            (Ok(payload), Ok(attachment)) => (payload, attachment),
+            (Err(no_room), _) | (_, Err(no_room)) => return no_room.code(),
+        };
 
         let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
             Some(s) => s,
@@ -574,9 +585,9 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         }
         let token = token.or_else(|| Some(state.cancel.clone()));
         issue_get(
-            &*state.shared,
+            Arc::as_ref(&state.shared),
             state.key.literal().to_owned(),
-            state.key.wire(&*state.shared),
+            state.key.wire(Arc::as_ref(&state.shared)),
             params_in,
             state.target,
             state.consolidation,

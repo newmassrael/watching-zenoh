@@ -95,6 +95,15 @@ alloc = [
 # the rest and links no allocator.
 storage-profile = []
 
+# `peer-row-pools` -- the lent policy's tables of what a peer writes by its own choice (its
+# aliases, its subscribers, queryables and tokens and their repeats, its interests) keep their rows
+# where the session's open put them (`row_pool`): in pools every face of a session of many shares,
+# or for a session of one face in spans of each table's own (`peer_tables::PeerPools`). Named by
+# an engine that holds faces besides its dial (`wz-capi-coop`'s `listen` and `group`). Off, a
+# build that holds one face (pico's client), those tables are inline at one peer's bound in the
+# face's tables, as the static policy's are, and none of the pools' code is in its text.
+peer-row-pools = []
+
 # `bounded-heapless` selects the FIXED-CAPACITY backing for
 # `bounded::BoundedVec` / `bounded::BoundedString` while `alloc` stays on: every
 # `caps` limit becomes the hard bound a push enforces, so `TableFull` /

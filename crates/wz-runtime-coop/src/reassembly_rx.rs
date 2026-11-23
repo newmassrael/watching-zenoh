@@ -122,6 +122,23 @@ pub fn lent_reassembly(policy: &SessionPolicy, chains: LentChains) -> LentReasse
     LentReassembly::with_staging(mcu_reassembly_config(policy), chains)
 }
 
+/// What [`lent_reassembly_in`] is made of, as a value: the maker a session's task holds until it
+/// first runs (`session_drive::spawn_session_with_router`), named so the task is.
+#[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+pub struct LentReassemblyMaker {
+    /// The session's snapshot.
+    pub policy: SessionPolicy,
+    /// The buffers its chains stage into.
+    pub chains: LentChains,
+}
+
+#[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+impl crate::session_drive::MakeRouter<LentReassembly> for LentReassemblyMaker {
+    fn make_in(self, place: &mut core::mem::MaybeUninit<LentReassembly>) -> &mut LentReassembly {
+        lent_reassembly_in(place, &self.policy, self.chains)
+    }
+}
+
 /// [`lent_reassembly`] built in `place` and lent back: the Router a session's pump holds, made in
 /// the pump's own field (`SessionPump::with_router_in`), so its kilobytes never pass through the
 /// stack of the call that opens the session.

@@ -4353,8 +4353,12 @@ mod record_walk_tests {
     /// The slot profile's walk ([`RecordForm::LentControl`]): every kind this
     /// build decodes is lent where the payload lies, and what no consumer reads is
     /// skipped, so the walk builds no owned message at all.
+    // The walk lends a Declare and an Interest only with `rx-control` and a ResponseFinal only with
+    // `rx-response`; without them it skips the kind, and the walk this compares has nothing to lend.
     #[cfg(all(
         feature = "rx-lent-control",
+        feature = "rx-control",
+        feature = "rx-response",
         feature = "codec-declare",
         feature = "declare-final",
         feature = "codec-response-final"

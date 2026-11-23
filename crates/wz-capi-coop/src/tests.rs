@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{FilterPlane, FilteredPut, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -752,8 +752,13 @@ fn client_config() -> CoopConfig {
         redial_ms: None,
         idle_wait_ms: 100,
         listen: Vec::new(),
-        accept_pending: crate::DEFAULT_ACCEPT_PENDING,
-        max_faces: crate::DEFAULT_MAX_FACES,
+        accept_pending: crate::arena::admitted_handshakes(
+            &wz_session_core::limits::SessionLimits::defaults(),
+        )
+        .expect("the build admits its own value"),
+        max_faces:
+            crate::arena::admitted_faces(&wz_session_core::limits::SessionLimits::defaults())
+                .expect("the build admits its own value"),
         groups: Vec::new(),
         clock_moves: None,
         limits: wz_session_core::limits::SessionLimits::defaults(),
@@ -837,7 +842,7 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -958,7 +963,7 @@ fn the_samples_one_delivery_hands_a_subscriber_find_its_callback_once() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1002,7 +1007,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1069,7 +1074,7 @@ fn a_received_push_is_handed_to_the_subscribers_alone_under_one_lookup() {
     let count = received.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1123,7 +1128,7 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     let declares_before = router.seen(|s| s.declares);
     let id = engine
         .declare_subscriber_on_wire(
-            "demo/**".to_owned(),
+            "demo/**",
             WireKey::literal(),
             Locality::Any,
             None,
@@ -1268,7 +1273,7 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/x".to_owned(),
+            "demo/x",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1340,14 +1345,14 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     let (sink, told) = heard();
     let kept = Arc::downgrade(&sink);
     assert_eq!(
-        engine.declare_matching_listener(plane, "demo/q".to_owned(), sink, false),
+        engine.declare_matching_listener(plane, "demo/q", sink, false),
         0
     );
     assert!(kept.upgrade().is_none(), "the refused sink is not kept");
     assert_eq!(
         engine.declare_write_filter(
             plane,
-            "demo/q".to_owned(),
+            "demo/q",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1360,12 +1365,7 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
     );
     let (sink, subscribers) = heard();
     assert_ne!(
-        engine.declare_matching_listener(
-            FilterPlane::Subscribers,
-            "demo/q".to_owned(),
-            sink,
-            false
-        ),
+        engine.declare_matching_listener(FilterPlane::Subscribers, "demo/q", sink, false),
         0,
         "CONTROL: the subscribers' plane is held"
     );
@@ -1405,22 +1405,16 @@ fn a_queryable_matching_listener_counts_what_its_filter_counts() {
         complete_required: true,
     };
     let (sink, any) = heard();
-    let any_id = engine.declare_matching_listener(any_plane, "demo/q".to_owned(), sink, false);
+    let any_id = engine.declare_matching_listener(any_plane, "demo/q", sink, false);
     let (sink, complete) = heard();
-    engine.declare_matching_listener(complete_plane, "demo/q".to_owned(), sink, false);
+    engine.declare_matching_listener(complete_plane, "demo/q", sink, false);
     let complete_filter = engine
-        .declare_write_filter(
-            complete_plane,
-            "demo/q".to_owned(),
-            &WireKey::literal(),
-            ask(),
-            false,
-        )
+        .declare_write_filter(complete_plane, "demo/q", &WireKey::literal(), ask(), false)
         .expect("a session with ids left declares");
     let subscriber_filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/q".to_owned(),
+            "demo/q",
             &WireKey::literal(),
             ask(),
             false,
@@ -1500,7 +1494,7 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1514,7 +1508,7 @@ fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
     let filter = engine
         .declare_write_filter(
             FilterPlane::Subscribers,
-            "demo/x".to_owned(),
+            "demo/x",
             &WireKey::literal(),
             Some(InterestForm {
                 mapping_id: 0,
@@ -1573,7 +1567,7 @@ fn a_stepped_session_keeps_its_lease() {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1623,7 +1617,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     let arrived = Arc::new(Mutex::new(None));
     let stamp = arrived.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,
@@ -1679,6 +1673,123 @@ fn a_start_given_no_thread_is_refused_and_a_later_start_runs_the_task() {
     SessionDrive::close(&*engine);
 }
 
+/// The session's peers are read one at a time, by key: the dial role's face is the one peer, a
+/// read past its key finds none, and the walk a C ABI makes hands each identity on with the
+/// session free, so what it is handed to may read the session again (a C callback may call into
+/// its session).
+#[test]
+fn the_peers_are_read_one_at_a_time_and_handed_on_with_the_session_free() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (key, peer) = engine.next_peer(0).expect("the router is a peer");
+    assert_eq!(peer.zid.to_vec(), vec![ROUTER_ZID; 4]);
+    assert_eq!(peer.whatami, 0, "a router, in its wire form");
+    assert_eq!(engine.next_peer(key + 1), None, "no peer past the one");
+    let mut handed = Vec::new();
+    wz_capi_port::each_peer(&*engine, |peer| {
+        assert!(
+            engine.next_peer(0).is_some(),
+            "the session is free while an identity is handed on"
+        );
+        handed.push(peer);
+    });
+    assert_eq!(handed, [peer]);
+    assert!(
+        engine.group_member_zids().is_empty(),
+        "a session that joined no group has no member"
+    );
+}
+
+/// An open asked for a place for the ABI's handle lends it from the session's arena, its last row:
+/// the place is aligned as a span starts, holds the layout, takes the arena two spans more than the
+/// same open without it, and is the program's to write; a handle aligned past a span is refused.
+#[test]
+fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
+    use crate::arena::{AllocatorMemory, ArenaPlan, ArenaRefused};
+    use crate::OpenKeyIds;
+    use core::alloc::Layout;
+    use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+    use wz_session_core::byte_cells::LentByteCells;
+    use wz_session_core::policy::SessionPolicy;
+
+    #[repr(C, align(8))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Handle([u8; 40]);
+    let layout = Layout::new::<Handle>();
+    let router = Router::start(CatchAll::None);
+    let holding = Engine::open_made_in(
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || config(&router),
+        SessionPolicy::defaults(),
+        OpenKeyIds::none(),
+        &AllocatorMemory,
+        Some(layout),
+    )
+    .expect("the session opens");
+    let other = Router::start(CatchAll::None);
+    let without = open(&other);
+    let place_rows = Arena::span(LentByteCells::FLAG_BYTES)
+        .and_then(|flag| Arena::span(layout.size()).map(|bytes| flag + bytes));
+    assert_eq!(
+        Some(holding.arena_bytes()),
+        place_rows.map(|rows| without.arena_bytes() + rows),
+        "the place is two spans of the arena"
+    );
+
+    let drive = holding.clone().into_drive();
+    let place = drive
+        .handle_place()
+        .expect("the open was asked for a place");
+    assert!(place.bytes() >= layout.size());
+    assert_eq!(place.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
+    // SAFETY: the place holds a `Handle`'s layout, nothing else uses it, and the engine stands.
+    unsafe {
+        place
+            .as_ptr()
+            .cast::<Handle>()
+            .as_ptr()
+            .write(Handle([7; 40]));
+        assert_eq!(
+            place.as_ptr().cast::<Handle>().as_ptr().read(),
+            Handle([7; 40])
+        );
+    }
+    drop(drive);
+    assert!(
+        without.clone().into_drive().handle_place().is_none(),
+        "an open asked for none lends none"
+    );
+
+    let plan = ArenaPlan::of(&config(&router), &config(&router).limits).expect("a plan");
+    assert_eq!(
+        plan.holding(Layout::from_size_align(32, 2 * ARENA_ALIGN).expect("a layout")),
+        Err(ArenaRefused::TooLarge),
+        "a handle aligned past a span has no place"
+    );
+}
+
+/// The C handle's drive is the engine's own allocation, held by value: the engine it hands out is
+/// the one it holds, and letting go of it closes the session while the engine itself lives on in
+/// the other holders, as an entity declared on a session that is dropped finds it closed.
+#[test]
+fn a_drive_is_the_engines_own_allocation_and_its_drop_closes_the_session() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let drive: crate::CoopDrive<PosixLinks, PosixClock> = engine.clone().into_drive();
+    assert!(
+        core::ptr::addr_eq(Arc::as_ptr(&drive.engine()), Arc::as_ptr(&engine)),
+        "the drive hands out the engine it holds, no copy of it"
+    );
+    assert!(!drive.is_closed());
+    drop(drive);
+    assert!(
+        SessionDrive::is_closed(&*engine),
+        "the handle's drop closes the session"
+    );
+}
+
 /// A peer that was told an id names it. A zenoh router sends a subscriber the samples it routes
 /// to it by the key expression the subscriber declared to it (the receiver's id space, `M=0`),
 /// not by the literal, and a session that cannot resolve the id drops the sample: the engine
@@ -1694,13 +1805,13 @@ fn a_sample_naming_an_id_the_session_declared_is_resolved_and_delivered() {
     let engine = open(&router);
 
     let id = engine
-        .acquire_keyexpr("demo/named".to_owned())
+        .acquire_keyexpr("demo/named")
         .expect("a key expression the link takes");
     let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let record = seen.clone();
     let declares_before = router.seen(|s| s.declares);
     engine.declare_subscriber_on_wire(
-        "demo/named".to_owned(),
+        "demo/named",
         WireKey::aliased(id, None),
         Locality::Any,
         None,
@@ -2019,6 +2130,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
+        None,
     )
     .err();
     assert_eq!(refused, Some(OpenError::NoEndpoint));
@@ -2060,6 +2172,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         &AllocatorMemory,
+        None,
     )
     .expect("a listener opens once it is bound");
     let handed_in = open_with(listener());
@@ -2119,6 +2232,7 @@ mod faces;
 mod get;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group;
+mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
 mod in_place;
@@ -2140,6 +2254,7 @@ mod program_clock;
 mod queryable;
 mod redial_wait;
 mod replay;
+mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",
     feature = "listen",

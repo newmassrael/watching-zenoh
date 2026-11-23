@@ -203,7 +203,7 @@ pub(crate) use zephyr_host::*;
 mod scouting {
     use core::net::{IpAddr, SocketAddr};
 
-    use wz_session_core::scouting_host::ScoutedHello;
+    use wz_session_core::scouting_host::{HelloRow, HelloTable, ScoutedHello};
 
     use wz_session_core::session_zid::SessionZid;
 
@@ -211,7 +211,7 @@ mod scouting {
 
     /// The group is asked from a socket of its family, IPv4 or IPv6, as the window binds it. The
     /// window is `budget_ms` of `clock`: the host's, or the time base the scout's config names.
-    /// Each datagram is read into a buffer of `rx_bytes`: zenoh-pico's multicast batch as the
+    /// Each datagram is read into `buffer`, the caller's: zenoh-pico's multicast batch as the
     /// scout's snapshot holds it, which is what its scout reads into.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_scout<C: wz_capi_coop::ClockSource + Clone>(
@@ -221,8 +221,9 @@ mod scouting {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
-        rx_bytes: usize,
-        on_hello: impl FnMut(&ScoutedHello),
+        table: &mut HelloTable,
+        buffer: &mut [u8],
+        on_hello: impl FnMut(&HelloRow),
     ) -> usize {
         wz_capi_coop::scout_datagram::run_scout::<Datagram, _>(
             clock,
@@ -230,11 +231,13 @@ mod scouting {
             what,
             zid,
             budget_ms,
-            rx_bytes,
+            table,
+            buffer,
             on_hello,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn scout_first<C: wz_capi_coop::ClockSource + Clone>(
         clock: &C,
         group: IpAddr,
@@ -242,7 +245,8 @@ mod scouting {
         what: u8,
         zid: Option<SessionZid>,
         budget_ms: u64,
-        rx_bytes: usize,
+        table: &mut HelloTable,
+        buffer: &mut [u8],
     ) -> Option<ScoutedHello> {
         wz_capi_coop::scout_datagram::scout_first::<Datagram, _>(
             clock,
@@ -250,7 +254,8 @@ mod scouting {
             what,
             zid,
             budget_ms,
-            rx_bytes,
+            table,
+            buffer,
         )
     }
 }

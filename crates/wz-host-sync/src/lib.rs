@@ -15,23 +15,26 @@
 //! its own condition again. That is the price of a lock with no system object of its own; a wake
 //! that finds its lock still held parks again.
 //!
-//! [`spawn`] starts a thread of the system, and [`current_thread`] names the calling thread by the
-//! number [`Thread::id`] gives the thread a spawn started. [`Parker`] is what one thread waits on
+//! [`spawn_fn`] starts a thread of the system, its body moved into a record of a pool of
+//! [`THREADS`] and not into memory of the heap, and [`current_thread`] names the calling thread by
+//! the number [`Thread::id`] gives the thread a spawn started. [`Parker`] is what one thread waits on
 //! until another wakes it, with or without a timeout on [`monotonic_ns`], the host's monotonic
 //! clock; a timed wait is on that clock, so a date set on the host moves no deadline.
 
 #![no_std]
 #![cfg(any(unix, windows))]
 
-// `spawn_fn` carries a closure to its thread on the heap; nothing else here allocates.
-extern crate alloc;
+// Nothing here allocates: a lock and a condition variable are a word of their owner's, and a
+// thread's body lies in a record of a static pool.
+
 #[cfg(test)]
 extern crate std;
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
+use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use core::time::Duration;
 
 #[cfg(unix)]
@@ -229,6 +232,15 @@ impl RawCondvar {
         lock.lock();
     }
 
+    /// [`Self::wait`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
+    /// `deadline_ns`: whether a notification came (false: the deadline came first).
+    ///
+    /// # Safety
+    /// The calling thread holds `lock`.
+    pub unsafe fn wait_until(&self, lock: &RawLock, deadline_ns: u64) -> bool {
+        raw_wait_until(self, lock, deadline_ns)
+    }
+
     /// Wake a waiting thread. Every waiter is woken, which the waiters' loops allow.
     pub fn notify_one(&self) {
         self.notify_all();
@@ -421,33 +433,138 @@ impl Instant {
     }
 }
 
-/// What a thread [`spawn`] starts runs: the first field of the starter's own record, which the new
-/// thread is handed, so the record is reached from it.
-#[repr(C)]
-pub struct ThreadStart {
-    /// Called once, on the new thread, with the record's address; it owns the record from then on.
-    pub run: unsafe fn(*mut ThreadStart),
+/// How many threads [`spawn_fn`] runs at once in the process: the records of its pool, each the
+/// place of one thread's body until it runs it and of the word that says it has ended. The
+/// engine's read task is one for each session that started it, and a reception supervisor's
+/// polling task one for each that polls on a task; a spawn past them is refused as a system that
+/// gives no thread is, which the C ABI answers with the code zenoh-pico's start of a task has for
+/// it. A Zephyr image sizes the same pool by `CONFIG_WZ_OS_THREADS`
+/// (`deploy/zephyr-common/Kconfig.wz`); a host's records are a few kilobytes of static memory
+/// whatever it runs, so the bound is a host's and not a program's statement. The stack is the
+/// system's, reserved by the thread's own creation as zenoh-pico's tasks' are
+/// (`vendor/zenoh-pico/src/system/windows/system.c` @
+/// `*task = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fun, arg, 0, NULL);`).
+pub const THREADS: usize = 64;
+
+/// The bytes a thread's body may take: a body is moved into its record whole, so one that does
+/// not fit is refused when it is compiled ([`spawn_fn`]). A multiple of eight.
+pub const BODY_BYTES: usize = 64;
+
+/// [`ThreadRecord::holders`]: the [`Thread`] that names the thread has not been joined or dropped.
+const HELD_BY_HANDLE: u8 = 1;
+/// [`ThreadRecord::holders`]: the thread's body has not returned.
+const HELD_BY_THREAD: u8 = 2;
+
+/// The room of a thread's body: [`BODY_BYTES`] aligned as a `u64` is, which is at least a
+/// pointer's alignment on every host.
+type BodyRoom = MaybeUninit<[u64; BODY_BYTES / 8]>;
+
+/// One thread's place in the pool: its body until the thread moves it out and runs it, and the
+/// word that says the body has returned. The thread reaches it through the one pointer its
+/// system's call hands it, so a thread takes no memory but its record and the stack the system
+/// gives it.
+struct ThreadRecord {
+    /// Which ends still hold the record ([`HELD_BY_HANDLE`], [`HELD_BY_THREAD`]); a record no end
+    /// holds is free. Each end lets go once, in either order, so a thread dropped unjoined gives
+    /// its record back when it ends and a joined one when it is joined.
+    holders: AtomicU8,
+    /// Set once the body has returned.
+    finished: AtomicBool,
+    /// Moves the body out of [`Self::room`] and runs it; written with it, before the thread
+    /// starts.
+    run: UnsafeCell<Option<unsafe fn(*mut u8)>>,
+    room: UnsafeCell<BodyRoom>,
 }
 
-/// Run what a spawn was handed: the one call every system's thread entry makes.
+// SAFETY: `run` and `room` are written by the one thread that took the record (`holders` from 0)
+// before the thread it starts reads them, the system's start of a thread ordering the two; the
+// rest are atomics.
+unsafe impl Sync for ThreadRecord {}
+
+impl ThreadRecord {
+    /// A record no end holds.
+    const fn new() -> Self {
+        Self {
+            holders: AtomicU8::new(0),
+            finished: AtomicBool::new(false),
+            run: UnsafeCell::new(None),
+            room: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    /// Let go of the record for `ends`. The release orders what the end did with the record
+    /// before the next spawn that takes it.
+    fn let_go(&self, ends: u8) {
+        self.holders.fetch_and(!ends, Ordering::AcqRel);
+    }
+}
+
+/// The process's pool of thread records.
+static RECORDS: [ThreadRecord; THREADS] = [const { ThreadRecord::new() }; THREADS];
+
+/// A record of `pool` no end holds, now held by both, its thread not yet finished; `None` when
+/// every record is held.
+fn take_record(pool: &'static [ThreadRecord]) -> Option<&'static ThreadRecord> {
+    let record = pool.iter().find(|record| {
+        record
+            .holders
+            .compare_exchange(
+                0,
+                HELD_BY_HANDLE | HELD_BY_THREAD,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    })?;
+    record.finished.store(false, Ordering::Relaxed);
+    Some(record)
+}
+
+/// What every system's thread entry calls with the pointer it was handed: run the body of the
+/// record, say it has ended, and let go of the record for the thread.
 ///
 /// # Safety
-/// `arg` is the record [`spawn`] was handed.
+/// `arg` is the record [`start`] started this thread with.
 unsafe fn enter(arg: *mut c_void) {
-    let start = arg.cast::<ThreadStart>();
-    ((*start).run)(start);
+    let record = &*arg.cast_const().cast::<ThreadRecord>();
+    if let Some(run) = *record.run.get() {
+        run(record.room.get().cast::<u8>());
+    }
+    record.finished.store(true, Ordering::Release);
+    record.let_go(HELD_BY_THREAD);
 }
 
-/// A thread [`spawn`] started, until it is joined. Dropped unjoined it is detached: it runs on, and
-/// the system lets it go when it ends.
+/// Moves the body of type `F` out of the room at `room` and runs it.
+///
+/// # Safety
+/// `room` holds an `F` that nothing else reads or drops.
+unsafe fn run_body<F: FnOnce()>(room: *mut u8) {
+    let body = room.cast::<F>().read();
+    body();
+}
+
+/// Start the thread of `record`, which holds its body and `run`: the thread, or `None` when the
+/// system gave none, the body then still in the record.
+///
+/// # Safety
+/// `record` was taken by [`take_record`] and its body and `run` written.
+unsafe fn start(record: &'static ThreadRecord) -> Option<Thread> {
+    let arg = core::ptr::from_ref(record).cast_mut().cast::<c_void>();
+    sys::spawn(arg).map(|(handle, id)| Thread { handle, id, record })
+}
+
+/// A thread [`spawn_fn`] started, until it is joined. Dropped unjoined it is detached: it runs on,
+/// and the system lets it go when it ends, and its record comes back to the pool then.
 pub struct Thread {
     handle: sys::Thread,
     id: usize,
+    record: &'static ThreadRecord,
 }
 
-// SAFETY: a thread of the system may be joined or detached from any other thread.
+// SAFETY: a thread of the system may be joined or detached from any other thread, and its record
+// is reached through atomics alone.
 unsafe impl Send for Thread {}
-// SAFETY: as for `Send`; a shared reference only reads the id.
+// SAFETY: as for `Send`; a shared reference reads the id and the record's word.
 unsafe impl Sync for Thread {}
 
 impl Thread {
@@ -456,64 +573,63 @@ impl Thread {
         self.id
     }
 
+    /// Whether the thread's body has returned, without waiting for it.
+    pub fn is_finished(&self) -> bool {
+        self.record.finished.load(Ordering::Acquire)
+    }
+
     /// Wait until the thread has ended.
     pub fn join(self) {
         let this = core::mem::ManuallyDrop::new(self);
         // SAFETY: the handle is a started thread's, joined once: `this` is never dropped.
-        unsafe { sys::join(this.handle) }
+        unsafe { sys::join(this.handle) };
+        this.record.let_go(HELD_BY_HANDLE);
     }
 }
 
 impl Drop for Thread {
     fn drop(&mut self) {
         // SAFETY: the handle is a started thread's that nothing has joined (`join` consumes it).
-        unsafe { sys::detach(self.handle) }
+        unsafe { sys::detach(self.handle) };
+        self.record.let_go(HELD_BY_HANDLE);
     }
 }
 
-/// Start a thread of the system that calls `run` of the record `start` points at with its
-/// address. `None` when the system gives no thread: the record is then still the caller's.
-///
-/// # Safety
-/// `start` points at a [`ThreadStart`] that stays valid until its `run` takes it, and `run` may be
-/// called on the new thread before this returns.
-pub unsafe fn spawn(start: *mut ThreadStart) -> Option<Thread> {
-    sys::spawn(start).map(|(handle, id)| Thread { handle, id })
+/// Run `body` on a thread of the system: the thread, or `None` when the pool has no free record
+/// ([`THREADS`]) or the system gave no thread, `body` then dropped here. Nothing is allocated:
+/// the body is moved into the record. A body larger than [`BODY_BYTES`] or aligned past a `u64`
+/// is refused when it is compiled.
+pub fn spawn_fn<F: FnOnce() + Send + 'static>(body: F) -> Option<Thread> {
+    spawn_in(&RECORDS, body)
 }
 
-/// Run `body` on a thread of the system: the thread, or `None` when the system gave none.
-pub fn spawn_fn(body: impl FnOnce() + Send + 'static) -> Option<Thread> {
-    use alloc::boxed::Box;
-
-    type Body = Box<dyn FnOnce() + Send + 'static>;
-
-    /// The record the thread is handed: the start first, so the thread reaches the rest from it.
-    #[repr(C)]
-    struct Boxed {
-        head: ThreadStart,
-        body: Body,
+/// [`spawn_fn`] on the records of `pool`. The part that depends on the body's type is the move
+/// into the room and the pointer to its run; taking a record and starting the thread are one
+/// function for every body.
+fn spawn_in<F: FnOnce() + Send + 'static>(
+    pool: &'static [ThreadRecord],
+    body: F,
+) -> Option<Thread> {
+    const {
+        assert!(
+            core::mem::size_of::<F>() <= BODY_BYTES
+                && core::mem::align_of::<F>() <= core::mem::align_of::<BodyRoom>(),
+            "a thread's body fits the room of its record"
+        );
     }
-
-    /// # Safety
-    /// `head` is the first field of the `Boxed` this function leaked for the thread.
-    unsafe fn run(head: *mut ThreadStart) {
-        let Boxed { body, .. } = *Box::from_raw(head.cast::<Boxed>());
-        body();
-    }
-
-    let record = Box::into_raw(Box::new(Boxed {
-        head: ThreadStart { run },
-        body: Box::new(body),
-    }));
-    // SAFETY: `run` takes the record back once, on the new thread; when no thread runs it is
-    // taken back here.
-    match unsafe { spawn(record.cast::<ThreadStart>()) } {
-        Some(thread) => Some(thread),
-        None => {
-            // SAFETY: as above: no thread took it.
-            drop(unsafe { Box::from_raw(record) });
-            None
+    let record = take_record(pool)?;
+    // SAFETY: the record was just taken, so nothing else reads or writes its room or its run; the
+    // room holds an `F` (asserted above), which the thread moves out once, or which is moved out
+    // here when no thread was started, before the record is let go.
+    unsafe {
+        record.room.get().cast::<F>().write(body);
+        record.run.get().write(Some(run_body::<F>));
+        let thread = start(record);
+        if thread.is_none() {
+            drop(record.room.get().cast::<F>().read());
+            record.let_go(HELD_BY_HANDLE | HELD_BY_THREAD);
         }
+        thread
     }
 }
 
@@ -639,33 +755,35 @@ mod tests {
         setter.join().expect("the setter ran");
     }
 
-    /// The record a test thread is started with.
-    #[repr(C)]
-    struct Record {
-        head: ThreadStart,
-        seen: Arc<AtomicUsize>,
-    }
-
-    /// The test thread's body: it waits a little, so a join that did not wait is seen, and writes
-    /// down which thread it runs on.
-    unsafe fn record_where_it_runs(head: *mut ThreadStart) {
-        let record = Box::from_raw(head.cast::<Record>());
-        std::thread::sleep(Duration::from_millis(20));
-        record.seen.store(current_thread(), Ordering::SeqCst);
-    }
-
+    /// A thread whose body waits a little, so a join that did not wait is seen, and writes down
+    /// which thread it runs on.
     fn start_recording(seen: &Arc<AtomicUsize>) -> Thread {
-        let record = Box::into_raw(Box::new(Record {
-            head: ThreadStart {
-                run: record_where_it_runs,
-            },
-            seen: seen.clone(),
-        }));
-        // SAFETY: the record is leaked to the thread, which takes it back in its body.
-        unsafe { spawn(record.cast::<ThreadStart>()) }.expect("a host gives a thread")
+        let seen = seen.clone();
+        spawn_fn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            seen.store(current_thread(), Ordering::SeqCst);
+        })
+        .expect("a host gives a thread")
     }
 
-    /// A spawned thread runs its record, names itself by the number its spawn gave, which is not
+    /// How many records of `pool` no end holds.
+    fn free_records(pool: &[ThreadRecord]) -> usize {
+        pool.iter()
+            .filter(|record| record.holders.load(Ordering::SeqCst) == 0)
+            .count()
+    }
+
+    /// A body that runs until `go` is set.
+    fn held_until(go: &Arc<AtomicBool>) -> impl FnOnce() + Send + 'static {
+        let go = go.clone();
+        move || {
+            while !go.load(Ordering::SeqCst) {
+                sleep_ms(1);
+            }
+        }
+    }
+
+    /// A spawned thread runs its body, names itself by the number its spawn gave, which is not
     /// the caller's and not 0, and a join returns after it has run.
     #[test]
     fn a_spawned_thread_runs_under_its_own_number_and_join_waits() {
@@ -814,6 +932,99 @@ mod tests {
         thread.join();
         assert_eq!(seen.load(Ordering::SeqCst), id);
         assert_ne!(id, current_thread());
+    }
+
+    /// A thread reads as running while its body runs and as finished once it has returned, before
+    /// it is joined. Turned red by a word never set, or set before the body ran.
+    #[test]
+    fn a_thread_reads_as_finished_only_once_its_body_has_returned() {
+        let go = Arc::new(AtomicBool::new(false));
+        let thread = spawn_fn(held_until(&go)).expect("a host gives a thread");
+        sleep_ms(20);
+        assert!(!thread.is_finished(), "the body still runs");
+        go.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        while !thread.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the thread never read as finished"
+            );
+            sleep_ms(1);
+        }
+        thread.join();
+    }
+
+    /// A pool whose records are all held gives no thread and drops the body it was handed; a
+    /// joined thread gives its record back at the join, a thread dropped unjoined when its body
+    /// returns, and the records are taken again. CONTROL: both records are free before the first
+    /// spawn.
+    #[test]
+    fn a_full_pool_refuses_a_thread_and_its_records_come_back() {
+        static POOL: [ThreadRecord; 2] = [const { ThreadRecord::new() }; 2];
+        assert_eq!(free_records(&POOL), 2, "CONTROL: no record is held");
+        let go = Arc::new(AtomicBool::new(false));
+        let joined = spawn_in(&POOL, held_until(&go)).expect("a free record");
+        let detached = spawn_in(&POOL, held_until(&go)).expect("a free record");
+        assert_eq!(free_records(&POOL), 0);
+        let witness = Arc::new(());
+        let refused = {
+            let witness = witness.clone();
+            spawn_in(&POOL, move || drop(witness))
+        };
+        assert!(
+            refused.is_none(),
+            "a pool with no free record gives no thread"
+        );
+        assert_eq!(
+            Arc::strong_count(&witness),
+            1,
+            "the refused body was dropped"
+        );
+        drop(detached);
+        go.store(true, Ordering::SeqCst);
+        joined.join();
+        let started = Instant::now();
+        while free_records(&POOL) < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the detached thread never gave its record back"
+            );
+            sleep_ms(1);
+        }
+        let seen = Arc::new(AtomicUsize::new(0));
+        let again = {
+            let seen = seen.clone();
+            spawn_in(&POOL, move || {
+                seen.store(current_thread(), Ordering::SeqCst)
+            })
+        }
+        .expect("a record given back is taken again");
+        let id = again.id();
+        again.join();
+        assert_eq!(seen.load(Ordering::SeqCst), id);
+        assert_eq!(free_records(&POOL), 2);
+    }
+
+    /// A body as large as the room reaches its thread whole: every byte it was made with. Turned
+    /// red by a room that keeps less than `BODY_BYTES` or a move that copies less.
+    #[test]
+    fn a_body_as_large_as_the_room_reaches_its_thread_whole() {
+        const FILL: usize = BODY_BYTES - core::mem::size_of::<usize>();
+        let mut bytes = [0u8; FILL];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = i as u8 + 1;
+        }
+        let seen = Arc::new(AtomicUsize::new(0));
+        let thread = {
+            let seen = seen.clone();
+            spawn_fn(move || {
+                let sum = bytes.iter().map(|byte| usize::from(*byte)).sum();
+                seen.store(sum, Ordering::SeqCst);
+            })
+        }
+        .expect("a host gives a thread");
+        thread.join();
+        assert_eq!(seen.load(Ordering::SeqCst), FILL * (FILL + 1) / 2);
     }
 
     /// The wall clock reads the date the standard library reads, within a second.

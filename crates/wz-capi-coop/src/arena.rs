@@ -11,21 +11,29 @@
 //!
 //! - the application's tables, once for the session: its subscribers (`MAX_SUBSCRIPTIONS`), with
 //!   `queryable` its queryables (`MAX_QUERYABLES`), with `liveliness` its tokens
-//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`);
+//!   (`MAX_LOCAL_TOKENS`) and its liveliness subscribers (`MAX_LIVELINESS_SUBSCRIPTIONS`), and
+//!   the lists of the watchers of what a peer declares, two for each plane that has them
+//!   (`MAX_DECL_OBSERVERS` rows each), one row of their spans;
 //! - one table of the gets pending on a face (`MAX_PENDING_QUERIES`, and with `liveliness-get`
 //!   `MAX_PENDING_LIVELINESS_GETS`) for each face the session may hold at once, which a face
 //!   takes when it comes and gives back when it goes, and with `local-queryable` one of those
 //!   pending on the session's own queryables, which no face holds ([`GetTables`]), and with
 //!   `query` a row for the end of each get those tables hold, waiting for its delivery;
-//! - one table of what a face's peer writes and is owed for each face the session may hold at once,
-//!   taken and given back as the face's gets are ([`FacePeers`]): its subscriber interests
-//!   (`MAX_INBOUND_SUB_INTERESTS`), the answers staged back to them and to its liveliness
-//!   interests (`MAX_PENDING_DECLARES`), the replies staged for its queries
-//!   (`MAX_PENDING_REPLIES`, each with a key and a payload of `MAX_KEYEXPR_BYTES` and
-//!   `MAX_REPLY_PAYLOAD_BYTES`) and the `Final`s owed after them (`MAX_PENDING_FINALS`), the
-//!   replies and `Final`s none in a build without `queryable`. What a peer declares by its own
-//!   ids is held inline in the table, at the build's capacities, each row the place of its key in
-//!   the key arena below;
+//! - one table of what a face's peer is owed for each face the session may hold at once, taken
+//!   and given back as the face's gets are ([`FacePeers`]): the answers staged back to its
+//!   interests and to its liveliness interests (`MAX_PENDING_DECLARES`) and the `Final`s owed to
+//!   its queries (`MAX_PENDING_FINALS`, none in a build without `queryable`). Its reply stage is
+//!   lent no row: the engine's queryable answers into a stage of its own (`peer_rows`);
+//! - one pool of each kind of row a peer writes by its own choice, which every face's tables share
+//!   ([`PeerPoolRows`]): its aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`), its subscribers,
+//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and its subscriber
+//!   interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the fewer of the session's value of its
+//!   limit and what the faces could hold at the bound of each peer (`MAX_PEER_KEYEXPR_ALIASES`,
+//!   `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row the place of its key in the key
+//!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
+//!   takes each from its heap as it comes. A session of one face shares with no one: its tables
+//!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
+//!   link and no pool state;
 //! - the buffers of each link the session may hold: a receive buffer of the batch the session
 //!   advertises, a streamed batch's length counted inside it, and [`LINK_TX_SLOTS`] slots of that
 //!   length to encode its frames into, each table with the flags that say which buffers are lent
@@ -52,7 +60,9 @@
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
 //!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the
 //!   tables that keep their keys in it. A peer's key that finds no room there is dropped and
-//!   counted, as zenoh-pico drops a declaration its heap cannot hold.
+//!   counted, as zenoh-pico drops a declaration its heap cannot hold;
+//! - with [`ArenaPlan::holding`], the place the ABI keeps its own handle of the session in, last,
+//!   so the handle is reserved with the session and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
 //! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
@@ -60,10 +70,14 @@
 //! never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
-//! as `max_faces` admits, each a link it attaches or accepts; one that listens holds as many again
-//! in their handshake as `accept_pending` admits. A group's face is no link of the session's: it
-//! has a row of gets and no buffers. These are the tables whose limits bind at the open
-//! (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
+//! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
+//! (`Core::accept_face` counts it against `max_faces`): the plan lends a set of a face's tables for
+//! each of those and no more. One that listens holds the buffers of as many links again as
+//! `accept_pending` admits. The config's two numbers are held to the session's `MAX_FACES` and
+//! `MAX_ACCEPT_PENDING` under the build's, which [`admitted_faces`] and [`admitted_handshakes`]
+//! give an ABI to state, and a config over either is refused. A group's face is no link of the
+//! session's: it has a set of tables and no buffers. These are the tables whose limits bind at the
+//! open (`binding_fixed = "open"`). What a group's members rejoin joins the plan with the unit that
 //! lends it from the arena and bounds it by limits of its own (`docs/c-abi-no-heap-pools.md`,
 //! section 4.14): reserved before then, it would be memory nothing uses.
 //!
@@ -90,13 +104,13 @@ use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
-use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerRows, PeerTables};
+use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
-use wz_session_core::reply_stage::ReplyStage;
+use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::sink::BoxedSink;
-use wz_session_core::slot_observer::{RequesterRows, Requesters};
+use wz_session_core::slot_observer::{HeapSinks, RequesterRows, Requesters, SlotObserverOf};
 
 use crate::engine::EntryBytes;
 use crate::CoopConfig;
@@ -129,8 +143,9 @@ impl ArenaRow {
     }
 }
 
-/// The most rows a plan holds: every row of the build with every feature.
-pub const ARENA_ROWS: usize = 24;
+/// The most rows a plan holds: every row of the build with every feature, and the two of the ABI's
+/// handle ([`ArenaPlan::holding`]).
+pub const ARENA_ROWS: usize = 30;
 
 /// The slots each link is lent to encode its frames into: one, as zenoh-pico keeps one write buffer
 /// (`vendor/zenoh-pico/src/transport/common/tx.c` @
@@ -224,13 +239,15 @@ type FaceGets = Requesters<ConsolidatingSink<BoxedReplySink>, BoxedReplySink, Le
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
-/// once.
+/// once; and how many rows each pool the faces' tables share holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FacePeers {
     /// The rows of each table of one face's.
     pub rows: PeerRows,
     /// How many faces' tables.
     pub tables: usize,
+    /// The rows of each pool of what the faces' peers write, which the faces share.
+    pub pools: PeerPoolRows,
 }
 
 impl EntityRows {
@@ -270,12 +287,23 @@ pub struct ArenaPlan {
     held_queries: usize,
     /// The bytes of blocks of the key arena (`KEY_ARENA_BYTES`).
     key_bytes: usize,
+    /// The bytes of the place the ABI keeps its handle of the session in, none for no place
+    /// ([`Self::holding`]).
+    handle_bytes: usize,
 }
 
 impl ArenaPlan {
     /// The rows of a session `config` opens under `limits` (see the module). Refused when a limit
     /// is over the build's value or the arena is past the address space.
     pub fn of(config: &CoopConfig, limits: &SessionLimits) -> Result<Self, ArenaRefused> {
+        hold("MAX_FACES", config.max_faces, admitted_faces(limits)?)?;
+        if !config.listen.is_empty() {
+            hold(
+                "MAX_ACCEPT_PENDING",
+                config.accept_pending,
+                admitted_handshakes(limits)?,
+            )?;
+        }
         let links = links_of(config).ok_or(ArenaRefused::TooLarge)?;
         // A buffer and a slot of the batch hold a whole batch of either link: a stream link's
         // length is counted inside the batch it negotiates (`STREAM_BATCH_LENGTH_BYTES`).
@@ -305,6 +333,7 @@ impl ArenaPlan {
                 "KEY_ARENA_BYTES",
                 Quota::at_most(limits.key_arena_bytes()),
             )?,
+            handle_bytes: 0,
         };
         let faces = faces_of(config).ok_or(ArenaRefused::TooLarge)?;
         // The links' rows are lent when the session opens, in this order (`SessionArena::lend_links`).
@@ -391,6 +420,19 @@ impl ArenaPlan {
                 >::ROW_BYTES,
             );
         }
+        // The watchers' lists of the application's observer, lent with its tables
+        // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
+        let watchers = lent::<{ caps::MAX_DECL_OBSERVERS }>(
+            "MAX_DECL_OBSERVERS",
+            limits.max_decl_observers(),
+        )?;
+        plan.put(
+            "declaration watchers",
+            "MAX_DECL_OBSERVERS",
+            1,
+            SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(watchers)
+                .ok_or(ArenaRefused::TooLarge)?,
+        );
         plan.gets = GetTables {
             rows: RequesterRows {
                 queries: lent::<{ caps::MAX_PENDING_QUERIES }>(
@@ -425,18 +467,39 @@ impl ArenaPlan {
             plan.gets.legs().ok_or(ArenaRefused::TooLarge)?,
             core::mem::size_of::<u64>(),
         );
-        // A row of tables, each what one face's peer writes and is owed: a face takes one whole.
+        // A row of tables, each what one face's peer is owed: a face takes one whole. What the
+        // peers write by their own choice lies in pools the faces share, one area each.
         plan.peers = FacePeers {
             rows: peer_rows(limits)?,
             tables: faces,
+            pools: pool_rows(limits, faces)?,
         };
         plan.put(
             "peer tables",
-            "MAX_INBOUND_SUB_INTERESTS + MAX_PENDING_DECLARES + MAX_PENDING_REPLIES + \
-             MAX_PENDING_FINALS",
+            "MAX_PENDING_DECLARES + MAX_PENDING_FINALS",
             plan.peers.tables,
             PeerTables::<Lent>::arena_bytes(plan.peers.rows).ok_or(ArenaRefused::TooLarge)?,
         );
+        // Each kind one area: a pool the faces share, or for a session of one face a span of its
+        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
+        if SHARES_ROWS {
+            let pools = plan.peers.pools;
+            for (part, kind, bytes) in [
+                ("peer alias pool", &POOL_LIMITS[0], pools.alias_bytes()),
+                (
+                    "peer declaration pools",
+                    &POOL_LIMITS[1],
+                    pools.decl_bytes(),
+                ),
+                (
+                    "peer interest pool",
+                    &POOL_LIMITS[2],
+                    pools.interest_bytes(),
+                ),
+            ] {
+                plan.put(part, kind.session, 1, bytes.ok_or(ArenaRefused::TooLarge)?);
+            }
+        }
         plan.held_queries = if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
@@ -562,6 +625,30 @@ impl ArenaPlan {
         self.len += 1;
     }
 
+    /// The plan with a place for the ABI's own handle of the session, of `handle`'s layout, lent
+    /// after every other row: the handle then takes no memory of its own, and an open whose arena
+    /// cannot hold it reserves nothing, as for any other row. A handle of no bytes takes no place.
+    /// Refused as past the address space when the handle asks for more alignment than a span of
+    /// the arena starts on ([`ARENA_ALIGN`]), or the arena with it is.
+    pub fn holding(mut self, handle: Layout) -> Result<Self, ArenaRefused> {
+        if handle.align() > ARENA_ALIGN {
+            return Err(ArenaRefused::TooLarge);
+        }
+        if handle.size() == 0 || self.handle_bytes != 0 {
+            return Ok(self);
+        }
+        self.handle_bytes = handle.size();
+        self.put("session handle flag", "", 1, LentByteCells::FLAG_BYTES);
+        self.put("session handle", "", 1, handle.size());
+        self.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        Ok(self)
+    }
+
+    /// The bytes of the place the plan holds for the ABI's handle, `0` for none.
+    pub fn handle_bytes(&self) -> usize {
+        self.handle_bytes
+    }
+
     /// The rows, in the order they are lent.
     pub fn rows(&self) -> &[ArenaRow] {
         &self.rows[..self.len]
@@ -579,9 +666,17 @@ impl ArenaPlan {
 /// into its limits at the open, under `CEILING`, the build's value of the limit, which is the
 /// capacity the build gives the table's type (a `BoundedVec<T, CEILING, Lent>` is lent at most
 /// that many rows): the build sizes the storage and the snapshot chooses within it.
+#[inline]
 fn lent<const CEILING: usize>(limit: &'static str, value: Quota) -> Result<usize, ArenaRefused> {
+    lent_under(limit, value, CEILING)
+}
+
+/// [`lent`] with the build's value a value: one body for every limit, the ceiling a const of the
+/// caller's alone.
+#[inline(never)]
+fn lent_under(limit: &'static str, value: Quota, ceiling: usize) -> Result<usize, ArenaRefused> {
     value
-        .lent_under(Quota::at_most(CEILING))
+        .lent_under(Quota::at_most(ceiling))
         .map_err(|why| ArenaRefused::Limit { limit, why })
 }
 
@@ -645,39 +740,134 @@ fn entity_rows(limits: &SessionLimits) -> Result<EntityRows, ArenaRefused> {
     })
 }
 
-/// The rows of each table of what one face's peer writes and is owed, under `limits`. The replies'
-/// area holds as many replies as the stage has rows, each of the longest key and payload the
-/// session admits, as the build's stage holds them at the build's values.
+/// The rows of each kind of what the peers of a session of `faces` faces write, under `limits`.
+///
+/// A session of many faces lends a pool of each kind the faces share: the session's value of the
+/// kind's limit under the build's, and no more than the faces could hold together, each at the
+/// bound of one peer the session resolved. A session of one face has no one to share with: its
+/// tables take spans of their own of that face's bounds, with no link and no pool state, as many
+/// rows as its inline tables held (and fewer where the session's limit is lower).
+///
+/// A pool or a span names its rows by `u16`, so a count past [`MAX_POOL_ROWS`] refuses the open
+/// by the limit that set it: the session's limit for a pool, the face's for a span. Refused too
+/// when a limit is over the build's value.
+fn pool_rows(limits: &SessionLimits, faces: usize) -> Result<PeerPoolRows, ArenaRefused> {
+    if !SHARES_ROWS {
+        // A build whose faces keep what their peers write inline lends no pool and no span.
+        return Ok(PeerPoolRows::default());
+    }
+    let mut rows = [0; POOL_LIMITS.len()];
+    for (kind, held) in POOL_LIMITS.iter().zip(&mut rows) {
+        let face = lent_under(kind.face, (kind.face_of)(limits), kind.face_ceiling)?;
+        let session = lent_under(
+            kind.session,
+            (kind.session_of)(limits),
+            kind.session_ceiling,
+        )?;
+        *held = kind_rows(faces, (kind.face, face), (kind.session, session))?;
+    }
+    let [aliases, remote_decls, interests] = rows;
+    Ok(PeerPoolRows {
+        aliases,
+        remote_decls,
+        interests,
+        shared: faces > 1,
+    })
+}
+
+/// The two limits that bound one kind of what the peers of a session write: one face's, and all
+/// the faces' together, each by its id, the build's value of it and how a snapshot reads it.
+struct PoolLimit {
+    face: &'static str,
+    face_ceiling: usize,
+    face_of: fn(&SessionLimits) -> Quota,
+    session: &'static str,
+    session_ceiling: usize,
+    session_of: fn(&SessionLimits) -> Quota,
+}
+
+/// The kinds [`pool_rows`] resolves, in the order of [`PeerPoolRows`]'s fields: the aliases, the
+/// declarations of one kind and the interests. One table, so the three are resolved by one body.
+const POOL_LIMITS: [PoolLimit; 3] = [
+    PoolLimit {
+        face: "MAX_PEER_KEYEXPR_ALIASES",
+        face_ceiling: caps::MAX_PEER_KEYEXPR_ALIASES,
+        face_of: SessionLimits::max_peer_keyexpr_aliases,
+        session: "SESSION_MAX_PEER_KEYEXPR_ALIASES",
+        session_ceiling: caps::SESSION_MAX_PEER_KEYEXPR_ALIASES,
+        session_of: SessionLimits::session_max_peer_keyexpr_aliases,
+    },
+    PoolLimit {
+        face: "MAX_REMOTE_DECLS",
+        face_ceiling: caps::MAX_REMOTE_DECLS,
+        face_of: SessionLimits::max_remote_decls,
+        session: "SESSION_MAX_REMOTE_DECLS",
+        session_ceiling: caps::SESSION_MAX_REMOTE_DECLS,
+        session_of: SessionLimits::session_max_remote_decls,
+    },
+    PoolLimit {
+        face: "MAX_INBOUND_SUB_INTERESTS",
+        face_ceiling: caps::MAX_INBOUND_SUB_INTERESTS,
+        face_of: SessionLimits::max_inbound_sub_interests,
+        session: "SESSION_MAX_INBOUND_SUB_INTERESTS",
+        session_ceiling: caps::SESSION_MAX_INBOUND_SUB_INTERESTS,
+        session_of: SessionLimits::session_max_inbound_sub_interests,
+    },
+];
+
+/// The rows of one kind of what the peers of a session of `faces` faces write: the fewer of the
+/// session's limit and the faces' bounds together, `face` and `session` each a limit's id and the
+/// value the open resolved of it. Refused, by the id of the limit that set the count, past the
+/// most rows a pool or a span names ([`MAX_POOL_ROWS`]): a session's limit for a session of many
+/// faces, the face's for one of one face, unless the session's is the lower.
+pub(crate) fn kind_rows(
+    faces: usize,
+    face: (&'static str, usize),
+    session: (&'static str, usize),
+) -> Result<usize, ArenaRefused> {
+    let all = face.1.saturating_mul(faces);
+    let (limit, rows) = if session.1 < all {
+        session
+    } else if faces > 1 {
+        (session.0, all)
+    } else {
+        face
+    };
+    if rows > MAX_POOL_ROWS {
+        return Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: rows,
+                ceiling: MAX_POOL_ROWS,
+            },
+        });
+    }
+    Ok(rows)
+}
+
+/// The rows of each table of what one face's peer is owed, under `limits`.
+///
+/// The face's reply stage is lent no row. This engine's queryable answers outside the session's
+/// lock into a stage of its own, held to the same limits (the engine's `answer`): the sink it
+/// registers copies the query out and leaves the responder the dispatch hands it over the face's
+/// stage unwritten, so rows lent there would be memory nothing reads. A reply staged there anyway
+/// is refused and counted as one past a full stage is. The reply limits are still held to the
+/// build's here, so a value over it refuses the open by its name as before.
 fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
-    let replies = if cfg!(feature = "queryable") {
-        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?
-    } else {
-        0
-    };
-    let reply_bytes = if replies == 0 {
-        0
-    } else {
-        ReplyStage::<Lent>::area_bytes(
-            replies,
-            lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
-                "MAX_REPLY_PAYLOAD_BYTES",
-                limits.max_reply_payload_bytes(),
-            )?,
-            lent::<{ caps::MAX_KEYEXPR_BYTES }>("MAX_KEYEXPR_BYTES", limits.max_keyexpr_bytes())?,
-        )
-        .ok_or(ArenaRefused::TooLarge)?
-    };
+    if cfg!(feature = "queryable") {
+        lent::<{ caps::MAX_PENDING_REPLIES }>("MAX_PENDING_REPLIES", limits.max_pending_replies())?;
+        lent::<{ caps::MAX_REPLY_PAYLOAD_BYTES }>(
+            "MAX_REPLY_PAYLOAD_BYTES",
+            limits.max_reply_payload_bytes(),
+        )?;
+    }
     Ok(PeerRows {
-        sub_interests: lent::<{ caps::MAX_INBOUND_SUB_INTERESTS }>(
-            "MAX_INBOUND_SUB_INTERESTS",
-            limits.max_inbound_sub_interests(),
-        )?,
         pending_declares: lent::<{ caps::MAX_PENDING_DECLARES }>(
             "MAX_PENDING_DECLARES",
             limits.max_pending_declares(),
         )?,
-        replies,
-        reply_bytes,
+        replies: 0,
+        reply_bytes: 0,
         finals: if cfg!(feature = "queryable") {
             lent::<{ caps::MAX_PENDING_FINALS }>("MAX_PENDING_FINALS", limits.max_pending_finals())?
         } else {
@@ -686,21 +876,57 @@ fn peer_rows(limits: &SessionLimits) -> Result<PeerRows, ArenaRefused> {
     })
 }
 
+/// The faces besides the dial role's that `limits` admit: the session's `MAX_FACES`, under the
+/// build's. What an ABI states as [`CoopConfig::max_faces`] for a session that takes faces besides
+/// its dial, which [`ArenaPlan::of`] holds the config to. Refused when the session's value is over
+/// the build's.
+pub fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_FACES }>("MAX_FACES", limits.max_faces())
+}
+
+/// The inbound links in their handshake at once that `limits` admit: the session's
+/// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as
+/// [`CoopConfig::accept_pending`], which [`ArenaPlan::of`] holds the config of a session that
+/// listens to. Refused when the session's value is over the build's.
+pub fn admitted_handshakes(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::MAX_ACCEPT_PENDING }>("MAX_ACCEPT_PENDING", limits.max_accept_pending())
+}
+
+/// `asked`, what a session's config states of the limit `limit`, held to `admitted`, the session's
+/// value of it under the build's: a config over it is refused, as a stage after the build only
+/// lowers the memory the build fixes.
+fn hold(limit: &'static str, asked: usize, admitted: usize) -> Result<(), ArenaRefused> {
+    if asked > admitted {
+        return Err(ArenaRefused::Limit {
+            limit,
+            why: UnlentRows::OverCeiling {
+                value: asked,
+                ceiling: admitted,
+            },
+        });
+    }
+    Ok(())
+}
+
 /// `count` items for each of `each` holders.
 fn times(each: usize, count: usize) -> Result<usize, ArenaRefused> {
     each.checked_mul(count).ok_or(ArenaRefused::TooLarge)
 }
 
-/// The faces a session `config` opens may hold at once: its links ([`links_of`]) and one for each
-/// group it joins. `None` past the address space.
+/// The faces a session `config` opens may hold at once: the dial role's, as many besides as
+/// `max_faces` admits, a link still in its handshake among them, and one for each group it joins.
+/// `None` past the address space.
 fn faces_of(config: &CoopConfig) -> Option<usize> {
-    links_of(config)?.checked_add(config.groups.len())
+    1usize
+        .checked_add(config.max_faces)?
+        .checked_add(config.groups.len())
 }
 
 /// The links a session `config` opens may hold at once: the dial role's, as many besides as
 /// `max_faces` admits (each a link it attaches or accepts), and for a listener as many in their
-/// handshake as `accept_pending` admits. `None` past the address space.
-fn links_of(config: &CoopConfig) -> Option<usize> {
+/// handshake as `accept_pending` admits. `None` past the address space. The runtime's task cells
+/// are reserved for as many (`engine::RuntimeTables`), a link's session being one task.
+pub(crate) fn links_of(config: &CoopConfig) -> Option<usize> {
     let handshakes = if config.listen.is_empty() {
         0
     } else {
@@ -740,6 +966,36 @@ impl ArenaMemory for AllocatorMemory {
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
         // SAFETY: the caller's contract: the allocator gave `base` for `layout`, given back once.
         unsafe { alloc::alloc::dealloc(base.as_ptr(), layout) }
+    }
+}
+
+/// The place a session's arena lends the ABI's handle of the session in
+/// ([`ArenaPlan::holding`]): `bytes` bytes aligned to [`ARENA_ALIGN`], zeroed at the open, which
+/// the engine never reads or writes. It stands while the engine does, so whatever the ABI keeps
+/// there must not keep the engine past its own drop: the ABI moves its handle out before it lets
+/// the handle go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandlePlace {
+    base: NonNull<u8>,
+    bytes: usize,
+}
+
+// SAFETY: a place is an address in the session's arena and its length; the engine never touches
+// the bytes, and the ABI that writes them keeps its own rule for who may, so handing the address to
+// another thread shares nothing.
+unsafe impl Send for HandlePlace {}
+// SAFETY: as for `Send`: the place itself is read only as an address.
+unsafe impl Sync for HandlePlace {}
+
+impl HandlePlace {
+    /// Where the place starts, aligned to [`ARENA_ALIGN`].
+    pub fn as_ptr(&self) -> NonNull<u8> {
+        self.base
+    }
+
+    /// How many bytes it holds: at least the size of the layout the plan was given.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -843,11 +1099,45 @@ impl SessionArena {
     }
 
     /// Lend the key arena `plan` lays out: the area every keyed row of the session keeps its key
-    /// in, for the session's life. Refused only by an arena reserved by another plan.
-    pub(crate) fn lend_keys(&mut self, plan: &ArenaPlan) -> Result<KeySpace, ArenaRefused> {
+    /// in, for the session's life, each key at most `longest` bytes, the session's
+    /// `MAX_KEYEXPR_BYTES`. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_keys(
+        &mut self,
+        plan: &ArenaPlan,
+        longest: MaxKeyexprBytesHeld,
+    ) -> Result<KeySpace, ArenaRefused> {
         self.arena
-            .lend_keys(plan.key_bytes)
+            .lend_keys(plan.key_bytes, longest)
             .map_err(ArenaRefused::Lend)
+    }
+
+    /// Lend the place for the ABI's handle `plan` holds, its last row: held by the handle for the
+    /// session's life and never given back to the arena, as the lane's area is not. `None` for a
+    /// plan with no place. Refused only by an arena reserved by another plan.
+    pub(crate) fn lend_handle(
+        &mut self,
+        plan: &ArenaPlan,
+    ) -> Result<Option<HandlePlace>, ArenaRefused> {
+        if plan.handle_bytes == 0 {
+            return Ok(None);
+        }
+        let cells = self
+            .arena
+            .lend_byte_cells(plan.handle_bytes, 1)
+            .map_err(ArenaRefused::Lend)?;
+        let refused = ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(plan.handle_bytes),
+            left: 0,
+        });
+        let buffer = cells.claim().ok_or(refused)?;
+        let (base, bytes) = buffer.raw();
+        // As the lane's: the claim is held for the session's life, and a buffer dropped then would
+        // write its cell's flag into an arena given back before it.
+        core::mem::forget(buffer);
+        Ok(Some(HandlePlace {
+            base: NonNull::new(base).ok_or(refused)?,
+            bytes,
+        }))
     }
 
     /// Lend a table of `rows` rows, at most `N`, from the arena: the next span of it. Refused,

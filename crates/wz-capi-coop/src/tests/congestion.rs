@@ -527,7 +527,7 @@ mod stalled_link {
         let heard = Arc::new(AtomicUsize::new(0));
         let into = Arc::clone(&heard);
         reading.declare_subscriber_on_wire(
-            "demo/beside".to_owned(),
+            "demo/beside",
             WireKey::literal(),
             Locality::Any,
             None,

@@ -35,7 +35,11 @@
 //   perf_probe pub sent=<puts that returned 0> failed=<n> elapsed_ns=<..> cpu_ns=<process CPU over the loop>
 //     start_ns=<..> end_ns=<..> batch_cycles=<windows opened, 0 without -b>
 //     lost_match_ns=<when the publisher was first seen to match nothing, 0 for never> matched_at_end=<1|0|-1>
-//     peers_at_end=<n>
+//     peers_at_end=<n> end_marks=<end markers whose put returned 0>
+//
+// Before that line pub puts an END MARKER on perf/end, three times 50 ms apart (a datagram transport may lose
+// one), whose first eight bytes are its count of puts that returned 0; after it pub keeps its session until it
+// is told to stop, so nothing it sent is cut off by its close while the subscriber still reads it.
 //
 // sub counts what it is handed; from its first sample it waits WARMUP_MS, then reads the count, the payload
 // bytes and its process CPU at the start and the end of a WINDOW_S window, and prints
@@ -46,8 +50,14 @@
 // Every time is CLOCK_MONOTONIC, which both processes read on the one host, so the reader can tell whether
 // the subscriber's window lay inside the publisher's loop, and when one side stopped.
 //
-// then keeps its session until SIGTERM, so the publisher never puts into a peer that has gone, and prints
-// `perf_probe sub total=<n> last_growth_ns=<..> peers=<n>` on its way out: the last time its count was seen
+// then keeps its session until SIGTERM, so the publisher never puts into a peer that has gone. When the first end
+// marker reaches it, sub prints
+//
+//   perf_probe sub end pub_sent=<the count the marker carries> received_before_end=<samples handed to it then>
+//
+// which on a stream is every put the publisher's library sent before the marker, since the marker follows them
+// on the same link; a put that returned 0 and is not among them was not sent. On its way out sub prints
+// `perf_probe sub total=<n> last_growth_ns=<..> peers=<n>`: the last time its count was seen
 // to grow (looked at every 10 ms) and the peers it lists then. The count is taken by the callback alone (two
 // relaxed atomic additions); the window and the growth are read by the main thread, so no clock is read per
 // sample.
@@ -133,6 +143,9 @@
 #define KEY_PONG "perf/pong"
 #define KEY_STOP "perf/stop"
 #define KEY_THR "perf/thr"
+#define KEY_END "perf/end"
+#define END_MARKS 3
+#define END_GAP_MS 50
 #define SEQ_BYTES 8
 #define PEER_WAIT_MS 10000
 #define SUB_PREPARE_MS 1000
@@ -660,7 +673,7 @@ static int wait_for_peer(const z_loaned_session_t *session) {
 }
 
 // The publishers a role declares, dropped by main after the session is closed: a callback that answers
-// on one (pong) can then never run against a publisher already gone.
+// on one (pong) can then never run against a publisher already gone. ping and pub declare two each.
 #define MAX_PUBLISHERS 2
 static z_owned_publisher_t publishers[MAX_PUBLISHERS];
 static int publisher_count = 0;
@@ -935,6 +948,32 @@ static void on_thr(z_loaned_sample_t *sample, void *context) {
     atomic_fetch_add_explicit(&received_count, 1, memory_order_relaxed);
 }
 
+// The first end marker: the publisher's count it carries and the samples handed to this subscriber before it,
+// read in the callback that hands the marker on, which runs after those of the samples before it. The main
+// thread reads them once `end_seen` is set.
+static _Atomic int end_claimed;
+static _Atomic int end_seen;
+static uint64_t end_pub_sent;
+static uint64_t end_received;
+
+static void on_end(z_loaned_sample_t *sample, void *context) {
+    (void)context;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&end_claimed, &expected, 1)) return;
+    end_received = atomic_load(&received_count);
+    end_pub_sent = sequence_of(sample);
+    atomic_store_explicit(&end_seen, 1, memory_order_release);
+}
+
+// The end marker's line, printed once, when the first marker has arrived.
+static void report_end(int *reported) {
+    if (*reported || !atomic_load_explicit(&end_seen, memory_order_acquire)) return;
+    *reported = 1;
+    printf("perf_probe sub end pub_sent=%llu received_before_end=%llu\n", (unsigned long long)end_pub_sent,
+           (unsigned long long)end_received);
+    fflush(stdout);
+}
+
 // The count the main thread last saw and when it last saw it grow: a delivery that stops is told from
 // one that never started, at the cost of a look every 10 ms and none per sample.
 static uint64_t watched_count;
@@ -955,8 +994,10 @@ static void watch_for(unsigned ms) {
 }
 
 static int run_sub(const z_loaned_session_t *session, const struct options *o) {
-    if (declare_subscriber(session, KEY_THR, on_thr, NULL) != 0) {
-        printf("perf_probe sub: unable to declare the subscriber\n");
+    // The marker's subscriber first, so its declaration reaches the publisher before the one it waits on.
+    if (declare_subscriber(session, KEY_END, on_end, NULL) != 0 ||
+        declare_subscriber(session, KEY_THR, on_thr, NULL) != 0) {
+        printf("perf_probe sub: unable to declare the subscribers\n");
         return 1;
     }
     // The first sample starts the clock; a publisher that never came leaves no window to print.
@@ -978,7 +1019,11 @@ static int run_sub(const z_loaned_session_t *session, const struct options *o) {
             fflush(stdout);
         }
     }
-    while (!terminated) watch_for(10);
+    int reported = 0;
+    while (!terminated) {
+        watch_for(10);
+        report_end(&reported);
+    }
     printf("perf_probe sub total=%llu last_growth_ns=%llu peers=%d\n",
            (unsigned long long)atomic_load(&received_count), (unsigned long long)last_growth_ns,
            peer_count(session));
@@ -990,9 +1035,37 @@ static int run_sub(const z_loaned_session_t *session, const struct options *o) {
 // pub
 // ---------------------------------------------------------------------------------------------------------
 
+// Put the end marker on `marker` END_MARKS times, END_GAP_MS apart, each carrying `sent`; the number of the
+// marker's puts that returned 0.
+static int put_end_marks(const z_loaned_publisher_t *marker, unsigned long long sent) {
+    int put = 0;
+    uint8_t mark[SEQ_BYTES];
+    const uint64_t count = (uint64_t)sent;
+    memcpy(mark, &count, sizeof count);
+    for (int i = 0; i < END_MARKS && !terminated; i++) {
+        z_owned_bytes_t payload;
+        if (z_bytes_copy_from_buf(&payload, mark, sizeof mark) == Z_OK &&
+            z_publisher_put(marker, z_bytes_move(&payload), NULL) == Z_OK) {
+            put++;
+        }
+        sleep_ms(END_GAP_MS);
+    }
+    return put;
+}
+
 static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     const z_loaned_publisher_t *loaned = client_publisher(session, o, KEY_THR);
     if (loaned == NULL) return 1;
+    // The marker's publisher blocks as the counted one does, so a full link holds it back rather than drops it.
+    const z_loaned_publisher_t *marker = declare_publisher(session, KEY_END, 0);
+    if (marker == NULL) {
+        printf("perf_probe pub: unable to declare the end marker's publisher\n");
+        return 1;
+    }
+    if (o->match && !wait_for_match(marker)) {
+        printf("perf_probe pub: no subscriber matched the end marker's publisher in %d ms\n", PEER_WAIT_MS);
+        return 1;
+    }
     uint8_t *buf = malloc(o->size);
     if (buf == NULL) {
         printf("perf_probe pub: out of memory\n");
@@ -1042,14 +1115,18 @@ static int run_pub(const z_loaned_session_t *session, const struct options *o) {
     if (o->batching) batch_stop(session);
     const uint64_t c1 = cpu_ns();
     t1 = now_ns();
+    const int marks = put_end_marks(marker, sent);
     printf("perf_probe pub sent=%llu failed=%llu elapsed_ns=%llu cpu_ns=%llu start_ns=%llu end_ns=%llu "
-           "batch_cycles=%llu lost_match_ns=%llu matched_at_end=%d peers_at_end=%d\n",
+           "batch_cycles=%llu lost_match_ns=%llu matched_at_end=%d peers_at_end=%d end_marks=%d\n",
            sent, failed, (unsigned long long)(t1 - t0), (unsigned long long)(c1 - c0), (unsigned long long)t0,
            (unsigned long long)t1, o->batching ? cycles + 1 : 0ULL, (unsigned long long)lost_match_ns,
-           o->match ? matched_now(loaned) : -1, peer_count(session));
+           o->match ? matched_now(loaned) : -1, peer_count(session), marks);
     fflush(stdout);
     z_bytes_drop(z_bytes_move(&payload));
     free(buf);
+    // The session is kept until the runner stops it, once the subscriber said what reached it: a close now
+    // could drop what the library still holds for a reader that is behind.
+    while (!terminated) sleep_ms(10);
     return 0;
 }
 

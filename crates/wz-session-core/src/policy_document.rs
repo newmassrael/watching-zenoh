@@ -274,8 +274,8 @@ impl Resolved {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LimitOrigin {
     BuildDefault,
-    /// Only the reader of a document states it, which a build without `alloc` does not have.
-    #[cfg(feature = "alloc")]
+    /// A document states it: the tree reader with `alloc`, or the reader that walks a document
+    /// with no tree, which a build without `alloc` has too.
     Document,
     Api,
 }
@@ -284,7 +284,6 @@ impl LimitOrigin {
     const fn origin(self) -> Origin {
         match self {
             Self::BuildDefault => Origin::BuildDefault,
-            #[cfg(feature = "alloc")]
             Self::Document => Origin::Document,
             Self::Api => Origin::Api,
         }
@@ -1166,6 +1165,81 @@ pub fn resolve_under<'a>(
     }
 }
 
+/// What the `wz` member of a document states, read by a caller that keeps no tree of it: the
+/// profile it names, the statements of its `wz/policies` and those of its `wz/limits`, each in
+/// the document's order. `Default` is a document with no `wz` member.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DocumentLayers<'s, 'a> {
+    /// The id `wz/profile` names, if it names one.
+    pub profile: Option<&'a str>,
+    /// The members of `wz/policies`.
+    pub statements: &'s [Statement<'a>],
+    /// The members of `wz/limits`.
+    pub limits: &'s [LimitStatement<'a>],
+}
+
+/// `base` with the document's layers and what the caller states over them, as
+/// `resolve_document_under` resolves a document whose `wz` member states `document`: the
+/// profile `overrides` names, else the document's, then the document's statements
+/// ([`Origin::Document`]), then the caller's ([`Origin::Api`]), and the two layers of limits over
+/// the limits of `base`. For a reader that walks the document and keeps what it states in storage
+/// of its own, with no tree; the key ids a document states are that reader's to judge.
+// The refusals are held inline because the core has no heap to box them in.
+#[allow(clippy::result_large_err)]
+pub fn resolve_layers_under<'a>(
+    base: impl Into<Base>,
+    document: DocumentLayers<'_, 'a>,
+    overrides: Overrides<'_, 'a>,
+) -> Result<Resolved, Refusals<'a>> {
+    let mut refusals = Refusals::new();
+    let resolved = compose_document(&POLICIES, base.into(), document, overrides, &mut refusals);
+    if refusals.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(refusals)
+    }
+}
+
+/// `document` and then `overrides` over `base` by the policies of `table`, each refusal pushed
+/// onto `refusals`: a profile either names that the build does not have is refused in the layer
+/// that named it, the document's one too when `overrides` names another.
+fn compose_document<'a>(
+    table: &[PolicyEntry; POLICY_COUNT],
+    base: Base,
+    document: DocumentLayers<'_, 'a>,
+    overrides: Overrides<'_, 'a>,
+    refusals: &mut Refusals<'a>,
+) -> Resolved {
+    let named = find_profile(document.profile, Origin::Document, refusals);
+    let stated = find_profile(overrides.profile, Origin::Api, refusals);
+    let stated_in_document = Layer {
+        origin: Origin::Document,
+        statements: document.statements,
+    };
+    let api = Layer {
+        origin: Origin::Api,
+        statements: overrides.statements,
+    };
+    let mut resolved = match stated.or(named) {
+        Some(profile) => compose(
+            table,
+            base.policy,
+            &[profile.layer(), stated_in_document, api],
+            refusals,
+        ),
+        None => compose(table, base.policy, &[stated_in_document, api], refusals),
+    };
+    resolved.limits = compose_limits(
+        &base,
+        &[
+            (LimitOrigin::Document, document.limits),
+            (LimitOrigin::Api, overrides.limits),
+        ],
+        refusals,
+    );
+    resolved
+}
+
 /// [`resolve_under`] for a creator that keeps no record of where each value came from, written
 /// where its snapshots lie: the profile `overrides` names and then its statements over `policy`,
 /// and its limits over `limits`, the snapshot of a session's, for a creator that holds no
@@ -1258,8 +1332,8 @@ mod from_json5 {
     #[cfg(not(feature = "shared-key-ids"))]
     use super::KeyIdsReason;
     use super::{
-        compose, compose_limits, find_profile, Base, Layer, LimitOrigin, LimitStatement, Origin,
-        Overrides, Reason, Refusal, Refusals, Resolved, Statement,
+        compose_document, Base, DocumentLayers, LimitStatement, Origin, Overrides, Reason, Refusal,
+        Refusals, Resolved, Statement,
     };
     use crate::json5::{number_as_u64, Json5Value};
     use crate::limit_binding::{LimitValue, UNBOUNDED};
@@ -1343,33 +1417,12 @@ mod from_json5 {
     ) -> Result<Resolved, Refusals<'a>> {
         let mut refusals = Refusals::new();
         let read = read_wz(tree, &mut refusals);
-        let named = find_profile(read.profile, Origin::Document, &mut refusals);
-        let stated = find_profile(overrides.profile, Origin::Api, &mut refusals);
-        let document = Layer {
-            origin: Origin::Document,
+        let document = DocumentLayers {
+            profile: read.profile,
             statements: &read.statements,
+            limits: &read.limits,
         };
-        let api = Layer {
-            origin: Origin::Api,
-            statements: overrides.statements,
-        };
-        let mut resolved = match stated.or(named) {
-            Some(profile) => compose(
-                table,
-                base.policy,
-                &[profile.layer(), document, api],
-                &mut refusals,
-            ),
-            None => compose(table, base.policy, &[document, api], &mut refusals),
-        };
-        resolved.limits = compose_limits(
-            &base,
-            &[
-                (LimitOrigin::Document, read.limits.as_slice()),
-                (LimitOrigin::Api, overrides.limits),
-            ],
-            &mut refusals,
-        );
+        let resolved = compose_document(table, base, document, overrides, &mut refusals);
         // The reader of `wz/key-ids` cannot count the dictionary against a limit the same
         // document may state; the composed limits can.
         #[cfg(feature = "shared-key-ids")]
@@ -3067,6 +3120,63 @@ mod tests {
                 resolved.provenance.origin("key-set"),
                 Some(Origin::BuildDefault)
             );
+        }
+
+        /// The layers a reader that keeps no tree read resolve as the tree they came from does:
+        /// the same snapshots and provenance for a document's policy and limit under the caller's
+        /// statement, and a refusal of a profile the document names and the build does not have,
+        /// though the caller names another. Turned red by a composition of the layers other than
+        /// `resolve_document_under`'s.
+        #[test]
+        fn layers_read_without_a_tree_resolve_as_their_document_does() {
+            let Some(ring) = another::<EventRingFull>() else {
+                return;
+            };
+            let text = format!(
+                r#"{{ wz: {{ policies: {{ "event-ring-full": "{}" }}, limits: {{ MAX_SUBSCRIPTIONS: 3 }} }} }}"#,
+                id_of(ring)
+            );
+            let tree = parse(&text).unwrap();
+            let read = statements_from_json5(&tree).expect("well formed");
+            let layers = DocumentLayers {
+                profile: read.profile,
+                statements: &read.statements,
+                limits: &read.limits,
+            };
+            let base = SessionPolicy::defaults();
+            let stated = [Statement::new(
+                "event-ring-full",
+                id_of(EventRingFull::DEFAULT),
+            )];
+            for overrides in [
+                Overrides::default(),
+                Overrides {
+                    profile: None,
+                    statements: &stated,
+                    limits: &[],
+                },
+            ] {
+                assert_eq!(
+                    resolve_layers_under(base, layers, overrides),
+                    resolve_document_under(base, &tree, overrides)
+                );
+            }
+            let resolved =
+                resolve_layers_under(base, layers, Overrides::default()).expect("allowed");
+            assert_eq!(resolved.policy.event_ring_full(), ring);
+            assert_eq!(
+                resolved.provenance.origin("event-ring-full"),
+                Some(Origin::Document)
+            );
+            let unknown = DocumentLayers {
+                profile: Some("no-such-profile"),
+                ..DocumentLayers::default()
+            };
+            let named = Overrides {
+                profile: Some("upstream"),
+                ..Overrides::default()
+            };
+            assert!(resolve_layers_under(base, unknown, named).is_err());
         }
 
         /// A caller handed no document resolves as one handed a document with no `wz` member:

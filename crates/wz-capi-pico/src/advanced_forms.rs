@@ -110,7 +110,7 @@ impl PicoSubscriberForms {
         let carrier = match entity {
             Entity::Subscriber => self.base.share(),
             Entity::LatePublishers | Entity::Heartbeat | Entity::Token => {
-                self.base.extended(keyexpr.to_owned())
+                self.base.extended(keyexpr)
             }
         };
         let (key, announced) = match entity {
@@ -142,16 +142,18 @@ impl PicoSubscriberForms {
         let Some(anchor) = self.anchor(&shared, entity, keyexpr) else {
             return EntityForm::literal();
         };
-        let wire = anchor.announced.wire(&*shared);
+        let wire = anchor.announced.wire(Arc::as_ref(&shared));
         let form = if wire.mapping_id == 0 {
             EntityForm::literal()
         } else {
             EntityForm::aliased(wire.mapping_id, wire.suffix)
         };
         let form = match entity {
-            Entity::Subscriber | Entity::Heartbeat => {
-                form.with_retraction_naming(anchor.key.retraction_naming_in(self.mode, &*shared))
-            }
+            Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
+                anchor
+                    .key
+                    .retraction_naming_in(self.mode, Arc::as_ref(&shared)),
+            ),
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),
         };
@@ -207,8 +209,7 @@ mod tests {
             hlc: NodeHlc::default(),
             time: crate::last_timestamp::SessionTime::new(),
         };
-        let forms =
-            PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key.to_owned()));
+        let forms = PicoSubscriberForms::new(&session, DeclaredKeyexpr::literal_only(key));
         (shared, forms)
     }
 

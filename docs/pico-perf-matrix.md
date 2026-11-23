@@ -16,7 +16,7 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico`, release, its default capabilities on the engine of the run (below) | the zenoh-pico-sys headers of that build with the `config.h` of its feature list (`wz_config.py --bench-config-h`) | tcp, udp, multicast |
+| W | `wz-capi-pico`, its default capabilities on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
 | W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
@@ -34,13 +34,41 @@ carries it into `perf.json` (`record.engine`) and prints it, and the gate refuse
 table filled from the other engine. The other host modes of `scripts/pico-compare.sh` (`rtt`, `thr`,
 `nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings.
 
+**The standard library.** Arm W is the library the release ships: without `std` (`os-posix` in the
+place of `engine-coop`, docs/c-abi-engine-and-memory.md phase P4), the one form
+`pico_windows_package.RELEASE_STDLIBS` names, unless `PICO_CMP_STDLIB` (`std` or `nostd`) names the
+other to compare them; `perf_matrix.py bench-stdlib` is where a run learns it, and a release of more than
+one form makes a run name the one it measures. Its feature list is the cooperative engine's with
+`os-posix` in the place of `engine-coop` and `std` left out (`wz_config.bench_named_features`, the rule
+the Windows package without `std` is made by); a capability that turns `std` on is refused by name, and
+so is the form without `std` on the tokio engine. `reference --stdlib` records it (`wz_stdlib` in
+`reference.json`), the run carries it into `perf.json` (`record.stdlib`; a reading that names none was
+made before the field, of a library with `std`), and the gate refuses a run against a table filled from
+the other form, as it refuses the other engine.
+
+**Arm W, built as the size gate builds its form.** `perf_matrix.py wz-arm` builds arm W by the plan of the
+size gate's case of the same form (`capability_cost_gate.case_build`, `SHAPE_CASES`): without `std` the
+case `pico-client-coop-nostd` (profile `capi-nostd`: panics abort, fat LTO; the configuration files that
+drop the unwind tables, pack the relative relocations and discard the prebuilt standard crates' unwind
+tables at the link; GNU ld through `cc`), with it `pico-client-coop`, on the tokio engine `pico-default`,
+each with the bench's feature list in the place of the case's and under the gate's build rule. The library
+timed is then built as the library whose size the gate measures. Its headers are arm P's export, the
+pinned pico's own, with the `config.h` of its own feature list in place of P's.
+
 **The same build.** Arm P is the build `scripts/lib/capability_cost_gate.py` measures the size of:
 every `Z_FEATURE_*` switch the declaration (`deploy/wz-config.toml`) answers is set from that answer
 for `wz-capi-pico`'s default features (`wz_config.pico_reference`), the rest keep pico's defaults,
 Release, shared. `perf_matrix.py reference` asks the gate's own builder for it, so the library timed
 here and the library whose size the gate prints are one build, built under the gate's build rule
 (`build_env`: no path of the host and the commit's time in its bytes) and found again by the same
-key (pin, compiler, switches, and the rule's C flags and epoch). A switch pico built otherwise than asked is listed in the run's record.
+key (pin, compiler, switches, and the rule's C flags and epoch). It is linked and compiled as the gate
+builds the reference of arm W's form (`capability_cost_gate.reference_build` of the linker arguments arm
+W's build is given): by GNU ld and with packed relocations as arm W is, and, for the library without
+`std`, its C compiled without unwind tables (`-fno-asynchronous-unwind-tables -fno-unwind-tables`) and
+linked with the script that discards what the C runtime's own objects still bring, so neither side of a
+ratio carries tables the other does not. `reference.json` records the linker arguments and the C flags
+(`reference_link_args`, `reference_cflags`) beside arm W's profile, configuration and linker arguments
+(`wz_build`). A switch pico built otherwise than asked is listed in the run's record.
 
 **Arm X, an external library of the pico API.** A library this repository does not hold, such as a
 deployment's own build of a library of the pico API, is measured by the same program when the
@@ -102,7 +130,16 @@ unicast batch of 2048 bytes, so no message is fragmented):
 - **thr.** `pub` puts the payload as fast as the session takes it (congestion control block);
   `sub` counts the samples and payload bytes it is handed. From its first sample `sub` waits the
   warm-up, then reads its count and its CPU at the start and at the end of a 5 s window. `pub` puts
-  for the warm-up, the window and 3 s more, and both print the monotonic times of their spans.
+  for the warm-up, the window and 3 s more, and both print the monotonic times of their spans. Then
+  `pub` puts an end marker on `perf/end`, three times 50 ms apart, carrying its count of puts that
+  answered success, prints its result and keeps its session until it is stopped; `sub` prints how many
+  samples it had been handed when the first marker reached it. The runner gives `sub` up to 20 s
+  (`DRAIN_S`) after `pub`'s result to hand on its backlog and say so, 2 s on udp and multicast, then
+  stops both. On a stream, which carries the marker after every put before it, the two counts are
+  equal when every put that answered success was sent: on tcp and the program transport a cell whose
+  marker never came, or whose counts differ, is lost (`delivery`), since a put under congestion
+  control block on a reliable stream is delivered or refused; on udp and multicast the difference is
+  the figure `undelivered`.
 
 **Before the first counted put.** The client side (`ping`, `pub`) declares its publisher one second
 after its open, as upstream's `z_pub_thr` does, then waits for a peer, and on tcp, udp and the
@@ -148,6 +185,7 @@ reference, to be answered by a run that holds one, not a figure of this matrix.
 | `pong_cpu_ns_per_rtt` | rtt | pong's process CPU from the first ping to the stop ping sends, per answer | lower |
 | `msgs_per_s`, `bytes_per_s` | thr | samples and payload bytes delivered in the window, per second | higher |
 | `offered_msgs_per_s`, `put_failed` | thr | the rate pub's puts returned, and the puts that failed | higher, lower |
+| `undelivered` | thr | puts that answered success and had not reached sub by pub's end marker; on a stream any is a lost cell instead | lower |
 | `cpu_ns_per_msg_pub` | thr | pub's process CPU over its loop, per put | lower |
 | `cpu_ns_per_msg_sub` | thr | sub's process CPU over the window, per sample delivered | lower |
 | `cpu_ns_per_msg` | thr | the two above, summed: the CPU a delivered message cost both sides | lower |
@@ -171,7 +209,7 @@ bx --host pc2 -- bash scripts/pico-compare.sh perf 3 8,64,1024
 
 The two arguments are the repetitions (default 3) and the payload sizes (default `8,64,1024`). The
 mode builds everything it runs: the reference (cached by the cost gate's key under the artifact root),
-`wz-capi-pico` twice in release, and the probe three times into `target/pico-compare/perf/bin`. With
+`wz-capi-pico` twice as the size gate builds its form, and the probe three times into `target/pico-compare/perf/bin`. With
 `PICO_CMP_NO_BUILD=1` it runs the programs already there.
 
 | variable | default | what it sets |
@@ -182,6 +220,7 @@ mode builds everything it runs: the reference (cached by the cost gate's key und
 | `PICO_CMP_CLIENT_CPUS` | `4-7` | the CPUs ping and pub are pinned to |
 | `PICO_CMP_SERVER_CPUS` | `8-11` | the CPUs pong and sub are pinned to |
 | `PICO_CMP_PINGS` | `20000` | the round trips counted per rtt cell |
+| `PICO_CMP_STDLIB` | the release's form | arm W's standard library, `std` or `nostd` (section 1) |
 | `WZ_PERF_EXTERNAL_*` | unset | arm X and its table (section 1, section 5) |
 
 The pinning defaults to the parity matrix's (`docs/upstream-parity.md` section 5b). On the host a
@@ -235,7 +274,7 @@ A run is left in `target/pico-compare/perf-runs/host-<UTC time>/` under the arti
 | key | what |
 |---|---|
 | `schema` | `wz-pico-perf/1` |
-| `record` | the tree and whether it had changes, host, kernel, CPU model, thread count, compilers, pinning, sizes, repetitions, round trips, warm-up, window, timeout, the foreign-use limit, start and end time, `builds`: the reference's pin, toolchain, switches and any switch pico built otherwise, and the wz features of both wz builds, and `external`: arm X's `status` (`built` with its label, paths and digests, or `not-measured` with `why`) |
+| `record` | the tree and whether it had changes, host, kernel, CPU model, thread count, compilers, pinning, sizes, repetitions, round trips, warm-up, window, timeout, the foreign-use limit, start and end time, `builds`: the reference's pin, toolchain, switches, linker arguments and C flags and any switch pico built otherwise, the wz features of both wz builds, arm W's engine (`wz_engine`), standard library (`wz_stdlib`) and the size case it was built as (`wz_build`), `engine` and `stdlib` read from them, and `external`: arm X's `status` (`built` with its label, paths and digests, or `not-measured` with `why`) |
 | `metrics` | each figure and which way it is better (`lower` or `higher`) |
 | `cells` | every cell: `arm`, `transport`, `batching`, `workload`, `size`, `rep`, `status`, and `figures` and `foreign_share` when measured or `why` when not |
 | `summary` | per transport, batching, workload and size: for each arm the measured and lost repetitions and the median of each figure, `w_over_p`, W's median over P's for each figure both arms have, and `w_over_x` alike when the run has arm X |
@@ -255,10 +294,38 @@ receiving side. The send path that sends to the peer list only when it is not em
 
 `vendor/zenoh-pico/src/transport/common/tx.c` @ `!_z_transport_peer_unicast_slist_is_empty(zn->_tp._transport._unicast._peers)`
 
-A run on a build host lost every throughput cell of arm P on tcp with batching on, and some with it
-off, with put counts no tcp loopback carries in the time, while arm P on multicast and arm W on tcp
-delivered; the next run's `why` says which side stopped. Until it does, the cell stays a lost cell of
-the reference, not a cell it does not have.
+**Arm P's throughput on tcp, read from its source.** A run on a build host lost every throughput cell of
+arm P on tcp with batching on, and some with it off, with put counts no tcp loopback carries in the time,
+while arm P on multicast and arm W on tcp delivered. A zenoh-pico peer gives its stream sockets no
+blocking: a peer that dials makes its link's socket non-blocking once the handshake is done, and a
+listening peer each socket it accepts:
+
+`vendor/zenoh-pico/src/transport/manager.c` @ `_Z_SET_IF_OK(ret, _z_socket_set_blocking(_z_link_get_socket(zl), false));`
+
+`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `if (_z_socket_set_blocking(&con_socket, false) != _Z_RES_OK) {`
+
+A batch for the peer list is written with one `send` per peer whose result is not looked at, and the put
+answers success whatever it was; congestion control block takes the transmit lock and holds nothing else
+back:
+
+`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_link_send_wbuf(ztc->_link, &ztc->_wbuf, &curr_peer->_socket);`
+
+Once the subscriber reads slower than the publisher puts and the socket's send buffer is full, a `send`
+writes nothing (the batch is lost and the stream stays whole) or a part of the batch, which the link calls
+a failure and does not finish:
+
+`vendor/zenoh-pico/src/link/link.c` @ `if (link_is_streamed && wb != n) {`
+
+A batch cut short leaves the stream inside a message, and what the subscriber reads after it is not what
+the publisher wrote: the subscriber drops the peer when it cannot decode it, or waits for a length that
+never comes, and the publisher's later puts go to no one. A batch of 2 KiB is far likelier to be cut than
+one small message, which is why batching on lost every repetition and off only some, and a group, whose
+datagrams are dropped whole, delivered. That is the reference's own transmit path, not the probe's; the
+end marker (section 1, thr) makes it a reading: a cell of arm P on tcp says how many of its puts answered
+success and never arrived, or that its marker never came, and stays a lost cell of the reference
+(`reference_lost` in the gate's table), not a cell it does not have and not a rate credited with puts that
+went nowhere. Arm W is held to the same rule: a put it answered success for and did not deliver on a
+stream is a repetition wz lost, which fails its rows.
 
 **Validity.** A cell counts only when the CPUs it was pinned to were used by nothing else while it
 ran: their busy time (`/proc/stat`) less the CPU of the two processes, over the CPU seconds the cell
@@ -315,7 +382,9 @@ every repetition leaves the cell without a ratio.
 
 **The table.** A JSON object: `schema` `wz-pico-perf-ceiling/1`, `pair` (`W/P` or `W/X`), `engine` (the
 engine arm W was built on when the rows were filled; required of the W over P table, and a run of
-another engine is refused against it), `tolerance`, and `rows`, one per row key, each of four shapes:
+another engine is refused against it), `stdlib` (the standard library arm W was built with, `std` or
+`nostd`; required of the W over P table alike, and a run of the other form is refused against it),
+`tolerance`, and `rows`, one per row key, each of four shapes:
 
 | row | holds |
 |---|---|
@@ -349,7 +418,9 @@ Layer C0 holds (`perf_matrix.py --check-table`) with the gate's selftest, on eve
 are null until a run on a quiet host fills them, as above.
 
 **One table per platform.** A run on Windows is judged against a table of its own, never this one (section 6):
-the reading and the table each state their platform, and the gate refuses a pair that differ.
+the reading and the table each state their platform, and the gate refuses a pair that differ. Both committed
+tables are of the library the release ships (`stdlib` `nostd`): a run of the library with `std`
+(`PICO_CMP_STDLIB=std`) compares the two forms and is judged against a table of its own, outside these.
 
 **W over X.** The table holds the external library's figures, so it lives outside the repository: the gate
 reads it from `--external-table` or `WZ_PERF_EXTERNAL_TABLE`, and refuses one inside this checkout or the
@@ -394,14 +465,16 @@ reading is judged on Linux.
 Linux build as it was), the cells and their order, the alternation of the arms, the figures, the repetitions,
 warm-up, window, round trips and timeout, the validity rule and its second pass, the reading's shape
 (`wz-pico-perf/1`) and the gate's rule. The plan carries the figures, the reasons a cell is not applicable and
-the rules of a cell from `perf_matrix.py` itself, so the runner states none of its own.
+the rules of a cell from `perf_matrix.py` itself, so the runner states none of its own. The plan is of schema
+`wz-pico-perf-windows-plan/2` and the runner reads no other, so a plan and the runner it is handed are of one
+tree.
 
 **What differs, and why.**
 
 | | Linux | Windows |
 |---|---|---|
-| arm W | `wz-capi-pico` built by the run, the bench's default build on the engine | the package's release DLL as shipped; its features are its manifest's and its engine its build statement's |
-| arm P | pico as the same build as the bench's build | pico as the same build as the package: its switches derived from the package's features by the same rule (`windows-plan`), built by CMake's Visual Studio generator, x64, Release, shared, without examples and tests |
+| arm W | `wz-capi-pico` built by the run in the form the release ships, as the size gate builds that form (section 1) | the package's release DLL as shipped, without `std` as a release ships it; its features are its manifest's, its engine its build statement's and its standard library its manifest's `stdlib`, which `windows-plan` holds its features to |
+| arm P | pico as the same build as the bench's build, linked and compiled by the size gate's rule for arm W's form | pico as the same build as the package: its switches derived from the package's features by the same rule (`windows-plan`), built by CMake's Visual Studio generator, x64, Release, shared, without examples and tests; the Windows library without `std` keeps its unwind tables (`crates/.cargo/capi-nostd.toml`), so no flag of the Linux rule for that form is added |
 | what pico was built as | `reference.json` | `record.builds`: the switches asked, any pico built otherwise, and the CMake cache entries of pico's own options and of the build's type, generator and flags (`reference_cache`) |
 | build rule | `build_normalization.py` | none: its words are GCC's |
 | probe | `cc -std=gnu11 -O2` | `cl /std:c11 /experimental:c11atomics /O2 /MD` |
@@ -412,6 +485,7 @@ the rules of a cell from `perf_matrix.py` itself, so the runner states none of i
 | validity | `/proc/stat`: user, nice, system, steal | per-CPU times (`NtQuerySystemInformation`): kernel less idle, interrupts and DPCs, plus user |
 | transports | tcp, udp, multicast on `lo`, the program transport | tcp, udp, multicast on the adapter of the default route; the program transport is not built (its stream in the probe is an AF_UNIX socket in Linux's abstract namespace) and `record.not_measured` says so |
 | arm X | when the environment names it | not run |
+| a throughput cell's end | `pub` keeps its session until `SIGTERM`; the runner waits for `sub`'s end-marker line (`DRAIN_S`, `MARK_WAIT_S`) | the same, until the stop event, with the waits and the reliable streams the plan states (`drain_s`, `mark_wait_s`, `stream_transports`) |
 
 **Multicast.** The loopback adapter of Windows carries no group, so the group is joined on the adapter of the
 default route, named by its GUID (`#iface={...}`, the form both libraries read on Windows); `-GroupInterface`
@@ -421,7 +495,7 @@ is left out of the run, `record.not_measured.multicast` says why with what each 
 prints that reason beside the rows it reports not measured. The runner reads and changes no firewall rule.
 
 **The table.** `deploy/pico_perf_ceiling_windows.json`: the rows of the default matrix, as the Linux table,
-with `platform` `windows-x64` and the engine `coop`, every row null until a run fills it. A reading states
+with `platform` `windows-x64`, the engine `coop` and `stdlib` `nostd`, every row null until a run fills it. A reading states
 the platform it was made on (`record.platform`; a reading that states none is Linux's, as every one before the
 field was) and a table the platform its rows were filled on (`platform`, Linux when absent). The gate judges a
 reading only against a table of its own platform and refuses any other (exit 2); without `--table` it reads the
@@ -430,11 +504,11 @@ committed table of the reading's platform. Layer C0 holds the population of both
 **A run.** On Linux, in a checkout of the commit the package was built from: `windows-plan` derives arm P's
 switches from this tree's declaration, feature table and pinned pico, and refuses a package whose commit differs
 from the tree in any of them. The package is the `package-windows` artifact of that commit's Platform run (x64,
-the single library).
+the single library without `std`, the form a release ships: `docs/c-abi-engine-and-memory.md` E7).
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
-gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
+gh run download <platform run id> -n pico-windows-package-x64-single-nostd -D "$out"
 zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
 python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD

@@ -351,6 +351,11 @@
 #              allocates after a session opens: each operation family's
 #              allocations a round, held by deploy/no_heap_ratchet.json so
 #              that they only fall, to 0 (docs/upstream-parity.md D12).
+#   Layers Vcov, Vtsan, Vasan, Vmiri — the engine's crates measured:
+#              coverage held to deploy/coverage_floor.json, the thread and
+#              address sanitizers, the Miri interpreter (scripts/verify.sh,
+#              docs/verification.md). Opt-in via `--layer <id>` or
+#              `WZ_RUN_LAYER_VERIFY=1`; hosted, a job each.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -2600,6 +2605,10 @@ layer_c0_test_discipline() {
     # of an InitSyn's advertised size, and the verdict of a cell, over synthetic bytes. The runs are a build
     # host's, which builds zenoh-pico once per size.
     _runci_leg batch_control.selftest -- python3 scripts/host-bench/batch_control.py --selftest
+    # The fan-in lane (`scripts/pico-compare.sh fanin`): the reader of the probe's lines and the judgement of
+    # a round (every sample put under block arrives; none corrupt, behind or foreign), over synthetic lines.
+    # The rounds are a build host's, which builds both Rust arms of the probe.
+    _runci_leg fanin.selftest -- python3 scripts/host-bench/fanin.py --selftest
     # R3449 -- the resource budget (a committed figure per image): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
@@ -3475,6 +3484,12 @@ layer_c0_test_discipline() {
     # wz_ext_* doors.
     _runci_leg drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null
     _runci_leg drop_in_header_gate --after drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py
+    # The release proof of the pico Windows DLL (docs/release-proof-pico-windows.md): every
+    # public function, switch, example and test of zenoh-pico at the pin, and every wz_ext_*
+    # door, has a row, and a row's status is what the lanes it cites make it. It reads
+    # zenoh-pico's header through the drop-in gate's reader, three `cc -E` runs, no build.
+    _runci_leg release_proof_ledger_gate.selftest -- python3 scripts/lib/release_proof_ledger_gate.py --selftest
+    _runci_leg release_proof_ledger_gate --after release_proof_ledger_gate.selftest -- python3 scripts/lib/release_proof_ledger_gate.py --check
     # R2213 (open-debt item 566) — and the same question asked of EVERY gate,
     # not only of the one that learned to ask it.
     #
@@ -9578,8 +9593,14 @@ layer_c1ba_cargo_clippy_transport_multilink() {
     # links split by a DECLARED class (upstream's `rel=`), the only way two
     # links of one protocol segregate once a link's class is its protocol's.
     # MEASURED: 9 passed on this command.
+    # 9 -> 11, and `transport-link-udp` joins this arm: a TCP link and a UDP
+    # link to one peer, no class declared on either end, split the reliable and
+    # the best-effort channel by their protocols' classes over real sockets, in
+    # both link orders. ML_FEATURES carries no UDP link, so without it those two
+    # cases are compiled out of every run; they ride this arm rather than a build
+    # of their own. MEASURED: 11 passed on this command.
     wz_test_args wz-runtime-tokio session_multilink_e2e
-    _runci_guarded_test C1ba 9 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos" "${WZ_TEST_ARGS[@]}" --quiet \
+    _runci_guarded_test C1ba 11 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_FEATURES,transport-qos,session-extqos,transport-link-udp" "${WZ_TEST_ARGS[@]}" --quiet \
         || return 1
     wz_test_args wz-runtime-tokio session_multilink_deploy_e2e
     _runci_guarded_test C1ba 2 cargo test -p wz-runtime-tokio --no-default-features --features "$ML_DEPLOY_FEATURES" "${WZ_TEST_ARGS[@]}" --quiet \
@@ -12918,8 +12939,17 @@ layer_c1cf_reduced_features() {
 # does, and are graded on that digest alone. Every build, and the zenoh-pico reference, runs under
 # scripts/lib/build_normalization.py, so a reading carries no path or build time of the host that
 # made it, and a library that still holds a build path fails the lane.
+#
+# The hosted lane is a matrix of `WZ_C1CS_SHARDS` jobs, each building the cases the gate deals to
+# its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
+# of its 1200 s budget at run 45051019628. Each shard is a runner of its own, so the one-lane rule
+# above holds inside it. Unset, every case is built here, as before.
 layer_c1cs_capability_cost() {
-    python3 scripts/lib/capability_cost_gate.py --check || return 1
+    local c1cs_shard_args=()
+    if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
+        c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
+    fi
+    python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"} || return 1
 }
 
 # ─── Layer Z8 — upstream's own tests against the patched graph ──────────
@@ -14038,7 +14068,9 @@ layer_c1m_session_lwip() {
     # and the dial reader's bracketed IPv6 address (`dial::parse_tests`, which `dial` compiles).
     # 57 -> 61, printed: main at `b58b71c19` already printed 61 on one machine, so the source
     # counts above missed four; the limits rounds add none to this leg.
-    _runci_guarded_test "C1m mcu adminspace-write" 61 \
+    # 61 -> 62, counted from the source: the dial reader's IPv6 form held to `SocketAddrV6`'s
+    # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
+    _runci_guarded_test "C1m mcu adminspace-write" 62 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14069,7 +14101,8 @@ layer_c1m_session_lwip() {
     # 67 -> 72, printed: main at `b58b71c19` printed 71 on one machine (four the source counts
     # missed), and the limits rounds add one, an admin node's observer held to its session's limits.
     # 72 -> 73, printed: one more with main at `0e24b2486` (Round 4581) merged in.
-    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
+    # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
+    _runci_guarded_test "C1m mcu adminspace read+write" 74 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -26685,7 +26718,16 @@ _runci_build_capi_c_for_oracle() {
     (cd crates && cargo build -p wz-capi-c $capi_c_args --features "$plane" --quiet)
 }
 
+# THE SHARED-MEMORY LEGS NEED LOCKABLE MEMORY, as E18's do and for the same reason: a session's
+# provider is a POSIX pool `mlock`ed whole (`commons/zenoh-shm/src/shm/unix.rs` @
+# `unsafe { mlock(ptr, len.get()) }?;` upstream, and wz's own copy of it), 16 MiB by default, and a reader locks the segment it opens too. A hosted
+# runner grants 8 MiB, so the sender's pool failed there, its provider read ERROR and every put of
+# the promotion differential went plain (run 45051019628, and every run since the test waits on
+# the provider's state); every build host grants GiB. Raised here, so the lane carries its own
+# precondition wherever it runs.
 layer_c1cc_api_compat_c() {
+    uring_raise_memlock $((64 * 1024 * 1024))
+    echo "  C1cc: RLIMIT_MEMLOCK soft=$(uring_soft_memlock_bytes) hard=$(uring_hard_memlock_bytes) bytes (-1 = unlimited)"
     _runci_build_capi_c_for_oracle C1cc || return 1
     (cd crates && cargo build -p wz-ap-demo --quiet) || return 1
     (cd crates && cargo clippy -p wz-capi-core --all-targets --quiet -- -D warnings) || return 1
@@ -29430,8 +29472,10 @@ _qzk_pico_ceiling() {
 # ─── Layer Fz — the fuzz targets' seeds and reproducers, once each ──
 # The C ABI doors of wz-capi-dissect and wz-capi-replay take bytes a consumer
 # was handed from outside (capture files, live packets, schemas, E2E headers,
-# replay payloads), and a defect there is a crash of the consumer's process.
-# `crates/wz-fuzz` holds a coverage-guided target per family of doors; this lane
+# replay payloads), and a defect there is a crash of the consumer's process; a
+# session takes bytes from its peer, and a defect there is a crash of every
+# node a peer reaches. `crates/wz-fuzz` holds a coverage-guided target per
+# family of doors and per layer of the ingress (its README); this lane
 # builds them (their own pinned nightly, AddressSanitizer) and runs every seed
 # `scripts/lib/fuzz_seeds.py` derives from `captures/` and the crate's examples,
 # and every reproducer under `crates/wz-fuzz/regressions/`, through its target
@@ -29441,6 +29485,76 @@ _qzk_pico_ceiling() {
 layer_fz_fuzz_regress() {
     python3 scripts/lib/fuzz_seeds.py --selftest || return 1
     bash scripts/fuzz.sh regress
+}
+
+# ─── Layers Vcov, Vtsan, Vasan, Vmiri — measured verification of the engine's crates ──
+# What the tests reach and whether the code they run is sound, measured over the crates of the
+# cooperative engine (wz-session-core, wz-session-mcu, wz-runtime-coop, wz-capi-coop, wz-capi-pico
+# and, for the interpreter, wz-capi-port), each in the feature sets the shipped builds give it: the
+# pico C library's profile and the MCU kit images (scripts/lib/verify_plan.py resolves them when
+# the lane runs). scripts/verify.sh builds every lane with the nightly crates/wz-fuzz pins. What
+# each lane proves and what it does not: docs/verification.md.
+#
+#   Vcov   line, branch and function coverage of each crate, held to deploy/coverage_floor.json
+#          (scripts/lib/coverage_floor_gate.py): a fall fails, a rise prints the tighter row, a row
+#          not filled yet is NOT-MEASURED; the functions no test reached are written beside it.
+#   Vtsan  the units' tests and the C programs of the library under ThreadSanitizer; any report
+#          fails.
+#   Vasan  the same under AddressSanitizer.
+#   Vmiri  the units whose unsafe code lends places of an arena, and the host lock made in its
+#          place, under the Miri interpreter; any undefined behaviour it finds fails.
+#
+# Opt-in, as Layers S and Cmut are: each builds its crates again under its own flags and runs for
+# tens of minutes, so a full sweep skips them unless asked (`--layer <id>` or
+# WZ_RUN_LAYER_VERIFY=1). Hosted, each is a job of its own; on the fleet, a unit of its own.
+layer_vcov_coverage() {
+    local out="$WZ_ARTIFACTS/target/verify/coverage"
+    if [[ "$ONLY_LAYER" != "Vcov" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vcov SKIP (opt-in verification lane; --layer Vcov or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vcov || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg coverage_floor_gate.selftest -- python3 scripts/lib/coverage_floor_gate.py --selftest
+    _runci_leg declared --after verify_plan.selftest,coverage_floor_gate.selftest -- python3 scripts/lib/coverage_floor_gate.py --declared
+    _runci_leg measure --after verify_plan.selftest -- bash scripts/verify.sh coverage
+    _runci_leg coverage_floor_gate --after coverage_floor_gate.selftest,declared,measure -- python3 scripts/lib/coverage_floor_gate.py --check "$out/export.json" --summary-out "$out/summary.json" --uncovered-out "$out/uncovered.txt"
+    _runci_legs_close
+}
+
+layer_vtsan_thread_sanitizer() {
+    if [[ "$ONLY_LAYER" != "Vtsan" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vtsan SKIP (opt-in verification lane; --layer Vtsan or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vtsan || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg tests --after verify_plan.selftest -- bash scripts/verify.sh tsan tests
+    _runci_leg programs --after verify_plan.selftest -- bash scripts/verify.sh tsan programs
+    _runci_legs_close
+}
+
+layer_vasan_address_sanitizer() {
+    if [[ "$ONLY_LAYER" != "Vasan" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vasan SKIP (opt-in verification lane; --layer Vasan or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vasan || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg tests --after verify_plan.selftest -- bash scripts/verify.sh asan tests
+    _runci_leg programs --after verify_plan.selftest -- bash scripts/verify.sh asan programs
+    _runci_legs_close
+}
+
+layer_vmiri_interpreter() {
+    if [[ "$ONLY_LAYER" != "Vmiri" && "${WZ_RUN_LAYER_VERIFY:-0}" != "1" ]]; then
+        echo "Layer Vmiri SKIP (opt-in verification lane; --layer Vmiri or WZ_RUN_LAYER_VERIFY=1)"
+        return 0
+    fi
+    _runci_legs_open Vmiri || return 1
+    _runci_leg verify_plan.selftest -- python3 scripts/lib/verify_plan.py --selftest
+    _runci_leg interpret --after verify_plan.selftest -- bash scripts/verify.sh miri
+    _runci_legs_close
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
@@ -29632,6 +29746,10 @@ run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
 run_layer E18 layer_e18_zenoh_family_conformance || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer Fz layer_fz_fuzz_regress || overall=1
+run_layer Vcov layer_vcov_coverage || overall=1
+run_layer Vtsan layer_vtsan_thread_sanitizer || overall=1
+run_layer Vasan layer_vasan_address_sanitizer || overall=1
+run_layer Vmiri layer_vmiri_interpreter || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
 run_layer Qa layer_qa_mcu_admin_node_vs_zenohd || overall=1

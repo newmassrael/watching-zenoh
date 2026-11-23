@@ -247,6 +247,88 @@ config WZ_LIMIT_HELD_PAYLOADS
 	  object when the program reserved none (object-pool). A constructor past it
 	  answers out of memory and leaves its payload null.
 
+config WZ_LIMIT_HELD_CONFIGS
+	int "HELD_CONFIGS"
+	default 2 if WZ_LIMITS_ZENOH_PICO
+	default 8
+	help
+	  The configs (z_owned_config_t) a program of the pico C ABI holds at once,
+	  each from z_config_default or z_config_clone to its move into an open or a
+	  scout, or its drop: the slots of the pool of configs the library reserves at
+	  its first object, each the size of one config of the build. One more is
+	  refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_HELLOS
+	int "HELD_HELLOS"
+	default 16
+	help
+	  The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
+	  with as many locators as a scouting window keeps of one Hello: the slots of
+	  the pool of kept hellos the library reserves at its first object. One more
+	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+
+config WZ_LIMIT_HELD_PAYLOAD_BYTES
+	int "HELD_PAYLOAD_BYTES"
+	default 131072
+	help
+	  The bytes the owned payloads, strings and slices a program of the pico C ABI
+	  holds carry at once: the payloads' area the library reserves at its first
+	  object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
+	  smallest that holds its bytes and a 16-byte head. A payload no free block
+	  holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+
+config WZ_LIMIT_CONFIG_ENTRIES
+	int "CONFIG_ENTRIES"
+	range 1 255
+	default 8 if WZ_LIMITS_ZENOH_PICO
+	default 32
+	help
+	  The numbered keys one config of the pico C ABI holds at once (z_config_default,
+	  zp_config_insert): the rows of its table, part of the config object. A new key
+	  past them is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps what
+	  it held; a key it holds is still replaced. From 1 to 255.
+
+config WZ_LIMIT_MAX_SCOUT_HELLOS
+	int "MAX_SCOUT_HELLOS"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 16
+	help
+	  The Hellos one scouting window records: the rows of its table, each a node
+	  that answered with its locators. A Hello past them is not recorded and the
+	  window counts it; the window still runs its budget out. The open's lookup,
+	  which ends at the first Hello, takes one.
+
+config WZ_LIMIT_SCOUT_HELLO_LOCATORS
+	int "SCOUT_HELLO_LOCATORS"
+	default 8
+	help
+	  The locators a scouting window keeps of one Hello, each at most
+	  MAX_LOCATOR_LEN bytes, in a text of the Hello's row. A locator past them, or
+	  a longer one, is skipped, never cut short, and counted with the Hello.
+
+config WZ_LIMIT_CONFIG_DOCUMENT_DEPTH
+	int "CONFIG_DOCUMENT_DEPTH"
+	range 3 64
+	default 16
+	help
+	  How deep the zenoh JSON5 document a config of the pico C ABI is handed
+	  (wz_ext_config_document) may nest, the outermost object being 1: the reader
+	  walks the document keeping no tree, and this bounds the values it steps over.
+	  A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
+	  keeps what it held. From 3, which the wz member's policies and limits take.
+
+config WZ_LIMIT_CONFIG_TEXT_BYTES
+	int "CONFIG_TEXT_BYTES"
+	range 1 1048576
+	default 256 if WZ_LIMITS_ZENOH_PICO
+	default 16384
+	help
+	  The bytes of value text one config of the pico C ABI holds, each value with
+	  its terminator, part of the config object. A key's new value is written over
+	  its old place when it fits there, else after the last value. A value that
+	  finds no room is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps
+	  what it held. At least 1.
+
 config WZ_LIMIT_MAX_PENDING_LIVELINESS_GETS
 	int "MAX_PENDING_LIVELINESS_GETS"
 	default 1 if WZ_LIMITS_ZENOH_PICO
@@ -359,16 +441,31 @@ config WZ_LIMIT_MAX_TASKS
 	int "MAX_TASKS"
 	default 8
 	help
-	  The most tasks the runtime of a fixed-memory image may hold: a ceiling on
-	  the task table the image declares, which the image is checked against when
-	  it compiles.
+	  The most tasks a runtime holds: a ceiling on the task table a fixed-memory
+	  image declares, which the image is checked against when it compiles, and on
+	  the task cells a session of the C ABI's cooperative engine reserves when it
+	  opens, one for each link and group its configuration admits. A link or a
+	  group past them is refused, at the open as out of memory and after it as a
+	  link past the faces the session admits.
 
 config WZ_LIMIT_MAX_TIMERS
 	int "MAX_TIMERS"
 	default 16
 	help
-	  The most timers the runtime of a fixed-memory image may hold: a ceiling on
-	  the timer table the image declares, checked as the task ceiling is.
+	  The most timers a runtime holds: a ceiling on the timer table a
+	  fixed-memory image declares, checked as the task ceiling is, and the entries
+	  of the timer table a session of the C ABI's cooperative engine reserves when
+	  it opens. A sleep past them is refused an entry and counted, and ends by
+	  polling.
+
+config WZ_LIMIT_MAX_TICKERS
+	int "MAX_TICKERS"
+	default 16
+	help
+	  The periodic jobs a session of the C ABI's cooperative engine runs at once
+	  (an advanced publisher's heartbeat is one): the rows of the table the
+	  session reserves when it opens. Starting one more is refused, as an engine
+	  with no periodic jobs refuses it.
 
 config WZ_LIMIT_MAX_LOCATOR_LEN
 	int "MAX_LOCATOR_LEN"
@@ -398,6 +495,72 @@ config WZ_LIMIT_MAX_PEER_NODES
 	  peer tables, so the default is 0: a node that is never asked to open a peer
 	  by its zid declares none of that, and refuses the open. One more than this
 	  is refused.
+
+config WZ_LIMIT_MAX_FACES
+	int "MAX_FACES"
+	default 10 if WZ_LIMITS_ZENOH_PICO
+	default 1000
+	help
+	  The faces a session that listens holds besides the one it dials: the links it
+	  accepts, those still in their handshake among them, and those it attaches. A
+	  link that arrives past it is closed unread. The cooperative engine lends each
+	  face its tables and each link its buffers from the session's memory when it
+	  opens, so a session may lower this and never raise it. The zenoh-pico
+	  interface holds no face besides its dial for a session that listens on
+	  nothing.
+
+config WZ_LIMIT_MAX_ACCEPT_PENDING
+	int "MAX_ACCEPT_PENDING"
+	default 1 if WZ_LIMITS_ZENOH_PICO
+	default 100
+	help
+	  The inbound links a session that listens holds in their handshake at once. A
+	  link that arrives past it is closed unread. Each is one of MAX_FACES; the
+	  cooperative engine lends each the buffers of one more link from the session's
+	  memory when it opens, so that a link past either bound can be taken off its
+	  port and closed, and a session may lower this and never raise it.
+
+config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
+	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The key expressions all the peers of a session may have declared to it at
+	  a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES. One more is
+	  refused and counted as one past a peer's own bound is. The cooperative
+	  engine keeps them in one pool its faces share, the fewer of this and as
+	  many as its faces could hold, so a peer that declares few leaves its share
+	  to the others. The default is MAX_PEER_KEYEXPR_ALIASES for each face of
+	  the default MAX_FACES and the dial's, so it refuses nothing a face's bound
+	  admits.
+
+config WZ_LIMIT_SESSION_MAX_REMOTE_DECLS
+	int "SESSION_MAX_REMOTE_DECLS"
+	default 32 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The declarations of one kind (subscribers, queryables, liveliness tokens)
+	  all the peers of a session may hold open to it at a time, each peer also
+	  held to MAX_REMOTE_DECLS. One more is refused and counted as one past a
+	  peer's own bound is, and the application is not told of it. The
+	  cooperative engine keeps them in one pool of each kind its faces share,
+	  the fewer of this and as many as its faces could hold. The default is
+	  MAX_REMOTE_DECLS for each face of the default MAX_FACES and the dial's, so
+	  it refuses nothing a face's bound admits.
+
+config WZ_LIMIT_SESSION_MAX_INBOUND_SUB_INTERESTS
+	int "SESSION_MAX_INBOUND_SUB_INTERESTS"
+	default 16 if WZ_LIMITS_ZENOH_PICO
+	default 16016
+	help
+	  The interests in this session's subscribers that all its peers may have
+	  it remember at a time, each peer also held to MAX_INBOUND_SUB_INTERESTS.
+	  Past it a peer still gets the subscribers of the moment, not the later
+	  ones, as past a peer's own bound. The cooperative engine keeps them in one
+	  pool its faces share, the fewer of this and as many as its faces could
+	  hold. The default is MAX_INBOUND_SUB_INTERESTS for each face of the
+	  default MAX_FACES and the dial's, so it refuses nothing a face's bound
+	  admits.
 
 config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	int "QUERIER_MAX_PENDING_QUERIES"

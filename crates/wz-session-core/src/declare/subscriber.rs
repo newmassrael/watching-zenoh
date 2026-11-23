@@ -23,7 +23,7 @@
 use crate::bounded::EpochCounter;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::bounded::KeyUnkept;
-use crate::bounded::{Profile, Static, Storage};
+use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
@@ -322,6 +322,29 @@ impl RemoteSubscriberPeer<Profile> {
     #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
+impl RemoteSubscriberPeer<crate::bounded::Lent> {
+    /// Keep the subscribers the peer declares from here on in rows of `rows`, the session's: a pool
+    /// the faces share, or a span of this table's own. What the table held elsewhere is forgotten
+    /// first.
+    pub fn keep_rows_in(
+        &mut self,
+        rows: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
+    ) {
+        self.declared.keep_rows_in(rows);
+    }
+
+    /// Keep the repeats of the subscribers the peer declares from here on in rows of `repeats`, the
+    /// session's: a pool the faces share, or a span of this table's own.
+    #[cfg(feature = "alloc")]
+    pub fn keep_repeat_rows_in(
+        &mut self,
+        repeats: crate::row_pool::RowSpace<crate::row_pool::Seq<(u64, u64)>>,
+    ) {
+        self.aliases.keep_rows_in(repeats);
     }
 }
 
@@ -731,6 +754,23 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Profile> {
     /// storage profile. Both observer lists start empty.
     pub fn with_sink_backing() -> Self {
         Self::default()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> RemoteSubscriberTable<D, U, Lent> {
+    /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
+    /// ([`DeclObserverPair::lent`]). Refused as that refuses.
+    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
+        Ok(Self {
+            observers: DeclObserverPair::lent(arena, rows)?,
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
+        })
+    }
+
+    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
+    pub const fn arena_bytes(rows: usize) -> Option<usize> {
+        DeclObserverPair::<D, U, Lent>::arena_bytes(rows)
     }
 }
 

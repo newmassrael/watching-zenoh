@@ -206,6 +206,30 @@ pub struct ReplyParts<'a> {
     pub kind: PartsKind<'a>,
 }
 
+impl ReplyParts<'_> {
+    /// The lengths a reply's payload bound (`MAX_REPLY_PAYLOAD_BYTES`) is read on: its payload's,
+    /// none for a Del or for a buffer of shared memory, which is not copied, and its attachment's.
+    /// What a stage refuses a reply by, and what a node that sends a reply as it is made refuses it
+    /// by.
+    pub fn bounded_lengths(&self) -> (usize, usize) {
+        match &self.kind {
+            PartsKind::Reply {
+                body, attachment, ..
+            } => (
+                match body {
+                    PartsBody::Put(payload) => payload.len(),
+                    PartsBody::Del => 0,
+                    #[cfg(feature = "transport-shm")]
+                    PartsBody::Shared(_) => 0,
+                },
+                attachment.map_or(0, <[u8]>::len),
+            ),
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { payload, .. } => (payload.len(), 0),
+        }
+    }
+}
+
 /// The longest `zid` a timestamp or a responder identity carries on the wire.
 const ZID_BYTES: usize = 16;
 
@@ -757,30 +781,15 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
         // The sizes the reply would put in the arena, and the two bounds a peer's
         // query must not be able to move: the payload (and attachment) length, and
         // the identity lengths the wire cannot carry.
-        let (payload_len, attachment_len, schema_len) = match &parts.kind {
-            PartsKind::Reply {
-                body,
-                encoding,
-                attachment,
-                ..
-            } => (
-                match body {
-                    PartsBody::Put(payload) => payload.len(),
-                    PartsBody::Del => 0,
-                    #[cfg(feature = "transport-shm")]
-                    PartsBody::Shared(_) => 0,
-                },
-                attachment.map_or(0, <[u8]>::len),
-                encoding.and_then(|e| e.schema).map_or(0, <[u8]>::len),
-            ),
+        let (payload_len, attachment_len) = parts.bounded_lengths();
+        let schema_len = match &parts.kind {
+            PartsKind::Reply { encoding, .. } => {
+                encoding.and_then(|e| e.schema).map_or(0, <[u8]>::len)
+            }
             #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { encoding, payload } => (
-                payload.len(),
-                0,
-                encoding
-                    .and_then(|(_, schema)| schema)
-                    .map_or(0, <[u8]>::len),
-            ),
+            PartsKind::Err { encoding, .. } => encoding
+                .and_then(|(_, schema)| schema)
+                .map_or(0, <[u8]>::len),
         };
         // A policy that enforces its capacity addresses its arena with 16 bits, which
         // is only sound while the arena it declares fits them.

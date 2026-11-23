@@ -111,16 +111,32 @@ the reference's, by its row in `deploy/pico_host_ceiling.json`:
   join outside the ceiling. A row with `ratio_at_most` null is unfilled: it fails `--check`
   with the row this run reads, and `--measure` prints the rows of every case it builds.
 
+## The hosted shards
+
+The cases are release builds run one after another, and their clock is the job's: run
+45051019628 read 1,013 s of the lane and 1,114 s of the job against its 1200 s budget (92 percent),
+and every case added since the eight the budget was sized for (378 s) put it nearer. The hosted
+lane is therefore a matrix, and `--shards N --shard K` builds the cases (size and statement alike)
+that `census_shard_plan.plan` deals to shard K over the seconds of `c1cs_case_weights.tsv`, in
+the order of `CASES` and then `STATEMENT_CASES`. Every shard computes the same plan from the
+same tree, so the shards partition the cases whatever the weights say: they decide the balance,
+never which case is built. A case with no row is planned at the median and named on stderr. Each
+case prints its seconds (`<id>: <N>s`), which is what the table is refreshed from. The checks of
+the committed ceiling table itself are run by every shard, since they build nothing.
+
 Usage:
-    capability_cost_gate.py --check [ID...]    build every case (or the named ones), grade it
-    capability_cost_gate.py --measure [ID...]  build the same and print what was measured,
-                                               with each pico case's ceiling row to commit
+    capability_cost_gate.py --check [--shards N --shard K] [ID...]
+                               build every case (or the shard's, or the named ones), grade it
+    capability_cost_gate.py --measure [--shards N --shard K] [ID...]
+                               build the same and print what was measured, with each pico
+                               case's ceiling row to commit
     capability_cost_gate.py --selftest     grade the grader on synthetic input
 """
 
 from __future__ import annotations
 
 import datetime
+import argparse
 import hashlib
 import io
 import json
@@ -131,12 +147,14 @@ import re
 import subprocess
 import sys
 import tarfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402  (the one declaration, and its resolver)
+import census_shard_plan  # noqa: E402  (the one cost planner of the sharded hosted lanes)
 import build_normalization  # noqa: E402  (the one rule that keeps paths and time out of bytes)
 import elf_facts  # noqa: E402  (the one reader of an ELF's version needs)
 from artifact_root import artifact  # noqa: E402  (a sibling: where products are)
@@ -149,6 +167,9 @@ PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 # same build again reads it instead of building it. Products, so under the artifact root when one
 # is set (scripts/lib/artifact-root.sh), like the cargo target directory below.
 PICO_BUILDS = artifact("crates/target/pico-reference")
+# Each case's seconds on a hosted runner, which the shards are planned by (module doc, "The hosted
+# shards").
+CASE_WEIGHTS = census_shard_plan.CASE_WEIGHTS
 # A case's library is under the directory of the cargo profile it was built with. The size cases
 # name it to cargo rather than inherit one: a target directory outside the checkout and the
 # artifact root would put paths no mapping covers into the library, and the gate would read a
@@ -2010,24 +2031,47 @@ def comment_linker(dump: str) -> str:
     return f"{NO_LINKER_NAMED} (GNU ld names none)"
 
 
-def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+@dataclass(frozen=True)
+class CaseBuild:
+    """How a case's library is built: the cargo command (run from `crates/`), the environment it
+    runs in, the library it leaves, and the linker arguments its flags give, which its zenoh-pico
+    reference is linked with alike (`reference_build`). The host performance matrix
+    (`scripts/host-bench/perf_matrix.py wz-arm`) builds its arm W by this plan, so the library it
+    times is built as the library this gate measures."""
+
+    cmd: tuple[str, ...]
+    env: Mapping[str, str]
+    lib: pathlib.Path
+    link_args: tuple[str, ...]
+
+
+def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
+               cfg: set[str] | None = None) -> CaseBuild:
+    """The build of `case` in `env` (the gate's, `build_env`). A case that names configuration
+    files is built for the host's own target, `triple` (this host's when not given), whose
+    `rustc --print cfg` lines are `cfg` (rustc's when not given), so their flags reach the
+    library's crates and not the build scripts."""
     cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
     flags = list(GATE_RUSTFLAGS)
     if case.cargo_configs:
-        triple = host_triple()
-        flags += case_config_flags(case, triple, target_cfg(triple))
+        triple = triple or host_triple()
+        flags += case_config_flags(case, triple, target_cfg(triple) if cfg is None else cfg)
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
-    env = with_rustflags(env, flags)
-    linked = link_args(flags)
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
-    subprocess.run(cmd, cwd=CRATES, env=env, check=True)
-    lib = lib_dir / case.lib
+    return CaseBuild(tuple(cmd), with_rustflags(env, flags), lib_dir / case.lib,
+                     tuple(link_args(flags)))
+
+
+def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes) -> Measured:
+    plan = case_build(case, env)
+    subprocess.run(list(plan.cmd), cwd=CRATES, env=dict(plan.env), check=True)
+    lib = plan.lib
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
@@ -2050,7 +2094,7 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
     return Measured(text=text, symbols=symbols, exports=exports, digests=digests_in(data),
                     leaked=tuple(build_normalization.leaked(data, prefixes)),
                     undefined=tuple(line.split()[-1] for line in undefined if line.split()),
-                    needed=needed, linker=linker_of(lib), link_args=tuple(linked),
+                    needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
                     eh_frame=has_unwind_tables(data))
@@ -2440,11 +2484,37 @@ def grade_ceiling(case_id: str, row: dict, reading: dict) -> tuple[list[str], li
     return findings, notes
 
 
-def cmd_check(measure_only: bool, only: list[str]) -> int:
+def shard_cases(shards: int, shard: int, weights: dict[str, int], notes: list[str]) -> list[str]:
+    """The ids of the cases shard `shard` of `shards` builds, size cases and statement cases dealt
+    together by their seconds (module doc, "The hosted shards"), in the order the gate builds them."""
+    ids = [c.id for c in CASES] + [c.id for c in STATEMENT_CASES]
+    planned = set(census_shard_plan.plan([(i, "") for i in ids], weights, shards, notes)[shard])
+    return [i for i in ids if i in planned]
+
+
+def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None = None) -> int:
     unknown = [i for i in only if i not in {c.id for c in CASES} | {c.id for c in STATEMENT_CASES}]
     if unknown:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
+    planned: set[str] | None = None
+    if shard is not None:
+        try:
+            weights = census_shard_plan.read_weights(CASE_WEIGHTS.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"  capability-cost: {CASE_WEIGHTS.relative_to(ROOT)}: {e}", file=sys.stderr)
+            return 2
+        notes: list[str] = []
+        ids = shard_cases(*shard, weights, notes)
+        for note in notes:
+            print(f"  capability-cost: {note}", file=sys.stderr)
+        print(f"  capability-cost: shard {shard[1]} of {shard[0]} builds {len(ids)} case(s): "
+              f"{', '.join(ids)}")
+        planned = set(ids)
+
+    def chosen(case_id: str) -> bool:
+        return (not only or case_id in only) and (planned is None or case_id in planned)
+
     rc = 0
     try:
         env, prefixes = build_env()
@@ -2468,8 +2538,9 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
     measured_rows: dict[str, dict] = {}
     ceilinged = 0
     for case in CASES:
-        if only and case.id not in only:
+        if not chosen(case.id):
             continue
+        started = time.monotonic()
         got = build(case, env, prefixes)
         stated = stated_digest(case, case_features(case))
         door = digest_door(case, case_features(case))
@@ -2478,6 +2549,8 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
               f"{', '.join(got.digests) or 'none'} "
               f"({f'statement {stated}' if door else f'no door: {DIGEST_CAPABILITY} is off'})")
         ref, ref_findings = report_reference(case, got, env, prefixes)
+        # The case's seconds, its build and its reference's: what c1cs_case_weights.tsv holds.
+        print(f"  capability-cost: {case.id}: {round(time.monotonic() - started)}s")
         # In either mode: a figure read from a library that holds a path is no figure, so it is
         # neither graded against a ceiling row nor printed as one.
         own = purity_findings(case.id, got.leaked) + link_findings(case.id, got)
@@ -2511,11 +2584,13 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
             rc = 1
     statements = 0
     for case in STATEMENT_CASES:
-        if only and case.id not in only:
+        if not chosen(case.id):
             continue
         statements += 1
+        started = time.monotonic()
         features = case_features(case)
         got = build_statement_case(case, env)
+        print(f"  capability-cost: {case.id}: {round(time.monotonic() - started)}s")
         stated = stated_digest(case, features)
         unstated = wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
                                            {}, {})["digest"]
@@ -2526,7 +2601,7 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         for finding in grade_statement(case, got, stated, unstated, digest_door(case, features)):
             print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
             rc = 1
-    sized = sum(1 for c in CASES if not only or c.id in only)
+    sized = sum(1 for c in CASES if chosen(c.id))
     if measured_rows:
         print(f"  capability-cost: the rows this run reads for {HOST_CEILING.relative_to(ROOT)} "
               f"`cases` (each replaces the row of its case; a ratchet's `debt` is the open-debt "
@@ -2691,6 +2766,27 @@ def cmd_selftest() -> int:
            and link_findings("t", Measured(900, [], 3, eh_frame=True)) == [])
     expect("every library the gate builds is linked by GNU ld through cc",
            link_args(GATE_RUSTFLAGS) == [GNU_LD] and "linker=cc" in GATE_RUSTFLAGS)
+    # The plan of a case's build, which the performance matrix builds its arm W by.
+    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {})
+    expect("a case of no configuration file is built for the default target, by the gate's linker",
+           plain.cmd[:6] == ("cargo", "build", "--profile", "release", "-p", "wz-capi-pico")
+           and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
+           and "--target" not in plain.cmd and plain.lib == TARGET / "release" / "libt.so"
+           and plain.link_args == (GNU_LD,)
+           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS)})
+    expect("a case of the crate's default features names none",
+           "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
+           and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
+    bare_build = case_build(by_case["pico-client-coop-nostd"], {}, "x86_64-unknown-linux-gnu",
+                            linux_gnu)
+    expect("a case of configuration files is built for the target named, their flags the library's",
+           bare_build.cmd[bare_build.cmd.index("--target") + 1] == "x86_64-unknown-linux-gnu"
+           and bare_build.lib
+           == TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
+           and "force-unwind-tables=no"
+           in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+           and discards_unwind_tables(bare_build.link_args)
+           and PACKED_RELOCS_LINK in bare_build.link_args)
     expect("the GNU ld line of the C compiler's linker version is read, and none is None",
            gnu_ld_line("collect2 version 13\nGNU ld (GNU Binutils for Ubuntu) 2.38\nCopyright\n")
            == "GNU ld (GNU Binutils for Ubuntu) 2.38"
@@ -2960,6 +3056,20 @@ def cmd_selftest() -> int:
            table_findings(committed, ceiling_cases()) == []
            and set(ceiling_rows(committed)) == {c.id for c in CASES if c.package == "wz-capi-pico"}
            and len(ceiling_cases()) >= 1)
+    every = [c.id for c in CASES] + [c.id for c in STATEMENT_CASES]
+    weights = census_shard_plan.read_weights(CASE_WEIGHTS.read_text(encoding="utf-8"))
+    expect("the shards partition the cases, size and statement alike, for one to four shards",
+           all(sorted(i for k in range(n) for i in shard_cases(n, k, weights, []))
+               == sorted(every) for n in range(1, 5)))
+    expect("an empty table still partitions them, each case planned at the fallback",
+           sorted(i for k in range(2) for i in shard_cases(2, k, {}, [])) == sorted(every))
+    stale: list[str] = []
+    shard_cases(2, 0, {**weights, "no-such-case": 1}, stale)
+    expect("a row for no case is named, not refused",
+           any(n.startswith("no-such-case has a weight") for n in stale))
+    expect("a shard builds its cases in the gate's order",
+           all(ids == [i for i in every if i in set(ids)]
+               for ids in (shard_cases(2, k, weights, []) for k in range(2))))
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
@@ -2972,7 +3082,24 @@ def main(argv: list[str]) -> int:
         return 2
     if argv[1] == "--selftest":
         return cmd_selftest()
-    return cmd_check(measure_only=argv[1] == "--measure", only=argv[2:])
+    parser = argparse.ArgumentParser(prog=f"capability_cost_gate.py {argv[1]}", add_help=False)
+    parser.add_argument("--shards", type=int)
+    parser.add_argument("--shard", type=int)
+    parser.add_argument("ids", nargs="*")
+    try:
+        args = parser.parse_intermixed_args(argv[2:])
+    except SystemExit:
+        return 2
+    shard = None
+    if args.shards is not None or args.shard is not None:
+        if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
+            print("  capability-cost: give --shards N and --shard K with 0 <= K < N",
+                  file=sys.stderr)
+            return 2
+        shard = (args.shards, args.shard)
+    # A line at a time, so the hosted log stamps each case when it ends, not when a buffer fills.
+    sys.stdout.reconfigure(line_buffering=True)
+    return cmd_check(measure_only=argv[1] == "--measure", only=args.ids, shard=shard)
 
 
 if __name__ == "__main__":

@@ -260,8 +260,7 @@ pub unsafe extern "C" fn z_encoding_to_string(
                 .as_bytes()
                 .to_vec(),
         };
-        store_owned_string(string, &rendered);
-        Z_OK
+        store_owned_string(string, &rendered)
     })
 }
 

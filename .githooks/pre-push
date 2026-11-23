@@ -1164,6 +1164,10 @@ round_fed_gates=(
     # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.
     "drop_in_header_gate.py"
+    # R4618 -- the release proof of the pico Windows DLL against zenoh-pico's own surface. Round-fed
+    # by docs/release-proof-pico-windows.md, the pico submodule, wz_ext.h and the files its lanes
+    # name. Three `cc -E` runs through the drop-in gate's reader and a text read, no build.
+    "release_proof_ledger_gate.py --check"
     # R3406 -- the committed public-API surfaces of the pinned zenoh crate. Round-fed by
     # deploy/upstream-api/ and scripts/rustdoc-json.pin. A text read, no build.
     "rust_api_surface.py"

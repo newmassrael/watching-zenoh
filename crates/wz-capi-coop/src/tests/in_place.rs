@@ -21,7 +21,7 @@ fn a_push_read_in_place_reaches_the_subscriber() {
     let got = Arc::new(Mutex::new(Vec::new()));
     let into = got.clone();
     engine.declare_subscriber_on_wire(
-        "demo/**".to_owned(),
+        "demo/**",
         WireKey::literal(),
         Locality::Any,
         None,

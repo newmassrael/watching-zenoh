@@ -45,6 +45,8 @@ use core::cell::Cell;
 use core::fmt;
 use core::ops::Deref;
 use core::ptr::NonNull;
+#[cfg(debug_assertions)]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept};
 
@@ -62,7 +64,8 @@ const MIN_BLOCK: u32 = (BLOCK_HEADER + BLOCK_ALIGN) as u32;
 /// No block: the end of the free list, and where an empty key points.
 const NIL: u32 = u32::MAX;
 
-/// The header word that holds a block's length.
+/// The header word that holds a block's length: its bytes for a free block, and for a held one its
+/// key's length with the granules the block took past the key's own (`held_word`).
 const SIZE: u32 = 0;
 
 /// The header word that holds how many keys hold a block, or the next free block of a free one.
@@ -71,6 +74,28 @@ const LINK: u32 = 1;
 /// The most bytes of blocks an arena of keys holds: every offset and length is a `u32`, and the
 /// largest `u32` marks no block.
 pub const MAX_KEY_ARENA_BYTES: usize = (u32::MAX - BLOCK_ALIGN as u32) as usize;
+
+/// The longest key a block's length word records (`held_word`).
+const MAX_KEY_LEN: usize = (u32::MAX >> 2) as usize;
+
+const _: () = assert!(
+    BLOCK_ALIGN == 4 && MIN_BLOCK - (BLOCK_ALIGN as u32) < 4 * BLOCK_ALIGN as u32,
+    "a held block's slack is at most three granules, which the length word's two low bits count"
+);
+
+/// The length word of a held block: the key's `len`, and the `slack` bytes the block holds past
+/// the key's own block (a free block's remainder too short to be a block of its own), counted in
+/// granules in the two low bits. A walk of the blocks reads each key's length from it
+/// ([`KeySpace::kept`]).
+const fn held_word(len: u32, slack: u32) -> u32 {
+    (len << 2) | (slack / BLOCK_ALIGN as u32)
+}
+
+/// The bytes of a held block whose length word is `word`.
+const fn held_bytes(word: u32) -> u32 {
+    let own = ((word >> 2) + (BLOCK_HEADER + BLOCK_ALIGN - 1) as u32) & !(BLOCK_ALIGN as u32 - 1);
+    own + (word & 3) * BLOCK_ALIGN as u32
+}
 
 /// The bytes a key of `len` bytes takes as a block: its header and its bytes, rounded up to
 /// [`BLOCK_ALIGN`]. `None` past [`MAX_KEY_ARENA_BYTES`].
@@ -97,9 +122,30 @@ struct KeyStore {
     peak: Cell<u32>,
     /// The keys refused for want of room.
     refused: Cell<u32>,
+    /// Whether the arena's owner keeps it behind one lock ([`KeySpace::guard_by_owner_lock`]).
+    #[cfg(debug_assertions)]
+    guarded: AtomicBool,
+    /// Whether that lock is held now.
+    #[cfg(debug_assertions)]
+    held: AtomicBool,
+    /// The longest key the arena keeps: the session's `MAX_KEYEXPR_BYTES` its creator lent the
+    /// arena with ([`Arena::lend_keys`]), held in no byte where the build fixes the bound.
+    longest: crate::limits::MaxKeyexprBytesHeld,
 }
 
 impl KeyStore {
+    /// Fail at once, in a build with debug assertions, when a key of an arena its owner's lock
+    /// guards is made, shared or let go of with that lock not held: the counts are cells, and a
+    /// thread that touches them outside the lock races the one that holds it.
+    #[inline]
+    fn assert_owner_lock(&self) {
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.guarded.load(Ordering::Relaxed) || self.held.load(Ordering::Relaxed),
+            "a key of an arena its owner's lock guards was touched with that lock not held"
+        );
+    }
+
     /// Header word `word` of the block at `at`.
     fn word(&self, at: u32, word: u32) -> u32 {
         // SAFETY: every block lies below `top`, inside the blocks, and starts on a multiple of
@@ -122,6 +168,18 @@ impl KeyStore {
                 .add(at as usize + 4 * word as usize)
                 .cast::<u32>()
                 .write(value)
+        }
+    }
+
+    /// The `len` bytes of the key the held block at `at` keeps.
+    fn text(&self, at: u32, len: u32) -> &[u8] {
+        // SAFETY: a held block holds its header and its key's `len` bytes after it, inside the
+        // blocks, which nothing writes while a holder of the block lives.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.blocks.as_ptr().add(at as usize + BLOCK_HEADER),
+                len as usize,
+            )
         }
     }
 
@@ -165,10 +223,9 @@ impl KeyStore {
         Some(top)
     }
 
-    /// Give the block at `at` back: into the free list in address order, merged with a free block
-    /// on either side, and to the bump area when it ends where that starts.
-    fn give_back(&self, at: u32) {
-        let mut size = self.word(at, SIZE);
+    /// Give the block of `size` bytes at `at` back: into the free list in address order, merged
+    /// with a free block on either side, and to the bump area when it ends where that starts.
+    fn give_back(&self, at: u32, mut size: u32) {
         // The free blocks around `at`: `before` the last below it, with the one before that, and
         // `after` the first above it.
         let (mut before_prev, mut before, mut after) = (NIL, NIL, self.free.get());
@@ -261,14 +318,19 @@ impl KeySpace {
         }
     }
 
-    /// A key arena of `bytes` bytes of blocks over the span at `span`, none of them taken.
+    /// A key arena of `bytes` bytes of blocks over the span at `span`, none of them taken, that
+    /// keeps keys of at most `longest` bytes ([`Self::holds_key`]).
     ///
     /// # Safety
     /// `span` is aligned to [`ARENA_ALIGN`](crate::bounded::ARENA_ALIGN), the
     /// [`Self::span_bytes`] of `bytes` bytes from it are valid for reads and writes and used by
     /// nothing else for as long as any copy of the space or any key made from it lives, and
     /// `bytes` is at most [`MAX_KEY_ARENA_BYTES`].
-    pub(crate) unsafe fn over(span: NonNull<u8>, bytes: usize) -> Self {
+    pub(crate) unsafe fn over(
+        span: NonNull<u8>,
+        bytes: usize,
+        longest: crate::limits::MaxKeyexprBytesHeld,
+    ) -> Self {
         const {
             assert!(
                 core::mem::align_of::<KeyStore>() <= crate::bounded::ARENA_ALIGN,
@@ -287,9 +349,21 @@ impl KeySpace {
                 used: Cell::new(0),
                 peak: Cell::new(0),
                 refused: Cell::new(0),
+                #[cfg(debug_assertions)]
+                guarded: AtomicBool::new(false),
+                #[cfg(debug_assertions)]
+                held: AtomicBool::new(false),
+                longest,
             });
         }
         Self { store }
+    }
+
+    /// Whether the arena keeps a key of `len` bytes: at most the session's `MAX_KEYEXPR_BYTES` it
+    /// was lent with. The value is compared even where the build fixes it, because on the lent
+    /// policy no row is a buffer that would refuse a longer key by itself: the arena is the bound.
+    pub fn holds_key(&self, len: usize) -> bool {
+        self.store().longest.get().admits(len)
     }
 
     /// The arena's state.
@@ -309,16 +383,19 @@ impl KeySpace {
             });
         }
         let store = self.store();
+        store.assert_owner_lock();
         let refused = |asked: Option<usize>| {
             store.refused.set(store.refused.get().wrapping_add(1));
             KeysExhausted { asked }
         };
-        let Some(need) = block_bytes(text.len()) else {
+        let Some(need) = block_bytes(text.len()).filter(|_| text.len() <= MAX_KEY_LEN) else {
             return Err(refused(None));
         };
         let Some(at) = store.take(need as u32) else {
             return Err(refused(Some(need)));
         };
+        let size = store.word(at, SIZE);
+        store.set_word(at, SIZE, held_word(text.len() as u32, size - need as u32));
         store.set_word(at, LINK, 1);
         // SAFETY: the block at `at` holds its header and at least `text.len()` bytes after it,
         // inside the blocks, and no key reads them until this one is made.
@@ -329,7 +406,7 @@ impl KeySpace {
                 text.len(),
             );
         }
-        let used = store.used.get() + store.word(at, SIZE);
+        let used = store.used.get() + size;
         store.used.set(used);
         store.peak.set(store.peak.get().max(used));
         Ok(KeyRef {
@@ -337,6 +414,71 @@ impl KeySpace {
             at,
             len: text.len() as u32,
         })
+    }
+
+    /// The key of the arena whose text is `text`, one holder more of its block, when a block holds
+    /// it now, or `None`: one walk of the blocks in address order, the free ones known by the free
+    /// list, which is in the same order. A key a row or an object outside the owner's lock asks
+    /// for then takes no second block for a text the arena keeps already, whoever holds it.
+    pub fn kept(&self, text: &str) -> Option<KeyRef> {
+        let store = self.store();
+        store.assert_owner_lock();
+        let (mut at, mut free) = (0, store.free.get());
+        while at < store.top.get() {
+            let word = store.word(at, SIZE);
+            if at == free {
+                free = store.word(at, LINK);
+                at += word;
+                continue;
+            }
+            if (word >> 2) as usize == text.len() && store.text(at, word >> 2) == text.as_bytes() {
+                store.set_word(at, LINK, store.word(at, LINK) + 1);
+                return Some(KeyRef {
+                    store: self.store,
+                    at,
+                    len: word >> 2,
+                });
+            }
+            at += held_bytes(word);
+        }
+        None
+    }
+
+    /// The key a holder kept as [`KeyRef::into_raw`] gave it, one of its block's holders again.
+    ///
+    /// # Safety
+    /// `at` and `len` are what `into_raw` gave for a key of this arena, whose holder they still
+    /// are, and are not used again.
+    pub unsafe fn adopt(&self, at: u32, len: u32) -> KeyRef {
+        KeyRef {
+            store: self.store,
+            at,
+            len,
+        }
+    }
+
+    /// Keep the arena behind its owner's one lock from now on: in a build with debug assertions a
+    /// key of it made, shared or let go of while the owner has not marked the lock held
+    /// ([`Self::owner_lock_taken`]) fails at once, so a path that lets go of a row's key after the
+    /// lock is let go of fails every test that takes it rather than racing a holder of the lock.
+    /// Nothing is kept or checked in a build without debug assertions.
+    pub fn guard_by_owner_lock(&self) {
+        #[cfg(debug_assertions)]
+        self.store().guarded.store(true, Ordering::Relaxed);
+    }
+
+    /// The owner took the lock that guards the arena.
+    #[inline]
+    pub fn owner_lock_taken(&self) {
+        #[cfg(debug_assertions)]
+        self.store().held.store(true, Ordering::Relaxed);
+    }
+
+    /// The owner is letting go of the lock that guards the arena.
+    #[inline]
+    pub fn owner_lock_released(&self) {
+        #[cfg(debug_assertions)]
+        self.store().held.store(false, Ordering::Relaxed);
     }
 
     /// What the arena holds now.
@@ -378,16 +520,17 @@ impl From<KeySpace> for LentKeys {
 }
 
 impl KeyMaker<KeyRef> for LentKeys {
-    /// A key past `MAX_KEYEXPR_BYTES` is refused as a row of the static policy refuses it, so the
-    /// bound a key is held to is the build's whichever policy keeps it; a key the arena has no room
-    /// for is refused and counted by the arena ([`KeyCounts::refused`]).
+    /// A key past the session's `MAX_KEYEXPR_BYTES` the arena was lent with is refused before any
+    /// room is asked ([`KeySpace::holds_key`]), as a row of the static policy refuses one past its
+    /// buffer; a key the arena has no room for is refused and counted by the arena
+    /// ([`KeyCounts::refused`]). A table handed no arena keeps no key.
     fn key(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
-        if text.len() > crate::caps::MAX_KEYEXPR_BYTES {
-            return Err(KeyUnkept::TooLong);
-        }
         let Some(keys) = &self.0 else {
             return Err(KeyUnkept::NoRoom);
         };
+        if !keys.holds_key(text.len()) {
+            return Err(KeyUnkept::TooLong);
+        }
         keys.key(text).map_err(|_| KeyUnkept::NoRoom)
     }
 }
@@ -409,15 +552,8 @@ impl KeyRef {
             return "";
         }
         // SAFETY: a key with a block points at a store that outlives it (`KeySpace::over`), and
-        // its block holds the `len` bytes of the `str` it was made from, which nothing writes
-        // while a holder of the block lives.
-        unsafe {
-            let store = self.store.as_ref();
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                store.blocks.as_ptr().add(self.at as usize + BLOCK_HEADER),
-                self.len as usize,
-            ))
-        }
+        // its block holds the `len` bytes of the `str` it was made from.
+        unsafe { core::str::from_utf8_unchecked(self.store.as_ref().text(self.at, self.len)) }
     }
 
     /// The bytes of the block the key holds, header included; none for the empty key.
@@ -426,7 +562,26 @@ impl KeyRef {
             return 0;
         }
         // SAFETY: as `as_str`.
-        unsafe { self.store.as_ref() }.word(self.at, SIZE) as usize
+        held_bytes(unsafe { self.store.as_ref() }.word(self.at, SIZE)) as usize
+    }
+
+    /// The key as its block's place and its length, still one of the block's holders, which
+    /// nothing counts while it is apart: for a holder outside the arena owner's lock, which hands
+    /// them back to [`KeySpace::adopt`] under it to share or let go of the key.
+    pub fn into_raw(self) -> (u32, u32) {
+        let this = core::mem::ManuallyDrop::new(self);
+        (this.at, this.len)
+    }
+
+    /// Let go of the key now and leave the empty key, which holds no block, in its place: for a
+    /// row taken out of its table under the lock that guards the arena and dropped after that lock
+    /// is let go of, for what else it holds.
+    pub fn let_go(&mut self) {
+        *self = Self {
+            store: self.store,
+            at: NIL,
+            len: 0,
+        };
     }
 }
 
@@ -435,6 +590,7 @@ impl Clone for KeyRef {
         if self.at != NIL {
             // SAFETY: as `as_str`.
             let store = unsafe { self.store.as_ref() };
+            store.assert_owner_lock();
             let holders = store.word(self.at, LINK);
             store.set_word(self.at, LINK, holders + 1);
         }
@@ -453,13 +609,15 @@ impl Drop for KeyRef {
         }
         // SAFETY: as `as_str`.
         let store = unsafe { self.store.as_ref() };
+        store.assert_owner_lock();
         let holders = store.word(self.at, LINK) - 1;
         if holders > 0 {
             store.set_word(self.at, LINK, holders);
             return;
         }
-        store.used.set(store.used.get() - store.word(self.at, SIZE));
-        store.give_back(self.at);
+        let size = held_bytes(store.word(self.at, SIZE));
+        store.used.set(store.used.get() - size);
+        store.give_back(self.at, size);
     }
 }
 
@@ -519,6 +677,8 @@ impl PartialEq<&str> for KeyRef {
 mod tests {
     use super::*;
     use crate::bounded::{LendRefused, ARENA_ALIGN};
+    use crate::limit_binding::{LimitSpec, Quota};
+    use crate::limits::SessionLimits;
 
     /// One block of an arena's memory in a test, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -537,12 +697,18 @@ mod tests {
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
     }
 
-    /// A key arena of `bytes` bytes of blocks, lent from an arena of exactly its span.
+    /// A key arena of `bytes` bytes of blocks, lent from an arena of exactly its span, that keeps
+    /// keys as long as a session that states nothing does.
     fn keys_of(bytes: usize) -> KeySpace {
+        keys_held_to(bytes, SessionLimits::defaults().max_keyexpr_bytes_held())
+    }
+
+    /// [`keys_of`], keeping keys of at most `longest` bytes.
+    fn keys_held_to(bytes: usize, longest: crate::limits::MaxKeyexprBytesHeld) -> KeySpace {
         let span = KeySpace::span_bytes(bytes).expect("a test arena fits");
         let mut arena = arena_of(span);
         let keys = arena
-            .lend_keys(bytes)
+            .lend_keys(bytes, longest)
             .expect("the arena is the key arena's span");
         assert_eq!(
             arena.high_water(),
@@ -710,9 +876,10 @@ mod tests {
         assert_eq!(keys.counts().used, 0);
     }
 
-    /// A table's key arena keeps a key as the arena does, refuses one past `MAX_KEYEXPR_BYTES`
-    /// as a row of the static policy refuses it, before any room is asked, and one the arena has
-    /// no room for as no room; a table handed no key arena keeps no key.
+    /// A table's key arena keeps a key as the arena does, refuses one past the `MAX_KEYEXPR_BYTES`
+    /// of a session that states nothing, the build's, as a row of the static policy refuses it,
+    /// before any room is asked, and one the arena has no room for as no room; a table handed no
+    /// key arena keeps no key.
     #[test]
     fn a_tables_key_arena_keeps_a_key_or_says_why_not() {
         let block = block_bytes(crate::caps::MAX_KEYEXPR_BYTES).expect("the longest key");
@@ -736,14 +903,182 @@ mod tests {
         assert!(LentKeys::default().space().is_none());
     }
 
+    /// An arena its owner's lock guards takes, shares and lets go of keys while the owner marks
+    /// the lock held; a key let go of after the lock is let go of fails a debug build at once.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "that lock not held")]
+    fn a_key_let_go_of_outside_its_owners_lock_fails() {
+        let keys = keys_of(128);
+        keys.guard_by_owner_lock();
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        let shared = key.clone();
+        drop(shared);
+        keys.owner_lock_released();
+        drop(key);
+    }
+
+    /// The CONTROL: the same key let go of while the lock is held, and an arena no lock guards,
+    /// pass.
+    #[test]
+    fn a_key_let_go_of_under_its_owners_lock_passes() {
+        let keys = keys_of(128);
+        keys.guard_by_owner_lock();
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        drop(key);
+        keys.owner_lock_released();
+        let unguarded = keys_of(128);
+        drop(unguarded.key("demo/free").expect("room"));
+        assert_eq!(keys.counts().used, 0);
+    }
+
+    /// A key let go of in place reads as the empty key and is one holder fewer of its block: the
+    /// block stays while another holder shares it, and goes back with the last, whose empty key
+    /// then gives nothing back when it is dropped.
+    #[test]
+    fn a_key_let_go_of_in_place_leaves_the_empty_key() {
+        let keys = keys_of(128);
+        let mut key = keys.key("demo/let/go").expect("room");
+        let mut shared = key.clone();
+        let block = block_bytes("demo/let/go".len()).expect("short");
+        key.let_go();
+        assert_eq!(key.as_str(), "");
+        assert_eq!(key.block_bytes(), 0);
+        assert_eq!(keys.counts().used, block, "the share keeps the block");
+        assert_eq!(shared.as_str(), "demo/let/go");
+        shared.let_go();
+        assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
+        drop((key, shared));
+        assert_eq!(keys.counts().used, 0, "an empty key gives nothing back");
+    }
+
+    /// A key asked for by its text is found in whichever block holds it, one holder more of that
+    /// block, past a free block before it; the start of a kept key, a text past one and the empty
+    /// text are no block's, and a block given back holds no key.
+    #[test]
+    fn a_kept_key_is_found_by_its_text_past_free_blocks() {
+        let keys = keys_of(256);
+        let gone = keys.key("demo/kept/gone").expect("room");
+        let held = keys.key("demo/kept/a").expect("room");
+        drop(gone);
+        assert_eq!(
+            free_blocks(&keys).len(),
+            1,
+            "CONTROL: a free block lies before the key"
+        );
+        let used = keys.counts().used;
+        let found = keys.kept("demo/kept/a").expect("the block that holds it");
+        assert_eq!(found.as_str(), "demo/kept/a");
+        assert_eq!(keys.counts().used, used, "a found key takes no block");
+        assert!(keys.kept("demo/kept/").is_none(), "the start of a kept key");
+        assert!(
+            keys.kept("demo/kept/ab").is_none(),
+            "a text past a kept key"
+        );
+        assert!(keys.kept("").is_none(), "the empty text");
+        drop(held);
+        assert_eq!(keys.counts().used, used, "the found key holds the block");
+        drop(found);
+        assert_eq!(keys.counts().used, 0);
+        assert!(
+            keys.kept("demo/kept/a").is_none(),
+            "a block given back holds no key"
+        );
+    }
+
+    /// A key that takes a free block too short to split keeps the block's slack: its length still
+    /// reads from the block, a walk finds it and steps over the slack to the next key, and the
+    /// whole block goes back with it.
+    #[test]
+    fn a_key_in_a_block_with_slack_reads_and_gives_back_the_whole_block() {
+        let keys = keys_of(256);
+        let wide = keys.key("demo/slack/abcd").expect("room");
+        let after = keys.key("demo/after").expect("room");
+        let wide_bytes = wide.block_bytes();
+        drop(wide);
+        let narrow = keys.key("demo/slack/a").expect("the free block");
+        assert!(
+            block_bytes("demo/slack/a".len()).expect("short") < wide_bytes,
+            "CONTROL: the key's own block is shorter than the free block it took"
+        );
+        assert_eq!(
+            narrow.block_bytes(),
+            wide_bytes,
+            "the slack stays with the key"
+        );
+        assert_eq!(narrow.as_str(), "demo/slack/a");
+        let found = keys.kept("demo/slack/a").expect("found with its slack");
+        let next = keys
+            .kept("demo/after")
+            .expect("the walk steps over the slack");
+        assert_eq!(next.as_str(), "demo/after");
+        drop((narrow, found, after, next));
+        assert_eq!(keys.counts().used, 0);
+        assert!(
+            free_blocks(&keys).is_empty(),
+            "every block went back to the bump area"
+        );
+    }
+
+    /// A key kept apart as its raw parts is still one of its block's holders: adopted back, it
+    /// reads its text and lets go of the block as the key would have.
+    #[test]
+    fn a_key_kept_apart_is_adopted_back_as_its_holder() {
+        let keys = keys_of(128);
+        let (at, len) = keys.key("demo/raw").expect("room").into_raw();
+        assert!(keys.counts().used > 0, "the raw parts hold the block");
+        // SAFETY: the parts are the raw form of a key of this arena, adopted once.
+        let key = unsafe { keys.adopt(at, len) };
+        assert_eq!(key.as_str(), "demo/raw");
+        drop(key);
+        assert_eq!(keys.counts().used, 0);
+    }
+
+    /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered
+    /// under the build's, and refuses one byte more as too long, asking no room and counting
+    /// nothing; a build whose domain is its own value alone has no lower bound to state.
+    #[test]
+    fn a_key_arena_holds_keys_to_the_bound_it_was_lent_with() {
+        let mut limits = SessionLimits::defaults();
+        if limits.select_max_keyexpr_bytes(Quota::at_most(8)).is_err() {
+            assert!(
+                <crate::limits::MaxKeyexprBytes as LimitSpec>::DOMAIN.is_singleton(),
+                "only a domain of one value refuses a lower bound"
+            );
+            return;
+        }
+        let keys = keys_held_to(256, limits.max_keyexpr_bytes_held());
+        assert!(keys.holds_key(8));
+        assert!(!keys.holds_key(9));
+        let lent = LentKeys::from(keys);
+        let past = "k".repeat(9);
+        assert_eq!(lent.key(&past).err(), Some(KeyUnkept::TooLong));
+        assert_eq!(
+            (keys.counts().used, keys.counts().refused),
+            (0, 0),
+            "a key past the bound takes and counts nothing"
+        );
+        let at = "k".repeat(8);
+        let held = lent.key(&at).expect("a key of the bound itself is kept");
+        assert_eq!(held.as_str(), at);
+        let wide = keys_of(256);
+        assert!(
+            wide.holds_key(9),
+            "an arena lent with the build's bound keeps the longer key"
+        );
+    }
+
     /// An arena refuses a key arena whose span is past what it has left, taking nothing, and one
     /// past the key arena's own address space.
     #[test]
     fn an_arena_refuses_a_key_arena_past_what_is_left() {
         let span = KeySpace::span_bytes(64).expect("fits");
         let mut arena = arena_of(span);
+        let longest = SessionLimits::defaults().max_keyexpr_bytes_held();
         assert_eq!(
-            arena.lend_keys(65).err(),
+            arena.lend_keys(65, longest).err(),
             Some(LendRefused::Exhausted {
                 asked: KeySpace::span_bytes(65),
                 left: span,
@@ -751,6 +1086,6 @@ mod tests {
         );
         assert_eq!(arena.high_water(), 0, "a refused key arena takes nothing");
         assert_eq!(KeySpace::span_bytes(MAX_KEY_ARENA_BYTES + 1), None);
-        assert!(arena.lend_keys(64).is_ok());
+        assert!(arena.lend_keys(64, longest).is_ok());
     }
 }

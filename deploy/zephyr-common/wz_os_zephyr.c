@@ -8,23 +8,39 @@
  * with it, the calling thread's identity, a thread of the engine's own (zenoh-pico's read task)
  * and a sleep. The mutex is the kernel's
  * blocking `k_mutex`, not a critical section: a session holds it while it reads and dispatches a
- * message, and masking interrupts for that long would hold off the network driver. A thread's
- * stack and its `k_thread` come from the kernel's dynamic thread pool and are given back when the
- * thread is joined.
+ * message, and masking interrupts for that long would hold off the network driver.
+ *
+ * Every kernel object here comes from a pool the image sizes and none from the kernel heap: the
+ * mutexes and the condition variables from memory slabs of CONFIG_WZ_OS_MUTEXES and
+ * CONFIG_WZ_OS_CONDVARS blocks, a thread's record and its stack from static arrays of
+ * CONFIG_WZ_OS_THREADS, as zenoh-pico places its tasks' stacks
+ * (`vendor/zenoh-pico/src/system/zephyr/system.c` @
+ * `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`).
+ * A pool with no free block answers as a heap with no room did: NULL, or -ENOMEM, which the
+ * engine reports as an allocation that failed. A block is given back when its object is freed,
+ * a thread's when it is joined.
  */
 
 #include <errno.h>
 #include <stdint.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
+
+K_MEM_SLAB_DEFINE_STATIC(wz_os_mutexes, sizeof(struct k_mutex), CONFIG_WZ_OS_MUTEXES,
+			 __alignof__(struct k_mutex));
+
+K_MEM_SLAB_DEFINE_STATIC(wz_os_condvars, sizeof(struct k_condvar), CONFIG_WZ_OS_CONDVARS,
+			 __alignof__(struct k_condvar));
 
 void *wz_os_mutex_new(void)
 {
-	struct k_mutex *mutex = k_malloc(sizeof(*mutex));
+	void *mutex;
 
-	if (mutex != NULL) {
-		k_mutex_init(mutex);
+	if (k_mem_slab_alloc(&wz_os_mutexes, &mutex, K_NO_WAIT) != 0) {
+		return NULL;
 	}
+	k_mutex_init(mutex);
 	return mutex;
 }
 
@@ -46,23 +62,30 @@ void wz_os_mutex_unlock(void *mutex)
 
 void wz_os_mutex_free(void *mutex)
 {
-	k_free(mutex);
+	k_mem_slab_free(&wz_os_mutexes, mutex);
 }
 
 /* The condition variable a C ABI's channels and undeclares wait on, with a mutex above held. */
 void *wz_os_condvar_new(void)
 {
-	struct k_condvar *condvar = k_malloc(sizeof(*condvar));
+	void *condvar;
 
-	if (condvar != NULL) {
-		k_condvar_init(condvar);
+	if (k_mem_slab_alloc(&wz_os_condvars, &condvar, K_NO_WAIT) != 0) {
+		return NULL;
 	}
+	k_condvar_init(condvar);
 	return condvar;
 }
 
 void wz_os_condvar_wait(void *condvar, void *mutex)
 {
 	(void)k_condvar_wait(condvar, mutex, K_FOREVER);
+}
+
+/* The same wait for at most ms: 0 when notified, otherwise the time ran out. */
+int wz_os_condvar_wait_ms(void *condvar, void *mutex, uint32_t ms)
+{
+	return k_condvar_wait(condvar, mutex, K_MSEC(ms)) == 0 ? 0 : 1;
 }
 
 void wz_os_condvar_notify_one(void *condvar)
@@ -77,7 +100,7 @@ void wz_os_condvar_notify_all(void *condvar)
 
 void wz_os_condvar_free(void *condvar)
 {
-	k_free(condvar);
+	k_mem_slab_free(&wz_os_condvars, condvar);
 }
 
 uintptr_t wz_os_thread_current(void)
@@ -87,10 +110,16 @@ uintptr_t wz_os_thread_current(void)
 
 struct wz_os_thread {
 	struct k_thread thread;
-	k_thread_stack_t *stack;
 	void (*entry)(void *);
 	void *arg;
 };
+
+#if CONFIG_WZ_OS_THREADS > 0
+
+K_THREAD_STACK_ARRAY_DEFINE(wz_os_stacks, CONFIG_WZ_OS_THREADS, CONFIG_WZ_OS_THREAD_STACK_SIZE);
+static struct wz_os_thread wz_os_threads[CONFIG_WZ_OS_THREADS];
+/* A set bit is a record and its stack that a thread holds until it is joined. */
+static ATOMIC_DEFINE(wz_os_threads_taken, CONFIG_WZ_OS_THREADS);
 
 static void wz_os_thread_entry(void *p1, void *p2, void *p3)
 {
@@ -103,25 +132,23 @@ static void wz_os_thread_entry(void *p1, void *p2, void *p3)
 
 int wz_os_thread_spawn(void (*entry)(void *), void *arg, uintptr_t *id)
 {
-	struct wz_os_thread *t = k_malloc(sizeof(*t));
+	for (int i = 0; i < CONFIG_WZ_OS_THREADS; i++) {
+		if (atomic_test_and_set_bit(wz_os_threads_taken, i)) {
+			continue;
+		}
+		struct wz_os_thread *t = &wz_os_threads[i];
 
-	if (t == NULL) {
-		return -ENOMEM;
-	}
-	t->stack = k_thread_stack_alloc(CONFIG_WZ_OS_THREAD_STACK_SIZE, 0);
-	if (t->stack == NULL) {
-		k_free(t);
-		return -ENOMEM;
-	}
-	t->entry = entry;
-	t->arg = arg;
-	k_tid_t tid = k_thread_create(&t->thread, t->stack, CONFIG_WZ_OS_THREAD_STACK_SIZE,
-				      wz_os_thread_entry, t, NULL, NULL,
-				      CONFIG_WZ_OS_THREAD_PRIORITY, 0, K_NO_WAIT);
+		t->entry = entry;
+		t->arg = arg;
+		k_tid_t tid = k_thread_create(&t->thread, wz_os_stacks[i],
+					      CONFIG_WZ_OS_THREAD_STACK_SIZE, wz_os_thread_entry, t,
+					      NULL, NULL, CONFIG_WZ_OS_THREAD_PRIORITY, 0, K_NO_WAIT);
 
-	(void)k_thread_name_set(tid, "wz-os");
-	*id = (uintptr_t)tid;
-	return 0;
+		(void)k_thread_name_set(tid, "wz-os");
+		*id = (uintptr_t)tid;
+		return 0;
+	}
+	return -ENOMEM;
 }
 
 int wz_os_thread_join(uintptr_t id)
@@ -130,8 +157,7 @@ int wz_os_thread_join(uintptr_t id)
 	int rc = k_thread_join(&t->thread, K_FOREVER);
 
 	if (rc == 0) {
-		(void)k_thread_stack_free(t->stack);
-		k_free(t);
+		atomic_clear_bit(wz_os_threads_taken, (int)(t - wz_os_threads));
 	}
 	return rc;
 }
@@ -139,10 +165,34 @@ int wz_os_thread_join(uintptr_t id)
 int wz_os_thread_is_finished(uintptr_t id)
 {
 	/* A join that does not wait answers 0 for a thread that has ended and -EBUSY for one that
-	 * runs; it frees nothing, so the thread is still joined once afterwards.
+	 * runs; it gives nothing back, so the thread is still joined once afterwards.
 	 */
 	return k_thread_join((struct k_thread *)id, K_NO_WAIT) == 0 ? 1 : 0;
 }
+
+#else /* CONFIG_WZ_OS_THREADS == 0: an image that starts no thread of the engine's. */
+
+int wz_os_thread_spawn(void (*entry)(void *), void *arg, uintptr_t *id)
+{
+	ARG_UNUSED(entry);
+	ARG_UNUSED(arg);
+	ARG_UNUSED(id);
+	return -ENOMEM;
+}
+
+int wz_os_thread_join(uintptr_t id)
+{
+	ARG_UNUSED(id);
+	return -EINVAL;
+}
+
+int wz_os_thread_is_finished(uintptr_t id)
+{
+	ARG_UNUSED(id);
+	return 1;
+}
+
+#endif
 
 void wz_os_sleep_ms(uint32_t ms)
 {

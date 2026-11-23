@@ -145,6 +145,15 @@ does it to the scopes of `deploy/mutation_ratchet.json` with cargo-mutants, nigh
 its committed row; every missed mutant it prints is a test to write
 (`docs/mutation-testing.md`).
 
+**Whether the code is correct and safe.** Four opt-in lanes measure the cooperative engine's
+crates in the feature sets the C library and the MCU kit images build them in
+(`scripts/lib/verify_plan.py`), on the nightly `crates/wz-fuzz` pins (`scripts/verify.sh`), each a
+hosted job of its own: Layer Vcov holds each crate's line, branch and function coverage to
+`deploy/coverage_floor.json` and writes the functions no test reached; Layer Vtsan runs the tests
+and the C programs under ThreadSanitizer, Layer Vasan under AddressSanitizer, and Layer Vmiri the
+arena and host-lock units under Miri. Run one with `bash scripts/run-ci.sh --layer <id>`; what each
+proves and what it does not is `docs/verification.md`.
+
 **A lane's legs (open-debt item 938).** A lane of `scripts/run-ci.sh` either
 stops at its first red (`|| return 1`, the right shape when each step reads the
 previous one's build) or declares its legs in a leg ledger:

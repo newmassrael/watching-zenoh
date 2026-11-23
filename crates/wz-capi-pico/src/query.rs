@@ -358,8 +358,13 @@ pub(crate) struct QueryMarshal {
 impl QueryMarshal {
     /// Build the marshal for one inbound query, with its cached views still
     /// UNBOUND — [`Self::bind`] must run once the value has reached its final
-    /// address. Splitting the two is load-bearing; see `bind`.
-    fn new(view: &dyn QueryView) -> Self {
+    /// address. Splitting the two is load-bearing; see `bind`. Its payload and attachment are
+    /// read where the view holds them, as a subscriber's sample's are; an escaped copy copies them
+    /// ([`clone_query_marshal`]).
+    ///
+    /// # Safety
+    /// The marshal is dropped before the borrow of `view` ends.
+    unsafe fn new(view: &dyn QueryView) -> Self {
         let parameters = view.parameters().map(<[u8]>::to_vec).unwrap_or_default();
         Self {
             keyexpr: view.keyexpr().to_owned(),
@@ -369,11 +374,11 @@ impl QueryMarshal {
             // must hand C a pointer either way (see the field docs).
             payload: view
                 .payload()
-                .map(crate::bytes::ByteBuf::from)
+                .map(|payload| crate::bytes::ByteBuf::lent(payload))
                 .unwrap_or_default(),
             attachment: view
                 .attachment()
-                .map(crate::bytes::ByteBuf::from)
+                .map(|attachment| crate::bytes::ByteBuf::lent(attachment))
                 .unwrap_or_default(),
             // R311y529 — owned, for the same reason the payload is: the view's
             // borrow ends when the dispatch returns and the C callback holds
@@ -428,8 +433,14 @@ impl QueryMarshal {
     /// [`crate::pubsub::SampleMarshal::deep_copy`]). The reply accumulator is
     /// created EMPTY rather than copied: replies the callback already asked for
     /// belong to the borrowed marshal's flush, and duplicating them here would
-    /// send each one twice.
-    fn deep_copy_deferred(&self, held: Box<dyn HeldQuery>) -> Self {
+    /// send each one twice. `payload` and `attachment` are the copy's own, made before the
+    /// hold is taken, so that no room for them holds nothing open.
+    fn deep_copy_deferred(
+        &self,
+        held: Box<dyn HeldQuery>,
+        payload: crate::bytes::ByteBuf,
+        attachment: crate::bytes::ByteBuf,
+    ) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -441,8 +452,8 @@ impl QueryMarshal {
                     hint: state.hint.clone(),
                 }),
             source_info: self.source_info,
-            payload: self.payload.clone(),
-            attachment: self.attachment.clone(),
+            payload,
+            attachment,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
@@ -656,7 +667,8 @@ pub(crate) fn make_queryable_callback(
             Some(f) => f,
             None => return,
         };
-        let mut marshal = QueryMarshal::new(view).with_holder(holder.clone());
+        // SAFETY: the marshal is dropped at the end of this call, inside the borrow of `view`.
+        let mut marshal = unsafe { QueryMarshal::new(view) }.with_holder(holder.clone());
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `QueryMarshal::bind`.
         marshal.bind();
@@ -713,11 +725,17 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> Result<*mut c_voi
     let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Query) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
+    // The bytes the view lent are copied before the hold, so no room for them holds nothing open.
+    let (payload, attachment) = match (marshal.payload.try_clone(), marshal.attachment.try_clone())
+    {
+        (Ok(payload), Ok(attachment)) => (payload, attachment),
+        (Err(no_room), _) | (_, Err(no_room)) => return Err(no_room.code()),
+    };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
     let held = holder.hold_query(marshal);
-    let owned = slot.fill(marshal.deep_copy_deferred(held));
+    let owned = slot.fill(marshal.deep_copy_deferred(held, payload, attachment));
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -1225,8 +1243,8 @@ pub(crate) fn declare_queryable_on(
     let id = session
         .engine
         .declare_queryable_on_wire(
-            keyexpr,
-            key.wire(&*session.engine),
+            &keyexpr,
+            key.wire(Arc::as_ref(&session.engine)),
             complete,
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key
@@ -1526,16 +1544,13 @@ pub unsafe extern "C" fn z_query_reply(
         // (pico's "z_move consumes on all paths" contract). The attachment is a
         // moved `z_bytes` like the payload, and `z_bytes_*` IS exported — so a C
         // program can build one, and failing to take it here would leak it.
-        let buf = match crate::pubsub::take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
-        };
+        let buf = crate::pubsub::take_moved_bytes(payload);
         // The moved `encoding` is consumed on every path alongside the
         // attachment, matching pico's unconditional `z_encoding_drop(opts.encoding)`
         // (`src/api/api.c:2152`) — an early return that skipped it would leak the
         // caller's owned encoding.
         let (attachment, meta) = if options.is_null() {
-            (None, ReplyMetaOwned::default())
+            (Ok(None), ReplyMetaOwned::default())
         } else {
             let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
             let meta = ReplyMetaOwned {
@@ -1545,6 +1560,13 @@ pub unsafe extern "C" fn z_query_reply(
                 express: (*options).is_express,
             };
             (attachment, meta)
+        };
+        // A payload or an attachment moved out of a callback's sample is copied; with no room for
+        // the copy the reply is refused, every moved argument consumed all the same.
+        let (buf, attachment) = match (buf, attachment) {
+            (Ok(Some(buf)), Ok(attachment)) => (buf, attachment),
+            (Ok(None), _) => return Z_ERR_NULL,
+            (Err(no_room), _) | (_, Err(no_room)) => return no_room.code(),
         };
         let marshal = match query_marshal(query) {
             Some(m) => m,
@@ -1612,19 +1634,17 @@ pub unsafe extern "C" fn z_query_reply_del(
         // codec discards.
         //
         // The `timestamp` and `source_info` DO ride a Del and are read.
-        let (attachment, meta) = if options.is_null() {
-            (None, ReplyMetaOwned::default())
+        let meta = if options.is_null() {
+            ReplyMetaOwned::default()
         } else {
-            let attachment = crate::pubsub::take_moved_bytes((*options).attachment);
-            let meta = ReplyMetaOwned {
+            crate::pubsub::drop_moved_bytes((*options).attachment);
+            ReplyMetaOwned {
                 encoding: None,
                 timestamp: crate::pubsub::timestamp_hint_of((*options).timestamp),
                 source_info: crate::pubsub::source_info_hint_of((*options).source_info()),
                 express: (*options).is_express,
-            };
-            (attachment, meta)
+            }
         };
-        drop(attachment);
         let marshal = match query_marshal(query) {
             Some(m) => m,
             None => return Z_ERR_INVALID,
@@ -1665,8 +1685,10 @@ pub unsafe extern "C" fn z_query_reply_err(
         } else {
             crate::encoding::take_moved_encoding((*options).encoding)
         };
-        let Some(buf) = buf else {
-            return Z_ERR_NULL;
+        let buf = match buf {
+            Ok(Some(buf)) => buf,
+            Ok(None) => return Z_ERR_NULL,
+            Err(no_room) => return no_room.code(),
         };
         let marshal = match query_marshal(query) {
             Some(m) => m,
@@ -1934,9 +1956,11 @@ mod tests {
 
         let mut flagged = 0usize;
         for list in &lists {
-            let marshal = QueryMarshal::new(&ParamsQuery {
+            let query = ParamsQuery {
                 parameters: list.clone(),
-            });
+            };
+            // SAFETY: the marshal is dropped before `query`.
+            let marshal = unsafe { QueryMarshal::new(&query) };
             let shown = String::from_utf8_lossy(list);
             assert_eq!(
                 marshal.anyke,
@@ -1968,11 +1992,13 @@ mod tests {
             ReplyKeyExpr::MatchingQuery,
             "the core reads the guarantee"
         );
+        let query = ParamsQuery {
+            parameters: not_text,
+        };
+        // SAFETY: the marshal is dropped before `query`.
+        let marshal = unsafe { QueryMarshal::new(&query) };
         assert!(
-            !QueryMarshal::new(&ParamsQuery {
-                parameters: not_text
-            })
-            .anyke,
+            !marshal.anyke,
             "so the ABI reads no flag and refuses the reply itself"
         );
     }
@@ -1986,7 +2012,8 @@ mod tests {
         };
         // Exactly the shape `make_queryable_callback` uses: construct, move out
         // of `new`, then bind at the final address.
-        let mut marshal = QueryMarshal::new(&view);
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { QueryMarshal::new(&view) };
         marshal.bind();
 
         assert_eq!(
@@ -2072,7 +2099,7 @@ mod tests {
         let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
         let put = |express| PendingReply::Put {
             keyexpr: "a/b".to_owned(),
-            payload: crate::bytes::ByteBuf::from(&[1u8][..]),
+            payload: crate::bytes::ByteBuf::copy_of(&[1u8]).expect("room for a byte"),
             attachment: None,
             meta: ReplyMetaOwned {
                 express,
@@ -2118,7 +2145,8 @@ mod tests {
             payload: Vec::new(),
             attachment: Vec::new(),
         };
-        let mut marshal = QueryMarshal::new(&view);
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { QueryMarshal::new(&view) };
         marshal.bind();
         let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         unsafe {
@@ -2209,6 +2237,31 @@ mod tests {
         fn reply(&self, _answer: &mut dyn FnMut(&mut dyn ReplyOut)) {}
     }
 
+    /// A query's payload and attachment are read where the view holds them, with nothing copied
+    /// for the callback, and a query kept past it holds copies of its own.
+    #[test]
+    fn a_query_reads_its_bytes_in_place_and_a_kept_one_copies_them() {
+        let view = FakeQuery {
+            keyexpr: "demo/q".to_owned(),
+            payload: b"in place".to_vec(),
+            attachment: b"att".to_vec(),
+        };
+        // SAFETY: the marshal is dropped before `view`.
+        let marshal = unsafe { QueryMarshal::new(&view) };
+        assert_eq!(marshal.payload.as_slice().as_ptr(), view.payload.as_ptr());
+        assert_eq!(
+            marshal.attachment.as_slice().as_ptr(),
+            view.attachment.as_ptr()
+        );
+        let payload = marshal.payload.try_clone().expect("room for the copy");
+        let attachment = marshal.attachment.try_clone().expect("room for the copy");
+        let kept = marshal.deep_copy_deferred(Box::new(NoHold), payload, attachment);
+        drop(marshal);
+        assert_ne!(kept.payload.as_slice().as_ptr(), view.payload.as_ptr());
+        assert_eq!(kept.payload.as_slice(), b"in place");
+        assert_eq!(kept.attachment.as_slice(), b"att");
+    }
+
     /// The encoding a query carried is held in its marshal: the loaned encoding
     /// `z_query_encoding` hands out points inside the marshal, so the query's encoding took no
     /// allocation of its own and goes with the marshal, and it reads what the view carried. A
@@ -2222,7 +2275,8 @@ mod tests {
                 schema: Some(b"utf8".to_vec()),
             },
         };
-        let mut marshal = QueryMarshal::new(&view);
+        // SAFETY: the marshal is dropped before `view`.
+        let mut marshal = unsafe { QueryMarshal::new(&view) };
         marshal.bind();
         let query = &marshal as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: a query this crate marshalled and bound.
@@ -2243,7 +2297,9 @@ mod tests {
         );
 
         let held: Box<dyn HeldQuery> = Box::new(NoHold);
-        let mut kept = marshal.deep_copy_deferred(held);
+        let payload = marshal.payload.try_clone().expect("room for the copy");
+        let attachment = marshal.attachment.try_clone().expect("room for the copy");
+        let mut kept = marshal.deep_copy_deferred(held, payload, attachment);
         drop(marshal);
         kept.bind();
         let kept_query = &kept as *const QueryMarshal as *const z_loaned_query_t;
@@ -2261,7 +2317,8 @@ mod tests {
             payload: Vec::new(),
             attachment: Vec::new(),
         };
-        let mut none = QueryMarshal::new(&plain);
+        // SAFETY: the marshal is dropped before `plain`.
+        let mut none = unsafe { QueryMarshal::new(&plain) };
         none.bind();
         let none_query = &none as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: a query this crate marshalled and bound.

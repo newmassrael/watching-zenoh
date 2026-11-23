@@ -33,6 +33,8 @@
 //! void  wz_os_mutex_free(void *mutex);
 //! void *wz_os_condvar_new(void);               /* NULL when none is left */
 //! void  wz_os_condvar_wait(void *condvar, void *mutex); /* mutex held; held again on return */
+//! int   wz_os_condvar_wait_ms(void *condvar, void *mutex, uint32_t ms); /* as above, at most ms;
+//!                                                 0 when notified, otherwise the time ran out */
 //! void  wz_os_condvar_notify_one(void *condvar);
 //! void  wz_os_condvar_notify_all(void *condvar);
 //! void  wz_os_condvar_free(void *condvar);
@@ -184,6 +186,21 @@ mod host {
             self.0.wait(guard).unwrap_or_else(PoisonError::into_inner)
         }
 
+        /// [`Self::wait`] for at most `ms` milliseconds: the guard, and whether the time ran out
+        /// with no notification. A wake may come early, so the caller waits in a loop on its own
+        /// condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let (guard, waited) = self
+                .0
+                .wait_timeout(guard, std::time::Duration::from_millis(ms))
+                .unwrap_or_else(PoisonError::into_inner);
+            (guard, waited.timed_out())
+        }
+
         /// Wake one waiting thread, if one waits.
         pub fn notify_one(&self) {
             self.0.notify_one();
@@ -214,6 +231,7 @@ mod kernel {
         fn wz_os_mutex_free(mutex: *mut c_void);
         fn wz_os_condvar_new() -> *mut c_void;
         fn wz_os_condvar_wait(condvar: *mut c_void, mutex: *mut c_void);
+        fn wz_os_condvar_wait_ms(condvar: *mut c_void, mutex: *mut c_void, ms: u32) -> c_int;
         fn wz_os_condvar_notify_one(condvar: *mut c_void);
         fn wz_os_condvar_notify_all(condvar: *mut c_void);
         fn wz_os_condvar_free(condvar: *mut c_void);
@@ -443,6 +461,21 @@ mod kernel {
             guard
         }
 
+        /// [`Self::wait`] for at most `ms` milliseconds (a longer wait is one of `u32::MAX`): the
+        /// guard, and whether the time ran out with no notification. A wake may come early, so the
+        /// caller waits in a loop on its own condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let ms = u32::try_from(ms).unwrap_or(u32::MAX);
+            // SAFETY: as for `wait`.
+            let woken =
+                unsafe { wz_os_condvar_wait_ms(self.raw.as_ptr(), guard.mutex.raw.as_ptr(), ms) };
+            (guard, woken != 0)
+        }
+
         /// Wake one waiting thread, if one waits.
         pub fn notify_one(&self) {
             // SAFETY: `raw` is this condition variable's, alive until it drops.
@@ -472,8 +505,9 @@ mod kernel {
 
 /// A host's, over its own calls (`os-sys`): for a host library built without `std`, which runs on
 /// a system with threads but has no `std::thread` or `std::sync` to reach them by. The lock and
-/// the condition variable are `wz-host-sync`'s one word each; a thread is the system's, and its end
-/// is a flag its body sets, since the system answers that only by joining it.
+/// the condition variable are `wz-host-sync`'s one word each; a thread is the system's, its body
+/// and the word its end sets (which the system answers only by joining it) in a record of
+/// `wz-host-sync`'s static pool. Nothing here allocates.
 #[cfg(any(
     all(not(feature = "std"), feature = "os-sys"),
     all(test, feature = "os-sys")
@@ -481,15 +515,12 @@ mod kernel {
 // A test build with `std` compiles this module for its own tests, which do not reach every item.
 #[cfg_attr(all(test, feature = "std"), allow(dead_code))]
 mod sys {
-    use alloc::boxed::Box;
-    use alloc::sync::Arc;
     use core::cell::UnsafeCell;
     use core::mem::MaybeUninit;
     use core::ops::{Deref, DerefMut};
     use core::ptr::addr_of_mut;
-    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use wz_host_sync::{RawCondvar, RawLock, ThreadStart};
+    use wz_host_sync::{RawCondvar, RawLock};
 
     /// The identity of a thread, comparable with another's: the system's number of it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -509,7 +540,6 @@ mod sys {
     /// A thread [`spawn`] started, until it is joined.
     pub struct JoinHandle {
         thread: wz_host_sync::Thread,
-        finished: Arc<AtomicBool>,
     }
 
     impl JoinHandle {
@@ -520,52 +550,17 @@ mod sys {
 
         /// Whether the thread has ended, without waiting for it.
         pub fn is_finished(&self) -> bool {
-            self.finished.load(Ordering::Acquire)
+            self.thread.is_finished()
         }
-    }
-
-    type Body = Box<dyn FnOnce() + Send + 'static>;
-
-    /// What a spawned thread is handed: the system's start record first, so the thread reaches the
-    /// rest from it.
-    #[repr(C)]
-    struct Start {
-        head: ThreadStart,
-        body: Body,
-        finished: Arc<AtomicBool>,
-    }
-
-    /// # Safety
-    /// `head` is the first field of the `Start` that [`spawn`] leaked for this thread.
-    unsafe fn run(head: *mut ThreadStart) {
-        let start = Box::from_raw(head.cast::<Start>());
-        let Start { body, finished, .. } = *start;
-        body();
-        finished.store(true, Ordering::Release);
     }
 
     /// Run `body` on a thread of its own: its handle and its identity, or `None` when the system
-    /// gave no thread.
+    /// gave no thread or the host's pool of thread records has none free
+    /// (`wz_host_sync::THREADS`). The body is moved into its record; nothing is allocated.
     pub fn spawn(body: impl FnOnce() + Send + 'static) -> Option<(JoinHandle, ThreadId)> {
-        let finished = Arc::new(AtomicBool::new(false));
-        let start = Box::into_raw(Box::new(Start {
-            head: ThreadStart { run },
-            body: Box::new(body),
-            finished: Arc::clone(&finished),
-        }));
-        // SAFETY: `run` takes the record back exactly once, on the new thread; on a refusal no
-        // thread runs and it is taken back here instead.
-        match unsafe { wz_host_sync::spawn(start.cast::<ThreadStart>()) } {
-            Some(thread) => {
-                let id = ThreadId(thread.id());
-                Some((JoinHandle { thread, finished }, id))
-            }
-            None => {
-                // SAFETY: as above: no thread took it.
-                drop(unsafe { Box::from_raw(start) });
-                None
-            }
-        }
+        let thread = wz_host_sync::spawn_fn(body)?;
+        let id = ThreadId(thread.id());
+        Some((JoinHandle { thread }, id))
     }
 
     /// Sleep the calling thread for `ms` milliseconds.
@@ -697,6 +692,21 @@ mod sys {
             guard
         }
 
+        /// [`Self::wait`] for at most `ms` milliseconds of the host's monotonic clock: the guard,
+        /// and whether the time ran out with no notification. A wake may come early, so the caller
+        /// waits in a loop on its own condition and its own deadline.
+        pub fn wait_timeout_ms<'a, T>(
+            &self,
+            guard: MutexGuard<'a, T>,
+            ms: u64,
+        ) -> (MutexGuard<'a, T>, bool) {
+            let deadline =
+                wz_host_sync::monotonic_ns().saturating_add(ms.saturating_mul(1_000_000));
+            // SAFETY: as for `wait`.
+            let notified = unsafe { self.raw.wait_until(&guard.mutex.raw, deadline) };
+            (guard, !notified)
+        }
+
         /// Wake one waiting thread, if one waits.
         pub fn notify_one(&self) {
             self.raw.notify_one();
@@ -711,6 +721,9 @@ mod sys {
     #[cfg(test)]
     mod tests {
         extern crate std;
+
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicBool, Ordering};
 
         use super::*;
 
@@ -830,6 +843,34 @@ mod tests {
         assert_ne!(there, here, "a thread running beside has a word of its own");
         release.send(()).expect("the thread waits");
         beside.join().expect("the thread");
+    }
+
+    /// A timed wait no notification ends runs out after at least its time, and one a notification
+    /// ends says it did not run out. Turned red by a timed wait that never returns, returns early,
+    /// or reads a notification as the time running out.
+    #[test]
+    fn a_timed_wait_runs_out_or_is_woken() {
+        let shared = alloc::sync::Arc::new((Mutex::new(false), Condvar::new()));
+        let started = std::time::Instant::now();
+        let (guard, timed_out) = shared.1.wait_timeout_ms(shared.0.lock(), 30);
+        assert!(timed_out, "nothing notified");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+        drop(guard);
+        let notifier = alloc::sync::Arc::clone(&shared);
+        let (handle, _) = spawn(move || {
+            sleep_ms(20);
+            *notifier.0.lock() = true;
+            notifier.1.notify_all();
+        })
+        .expect("a host gives a thread");
+        let mut ready = shared.0.lock();
+        let mut ran_out = false;
+        while !*ready && !ran_out {
+            (ready, ran_out) = shared.1.wait_timeout_ms(ready, 5_000);
+        }
+        assert!(*ready && !ran_out, "the notification ended the wait");
+        drop(ready);
+        handle.join();
     }
 
     #[test]

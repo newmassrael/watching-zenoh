@@ -162,7 +162,7 @@ pub const MAX_DECL_OBSERVERS: LimitBinding = LimitBinding {
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),
-    binding_fixed: Some(Binding::Build),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 
@@ -291,6 +291,102 @@ pub const HELD_PAYLOADS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
     driven: Some(Driven::Local),
     range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_CONFIGS`] is bound.
+pub const HELD_CONFIGS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_HELLOS`] is bound.
+pub const HELD_HELLOS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::HELD_PAYLOAD_BYTES`] is bound.
+pub const HELD_PAYLOAD_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::CONFIG_ENTRIES`] is bound.
+pub const CONFIG_ENTRIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 255)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_SCOUT_HELLOS`] is bound.
+pub const MAX_SCOUT_HELLOS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::SCOUT_HELLO_LOCATORS`] is bound.
+pub const SCOUT_HELLO_LOCATORS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::CONFIG_DOCUMENT_DEPTH`] is bound.
+pub const CONFIG_DOCUMENT_DEPTH: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((3, 64)),
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::CONFIG_TEXT_BYTES`] is bound.
+pub const CONFIG_TEXT_BYTES: LimitBinding = LimitBinding {
+    kind: LimitKind::Parameter,
+    driven: None,
+    range: Some((1, 1048576)),
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
     binding_heap: Some(Binding::Build),
@@ -461,7 +557,7 @@ pub const MAX_TASKS: LimitBinding = LimitBinding {
     range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
-    binding_heap: None,
+    binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
@@ -473,7 +569,19 @@ pub const MAX_TIMERS: LimitBinding = LimitBinding {
     range: None,
     storage: Storage::Capacity,
     scope: &[Scope::Runtime],
-    binding_heap: None,
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_TICKERS`] is bound.
+pub const MAX_TICKERS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
     binding_fixed: Some(Binding::Build),
     wire: Wire::None,
 };
@@ -511,6 +619,66 @@ pub const MAX_PEER_NODES: LimitBinding = LimitBinding {
     scope: &[Scope::Runtime],
     binding_heap: None,
     binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_FACES`] is bound.
+pub const MAX_FACES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::MAX_ACCEPT_PENDING`] is bound.
+pub const MAX_ACCEPT_PENDING: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::SESSION_MAX_PEER_KEYEXPR_ALIASES`] is bound.
+pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::SESSION_MAX_REMOTE_DECLS`] is bound.
+pub const SESSION_MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::SESSION_MAX_INBOUND_SUB_INTERESTS`] is bound.
+pub const SESSION_MAX_INBOUND_SUB_INTERESTS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
     wire: Wire::None,
 };
 

@@ -687,9 +687,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     session's source is shared behind a lock (`SharedEntropy`) and `open` asks it to be `Send`.
   - `Link::Dialing` is `Link::Opening`: a handshake under way, the dial role's or an accepted
     link's. An accepted face that does not complete is removed, as an attached one is.
-  - The bounds are upstream's and are the config's, which settles that open question:
-    `accept_pending` (handshakes under way, 100) and `max_faces` (faces besides the dial role's,
-    1000, zenoh's `max_sessions`); a connection past either is accepted and closed unread, as the
+  - The bounds are the config's, held to the session's limits `MAX_ACCEPT_PENDING` and
+    `MAX_FACES`, whose defaults are upstream's: `accept_pending` (handshakes under way, 100) and
+    `max_faces` (faces besides the dial role's, 1000, zenoh's `max_sessions`), and at the pico
+    preset zenoh-pico's, one and ten (`docs/c-abi-no-heap-pools.md`, section 9.6); a connection
+    past either is accepted and closed unread, as the
     slot profile's `Accept` does, so its peer learns the node is full and no connection waits in
     the kernel's queue for a handshake that never starts. How long a handshake may take is
     `timeouts.accepting_inactivity_ms`, and the face's own deadline is the same number.

@@ -41,7 +41,7 @@ use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
     z_owned_bytes_t,
 };
-use crate::bytes::ByteBuf;
+use crate::bytes::{ByteBuf, NoRoom};
 use crate::ffi::{guarded, CClosure as FfiClosure};
 use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
@@ -335,15 +335,19 @@ impl SampleMarshal {
     /// is what it did until a real zenoh-pico `z_queryable_attachment` replied
     /// with an attachment and upstream's `z_get_attachment.c` on wz printed the
     /// value with no attachment line under it.
+    ///
+    /// # Safety
+    /// The marshal is dropped before the borrow of `attachment` ends, as the reply's is.
     #[cfg(feature = "query")]
-    pub(crate) fn with_reply_metadata(
+    pub(crate) unsafe fn with_reply_metadata(
         mut self,
         attachment: Option<&[u8]>,
         encoding: Option<(u32, Option<&[u8]>)>,
         timestamp: Option<(u64, &[u8])>,
         source_info: Option<&wz_session_core::sample::SourceInfo>,
     ) -> Self {
-        self.attachment = attachment.map(ByteBuf::from);
+        // Read where the reply holds it, as a subscriber's sample's is ([`Self::lent`]).
+        self.attachment = attachment.map(|attachment| ByteBuf::lent(attachment));
         self.timestamp = timestamp.map(|(time, zid)| timestamp_from(time, zid));
         self.encoding = encoding.map(|(packed_id, schema)| crate::encoding::EncodingState {
             hint: wz_session_core::sample::EncodingHint {
@@ -400,18 +404,23 @@ impl SampleMarshal {
     /// are deliberately left UNBOUND: they point at the copy's own fields, so
     /// they can only be set once the copy has reached its final address, which
     /// is [`Self::bind`]'s whole contract.
-    pub(crate) fn deep_copy(&self) -> Self {
-        Self {
+    pub(crate) fn deep_copy(&self) -> Result<Self, NoRoom> {
+        let payload = self.payload.try_clone()?;
+        let attachment = match &self.attachment {
+            Some(attachment) => Some(attachment.try_clone()?),
+            None => None,
+        };
+        Ok(Self {
             _pico_keyexpr: [0u8; PICO_SAMPLE_PAYLOAD_OFFSET],
             // Left UNBOUND for the same reason the cached views below are: it
             // borrows the COPY's `payload`, an address that does not exist until
             // the copy has landed and `bind` runs.
             pico_payload: z_owned_bytes_t::null_value(),
             keyexpr: KeyText::Owned(self.keyexpr.as_str().to_owned()),
-            // A lent payload's clone, and its attachment's, is a copy (`ByteBuf`'s `Clone`).
-            payload: self.payload.clone(),
+            // A lent payload's clone, and its attachment's, is a copy (`ByteBuf::try_clone`).
+            payload,
             kind: self.kind,
-            attachment: self.attachment.clone(),
+            attachment,
             timestamp: self.timestamp,
             qos: self.qos,
             reliability: self.reliability,
@@ -432,7 +441,7 @@ impl SampleMarshal {
                 _pad: [core::ptr::null_mut(); 3],
             },
             loaned_encoding: crate::encoding::z_loaned_encoding_t::unbound(),
-        }
+        })
     }
 }
 
@@ -460,7 +469,8 @@ unsafe fn clone_sample_marshal(src: *const z_loaned_sample_t) -> Result<*mut c_v
     let Some(slot) = crate::object_slot::Slot::take(crate::object_slot::Kind::Sample) else {
         return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
     };
-    let owned = slot.fill(marshal.deep_copy());
+    let copy = marshal.deep_copy().map_err(NoRoom::code)?;
+    let owned = slot.fill(copy);
     (*owned).bind();
     Ok(owned.cast::<c_void>())
 }
@@ -1358,7 +1368,7 @@ impl PlainPublisher {
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
-            .zip(key.whole_key_mapping(&*session.engine));
+            .zip(key.whole_key_mapping(Arc::as_ref(&session.engine)));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
@@ -1419,7 +1429,7 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
-        let wire = self.key.wire(&*self.shared);
+        let wire = self.key.wire(Arc::as_ref(&self.shared));
         let opts = self.declared.apply(opts);
         publish_code(
             self.shared
@@ -1662,23 +1672,72 @@ impl_handle_ownership7!(
 
 // --- helpers ---------------------------------------------------------------
 
-/// Take a moved payload's bytes, nulling the source.
+/// Take a moved payload's bytes, nulling the source: `Ok(None)` for a null one.
 ///
 /// Ownership is decided by the value's own borrow tag rather than assumed. An
 /// ORDINARY owned bytes — everything a wz constructor produces — is reclaimed
-/// from its `Box`. A BORROWED one is COPIED and its storage left alone, because
+/// from its place. A BORROWED one is CLONED and its storage left alone, because
 /// the only way a C program obtains one is by reading `sample->payload` out of a
 /// marshal that still owns it, and that marshal frees it when the callback
 /// returns. Freeing it here is the double free this tag exists to prevent; see
-/// [`crate::abi::HandleOwnership`].
+/// [`crate::abi::HandleOwnership`]. A clone of a payload the marshal reads where it lies is a
+/// copy, which can be refused for want of room (`Err`).
 ///
-/// Both arms null the source, so pico's consume-on-all-paths contract holds
+/// Every arm nulls the source, so pico's consume-on-all-paths contract holds
 /// either way: after this call the caller's `z_owned_bytes_t` is spent.
 ///
 /// # Safety
 /// `payload` must be null or a valid `z_moved_bytes_t` whose handle is a live
-/// `Box::into_raw::<ByteBuf>` pointer, or a BORROW of a live `ByteBuf`.
-pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<ByteBuf> {
+/// payload a constructor of this crate placed, or a BORROW of a live `ByteBuf`.
+pub(crate) unsafe fn take_moved_bytes(
+    payload: *mut z_moved_bytes_t,
+) -> Result<Option<ByteBuf>, NoRoom> {
+    if payload.is_null() {
+        return Ok(None);
+    }
+    let handle = (*payload)._this.handle;
+    if handle.is_null() {
+        return Ok(None);
+    }
+    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
+    (*payload)._this = z_owned_bytes_t::null_value();
+    if borrowed {
+        (*(handle as *const ByteBuf)).try_clone().map(Some)
+    } else {
+        Ok(Some(crate::bytes::unbox_bytes(handle as *mut ByteBuf)))
+    }
+}
+
+/// Consume a moved payload without reading it, nulling the source: what an option whose bytes the
+/// wire does not carry is owed. A borrowed payload is its marshal's, and is left to it.
+///
+/// # Safety
+/// As [`take_moved_bytes`].
+// Only a Del reply's options carry bytes the wire does not, so only a build that answers queries
+// has a caller.
+#[cfg(feature = "queryable")]
+pub(crate) unsafe fn drop_moved_bytes(payload: *mut z_moved_bytes_t) {
+    if payload.is_null() {
+        return;
+    }
+    let handle = (*payload)._this.handle;
+    if handle.is_null() {
+        return;
+    }
+    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
+    (*payload)._this = z_owned_bytes_t::null_value();
+    if !borrowed {
+        drop(crate::bytes::unbox_bytes(handle as *mut ByteBuf));
+    }
+}
+
+/// Take a moved payload's bytes as a `Vec`, nulling the source: what an option that carries an
+/// attachment reads, which is copied into the options it builds. A borrowed payload is read where
+/// its marshal holds it, which this call outlives, and copied nowhere else.
+///
+/// # Safety
+/// As [`take_moved_bytes`].
+pub(crate) unsafe fn take_moved_bytes_to_vec(payload: *mut z_moved_bytes_t) -> Option<Vec<u8>> {
     if payload.is_null() {
         return None;
     }
@@ -1686,13 +1745,13 @@ pub(crate) unsafe fn take_moved_bytes(payload: *mut z_moved_bytes_t) -> Option<B
     if handle.is_null() {
         return None;
     }
-    let buf = if crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this) {
-        (*(handle as *const ByteBuf)).clone()
-    } else {
-        crate::bytes::unbox_bytes(handle as *mut ByteBuf)
-    };
+    let borrowed = crate::abi::HandleOwnership::handle_is_borrowed(&(*payload)._this);
     (*payload)._this = z_owned_bytes_t::null_value();
-    Some(buf)
+    if borrowed {
+        Some((*(handle as *const ByteBuf)).to_vec())
+    } else {
+        Some(crate::bytes::unbox_bytes(handle as *mut ByteBuf).to_vec())
+    }
 }
 
 /// Fold a caller's `z_publisher_put_options_t` into wz's [`PublishOptions`], or
@@ -1716,32 +1775,60 @@ unsafe fn publisher_put_options(
     if options.is_null() {
         return None;
     }
-    // The moved values are consumed FIRST, before any early return could skip
-    // them — the same consume-on-all-paths discipline `z_get` follows.
-    let attachment = take_moved_bytes((*options).attachment);
-    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
-    let timestamp = timestamp_hint_of((*options).timestamp);
-    let source_info = source_info_hint_of((*options).source_info());
-    if attachment.is_none() && encoding.is_none() && timestamp.is_none() && source_info.is_none() {
-        return None;
+    let (opts, carried) = PutCarried {
+        encoding: (*options).encoding,
+        timestamp: (*options).timestamp,
+        attachment: (*options).attachment,
+        source_info: (*options).source_info(),
     }
-    let mut opts = put_options();
-    if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment.to_vec());
+    .fold(put_options());
+    carried.then_some(opts)
+}
+
+/// What a put's options carry beside its QoS, read the same way from `z_put_options_t` and
+/// `z_publisher_put_options_t`: the moved encoding and attachment, the timestamp, and the source
+/// info (null where the struct has no such field).
+struct PutCarried {
+    encoding: *mut c_void,
+    timestamp: *mut z_timestamp_t,
+    attachment: *mut z_moved_bytes_t,
+    source_info: *mut z_source_info_t,
+}
+
+impl PutCarried {
+    /// `opts` with what the options carry, and whether they carried anything. The moved encoding
+    /// and attachment are consumed on every path. One body for both put doors, out of line so
+    /// that neither export holds a copy of it.
+    ///
+    /// # Safety
+    /// Each field must be null or valid as the options struct it was read from requires.
+    #[inline(never)]
+    unsafe fn fold(self, mut opts: PublishOptions) -> (PublishOptions, bool) {
+        let attachment = take_moved_bytes_to_vec(self.attachment);
+        let encoding = crate::encoding::take_moved_encoding(self.encoding);
+        let timestamp = timestamp_hint_of(self.timestamp);
+        let source_info = source_info_hint_of(self.source_info);
+        let carried = attachment.is_some()
+            || encoding.is_some()
+            || timestamp.is_some()
+            || source_info.is_some();
+        if let Some(attachment) = attachment {
+            opts = opts.with_attachment(attachment);
+        }
+        if let Some(hint) = encoding {
+            opts = opts.with_encoding(hint);
+        }
+        if let Some(ts) = timestamp {
+            opts = opts.with_timestamp(ts);
+        }
+        // A source info is read only where the option field exists, and the setter it reaches is
+        // linked only there: without the unstable API the field is pico's absent value.
+        #[cfg(feature = "unstable-api")]
+        if let Some(si) = source_info {
+            opts = opts.with_source_info(si);
+        }
+        (opts, carried)
     }
-    if let Some(hint) = encoding {
-        opts = opts.with_encoding(hint);
-    }
-    if let Some(ts) = timestamp {
-        opts = opts.with_timestamp(ts);
-    }
-    // A source info is read only where the option field exists, and the setter it reaches is
-    // linked only there: without the unstable API the field is pico's absent value.
-    #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info {
-        opts = opts.with_source_info(si);
-    }
-    Some(opts)
 }
 
 /// The options a put starts from: reliable, and the destination
@@ -1795,6 +1882,61 @@ mod put_options_tests {
             options.timestamp = &mut stamp;
             let carried = publisher_put_options(&options).expect("a timestamp is carried");
             assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+        }
+    }
+
+    /// Both put doors fold their options through one body: a moved attachment and a timestamp
+    /// are carried into the options a session's put and a publisher's put are sent with, the QoS
+    /// a session's put states beside them is kept, and the caller's moved bytes are spent.
+    #[test]
+    fn both_put_doors_carry_a_moved_attachment_and_spend_it() {
+        use super::{session_put_options, z_put_options_default, z_put_options_t};
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        let moved = |bytes: &[u8]| {
+            let mut owned = z_owned_bytes_t::null_value();
+            // SAFETY: `owned` is writable and `bytes` readable for its length.
+            let copied = unsafe {
+                crate::bytes::z_bytes_copy_from_buf(&mut owned, bytes.as_ptr(), bytes.len())
+            };
+            assert_eq!(copied, crate::result::Z_OK);
+            z_moved_bytes_t { _this: owned }
+        };
+        let mut stamp = z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t {
+                id: [7; crate::zid::Z_ID_SIZE],
+            },
+            time: 42,
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut attachment = moved(b"session");
+            let mut put = core::mem::MaybeUninit::<z_put_options_t>::uninit();
+            z_put_options_default(put.as_mut_ptr());
+            let mut put = put.assume_init();
+            put.attachment = &mut attachment;
+            put.timestamp = &mut stamp;
+            put.is_express = true;
+            let carried = session_put_options(&put);
+            assert_eq!(carried.attachment.as_deref(), Some(&b"session"[..]));
+            assert_eq!(carried.timestamp.as_ref().map(|ts| ts.time), Some(42));
+            assert_eq!(
+                carried.qos.map(|qos| qos.is_express()),
+                Some(true),
+                "the QoS beside the carried values is kept"
+            );
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
+
+            let mut attachment = moved(b"publisher");
+            let mut options = core::mem::MaybeUninit::<z_publisher_put_options_t>::uninit();
+            z_publisher_put_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            options.attachment = &mut attachment;
+            let carried = publisher_put_options(&options).expect("an attachment is carried");
+            assert_eq!(carried.attachment.as_deref(), Some(&b"publisher"[..]));
+            assert!(carried.timestamp.is_none());
+            assert!(attachment._this.handle.is_null(), "the attachment is spent");
         }
     }
 
@@ -2118,33 +2260,27 @@ pub(crate) unsafe fn source_info_hint_of(
 /// # Safety
 /// `options` must be null or a valid put-options struct.
 unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions {
-    let mut opts = put_options();
+    let opts = put_options();
     if options.is_null() {
         return opts;
     }
-    // Consumed FIRST, before any branch could skip them.
-    let attachment = take_moved_bytes((*options).attachment);
-    let encoding = crate::encoding::take_moved_encoding((*options).encoding);
-    opts = opts
-        .with_priority(crate::qos::priority_from_pico((*options).priority))
+    // The moved values are consumed first, before anything else is read.
+    #[cfg(feature = "unstable-api")]
+    let source_info = (*options).source_info;
+    #[cfg(not(feature = "unstable-api"))]
+    let source_info = core::ptr::null_mut();
+    let (opts, _) = PutCarried {
+        encoding: (*options).encoding,
+        timestamp: (*options).timestamp,
+        attachment: (*options).attachment,
+        source_info,
+    }
+    .fold(opts);
+    opts.with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
         .with_reliability(reliability_from_pico((*options).reliability()))
-        .with_locality((*options).allowed_destination());
-    if let Some(attachment) = attachment {
-        opts = opts.with_attachment(attachment.to_vec());
-    }
-    if let Some(hint) = encoding {
-        opts = opts.with_encoding(hint);
-    }
-    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-        opts = opts.with_timestamp(ts);
-    }
-    #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info_hint_of((*options).source_info) {
-        opts = opts.with_source_info(si);
-    }
-    opts
+        .with_locality((*options).allowed_destination())
 }
 
 /// Fold a caller's `z_delete_options_t` into wz's [`PublishOptions`], as the
@@ -2191,8 +2327,9 @@ pub unsafe extern "C" fn z_put(
         // on any early error below, and `take_moved_bytes` already nulled the
         // caller's source struct.
         let buf = match take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
+            Ok(Some(b)) => b,
+            Ok(None) => return Z_ERR_NULL,
+            Err(no_room) => return no_room.code(),
         };
         let state = match session_handle(zs) {
             Some(s) => s,
@@ -2422,8 +2559,9 @@ pub unsafe extern "C" fn z_publisher_put(
         // Consume the moved payload first (pico consume-on-all-paths contract):
         // dropped + source nulled even if the publisher handle is invalid.
         let buf = match take_moved_bytes(payload) {
-            Some(b) => b,
-            None => return Z_ERR_NULL,
+            Ok(Some(b)) => b,
+            Ok(None) => return Z_ERR_NULL,
+            Err(no_room) => return no_room.code(),
         };
         let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
             Some(s) => s,
@@ -2552,9 +2690,9 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 
 /// The wire form a subscriber on `keyexpr` is announced in: the CALLER's key
 /// (see the declare site for why it is not the subscription's own), keeping
-/// alive both the caller's declaration, if it named one, and the
-/// subscription's own `key` — the registry entry is the only holder a
-/// background subscriber has.
+/// alive both the caller's declaration, if it named one, and the declaration
+/// of the subscription's own `key` — the registry entry is the only holder a
+/// background subscriber has. The key's text is not held: nothing reads it here.
 ///
 /// # Safety
 /// `keyexpr` must be null or a live loaned keyexpr.
@@ -2565,8 +2703,8 @@ unsafe fn subscriber_wire(
 ) -> Option<WireKey> {
     let wire = wire_key_of(keyexpr, shared)?;
     let anchor: Arc<dyn Send + Sync> = Arc::new((
-        key.share(),
-        declared_of(keyexpr).map(DeclaredKeyexpr::share),
+        key.declaration_hold(),
+        declared_of(keyexpr).and_then(DeclaredKeyexpr::declaration_hold),
     ));
     Some(wire.keeping(anchor))
 }
@@ -2667,7 +2805,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // A peer or router-hat session retracts the subscription naming ITS key
@@ -2679,7 +2817,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // its declaration ids spent, refuses the subscriber as pico refuses an entity it cannot
         // hold; the engine dropped the sink, so the closure's drop has run.
         let Some(id) =
-            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
+            engine.declare_subscriber_on_wire(&ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
             })
@@ -2758,7 +2896,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, Arc::as_ref(&engine), &key) else {
             return Z_ERR_INVALID;
         };
         // Named before the key is dropped: the entry keeps it alive through
@@ -2768,10 +2906,16 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         drop(key);
         // No handle will undeclare this one, so the session's close waits for it.
         state.keep_background(cclosure.release_latch());
-        match engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-        }) {
+        match engine.declare_subscriber_on_wire(
+            &ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
+                let closure = Arc::new(cclosure);
+                Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
+            },
+        ) {
             Some(_) => Z_OK,
             // As the owned form above refuses it.
             None => crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
@@ -3269,8 +3413,8 @@ mod tests {
         // SAFETY: the marshal is dropped before `view`.
         let mut marshal = unsafe { SampleMarshal::lent(&view) };
         marshal.bind();
-        let kept = marshal.deep_copy();
-        let clone = marshal.payload.clone();
+        let kept = marshal.deep_copy().expect("room for the copy");
+        let clone = marshal.payload.try_clone().expect("room for the copy");
         drop(marshal);
         assert_eq!(kept.keyexpr.as_str(), "demo/lent");
         assert_ne!(kept.keyexpr.as_str().as_ptr(), view.key.as_ptr());
@@ -3333,7 +3477,7 @@ mod tests {
             (hint.packed_id, hint.schema.as_deref()),
             (7, Some(&b"utf8"[..]))
         );
-        let mut kept = marshal.deep_copy();
+        let mut kept = marshal.deep_copy().expect("room for the copy");
         drop(marshal);
         kept.bind();
         // SAFETY: the kept copy, bound at its final address.

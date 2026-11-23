@@ -14,11 +14,9 @@
 //!   - `type JoinHandle<T> = CoopJoinHandle<T>`
 //!   - `type Mutex<T> = crate::sync::Mutex<T>`
 //!   - `type RwLock<T> = crate::sync::RwLock<T>`
-//!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: heap-allocates
-//!     a wrapper future that drives the user future to completion,
-//!     stores its output into the shared `JoinState<T>`, and wakes
-//!     the join handle's waker; pushes the wrapper into the inner
-//!     `ExecutorState`'s task vector.
+//!   - `fn spawn<F>(..) -> CoopJoinHandle<F::Output>`: writes the
+//!     future into a cell of the runtime's task table, where its output
+//!     is written too when it ends ([`crate::executor`]).
 //! - [`CoopRuntime::run_until_idle`] — drives one executor step.
 //!   R311bc adds a `pop_expired(clock.now_us())` pass *before* the
 //!   task-pool sweep so wake-on-deadline timers fire ahead of the
@@ -84,40 +82,31 @@
 //!
 //! - Re-entrant `spawn` from inside a task's poll is safe: poll
 //!   runs *outside* the critical section (`run_until_idle` takes
-//!   the lock only for the take-and-restore window); the nested
-//!   `spawn` call re-acquires the lock and appends.
-//! - `CoopRuntime::spawn` heap-allocates twice — once for the
-//!   `Box<dyn Future>` wrapper and once for the `Arc<Mutex<RefCell<
-//!   JoinState<T>>>>` shared state. Both allocations are required
-//!   by the trait surface (type erasure + cross-task result
-//!   sharing); they cannot be elided without changing the
-//!   `Runtime` contract.
+//!   it only to read and write a cell's state); the nested `spawn`
+//!   takes a free cell, or grows the table.
+//! - `CoopRuntime::spawn` allocates nothing on a table that has a
+//!   free cell with room for the task: the future and its result
+//!   are written into the cell, and the handle and every waker are
+//!   references to it.
 
 // R311bb — Arc + AtomicBool + Ordering routed through the crate's
 // polyfill alias so thumbv6m builds engage portable-atomic{,-util}
 // while native-atomic targets stay on the standard library types.
 #[cfg(not(feature = "session-slot"))]
 use crate::atomic::{Arc, AtomicBool, Ordering};
-#[cfg(not(feature = "session-slot"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "session-slot"))]
-use core::cell::RefCell;
 use core::future::Future;
 use core::marker::PhantomData;
 #[cfg(not(feature = "session-slot"))]
-use core::task::{Context, Poll};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+#[cfg(feature = "session-slot")]
 use critical_section::Mutex;
 use wz_runtime_core::Runtime;
 
-#[cfg(not(feature = "session-slot"))]
-use crate::executor::make_waker;
-use crate::executor::ExecutorState;
 #[cfg(feature = "session-slot")]
-use crate::executor::{TaskJoin, TaskTable};
+use crate::executor::TaskTable;
+use crate::executor::{ExecutorState, TaskJoin};
 use crate::join_handle::CoopJoinHandle;
-#[cfg(not(feature = "session-slot"))]
-use crate::join_handle::JoinState;
 use crate::time::ClockSource;
 use crate::timer::TimerQueue;
 #[cfg(feature = "session-slot")]
@@ -209,19 +198,93 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// timer-queue evaluation needs a clock reference at every
     /// `run_until_idle` pass.
     ///
+    /// The task table grows when every cell is taken, each cell keeping its bytes for the next
+    /// task that fits them, so a program that spawns the same tasks again allocates nothing after
+    /// the first ([`crate::executor`]).
+    ///
     /// Absent under `session-slot`, whose runtime is made by
     /// `RuntimeCell::start` over tables the image declares: this constructor
     /// allocates the runtime's state.
     #[cfg(not(feature = "session-slot"))]
     pub fn new(clock: C) -> Self {
+        Self::over(clock, ExecutorState::growing(), TimerQueue::growing())
+    }
+
+    /// A runtime whose task table and timer table are reserved now, as `rows` says, and never
+    /// grow: a spawn past the tasks, or of a task larger than its cells, is refused and counted
+    /// ([`Self::task_refusals`]); a sleep past the timers is refused an entry, counted
+    /// ([`Self::timer_refusals`]), and ends by polling. No spawn and no sleep allocates. What an
+    /// engine that owes no allocation after its open makes at its open.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn reserved(clock: C, rows: RuntimeRows) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::reserved(rows.tasks, rows.task_bytes),
+            TimerQueue::reserved(rows.timers),
+        )
+    }
+
+    /// [`Self::reserved`] for an engine whose open spawns tasks it cannot size before it opens (a
+    /// group's session): beside the `rows.tasks` cells it holds `added` cells with no bytes yet,
+    /// and until [`Self::seal`] a task that no free cell fits takes one of those and bytes of its
+    /// own size, kept for the next task it fits, so what the open spawns is placed while it opens
+    /// and a task spawned again after it finds its cell. The table never holds more than
+    /// `rows.tasks + added` cells: a spawn past them is refused, counted, as one past a reserved
+    /// table's rows is. Once sealed the runtime is [`Self::reserved`]'s: no spawn and no sleep
+    /// allocates.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn opening(clock: C, rows: RuntimeRows, added: usize) -> Self {
+        Self::over(
+            clock,
+            ExecutorState::opening(rows.tasks, rows.task_bytes, added),
+            TimerQueue::reserved(rows.timers),
+        )
+    }
+
+    #[cfg(not(feature = "session-slot"))]
+    fn over(clock: C, executor: ExecutorState, timers: TimerQueue) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
-                executor: ExecutorState::new(),
-                timers: TimerQueue::new(),
+                executor,
+                timers,
                 clock,
             }),
             driver: PhantomData,
         }
+    }
+}
+
+/// What a reserved runtime holds ([`CoopRuntime::reserved`]): its tasks, the bytes each may
+/// take (a future and its output together), and the deadlines that may wait at once.
+#[cfg(not(feature = "session-slot"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeRows {
+    /// The tasks the runtime hosts at once.
+    pub tasks: usize,
+    /// The bytes of a task's cell: its future and its output, as
+    /// [`crate::executor::cell_bytes_of`] counts them.
+    pub task_bytes: usize,
+    /// The deadlines (a sleep, a timeout) that may wait at once.
+    pub timers: usize,
+}
+
+#[cfg(not(feature = "session-slot"))]
+impl RuntimeRows {
+    /// The bytes the tables take: each task cell's bytes, rounded up to the cells' alignment, and
+    /// its bookkeeping, and each timer entry. What a report of the memory reserved at open adds
+    /// for the runtime.
+    pub const fn reserved_bytes(&self) -> usize {
+        let stride = self
+            .task_bytes
+            .div_ceil(crate::executor::CELL_ALIGN)
+            .saturating_mul(crate::executor::CELL_ALIGN);
+        let tasks = self.tasks.saturating_mul(
+            stride.saturating_add(core::mem::size_of::<crate::executor::TaskCell>()),
+        );
+        let timers = self
+            .timers
+            .saturating_mul(core::mem::size_of::<crate::timer::TimerSlot>());
+        tasks.saturating_add(timers)
     }
 }
 
@@ -297,7 +360,7 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// This is the synchronous entry point used by host tests and
     /// by deploy `main()` when the runtime is driving a single
     /// top-level future (the embedded equivalent of tokio's
-    /// `Runtime::block_on`). The future is heap-pinned (`Box::pin`)
+    /// `Runtime::block_on`). The future is pinned on this call's stack,
     /// so the polling loop can re-enter `poll` repeatedly without
     /// requiring `F: Unpin`.
     ///
@@ -315,14 +378,15 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// cannot tell the difference between "deploy waiting for a
     /// timer to fire" and "test forgot to drive the clock".
     ///
-    /// Absent under `session-slot`: it pins the outer future in a box and hands
-    /// the executor a waker that owns a flag from the heap. A local task is run to
-    /// completion with [`crate::CoopLocalSet::block_on_local`], which does neither.
+    /// Absent under `session-slot`: the outer future may keep its waker past
+    /// this call (a timer entry, say), so the waker owns its flag, from the heap. A
+    /// local task is run to completion with
+    /// [`crate::CoopLocalSet::block_on_local`], which allocates nothing.
     #[cfg(not(feature = "session-slot"))]
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
-        let mut fut = Box::pin(fut);
+        let mut fut = core::pin::pin!(fut);
         let flag = Arc::new(AtomicBool::new(true));
-        let waker = make_waker(flag.clone());
+        let waker = owned_flag_waker(flag.clone());
         let mut cx = Context::from_waker(&waker);
         loop {
             // Poll the outer future first if its wake flag is set.
@@ -358,6 +422,40 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     }
 }
 
+// The waker `block_on` polls its outer future with: it owns a count on its flag, so a clone the
+// future keeps past the call still points at a flag.
+#[cfg(not(feature = "session-slot"))]
+static OWNED_FLAG_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |data| {
+        // SAFETY: `data` is an `Arc<AtomicBool>` this waker holds a count on; the clone takes
+        // one of its own.
+        unsafe { Arc::increment_strong_count(data.cast::<AtomicBool>()) };
+        RawWaker::new(data, &OWNED_FLAG_VTABLE)
+    },
+    |data| {
+        // SAFETY: as above; the waker is consumed, so its count goes with it.
+        let flag = unsafe { Arc::from_raw(data.cast::<AtomicBool>()) };
+        flag.store(true, Ordering::Release);
+    },
+    |data| {
+        // SAFETY: as above; the count stays.
+        unsafe { &*data.cast::<AtomicBool>() }.store(true, Ordering::Release)
+    },
+    |data| {
+        // SAFETY: as above; the count goes.
+        drop(unsafe { Arc::from_raw(data.cast::<AtomicBool>()) })
+    },
+);
+
+/// A waker that raises `flag` and owns the count it is handed.
+#[cfg(not(feature = "session-slot"))]
+fn owned_flag_waker(flag: Arc<AtomicBool>) -> Waker {
+    let raw = RawWaker::new(Arc::into_raw(flag).cast::<()>(), &OWNED_FLAG_VTABLE);
+    // SAFETY: the vtable takes a count on clone and gives one back on wake and on drop, and
+    // only stores the flag otherwise.
+    unsafe { Waker::from_raw(raw) }
+}
+
 #[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     fn default() -> Self {
@@ -365,7 +463,6 @@ impl<C: ClockSource + Default> Default for CoopRuntime<C> {
     }
 }
 
-#[cfg(feature = "session-slot")]
 impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
@@ -381,6 +478,13 @@ impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// Cells of the task table that hold a task, or a result no handle has read.
     pub fn live_task_count(&self) -> usize {
         self.inner.executor.live_task_count()
+    }
+
+    /// The open is over: a runtime made by [`CoopRuntime::opening`] takes no more memory, and a
+    /// spawn that finds no free cell it fits is refused, counted. Nothing for any other runtime.
+    #[cfg(not(feature = "session-slot"))]
+    pub fn seal(&self) {
+        self.inner.executor.seal();
     }
 }
 
@@ -502,67 +606,19 @@ impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
     where
         T: Send + Sync + 'static;
 
-    // Fixed-memory step S6 -- the future is written into a cell of the static task
-    // table and its result into the same cell. A spawn that no cell takes (the
-    // table is full, or the future does not fit a cell) is counted by the executor
-    // and answers `Err(Shutdown)` ("new work refused") through its handle: the
-    // `Runtime::spawn` contract has no failure to return.
-    #[cfg(feature = "session-slot")]
+    // The future is written into a cell of the runtime's task table and its result into the
+    // same cell. A spawn that no cell takes (a fixed table that is full, or a future that does
+    // not fit its cells) is counted by the executor and answers `Err(Shutdown)` ("new work
+    // refused") through its handle: the `Runtime::spawn` contract has no failure to return.
     fn spawn<F>(&self, fut: F) -> Self::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        match self.inner.executor.spawn(fut) {
+        match self.inner.executor.spawn(fut, 0) {
             Ok(cell) => CoopJoinHandle::new(TaskJoin::attached(cell)),
             Err(_refused) => CoopJoinHandle::new(TaskJoin::refused()),
         }
-    }
-
-    #[cfg(not(feature = "session-slot"))]
-    fn spawn<F>(&self, fut: F) -> Self::JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        // Shared JoinState between the spawn wrapper (which stores
-        // the result on completion) and the CoopJoinHandle returned
-        // here (which reads the result on poll).
-        let state: Arc<Mutex<RefCell<JoinState<F::Output>>>> =
-            Arc::new(Mutex::new(RefCell::new(JoinState::new())));
-        let state_for_wrapper = state.clone();
-        // R311bd — cancel_flag shared between the executor task
-        // slot and the CoopJoinHandle returned here. Initial value
-        // = false; set to true by `CoopJoinHandle::abort()`.
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let cancel_flag_for_handle = cancel_flag.clone();
-        // Wrapper drives the user future and pushes the result into
-        // JoinState + wakes any registered handle waker. The wrapper
-        // returns () so it fits the type-erased BoxFuture slot.
-        //
-        // R311bd: the `is_none()` guard preserves the result that
-        // landed first. If `CoopJoinHandle::abort()` raced ahead of
-        // this wrapper and stored `Err(JoinCancelled)`, the natural
-        // `Ok(output)` write here becomes a no-op; the handle
-        // returns the cancellation. Conversely, if the wrapper
-        // completes first and stores `Ok(output)`, a later abort
-        // sees the populated result and is a no-op. Either order
-        // is honest about which event landed first.
-        let wrapper = async move {
-            let output = fut.await;
-            crate::cs::with(|cs| {
-                let mut s = state_for_wrapper.borrow(cs).borrow_mut();
-                if s.result.is_none() {
-                    s.result = Some(Ok(output));
-                    if let Some(w) = s.waker.take() {
-                        w.wake();
-                    }
-                }
-            });
-        };
-        let boxed: crate::executor::BoxFuture = Box::pin(wrapper);
-        self.inner.executor.spawn(boxed, cancel_flag);
-        CoopJoinHandle::new(state, cancel_flag_for_handle)
     }
 
     // R311ct — closure-scoped mutex access. MCU profile binds through

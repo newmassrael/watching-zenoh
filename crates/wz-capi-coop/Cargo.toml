@@ -190,7 +190,11 @@ local-subscriber = []
 # feature asks the runtime for it: without that an acceptor would start on no event. It asks the
 # runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
 # peers each take a face of their own.
-listen = ["wz-runtime-coop/session-unicast-accept", "wz-runtime-coop/udp-listen"]
+listen = [
+    "wz-runtime-coop/session-unicast-accept",
+    "wz-runtime-coop/udp-listen",
+    "wz-session-core/peer-row-pools",
+]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
@@ -203,6 +207,7 @@ app-transport = ["wz-runtime-coop/app-link"]
 group = [
     "wz-session-mcu/transport-multicast",
     "wz-session-mcu/codec-push",
+    "wz-session-core/peer-row-pools",
 ]
 # The groups of `group` joined on the host's own sockets (`host_group::HostGroups`, which the
 # host's links are given with `IpLinks::with_groups`). The sockets are those of
@@ -323,9 +328,11 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
 # tells it to (`declare-queryable`), in every test build: an engine built without `query` and
 # `queryable` is then shown a peer's queryable it keeps no table of. The stand-in's sequenced
 # publisher stamps a source info the advanced subscriber orders by (`pubsub-source-info`), which
-# the C ABI's `advanced` brings through its unstable API.
+# the C ABI's `advanced` brings through its unstable API. The registry's tests read the pools its
+# faces share (`peer-row-pools`), in every test build.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "pubsub-source-info",
+    "peer-row-pools",
     "session-unicast-accept",
     "query-queryable",
     "request-put-del",

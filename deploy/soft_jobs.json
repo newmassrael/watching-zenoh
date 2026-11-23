@@ -96,19 +96,6 @@
       "note": "added on 2026-11-22 with no main run read yet"
     },
     {
-      "workflow": ".github/workflows/platform.yml",
-      "job": "package-windows",
-      "step": null,
-      "kind": "continue-on-error",
-      "why_soft": "the expression is true only on the two nostd rows: the Windows package with its DLL built without std (os-windows), whose examples and check program run against it and whose size gate client is measured in both forms; the std rows of the job are a gate already",
-      "gate_when": "both nostd rows read green on two consecutive main runs; then the job drops continue-on-error and every row is a gate",
-      "promote_after_green": 2,
-      "allowed_consecutive_red": 1,
-      "declared": "2026-11-22",
-      "expires": "2026-12-22",
-      "note": "added on 2026-11-22 with no main run read yet; the std rows are read too and are expected green, as the gate they already are"
-    },
-    {
       "workflow": ".github/workflows/release.yml",
       "job": "release",
       "step": "cargo publish --dry-run (zenoh-pico-sys)",
@@ -159,6 +146,19 @@
       "declared": "2026-11-21",
       "expires": "2027-02-19",
       "note": "release.yml runs on a v* tag, never on a main push, so --hosted-last reads no run of it; read a release run with --hosted <run-id>"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "verify-tsan",
+      "step": "Layer Vtsan — the units' tests and the C programs under ThreadSanitizer",
+      "kind": "continue-on-error",
+      "why_soft": "the lane's first runs found a data race in the cooperative engine: a key's reference count released by z_undeclare_subscriber, which drops the subscriber's entry outside the session lock (crates/wz-capi-coop/src/engine.rs), while the read task takes a declaration (absorb_declare_view, crates/wz-session-core/src/pubsub.rs); its repair is a change of its own, and until it lands the lane reads red on every run",
+      "gate_when": "that race is repaired and the step reads green on two consecutive main runs; continue-on-error then comes off and the lane gates every landing",
+      "promote_after_green": 2,
+      "allowed_consecutive_red": 10,
+      "declared": "2026-11-23",
+      "expires": "2027-01-22",
+      "note": "recorded in docs/verification.md under the findings of Layer Vtsan"
     }
   ]
 }

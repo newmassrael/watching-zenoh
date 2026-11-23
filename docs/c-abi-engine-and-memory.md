@@ -96,11 +96,19 @@ Every figure here is a committed reading or a reading a gate prints; an estimate
   criterion (d), `no-allocation-in-operation` (D11, `docs/completeness-scoreboard.md`), is
   extended from the MCU images to the C ABI host libraries.
 
-- **E7. The releases, and the end state that closes them** (owner, 2026-11-21). The PoC release
-  of 2026-12-01 is phase P1 (section 6): the cooperative engine, with `std` and the heap. The
-  `no_std`, no-heap release follows phases P2 to P4. The end state is gated, each gate locked
-  once met: D9, every pico-ABI case at a ratio of at most 1.0, locked at WIN; D10, every cell of
-  the host performance matrix WIN, locked; D12, the allocations a session makes after its open,
+- **E7. The releases, and the end state that closes them** (owner, 2026-11-21; the release form
+  decided again 2026-11-23). The release of 2026-12-01, the Windows DLLs with it, ships the
+  `no_std`, no-heap form: the cooperative engine without `std` over the OS layer (P4's form,
+  `os-windows` and `os-posix`), its memory taken at open from the limits (E3, P2). It is the one
+  form of the library a release carries. P1's form, the cooperative engine with `std` and the
+  heap, is not released: its build stays as the one the release form is compared and measured
+  against. Until P2 ends, what the release form still takes from the heap is the table of section
+  7 of `docs/c-abi-no-heap-pools.md`. The order of the work (owner, 2026-11-23): first the
+  `no_std`, no-heap form wins all three axes, size (D9), performance (D10) and the allocations
+  after open (D12); then the `std` form and the other feature combinations are refactored to win
+  in turn, one at a time. The end state is gated, each gate locked once met: D9, every pico-ABI
+  case at a ratio of at most 1.0, locked at WIN; D10, every cell of the host performance matrix
+  WIN, locked; D12, the allocations a session makes after its open,
   0 in every family of the P2 ratchet and locked there.
 
 ## 3. Consequences
@@ -204,17 +212,20 @@ before and after); P4 changes no path a message takes. The end state is every ro
 ## 6. Migration
 
 Each phase has a gate that judges it and a ratchet that keeps what it took. A ratchet's row only
-moves toward its target, and a reading under it is committed as the tighter row. The PoC release of
-2026-12-01 is P1; the `no_std`, no-heap release follows P2 to P4; the gates of E7 close the end
-state.
+moves toward its target, and a reading under it is committed as the tighter row. The release of
+2026-12-01 ships P4's `no_std` form, allocating nothing after open as far as P2 has come (E7, owner
+2026-11-23); P1's `std` package is not released. The gates of E7 close the end state.
 
-- **P1. The package on the cooperative engine (`std`).** The shipped pico library (the Linux
-  `.so`, the Windows DLL of `scripts/lib/pico_windows_package.py`) is built on the cooperative
-  engine for every capability it carries: the pico base of `deploy/wz-config.toml` names
+- **P1. The package on the cooperative engine (`std`).** The pico library (the Linux `.so`, the
+  Windows DLL of `scripts/lib/pico_windows_package.py`) is built on the cooperative engine for
+  every capability it carries: the pico base of `deploy/wz-config.toml` names
   `engine-coop` where it names `engine-tokio` today, and a capability only the tokio engine has
   is out of the package until P3 brings it. Gate: the package's case in
   `capability_cost_gate.py` and its D9 row; zenoh-pico's API tests (Layer Z) and Layer C1co on
-  the package build. Ratchet: the case's D9 row.
+  the package build. Ratchet: the case's D9 row. Its `std` package is not released (owner,
+  2026-11-23, E7): a release ships P4's form, and the `std` build of this phase is the one that
+  form is compared and measured against (`pico_windows_package.py --stdlib std`, the `std` rows
+  of the Platform lane's `package-windows`).
 - **P2. The no-heap ratchet.** Allocations after open are counted per operation family by a
   test allocator (the instrument of `allocation_faults.rs`), on the cooperative package build.
   The gate is `scripts/lib/no_heap_ratchet_gate.py` over `deploy/no_heap_ratchet.json`, built by
@@ -249,9 +260,16 @@ state.
   pico crate per host: `os-posix` on a POSIX host, `os-windows` on Windows (the MSVC targets:
   Winsock waited on with `WSAPoll`, the Win32 slim reader/writer lock, condition variable and
   threads, the performance counter, the system's random number generator, and the process heap
-  as the allocator until P2 ends). The Windows package builds it with `--stdlib nostd` beside the
-  `std` form, which the release ships until it is switched, and prints the size of the size
-  gate's client in both forms there, the one host that can read a Windows DLL.
+  as the allocator until P2 ends). It is the form a release ships (owner, 2026-11-23, E7): the
+  Windows package is built in it unless told another (`pico_windows_package.py --stdlib nostd`,
+  one library, as the additional library of the split form has no form without `std`), and the
+  Platform lane's `package-windows` gates its rows, builds the `std` form beside it to compare
+  against and prints the size of the size gate's client in both forms there, the one host that
+  can read a Windows DLL. The C examples of the package run against the `os-posix` build on the
+  Linux row of the lane's `capi-examples` and against the `os-windows` one on its Windows row. A
+  release carries no Linux package; the target-build contract's entry (`scripts/lib/wz_package.py`,
+  platform `linux-x86_64-glibc`) still builds the crate's default (`std`) or a profile's list,
+  and has no `no_std` form yet.
 - **P5. The tokio engine path of the C libraries is deleted.** Preconditions: P3 at 0, and every
   upstream suite graded on the cooperative engine: zenoh-pico's API tests, zenoh-c's tests (Layer
   C1cc) once `wz-capi-c` has made its own P1 to P4 with its own coverage rows, and the Z8

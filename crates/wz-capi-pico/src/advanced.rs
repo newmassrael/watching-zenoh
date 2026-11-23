@@ -709,8 +709,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let mut put_options = AdvancedPutOptions::default();
         if !options.is_null() {
             let embedded = &(*options).put_options;
-            if let Some(attachment) = crate::pubsub::take_moved_bytes(embedded.attachment) {
-                put_options = put_options.with_attachment(attachment.to_vec());
+            if let Some(attachment) = crate::pubsub::take_moved_bytes_to_vec(embedded.attachment) {
+                put_options = put_options.with_attachment(attachment);
             }
             if let Some(encoding) = crate::encoding::take_moved_encoding(embedded.encoding) {
                 put_options = put_options.with_encoding(encoding);
@@ -721,8 +721,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
             // `opt.put_options.timestamp = &timestamp;`), so a caller's value
             // never reaches the wire there and must not here.
         }
-        let Some(buf) = buf else {
-            return Z_ERR_NULL;
+        let buf = match buf {
+            Ok(Some(buf)) => buf,
+            Ok(None) => return Z_ERR_NULL,
+            Err(no_room) => return no_room.code(),
         };
         let Some(state) = handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_) else {
             return Z_ERR_NULL;
@@ -1073,7 +1075,7 @@ unsafe fn declare_subscriber_state(
         &PicoSession::of(handle),
         declared_of(keyexpr)
             .map(DeclaredKeyexpr::share)
-            .unwrap_or_else(|| DeclaredKeyexpr::literal_only(ke.clone())),
+            .unwrap_or_else(|| DeclaredKeyexpr::literal_only(&ke)),
     ));
     let opts = advanced_subscriber_options(options).with_declaration_forms(forms);
     let engine = engine_of(handle);
@@ -1081,7 +1083,7 @@ unsafe fn declare_subscriber_state(
         let miss = miss.clone();
         let mut inner = crate::pubsub::make_subscriber_callback(cclosure);
         EngineSubscriber::declare_with_miss_listener(
-            &engine,
+            &crate::session::port_engine(&engine),
             ke.clone(),
             opts,
             // The advanced subscriber hands an OWNED `Sample`; the existing marshal
@@ -1476,10 +1478,10 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(&*engine);
+        let wire = key.wire(Arc::as_ref(&engine));
         let released = cclosure.release_latch();
         let Some(id) = engine.declare_liveliness_subscriber_on_wire(
-            ke,
+            &ke,
             wire,
             history,
             crate::liveliness::sample_sink(cclosure),

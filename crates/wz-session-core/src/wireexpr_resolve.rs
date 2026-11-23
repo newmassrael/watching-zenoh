@@ -341,7 +341,7 @@ enum PeerSpaceRepr<'a> {
     /// The static policy's bounded table.
     Table(&'a FixedIdMap<KeyText<Static>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
     /// The lent policy's bounded table, whose rows hold their keys in the session's key arena.
-    LentTable(&'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>),
+    LentTable(&'a PeerAliases<crate::bounded::Lent>),
 }
 
 impl<'a> PeerSpace<'a> {
@@ -359,9 +359,7 @@ impl<'a> PeerSpace<'a> {
     }
 
     /// The lent policy's table, as a peer space.
-    pub(crate) fn of_lent_table(
-        table: &'a FixedIdMap<KeyText<crate::bounded::Lent>, { caps::MAX_PEER_KEYEXPR_ALIASES }>,
-    ) -> Self {
+    pub(crate) fn of_lent_table(table: &'a PeerAliases<crate::bounded::Lent>) -> Self {
         Self(PeerSpaceRepr::LentTable(table))
     }
 

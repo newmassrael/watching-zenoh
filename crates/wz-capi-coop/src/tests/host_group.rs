@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-use wz_capi_port::{SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
 use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_posix::links::PosixLinks;
@@ -109,7 +109,7 @@ fn two_members_on_the_hosts_sockets_learn_each_other_and_a_put_crosses_the_group
     let into = Arc::clone(&heard);
     second
         .declare_subscriber_on_wire(
-            "demo/host-group/**".to_owned(),
+            "demo/host-group/**",
             WireKey::literal(),
             Locality::Any,
             None,

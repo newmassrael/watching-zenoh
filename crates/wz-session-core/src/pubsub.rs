@@ -119,6 +119,8 @@ use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, P
 use crate::keyexpr_match::keyexpr_intersects_text;
 use crate::keyexpr_match::{keyexpr_intersects_text_with, KeyFacts, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
+#[cfg(feature = "declare-subscriber")]
+use crate::row_pool::RowList;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
 // `wireexpr_resolve` module and is reached only from the `alloc`
@@ -532,8 +534,13 @@ struct InterestSide<P: Storage = Profile> {
     /// `BoundedString` slot per item is what overflowed a Cortex-M0 stack when
     /// the liveliness twin tried it). So the keyexpr lives here, once, and the
     /// staged item is two `u64`s that resolve through it.
+    ///
+    /// At most `MAX_INBOUND_SUB_INTERESTS` rows, in the policy's sequence of a peer's rows
+    /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
+    /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
+    /// could.
     #[cfg(feature = "declare-subscriber")]
-    rows: BoundedVec<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }, P>,
+    rows: <P as Storage>::Pooled<InboundSubInterest<P>, { caps::MAX_INBOUND_SUB_INTERESTS }>,
     /// R311y530 — the staged interest-response chain, drained by
     /// [`Self::take_staged_sub_interest_replies`] through a
     /// [`crate::response_sink::DeclareReplySink`].
@@ -1870,14 +1877,14 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         peer: &mut SubscriberPeer<Q>,
         interest_id: u64,
     ) -> Option<u64> {
-        let rows = &mut peer.interests.rows;
-        let idx = rows
-            .iter()
-            .position(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
-        if self.any_subscription_matches(Some(&*rows[idx].keyexpr)) {
+        let row = peer
+            .interests
+            .rows
+            .iter_mut()
+            .find(|row| row.interest_id == interest_id && row.aggregate && row.announced)?;
+        if self.any_subscription_matches(Some(&*row.keyexpr)) {
             return None;
         }
-        let row = &mut rows[idx];
         row.announced = false;
         Some(u64::from(row.aggregate_decl_id))
     }
@@ -3023,54 +3030,64 @@ impl SubscriberPeer<crate::bounded::Static> {
 }
 
 impl SubscriberPeer<Lent> {
-    /// An empty side whose interest table (`interests` rows) and staging (`staged` rows) are lent
-    /// from `arena`. Refused when either is over the build's capacity or the arena has not the
-    /// room. The alias table is the policy's inline one, whose keys are kept in the key arena it is
-    /// handed ([`Self::keep_keys_in`]), and in none before.
-    pub fn lent(arena: &mut Arena, interests: usize, staged: usize) -> Result<Self, LendRefused> {
+    /// An empty side whose staging (`staged` rows) is lent from `arena`. Refused when it is over
+    /// the build's capacity or the arena has not the room. The alias table and the interest table
+    /// keep their rows in the session's pools they are handed (`keep_alias_rows_in`,
+    /// `keep_interest_rows_in`) and their keys in the key arena it is handed (`keep_keys_in`), and
+    /// refuse what the peer asks before.
+    pub fn lent(arena: &mut Arena, staged: usize) -> Result<Self, LendRefused> {
         let mut side = Self::default();
-        side.lend_rows(arena, interests, staged)?;
+        side.lend_rows(arena, staged)?;
         Ok(side)
     }
 
-    /// Lend an empty side its interest table (`interests` rows) and staging (`staged` rows) from
-    /// `arena`, where it lies: what [`Self::lent`] makes, without the side, whose alias table is
-    /// inline and kilobytes, being a value of its own. Refused as `lent` is.
+    /// Lend an empty side its staging (`staged` rows) from `arena`, where it lies: what
+    /// [`Self::lent`] makes, without the side being a value of its own. Refused as `lent` is.
     ///
-    /// The key arena the side was handed (`keep_keys_in`) stays its own: lending rows before or
-    /// after it was handed one keeps the interests' keys in it.
+    /// The key arena and the rows of interests the side was handed stay its own: lending its
+    /// staging before or after it was handed them keeps the interests' keys and rows in them.
     #[cfg(feature = "declare-subscriber")]
-    pub fn lend_rows(
-        &mut self,
-        arena: &mut Arena,
-        interests: usize,
-        staged: usize,
-    ) -> Result<(), LendRefused> {
-        self.interests = InterestSide::lent(arena, interests, staged, self.interests.keys)?;
+    pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
+        self.interests.staged = arena.lend(staged)?;
         Ok(())
     }
 
     /// Nothing to lend: a build without `declare-subscriber` keeps no interest of the peer.
     #[cfg(not(feature = "declare-subscriber"))]
-    pub fn lend_rows(
-        &mut self,
-        _arena: &mut Arena,
-        _interests: usize,
-        _staged: usize,
-    ) -> Result<(), LendRefused> {
+    pub fn lend_rows(&mut self, _arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
         Ok(())
     }
 
     /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
     #[cfg(feature = "declare-subscriber")]
-    pub const fn arena_bytes(interests: usize, staged: usize) -> Option<usize> {
-        InterestSide::<Lent>::arena_bytes(interests, staged)
+    pub const fn arena_bytes(staged: usize) -> Option<usize> {
+        InterestSide::<Lent>::arena_bytes(staged)
     }
 
     /// The bytes of an arena [`Self::lent`] takes: none without `declare-subscriber`.
     #[cfg(not(feature = "declare-subscriber"))]
-    pub const fn arena_bytes(_interests: usize, _staged: usize) -> Option<usize> {
+    pub const fn arena_bytes(_staged: usize) -> Option<usize> {
         Some(0)
+    }
+
+    /// Keep the aliases the peer declares from here on in rows of `space`, the session's: a pool the
+    /// faces share, or a span of this table's own; the aliases held elsewhere are forgotten first.
+    #[cfg(all(feature = "storage-profile", feature = "peer-row-pools"))]
+    pub fn keep_alias_rows_in(
+        &mut self,
+        space: crate::row_pool::RowSpace<crate::row_pool::Keyed<crate::key_arena::KeyRef>>,
+    ) {
+        self.naming.aliases.keep_rows_in(space);
+    }
+
+    /// Keep the interests the peer asks from here on in rows `rows` hands out, the session's: a
+    /// pool the faces share, or a span of this side's own if no table took it before; the
+    /// interests held elsewhere are forgotten first. Rows with nothing left to hand change nothing.
+    #[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+    pub fn keep_interest_rows_in(&mut self, rows: &mut InterestRows) {
+        if let Some(space) = rows.0.hand_out() {
+            self.interests.rows.keep_rows_in(space);
+        }
     }
 }
 
@@ -3542,7 +3559,7 @@ impl<P: Storage> Default for InterestSide<P> {
     /// No interest registered, nothing staged.
     fn default() -> Self {
         Self {
-            rows: BoundedVec::default(),
+            rows: Default::default(),
             staged: BoundedVec::default(),
             refusals: SubInterestRefusals::default(),
             reconciled_epoch: 0,
@@ -3553,32 +3570,50 @@ impl<P: Storage> Default for InterestSide<P> {
 
 #[cfg(feature = "declare-subscriber")]
 impl InterestSide<Lent> {
-    /// No interest registered, nothing staged, `interests` rows of interests and `staged` of the
-    /// answers staged back lent from `arena`, the interests' keys kept in `keys`.
-    fn lent(
-        arena: &mut Arena,
-        interests: usize,
-        staged: usize,
-        keys: LentKeys,
-    ) -> Result<Self, LendRefused> {
-        Ok(Self {
-            rows: arena.lend(interests)?,
-            staged: arena.lend(staged)?,
-            refusals: SubInterestRefusals::default(),
-            reconciled_epoch: 0,
-            keys,
-        })
+    /// The bytes of an arena [`SubscriberPeer::lend_rows`] takes: the staging's. `None` past the
+    /// address space.
+    const fn arena_bytes(staged: usize) -> Option<usize> {
+        Arena::table_bytes::<SubInterestReply>(staged)
+    }
+}
+
+/// The kind of row a peer's interests are kept in on the lent policy.
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+type InterestKind = crate::row_pool::Seq<InboundSubInterest<Lent>>;
+
+/// Where every face of a session keeps the interests its peer asks
+/// ([`SubscriberPeer::keep_interest_rows_in`]): a pool the faces of a session of many share, lent
+/// from its arena once, so a face holds the interests its peer asked and the session holds what its
+/// faces together asked, up to the pool's rows; or, for a session of one face, a span of that
+/// face's own, handed to the first side that asks and to no other.
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+#[derive(Debug)]
+pub struct InterestRows(crate::row_pool::RowSource<InterestKind>);
+
+#[cfg(all(feature = "declare-subscriber", feature = "peer-row-pools"))]
+impl InterestRows {
+    /// `rows` interests lent by `lend`: a pool the faces share, or a span of one face's own, a group
+    /// of its own ([`Self::own_bytes`]). A refusal is `lend`'s to hand back.
+    pub fn lent(lend: &mut crate::row_pool::RowLender<'_>, rows: usize) -> Self {
+        lend.group(Self::own_bytes(rows));
+        Self(lend.next(rows))
     }
 
-    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
-    const fn arena_bytes(interests: usize, staged: usize) -> Option<usize> {
-        match (
-            Arena::table_bytes::<InboundSubInterest<Lent>>(interests),
-            Arena::table_bytes::<SubInterestReply>(staged),
-        ) {
-            (Some(rows), Some(staged)) => rows.checked_add(staged),
-            _ => None,
-        }
+    /// The bytes of an arena a pool of `rows` interests takes. `None` past the most rows a pool
+    /// names or the address space.
+    pub const fn pool_bytes(rows: usize) -> Option<usize> {
+        crate::row_pool::RowSpace::<InterestKind>::pool_bytes(rows)
+    }
+
+    /// The bytes a span of one face's own of `rows` interests takes, not rounded to an arena's
+    /// spans. `None` past the most rows a span names or the address space.
+    pub const fn own_bytes(rows: usize) -> Option<usize> {
+        crate::row_pool::RowSpace::<InterestKind>::own_bytes(rows)
+    }
+
+    /// What a shared pool holds now; `None` for a span of one face's own.
+    pub fn counts(&self) -> Option<crate::row_pool::RowCounts> {
+        self.0.counts()
     }
 }
 
@@ -3626,8 +3661,20 @@ impl<P: Storage> InterestSide<P> {
         quota: crate::limits::MaxPendingDeclaresHeld,
         item: SubInterestReply,
     ) {
-        if !quota.admits(self.staged.len() + 1) || self.staged.push(item).is_err() {
-            self.count_refused_announcement();
+        Self::stage_announcement_in(&mut self.staged, &mut self.refusals, quota, item);
+    }
+
+    /// [`Self::stage_announcement`] into the side's staging and refusals alone, for a caller that
+    /// holds the side's rows meanwhile.
+    #[inline(always)]
+    fn stage_announcement_in(
+        staged: &mut BoundedVec<SubInterestReply, { caps::MAX_PENDING_DECLARES }, P>,
+        refusals: &mut SubInterestRefusals,
+        quota: crate::limits::MaxPendingDeclaresHeld,
+        item: SubInterestReply,
+    ) {
+        if !quota.admits(staged.len() + 1) || staged.push(item).is_err() {
+            refusals.announcements = refusals.announcements.saturating_add(1);
         }
     }
 
@@ -3646,13 +3693,6 @@ impl<P: Storage> InterestSide<P> {
     /// Count one CURRENT reply chain the staging buffer could not take whole.
     fn count_refused_chain(&mut self) {
         self.refusals.chains = self.refusals.chains.saturating_add(1);
-    }
-
-    /// Count one unsolicited announcement the staging buffer refused. Shared by
-    /// the FUTURE push and the aggregate retraction, the two stagers with no
-    /// chain to keep whole.
-    fn count_refused_announcement(&mut self) {
-        self.refusals.announcements = self.refusals.announcements.saturating_add(1);
     }
 
     /// Drop the rows and the staging, in place.
@@ -3744,29 +3784,31 @@ impl<P: Storage> SubscriberPeer<P> {
     /// A no-op when the table did not move. Staging that does not fit is counted
     /// and refused, as everywhere else.
     pub fn reconcile<C: SampleSink, R: Storage>(&mut self, table: &SubscriberTable<C, R>) {
-        let interests = &mut self.interests;
-        if interests.reconciled_epoch == table.epoch {
+        if self.interests.reconciled_epoch == table.epoch {
             return;
         }
-        interests.reconciled_epoch = table.epoch;
+        self.interests.reconciled_epoch = table.epoch;
         // FUTURE pushes. An aggregate interest is told ONCE that something
         // matches, however many matching subscriptions arrived; any other is
         // told of each, under that subscription's own keyexpr. Staged straight
         // from the two tables: collecting the hits first would need a bound of
         // rows times subscriptions on the stack.
-        for at in 0..interests.rows.len() {
-            let (interest_id, aggregate, watermark) = {
-                let row = &interests.rows[at];
-                (row.interest_id, row.aggregate, row.watermark)
-            };
+        let InterestSide {
+            rows,
+            staged,
+            refusals,
+            ..
+        } = &mut self.interests;
+        for row in rows.iter_mut() {
+            let (interest_id, aggregate, watermark) =
+                (row.interest_id, row.aggregate, row.watermark);
             let mut told = false;
             for sub in table
                 .subscribers
                 .iter()
                 .filter(|s| s.id.as_u64() >= watermark)
             {
-                if !subscription_matches_interest(&sub.pattern, Some(&*interests.rows[at].keyexpr))
-                {
+                if !subscription_matches_interest(&sub.pattern, Some(&*row.keyexpr)) {
                     continue;
                 }
                 let item = if aggregate {
@@ -3783,12 +3825,12 @@ impl<P: Storage> SubscriberPeer<P> {
                 };
                 // No terminating `Final`: an unsolicited FUTURE push, not a
                 // CURRENT dump (see `stage_future_subscriber_pushes`).
-                interests.stage_announcement(table.reply_quota, item);
+                InterestSide::<P>::stage_announcement_in(staged, refusals, table.reply_quota, item);
             }
-            interests.rows[at].watermark = table.next_id;
+            row.watermark = table.next_id;
         }
         #[cfg(feature = "declare-undeclare")]
-        table.stage_emptied_aggregate_retracts(interests);
+        table.stage_emptied_aggregate_retracts(&mut self.interests);
     }
 
     /// Forget this peer's interests and what was staged to it, because its
@@ -4411,7 +4453,6 @@ mod tests {
 
     #[test]
     fn dispatch_iteration_event_projects_frame_reliable_bool_to_sample() {
-        use crate::driver_loop::IterationEvent;
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
@@ -4429,7 +4470,9 @@ mod tests {
             has_ext: false,
             extensions: Vec::new(),
         };
-        registry.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        crate::driver_loop::deliver_frame(&outcome, |event| {
+            registry.dispatch_iteration_event(event)
+        });
         assert_eq!(
             *captured.lock().unwrap(),
             Some(Reliability::BestEffort),
@@ -5954,9 +5997,12 @@ mod tests {
     /// frame: the same keys (an alias, an alias with a suffix, a literal), payloads, QoS and
     /// reliability, in the same order, with a key nobody declared dropped by both and a key
     /// no subscriber matches delivered to nobody by both.
+    ///
+    /// The build that lends every record has no plain-put lane: its receive lends the same frame's
+    /// records where they lie, and that delivery is the one compared there
+    /// (`crate::driver_loop::deliver_frame`).
     #[test]
     fn a_frame_of_plain_puts_is_delivered_as_the_owned_path_delivers_it() {
-        use crate::driver_loop::IterationEvent;
         let long = vec![5u8; 300];
         let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8], u8); 7] = [
             (7, None, b"alias", 0x05),
@@ -6008,7 +6054,9 @@ mod tests {
                 payload: frame,
                 puts: read,
             };
-            lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+            crate::driver_loop::deliver_frame(&outcome, |event| {
+                lane.dispatch_iteration_event(event)
+            });
 
             let (want, got) = (
                 seen_owned.lock().unwrap().clone(),
@@ -6030,10 +6078,10 @@ mod tests {
     /// alias). A repeated key rests on the record before it having been delivered, so a
     /// dropped record between two equal ones, an alias that changes meaning and a key that
     /// returns after another are all in the frame, and the reader's own flag is checked to
-    /// have been set where it should and only there.
+    /// have been set where it should and only there. The build that lends every record compares
+    /// the frame lent where it lies, as the test above does.
     #[test]
     fn a_frame_of_repeated_keys_is_delivered_as_the_owned_path_delivers_it() {
-        use crate::driver_loop::IterationEvent;
         let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 16] = [
             (0, Some("demo/x"), b"1"),
             (0, Some("demo/x"), b"2"),
@@ -6106,7 +6154,7 @@ mod tests {
             payload: frame,
             puts: read,
         };
-        lane.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        crate::driver_loop::deliver_frame(&outcome, |event| lane.dispatch_iteration_event(event));
         for (index, pattern) in patterns.iter().enumerate() {
             let (want, got) = (
                 seen_owned[index].lock().unwrap().clone(),

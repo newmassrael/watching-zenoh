@@ -664,6 +664,116 @@ const _: LimitDomain = MaxStaticConnect::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxStaticConnectHeld = Limited<MaxStaticConnect, { MaxStaticConnect::HELD }>;
 
+/// `MAX_FACES`: The faces a session that listens holds besides the one it dials: the links
+/// it accepts, those still in their handshake among them, and those it attaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxFaces;
+
+impl LimitSpec for MaxFaces {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_FACES";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_FACES);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxFaces::DOMAIN;
+
+/// How `MAX_FACES` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxFacesHeld = Limited<MaxFaces, { MaxFaces::HELD }>;
+
+/// `MAX_ACCEPT_PENDING`: The inbound links a session that listens holds in their handshake
+/// at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaxAcceptPending;
+
+impl LimitSpec for MaxAcceptPending {
+    type Value = Quota;
+    const LIMIT: &'static str = "MAX_ACCEPT_PENDING";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::MAX_ACCEPT_PENDING);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = MaxAcceptPending::DOMAIN;
+
+/// How `MAX_ACCEPT_PENDING` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type MaxAcceptPendingHeld = Limited<MaxAcceptPending, { MaxAcceptPending::HELD }>;
+
+/// `SESSION_MAX_PEER_KEYEXPR_ALIASES`: The key expressions all the peers of a session may
+/// have declared to it at a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionMaxPeerKeyexprAliases;
+
+impl LimitSpec for SessionMaxPeerKeyexprAliases {
+    type Value = Quota;
+    const LIMIT: &'static str = "SESSION_MAX_PEER_KEYEXPR_ALIASES";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_PEER_KEYEXPR_ALIASES);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = SessionMaxPeerKeyexprAliases::DOMAIN;
+
+/// How `SESSION_MAX_PEER_KEYEXPR_ALIASES` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type SessionMaxPeerKeyexprAliasesHeld =
+    Limited<SessionMaxPeerKeyexprAliases, { SessionMaxPeerKeyexprAliases::HELD }>;
+
+/// `SESSION_MAX_REMOTE_DECLS`: The declarations of one kind (subscribers, queryables,
+/// liveliness tokens) all the peers of a session may hold open to it at a time, each peer
+/// also held to MAX_REMOTE_DECLS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionMaxRemoteDecls;
+
+impl LimitSpec for SessionMaxRemoteDecls {
+    type Value = Quota;
+    const LIMIT: &'static str = "SESSION_MAX_REMOTE_DECLS";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_REMOTE_DECLS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = SessionMaxRemoteDecls::DOMAIN;
+
+/// How `SESSION_MAX_REMOTE_DECLS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type SessionMaxRemoteDeclsHeld =
+    Limited<SessionMaxRemoteDecls, { SessionMaxRemoteDecls::HELD }>;
+
+/// `SESSION_MAX_INBOUND_SUB_INTERESTS`: The interests in this session's subscribers that
+/// all its peers may have it remember at a time, each peer also held to
+/// MAX_INBOUND_SUB_INTERESTS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionMaxInboundSubInterests;
+
+impl LimitSpec for SessionMaxInboundSubInterests {
+    type Value = Quota;
+    const LIMIT: &'static str = "SESSION_MAX_INBOUND_SUB_INTERESTS";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::SESSION_MAX_INBOUND_SUB_INTERESTS);
+    const DOMAIN: LimitDomain = LimitDomain::of_bound(Self::CAPACITY, Self::DEFAULT, DEFAULTS_ONLY);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = SessionMaxInboundSubInterests::DOMAIN;
+
+/// How `SESSION_MAX_INBOUND_SUB_INTERESTS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type SessionMaxInboundSubInterestsHeld =
+    Limited<SessionMaxInboundSubInterests, { SessionMaxInboundSubInterests::HELD }>;
+
 /// `QUERIER_MAX_PENDING_QUERIES`: The queries one declared querier may have in flight at
 /// once; one more is refused until a pending one ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1498,6 +1608,16 @@ pub struct SessionLimits {
     max_reply_payload_bytes: MaxReplyPayloadBytesHeld,
     /// `MAX_MULTICAST_REPLIES`.
     max_multicast_replies: MaxMulticastRepliesHeld,
+    /// `MAX_FACES`.
+    max_faces: MaxFacesHeld,
+    /// `MAX_ACCEPT_PENDING`.
+    max_accept_pending: MaxAcceptPendingHeld,
+    /// `SESSION_MAX_PEER_KEYEXPR_ALIASES`.
+    session_max_peer_keyexpr_aliases: SessionMaxPeerKeyexprAliasesHeld,
+    /// `SESSION_MAX_REMOTE_DECLS`.
+    session_max_remote_decls: SessionMaxRemoteDeclsHeld,
+    /// `SESSION_MAX_INBOUND_SUB_INTERESTS`.
+    session_max_inbound_sub_interests: SessionMaxInboundSubInterestsHeld,
     /// `QUERIER_MAX_PENDING_QUERIES`.
     querier_max_pending_queries: QuerierMaxPendingQueriesHeld,
     /// `TX_NO_PROGRESS_WINDOW_US`.
@@ -1585,6 +1705,11 @@ impl SessionLimits {
             max_pending_finals: Limited::build_default(),
             max_reply_payload_bytes: Limited::build_default(),
             max_multicast_replies: Limited::build_default(),
+            max_faces: Limited::build_default(),
+            max_accept_pending: Limited::build_default(),
+            session_max_peer_keyexpr_aliases: Limited::build_default(),
+            session_max_remote_decls: Limited::build_default(),
+            session_max_inbound_sub_interests: Limited::build_default(),
             querier_max_pending_queries: Limited::build_default(),
             tx_no_progress_window_us: Limited::build_default(),
             tx_expiry_close_after: Limited::build_default(),
@@ -2102,6 +2227,102 @@ impl SessionLimits {
     /// Selects `MAX_MULTICAST_REPLIES`, when the build's domain holds `value`.
     pub fn select_max_multicast_replies(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
         self.max_multicast_replies = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_FACES` as this snapshot holds it.
+    pub const fn max_faces(&self) -> Quota {
+        self.max_faces.get()
+    }
+
+    /// `MAX_FACES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_faces_held(&self) -> MaxFacesHeld {
+        self.max_faces
+    }
+
+    /// Selects `MAX_FACES`, when the build's domain holds `value`.
+    pub fn select_max_faces(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_faces = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `MAX_ACCEPT_PENDING` as this snapshot holds it.
+    pub const fn max_accept_pending(&self) -> Quota {
+        self.max_accept_pending.get()
+    }
+
+    /// `MAX_ACCEPT_PENDING` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn max_accept_pending_held(&self) -> MaxAcceptPendingHeld {
+        self.max_accept_pending
+    }
+
+    /// Selects `MAX_ACCEPT_PENDING`, when the build's domain holds `value`.
+    pub fn select_max_accept_pending(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.max_accept_pending = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `SESSION_MAX_PEER_KEYEXPR_ALIASES` as this snapshot holds it.
+    pub const fn session_max_peer_keyexpr_aliases(&self) -> Quota {
+        self.session_max_peer_keyexpr_aliases.get()
+    }
+
+    /// `SESSION_MAX_PEER_KEYEXPR_ALIASES` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn session_max_peer_keyexpr_aliases_held(&self) -> SessionMaxPeerKeyexprAliasesHeld {
+        self.session_max_peer_keyexpr_aliases
+    }
+
+    /// Selects `SESSION_MAX_PEER_KEYEXPR_ALIASES`, when the build's domain holds `value`.
+    pub fn select_session_max_peer_keyexpr_aliases(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.session_max_peer_keyexpr_aliases = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `SESSION_MAX_REMOTE_DECLS` as this snapshot holds it.
+    pub const fn session_max_remote_decls(&self) -> Quota {
+        self.session_max_remote_decls.get()
+    }
+
+    /// `SESSION_MAX_REMOTE_DECLS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn session_max_remote_decls_held(&self) -> SessionMaxRemoteDeclsHeld {
+        self.session_max_remote_decls
+    }
+
+    /// Selects `SESSION_MAX_REMOTE_DECLS`, when the build's domain holds `value`.
+    pub fn select_session_max_remote_decls(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.session_max_remote_decls = Limited::select(value)?;
+        Ok(())
+    }
+
+    /// `SESSION_MAX_INBOUND_SUB_INTERESTS` as this snapshot holds it.
+    pub const fn session_max_inbound_sub_interests(&self) -> Quota {
+        self.session_max_inbound_sub_interests.get()
+    }
+
+    /// `SESSION_MAX_INBOUND_SUB_INTERESTS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn session_max_inbound_sub_interests_held(
+        &self,
+    ) -> SessionMaxInboundSubInterestsHeld {
+        self.session_max_inbound_sub_interests
+    }
+
+    /// Selects `SESSION_MAX_INBOUND_SUB_INTERESTS`, when the build's domain holds `value`.
+    pub fn select_session_max_inbound_sub_interests(
+        &mut self,
+        value: Quota,
+    ) -> Result<(), OutsideLimitDomain> {
+        self.session_max_inbound_sub_interests = Limited::select(value)?;
         Ok(())
     }
 
@@ -2903,6 +3124,56 @@ impl LimitField<SessionLimits> for MaxMulticastReplies {
     }
 }
 
+impl LimitField<SessionLimits> for MaxFaces {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_faces(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_faces()
+    }
+}
+
+impl LimitField<SessionLimits> for MaxAcceptPending {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_max_accept_pending(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.max_accept_pending()
+    }
+}
+
+impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_session_max_peer_keyexpr_aliases(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.session_max_peer_keyexpr_aliases()
+    }
+}
+
+impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_session_max_remote_decls(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.session_max_remote_decls()
+    }
+}
+
+impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
+    fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
+        snapshot.select_session_max_inbound_sub_interests(value)
+    }
+
+    fn held_in(snapshot: &SessionLimits) -> Quota {
+        snapshot.session_max_inbound_sub_interests()
+    }
+}
+
 impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
     fn select_in(snapshot: &mut SessionLimits, value: Quota) -> Result<(), OutsideLimitDomain> {
         snapshot.select_querier_max_pending_queries(value)
@@ -3174,7 +3445,7 @@ impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 54;
+pub const SESSION_LIMIT_COUNT: usize = 59;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its fields.
@@ -3206,6 +3477,11 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxPendingFinals>(),
     LimitEntry::of::<MaxReplyPayloadBytes>(),
     LimitEntry::of::<MaxMulticastReplies>(),
+    LimitEntry::of::<MaxFaces>(),
+    LimitEntry::of::<MaxAcceptPending>(),
+    LimitEntry::of::<SessionMaxPeerKeyexprAliases>(),
+    LimitEntry::of::<SessionMaxRemoteDecls>(),
+    LimitEntry::of::<SessionMaxInboundSubInterests>(),
     LimitEntry::of::<QuerierMaxPendingQueries>(),
     LimitEntry::of::<TxNoProgressWindowUs>(),
     LimitEntry::of::<TxExpiryCloseAfter>(),
@@ -3605,7 +3881,7 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
 /// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
 /// stage decides it, so neither snapshot holds it and a document that states it is refused by
 /// name.
-pub static CAPACITY_LIMITS: [&str; 15] = [
+pub static CAPACITY_LIMITS: [&str; 24] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
     "HELD_SESSIONS",
@@ -3613,11 +3889,20 @@ pub static CAPACITY_LIMITS: [&str; 15] = [
     "HELD_REPLIES",
     "HELD_QUERIES",
     "HELD_PAYLOADS",
+    "HELD_CONFIGS",
+    "HELD_HELLOS",
+    "HELD_PAYLOAD_BYTES",
+    "CONFIG_ENTRIES",
+    "MAX_SCOUT_HELLOS",
+    "SCOUT_HELLO_LOCATORS",
+    "CONFIG_DOCUMENT_DEPTH",
+    "CONFIG_TEXT_BYTES",
     "MAX_ADMIN_REPLY_BYTES",
     "MAX_ADMIN_LOCATORS",
     "MAX_ADMIN_SESSION_LINKS",
     "MAX_TASKS",
     "MAX_TIMERS",
+    "MAX_TICKERS",
     "MAX_PEER_NODES",
     "HANDSHAKE_COOKIE_BYTES",
     "EVENT_RECORD_ARGS",

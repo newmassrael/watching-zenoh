@@ -32,12 +32,7 @@ fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
         })
     });
     let id = engine
-        .declare_liveliness_subscriber_on_wire(
-            keyexpr.to_owned(),
-            WireKey::literal(),
-            history,
-            sink,
-        )
+        .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
         .expect("the engine has liveliness");
     (id, heard)
 }
@@ -59,7 +54,7 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
     let engine = open(&router);
     let named = engine
         .declare_liveliness_token_on_wire(
-            "demo/alive/a".to_owned(),
+            "demo/alive/a",
             WireKey::literal(),
             Some(RetractionKey {
                 mapping_id: 0,
@@ -68,7 +63,7 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
         )
         .expect("the engine has liveliness");
     let bare = engine
-        .declare_liveliness_token_on_wire("demo/alive/b".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("demo/alive/b", WireKey::literal(), None)
         .expect("the engine has liveliness");
     // The session hands out its entity ids in a u32 space; the router reads a declared id at
     // wire width, so the comparison widens what the session handed out.
@@ -176,7 +171,7 @@ fn a_lost_link_takes_the_routers_tokens_and_a_new_one_is_told_the_sessions() {
     });
     let (_, heard) = subscribe(&engine, "demo/**", false);
     let token = engine
-        .declare_liveliness_token_on_wire("demo/mine".to_owned(), WireKey::literal(), None)
+        .declare_liveliness_token_on_wire("demo/mine", WireKey::literal(), None)
         .expect("the engine has liveliness");
     let token = u64::from(token);
     router.send(Command::DeclareToken(6, "demo/theirs"));

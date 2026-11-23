@@ -248,6 +248,10 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"], "C1p32": ["cc"
 #         `deploy/offline-build.json` declares (`offline_build.py`)
 #   Cmut: "the table pins cargo-mutants <pin> and this machine runs 'none'" (`[tools.cargo-mutants]`
 #         in bx.toml provisions the pin)
+#   Vcov, Vtsan, Vasan, Vmiri: "verify.sh: no rustup on PATH (the lanes need its pinned nightly)"
+#         (`scripts/verify.sh`, which installs the nightly crates/wz-fuzz pins through it); Vtsan and
+#         Vasan build their C programs with `cc` and the pico headers they compile against with
+#         `cmake` (zenoh-pico-sys), each a failure of `scripts/pico-c-program.sh`
 # A program is `needs` (bx runs it), never a package name: the package's NAME differs between
 # releases and machines, and the program is what the lane calls.
 LANE_COMMANDS: dict[str, list[str]] = {
@@ -262,6 +266,10 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "C1st": ["bwrap", "strace"],
     "C1ob": ["ar", "as", "bwrap", "c++", "cc", "ld"],
     "Cmut": ["cargo-mutants"],
+    "Vcov": ["rustup"],
+    "Vtsan": ["cc", "cmake", "rustup"],
+    "Vasan": ["cc", "cmake", "rustup"],
+    "Vmiri": ["rustup"],
 }
 
 # Packages a lane refuses to run without that are no program: `python3-venv`, the venv the pinned
@@ -279,6 +287,12 @@ LANE_PACKAGES: dict[str, list[str]] = {
     "C1st": ["python3-venv"],
     "E": ["python3-venv"],
     "Qz": ["python3-venv"],
+    # Vcov, Vtsan, Vasan: the C library's feature set is the profile the pinned Kconfig interpreter
+    # resolves (`scripts/lib/verify_plan.py`), which they provision as E does; the C programs of
+    # Vtsan and Vasan build the pico headers through zenoh-pico-sys, whose bindgen loads libclang.
+    "Vcov": ["python3-venv"],
+    "Vtsan": ["libclang-dev", "python3-venv"],
+    "Vasan": ["libclang-dev", "python3-venv"],
 }
 
 

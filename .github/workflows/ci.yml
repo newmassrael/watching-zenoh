@@ -2342,12 +2342,33 @@ jobs:
   # cold 12 min at 60%, between the floor and the 90% alarm. It reads a BINARY, so nothing here
   # is cached by key: the rust-cache entry it reads is the `ci` job's (class `rust-ci`) and it
   # never writes one.
+  #
+  # BY COST, TWO SHARDS (hosted run 45051019628). The one job read `elapsed 1114s of 1200s budget
+  # (92%)`, its lane 1,013 s: the eight cases the budget was sized for are now twenty-two size
+  # cases and two statement cases, each a release build, and the job had read 1,084 to 1,132 s in
+  # five of the six runs before it. The cases are now dealt by measured cost, heaviest first to the least
+  # loaded shard (`capability_cost_gate.py --shards`, over `c1cs_case_weights.tsv`), which puts
+  # 611 and 607 s of a 1,218 s four-core reading in the two. Each shard is a runner of its own, so
+  # the cases of one shard still build one after another in one target directory. PREDICTION, for
+  # the next run to judge: each shard near 660 s with its setup, 55 percent of the budget; a shard
+  # under 240 s (the 20 percent floor) hands budget back. Each case prints its seconds, which is
+  # what the table is refreshed from.
+  #
+  # DROP-PROOF INVARIANT: `shard` MUST list exactly [0 .. WZ_C1CS_SHARDS-1]
+  # (`scripts/lib/shard_matrix_binding.py`).
   capability-cost:
-    name: capability cost of the C ABI builds (Layer C1cs)
+    name: capability cost of the C ABI builds (Layer C1cs, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      WZ_C1CS_SHARDS: "2"
+      WZ_C1CS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock
         run: date +%s > "$RUNNER_TEMP/wz_job_start"
@@ -2839,6 +2860,103 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
+  # The measured verification of the cooperative engine's crates (docs/verification.md), a lane a
+  # job: line and branch coverage held to deploy/coverage_floor.json, ThreadSanitizer,
+  # AddressSanitizer and the Miri interpreter, each over the tests of the crates in the feature sets
+  # the C library and the MCU kit images build them in (scripts/lib/verify_plan.py). A job each
+  # because each builds every crate again under its own flags, on the nightly crates/wz-fuzz pins:
+  # nothing another job compiles is reusable here, and one red does not hide another. No cargo
+  # cache, for the fuzz job's reason above; scripts/verify.sh installs the nightly and the
+  # components it needs. The workspace's own toolchain resolves the feature sets (`cargo tree`).
+  #
+  # NO BUDGET GATE YET, on the precedent of `pico-client-only`: a margin gate's floor and alarm are
+  # derived from measured runs and these jobs have none. The first hosted run is the measurement;
+  # `timeout-minutes` is a ceiling until then.
+  verify-coverage:
+    name: line and branch coverage (Layer Vcov)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Layer Vcov — each crate's coverage held to its floor
+        run: bash scripts/run-ci.sh --layer Vcov
+
+      # Every run and not only a red one: each function no test reached is a test to write.
+      - name: Upload the coverage summary and the functions no test reached
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            target/verify/coverage/summary.json
+            target/verify/coverage/uncovered.txt
+          if-no-files-found: ignore
+
+  verify-tsan:
+    name: ThreadSanitizer over the tests and the C programs (Layer Vtsan)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      # ThreadSanitizer maps its shadow at fixed addresses, which the runner kernel's
+      # high-entropy mmap randomisation can collide with; 28 bits is the value its runtime
+      # documents as compatible.
+      - name: Address space randomisation the race detector's layout fits
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      # Soft until the race its first runs found is repaired (a key's reference count released by
+      # an undeclare outside the session lock while the read task takes a declaration; see
+      # docs/verification.md), then a gate: deploy/soft_jobs.json holds the promise.
+      - name: Layer Vtsan — the units' tests and the C programs under ThreadSanitizer
+        continue-on-error: true
+        run: bash scripts/run-ci.sh --layer Vtsan
+
+  verify-asan:
+    name: AddressSanitizer over the tests and the C programs (Layer Vasan)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Layer Vasan — the units' tests and the C programs under AddressSanitizer
+        run: bash scripts/run-ci.sh --layer Vasan
+
+  verify-miri:
+    name: the arena and lock units under Miri (Layer Vmiri)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Layer Vmiri — the units under the interpreter
+        run: bash scripts/run-ci.sh --layer Vmiri
+
   # The consumer bundles' offline build entry (deploy/offline-build.json),
   # measured: every bundle is built in a bwrap sandbox with no network, no .git
   # and only the declared inputs (scripts/lib/offline_build.py --build). A job
@@ -2967,6 +3085,15 @@ jobs:
   # spreads the captures over the runner's cores (86.6 s on four cores of the same machine),
   # and a fourth shard gives back the margin the table's growth took. The partition is still
   # position modulo the count, so the heavy leg shares its shard with a quarter of the rest.
+  #
+  # BY COST (hosted run 45051019628). Shard 1 read 99 percent of 1800 s with every leg green,
+  # its legs 1,647 s against 869, 810 and 995 for the other three: it held the 543 s
+  # `wz-capture` leg and the 227 s `wz-runtime-tokio` one. The legs are now dealt by measured
+  # cost, heaviest first to the least loaded shard (`census_shard_plan.py` over
+  # `c1bnl_leg_weights.tsv`, keyed by each leg's package, filter and feature CRC), which puts
+  # about 1,110 s of that run's legs in each shard. PREDICTION, for the next run to judge: each
+  # shard near 1,260 s with its own setup, 70 percent of the budget. The weights decide the
+  # balance only; a leg added later is planned at the median and named in the log.
   #
   # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
   # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;

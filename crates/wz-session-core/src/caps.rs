@@ -258,6 +258,54 @@ pub const HELD_QUERIES: usize = generated::HELD_QUERIES;
 /// payloads, reserved as [`HELD_SESSIONS`]'s is.
 pub const HELD_PAYLOADS: usize = generated::HELD_PAYLOADS;
 
+/// The configs a program holds through the C ABI at once: the slots of the process's pool of
+/// configs, each the size of one config of the build, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_CONFIGS: usize = generated::HELD_CONFIGS;
+
+/// The hellos a program keeps through the C ABI at once: the slots of the process's pool of kept
+/// hellos, each holding [`SCOUT_HELLO_LOCATORS`] locators, reserved as [`HELD_SESSIONS`]'s is.
+pub const HELD_HELLOS: usize = generated::HELD_HELLOS;
+
+/// The bytes the owned payloads, strings and slices a program holds through the C ABI carry at
+/// once: the payloads' area of the process's pools, blocks of power-of-two sizes each the smallest
+/// that holds its bytes and its head, reserved as [`HELD_SESSIONS`]'s pool is.
+pub const HELD_PAYLOAD_BYTES: usize = generated::HELD_PAYLOAD_BYTES;
+
+/// The numbered keys one config of the pico C ABI holds at once: the rows of its table, fixed in
+/// the config object. A new key past them is refused at its insert.
+pub const CONFIG_ENTRIES: usize = generated::CONFIG_ENTRIES;
+
+/// The bytes of value text one config of the pico C ABI holds, each value with its terminator, in
+/// one text fixed in the config object. A value that finds no room is refused at its insert.
+pub const CONFIG_TEXT_BYTES: usize = generated::CONFIG_TEXT_BYTES;
+
+/// The Hellos one scouting window records, in a table of that many rows
+/// (`scouting_host::HelloTable`). A Hello past them is counted and not recorded.
+pub const MAX_SCOUT_HELLOS: usize = generated::MAX_SCOUT_HELLOS;
+
+/// The locators a scouting window keeps of one Hello, each at most [`MAX_LOCATOR_LEN`] bytes, in a
+/// text of the Hello's row. One past them, or a longer one, is skipped and counted.
+pub const SCOUT_HELLO_LOCATORS: usize = generated::SCOUT_HELLO_LOCATORS;
+
+/// How deep the JSON5 document a config of the pico C ABI is handed may nest, the outermost object
+/// being 1. A deeper document is refused at its door.
+pub const CONFIG_DOCUMENT_DEPTH: usize = generated::CONFIG_DOCUMENT_DEPTH;
+
+const _: () = assert!(
+    CONFIG_DOCUMENT_DEPTH >= 3,
+    "a document's wz member reaches its policies and limits at a depth of 3"
+);
+
+const _: () = assert!(
+    CONFIG_ENTRIES >= 1 && CONFIG_ENTRIES <= 255 && CONFIG_TEXT_BYTES >= 1,
+    "a config holds at least one key, at most one row for each key but one, and some text"
+);
+
+const _: () = assert!(
+    HELD_PAYLOAD_BYTES <= 1 << 30,
+    "the payloads' area names its blocks by 32-bit offsets and its largest block is 1 GiB"
+);
+
 /// Maximum number of concurrently-outstanding pending liveliness GET
 /// (snapshot) queries in a
 /// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
@@ -451,13 +499,21 @@ pub const MAX_MULTICAST_REPLIES: usize = generated::MAX_MULTICAST_REPLIES;
 /// image's table is the pump per session it holds and room beside them, so it is
 /// smaller than this; the images assert `TASKS <= MAX_TASKS` at compile time, and
 /// a host test holds this number equal to the deploy file's, so a deploy file that
-/// raises the ceiling and an image that outgrows it are each a red build.
+/// raises the ceiling and an image that outgrows it are each a red build. It is also the
+/// ceiling on the task cells a session of the C ABI's cooperative engine reserves when it
+/// opens, one for each link and group its configuration admits.
 pub const MAX_TASKS: usize = generated::MAX_TASKS;
 
 /// The most timers a fixed-memory machine's runtime may hold (the deploy
 /// `session_pool.process.max_timers` key): the ceiling on an image's `RuntimeCell`
-/// `TIMERS`, held the same way as [`MAX_TASKS`].
+/// `TIMERS`, held the same way as [`MAX_TASKS`]; and the entries of the timer table a session
+/// of the C ABI's cooperative engine reserves when it opens.
 pub const MAX_TIMERS: usize = generated::MAX_TIMERS;
+
+/// The periodic jobs a session of the C ABI's cooperative engine runs at once (the deploy
+/// `MAX_TICKERS` limit): the rows of the table the session reserves when it opens. One more is
+/// refused.
+pub const MAX_TICKERS: usize = generated::MAX_TICKERS;
 
 /// Maximum byte length of the keyexpr one admin reply is stamped with:
 /// `@/<zid>/<whatami>/<leg>` and, for a per-entity leg, the entity's own
@@ -495,6 +551,35 @@ pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 /// machine of about 930 bytes, so the default is 0: an image that is never asked to open a peer
 /// by its zid declares none of it, and refuses the open.
 pub const MAX_PEER_NODES: usize = generated::MAX_PEER_NODES;
+
+/// Maximum number of faces a session that listens holds besides the one it dials (zenoh's
+/// `transport/unicast/max_sessions`): the links it accepts, those still in their handshake
+/// among them, and those it attaches. An engine that lends each face its tables from the
+/// session's arena lends this many sets and the dial role's, so the build's value is the ceiling
+/// a session's own value is held under, and a link past the session's value is closed unread.
+pub const MAX_FACES: usize = generated::MAX_FACES;
+
+/// Maximum number of inbound links a session that listens holds in their handshake at once
+/// (zenoh's `transport/unicast/accept_pending`), each one of [`MAX_FACES`]. An engine that lends
+/// each link its buffers from the session's arena lends this many beyond the faces' own, so that
+/// a link past either bound is taken off its port and closed rather than left waiting there.
+pub const MAX_ACCEPT_PENDING: usize = generated::MAX_ACCEPT_PENDING;
+
+/// Maximum number of key expressions all the peers of a session hold declared to it at once,
+/// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'
+/// peers declare in one pool the faces share lends the fewer of this and what its faces could
+/// hold, so the build's value is the ceiling a session's own value is held under.
+pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: usize = generated::SESSION_MAX_PEER_KEYEXPR_ALIASES;
+
+/// Maximum number of declarations of one kind (subscribers, queryables, tokens) all the peers of
+/// a session hold open to it at once, each peer also held to [`MAX_REMOTE_DECLS`]. Lent as
+/// [`SESSION_MAX_PEER_KEYEXPR_ALIASES`] is, one pool of each kind.
+pub const SESSION_MAX_REMOTE_DECLS: usize = generated::SESSION_MAX_REMOTE_DECLS;
+
+/// Maximum number of interests in the session's subscribers all its peers have it remember at
+/// once, each peer also held to [`MAX_INBOUND_SUB_INTERESTS`]. Lent as
+/// [`SESSION_MAX_PEER_KEYEXPR_ALIASES`] is.
+pub const SESSION_MAX_INBOUND_SUB_INTERESTS: usize = generated::SESSION_MAX_INBOUND_SUB_INTERESTS;
 
 /// Maximum number of queries ONE declared querier has in flight at once, as a
 /// [`crate::quota::Quota`] states it: a query past it is refused, and a place comes back

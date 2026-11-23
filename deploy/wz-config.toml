@@ -101,10 +101,11 @@
 # counterpart is a comparison, not a second way to set the limit: a document sets a limit only under
 # `wz/limits`, and an upstream key keeps its own meaning.
 #
-# `[limit.pico_preset]` is for a limit zenoh-pico bounds by no constant of its own, which wz sizes
-# memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
-# session, and `reason` says what of zenoh-pico's own build it holds, its examples and its API tests
-# (decision Q3 of docs/c-abi-engine-and-memory.md). It only lowers the default, and a limit a
+# `[limit.pico_preset]` is for a limit zenoh-pico bounds by no value switch of its own, which wz
+# sizes memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
+# session, and `reason` says what of zenoh-pico's own build it holds: a constant of its own that no
+# switch sets, or else its examples and its API tests (decision Q3 of
+# docs/c-abi-engine-and-memory.md). It only lowers the default, and a limit a
 # zenoh-pico value switch anchors to has none, as its default is pico's own constant. The generated
 # Kconfig makes each preset the limit's default under one switch, which zenoh-pico's defconfig turns
 # on; a build that does not turn it on keeps the defaults.
@@ -1507,18 +1508,20 @@ help = "A time base the program supplies in place of the system's clock: the tim
 [[capability]]
 id = "object-pool"
 kconfig = "WZ_CAP_OBJECT_POOL"
-# Off by default: zenoh-pico allocates the objects behind its owned handles from the heap as it
-# makes them, and so does a build made as it is. A program that must make no allocation while it
-# runs turns it on: the first object reserves the pools from the build's limits (HELD_* and the
-# session limits), or the program reserves its own before it, each count it states held to the
-# bound of the session limit that bounds the object. The pico ABI's doors are wz_ext_* and part of
-# its unstable surface.
+# Off by default, as zenoh-pico has no such doors. The pools themselves are not this capability's:
+# a pico library without the tokio engine takes every object a program holds outside a session
+# from fixed pools its first object reserves from the build's limits (HELD_* and the session
+# limits), whether or not it has the doors, so a build without the unstable surface makes no
+# allocation for them either. A program that states its own counts turns it on and reserves the
+# pools before its first object, each count held to the bound of the session limit that bounds the
+# object; on the tokio engine, which otherwise keeps those objects on the heap, it also puts them
+# in the pools. The pico ABI's doors are wz_ext_* and part of its unstable surface.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Fixed pools, one per kind of object, that the objects behind the owned handles (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads) are taken from in place of the heap, reserved by the first object from the build's limits or by the program before it; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY (wz_ext_object_pool_*, wz-own doors)."
+help = "The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (wz_ext_object_pool_*, wz-own doors)."
 
 [[capability]]
 id = "object-pool-region"
@@ -2460,7 +2463,7 @@ default = 8
 storage = "both"
 scope = "session"
 binding_heap = "open"
-binding_fixed = "build"
+binding_fixed = "open"
 read = "snapshot"
 wire = "none"
 help = '''
@@ -2744,6 +2747,201 @@ answers out of memory and leaves its payload null.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration bounds the payloads a program holds, and zenoh-pico allocates each on the heap with no constant; thirty-two is one payload for each held sample and held reply of the other defaults."
+
+[[limit]]
+id = "HELD_CONFIGS"
+kconfig = "WZ_LIMIT_HELD_CONFIGS"
+kind = "bound"
+driven = "local"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The configs (z_owned_config_t) a program of the pico C ABI holds at once,
+each from z_config_default or z_config_clone to its move into an open or a
+scout, or its drop: the slots of the pool of configs the library reserves at
+its first object, each the size of one config of the build. One more is
+refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the configs a program holds, and zenoh-pico allocates each on the heap with no constant; eight is two for each of HELD_SESSIONS's four sessions, the config an open consumes and a clone of it."
+
+[limit.pico_preset]
+value = 2
+reason = "zenoh-pico bounds its configs by no count; each of its examples holds the one config it opens its session or runs its scout from, and two let a program keep a clone of it."
+
+[[limit]]
+id = "HELD_HELLOS"
+kconfig = "WZ_LIMIT_HELD_HELLOS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
+with as many locators as a scouting window keeps of one Hello: the slots of
+the pool of kept hellos the library reserves at its first object. One more
+is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the hellos a program keeps, and zenoh-pico allocates each clone on the heap with no constant; sixteen is MAX_SCOUT_HELLOS's default, a kept hello for each Hello one scouting window records."
+
+[[limit]]
+id = "HELD_PAYLOAD_BYTES"
+kconfig = "WZ_LIMIT_HELD_PAYLOAD_BYTES"
+kind = "bound"
+driven = "local"
+default = 131072
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes the owned payloads, strings and slices a program of the pico C ABI
+holds carry at once: the payloads' area the library reserves at its first
+object, in blocks of power-of-two sizes from 32 bytes, each payload taking the
+smallest that holds its bytes and a 16-byte head. A payload no free block
+holds is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null. At most 1 GiB.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the bytes a program's payloads carry, and zenoh-pico allocates each payload's on the heap with no constant; 131,072 is a block of 4,096 bytes, the size of PICO_FRAG_MAX_BYTES's default, for each of HELD_PAYLOADS's thirty-two payloads."
+
+[[limit]]
+id = "CONFIG_ENTRIES"
+kconfig = "WZ_LIMIT_CONFIG_ENTRIES"
+kind = "parameter"
+range = [1, 255]
+default = 32
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The numbered keys one config of the pico C ABI holds at once (z_config_default,
+zp_config_insert): the rows of its table, part of the config object. A new key
+past them is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps what
+it held; a key it holds is still replaced. From 1 to 255.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh configuration is a document, and zenoh-pico keeps its numbered keys in a map on its heap bounded by no count. The default holds every numbered key zenoh-pico defines at once, the 27 from 0x40 to the last (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_CONFIG_LISTEN_EXIT_ON_FAILURE_KEY 0x5A`), and five more."
+
+[limit.pico_preset]
+value = 8
+reason = "zenoh-pico's map of keys is bounded by no count; the preset holds the keys of its examples without TLS: the mode and the three scouting keys its default config inserts (`vendor/zenoh-pico/src/net/config.c` @ `_zp_config_insert(ps, Z_CONFIG_MULTICAST_LOCATOR_KEY, Z_CONFIG_MULTICAST_LOCATOR_DEFAULT),`), a connect and a listen locator, the session id and what to scout for, eight, as the text of CONFIG_TEXT_BYTES's preset does."
+
+[[limit]]
+id = "MAX_SCOUT_HELLOS"
+kconfig = "WZ_LIMIT_MAX_SCOUT_HELLOS"
+kind = "bound"
+driven = "remote"
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The Hellos one scouting window records: the rows of its table, each a node
+that answered with its locators. A Hello past them is not recorded and the
+window counts it; the window still runs its budget out. The open's lookup,
+which ends at the first Hello, takes one.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico collect a window's Hellos in a list of their heap. Sixteen, the build's default for the tables of one session's entities (MAX_SUBSCRIPTIONS), holds a scout on a segment of a dozen nodes with room."
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico's list of Hellos is bounded by no count; its API test scouts the one router it runs against and asks for at least one Hello (`vendor/zenoh-pico/tests/z_api_alignment_test.c` @ `assert(hellos >= 1);`), and its open's lookup takes the first."
+
+[[limit]]
+id = "SCOUT_HELLO_LOCATORS"
+kconfig = "WZ_LIMIT_SCOUT_HELLO_LOCATORS"
+kind = "bound"
+driven = "remote"
+default = 8
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The locators a scouting window keeps of one Hello, each at most
+MAX_LOCATOR_LEN bytes, in a text of the Hello's row. A locator past them, or
+a longer one, is skipped, never cut short, and counted with the Hello.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh and zenoh-pico keep a Hello's locators in a vector of their heap. Eight holds a node that listens on two endpoints on each of four interfaces."
+
+[[limit]]
+id = "CONFIG_DOCUMENT_DEPTH"
+kconfig = "WZ_LIMIT_CONFIG_DOCUMENT_DEPTH"
+kind = "parameter"
+range = [3, 64]
+default = 16
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+How deep the zenoh JSON5 document a config of the pico C ABI is handed
+(wz_ext_config_document) may nest, the outermost object being 1: the reader
+walks the document keeping no tree, and this bounds the values it steps over.
+A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
+keeps what it held. From 3, which the wz member's policies and limits take.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh reads its configuration into a tree of its own depth. The default holds zenoh's reference configuration, which nests seven deep (crates/wz-zenoh/DEFAULT_CONFIG.json5, wz-zenoh's byte copy of it), with room."
+
+[[limit]]
+id = "CONFIG_TEXT_BYTES"
+kconfig = "WZ_LIMIT_CONFIG_TEXT_BYTES"
+kind = "parameter"
+range = [1, 1048576]
+default = 16384
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The bytes of value text one config of the pico C ABI holds, each value with
+its terminator, part of the config object. A key's new value is written over
+its old place when it fits there, else after the last value. A value that
+finds no room is refused with _Z_ERR_CONFIG_FAILED_INSERT and the config keeps
+what it held. At least 1.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh-pico copies each value into an allocation of its own length (`vendor/zenoh-pico/src/protocol/config.c` @ `res = _z_str_intmap_insert(ps, key, _z_str_clone(value));`). The default holds the five inline certificates and keys of zenoh-pico's TLS example, a trust bundle of 1,608 bytes and a certificate of 1,552 and a key of 2,052 for each of listen and connect, 8,816 bytes, with its other values and room to replace them."
+
+[limit.pico_preset]
+value = 256
+reason = "zenoh-pico's values are bounded by no constant; the preset holds what its examples without TLS set at the longest: the mode, a connect and a listen locator of MAX_LOCATOR_LEN (64) each, the session id of 36 characters and the four scouting keys, each with its terminator, about 210 bytes, and room to replace one."
 
 [[limit]]
 id = "MAX_PENDING_LIVELINESS_GETS"
@@ -3075,18 +3273,21 @@ driven = "local"
 default = 8
 storage = "capacity"
 scope = "runtime"
-binding_heap = "none"
+binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The most tasks the runtime of a fixed-memory image may hold: a ceiling on
-the task table the image declares, which the image is checked against when
-it compiles.
+The most tasks a runtime holds: a ceiling on the task table a fixed-memory
+image declares, which the image is checked against when it compiles, and on
+the task cells a session of the C ABI's cooperative engine reserves when it
+opens, one for each link and group its configuration admits. A link or a
+group past them is refused, at the open as out of memory and after it as a
+link past the faces the session admits.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a fixed-memory wz image."
+reason = "No key of upstream's configuration states it: it is a ceiling on the task table of a wz runtime whose tables are fixed."
 
 [[limit]]
 id = "MAX_TIMERS"
@@ -3096,17 +3297,42 @@ driven = "local"
 default = 16
 storage = "capacity"
 scope = "runtime"
-binding_heap = "none"
+binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The most timers the runtime of a fixed-memory image may hold: a ceiling on
-the timer table the image declares, checked as the task ceiling is.
+The most timers a runtime holds: a ceiling on the timer table a
+fixed-memory image declares, checked as the task ceiling is, and the entries
+of the timer table a session of the C ABI's cooperative engine reserves when
+it opens. A sleep past them is refused an entry and counted, and ends by
+polling.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration states it: it is a ceiling on the timer table of a fixed-memory wz image."
+reason = "No key of upstream's configuration states it: it is a ceiling on the timer table of a wz runtime whose tables are fixed."
+
+[[limit]]
+id = "MAX_TICKERS"
+kconfig = "WZ_LIMIT_MAX_TICKERS"
+kind = "bound"
+driven = "local"
+default = 16
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The periodic jobs a session of the C ABI's cooperative engine runs at once
+(an advanced publisher's heartbeat is one): the rows of the table the
+session reserves when it opens. Starting one more is refused, as an engine
+with no periodic jobs refuses it.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds them; zenoh-pico holds its runtime's periodic tasks in tables of a build constant, 64 by default (`vendor/zenoh-pico/cmake/feature_config.cmake` @ `set(Z_RUNTIME_MAX_TASKS 64 CACHE STRING`). Sixteen is MAX_PUBLISHERS's default, a heartbeat for each publisher of a session."
 
 [[limit]]
 id = "MAX_LOCATOR_LEN"
@@ -3179,6 +3405,170 @@ is refused.
 [limit.upstream]
 zenoh = "none"
 reason = "No key of upstream's configuration states it: it sizes the connection machines a fixed-memory wz image holds for the peers it opens by their zid."
+
+[[limit]]
+id = "MAX_FACES"
+kconfig = "WZ_LIMIT_MAX_FACES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 1000
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link past the limit is closed before a byte of its handshake is answered.
+wire = "none"
+help = '''
+The faces a session that listens holds besides the one it dials: the links it
+accepts, those still in their handshake among them, and those it attaches. A
+link that arrives past it is closed unread. The cooperative engine lends each
+face its tables and each link its buffers from the session's memory when it
+opens, so a session may lower this and never raise it. The zenoh-pico
+interface holds no face besides its dial for a session that listens on
+nothing.
+'''
+
+[limit.upstream]
+zenoh = "transport/unicast/max_sessions"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Maximum number of unicast sessions (default: 1000)`", "`io/zenoh-transport/src/unicast/manager.rs` @ `self = self.max_sessions(*config.transport().unicast().max_sessions());`", "`io/zenoh-transport/src/unicast/manager.rs` @ `if guard.len() >= self.config.unicast.max_sessions {`"]
+
+[limit.pico_preset]
+value = 10
+reason = "zenoh-pico refuses an inbound link once its unicast transport holds Z_LISTEN_MAX_CONNECTION_NB peers, a constant of its configuration template that no build switch sets (`vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`, `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `if (_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB) {`). A client holds its one transport and no other, which the pico interface states for a session that listens on nothing."
+
+[[limit]]
+id = "MAX_ACCEPT_PENDING"
+kconfig = "WZ_LIMIT_MAX_ACCEPT_PENDING"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 100
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a link past the limit is closed before a byte of its handshake is answered.
+wire = "none"
+help = '''
+The inbound links a session that listens holds in their handshake at once. A
+link that arrives past it is closed unread. Each is one of MAX_FACES; the
+cooperative engine lends each the buffers of one more link from the session's
+memory when it opens, so that a link past either bound can be taken off its
+port and closed, and a session may lower this and never raise it.
+'''
+
+[limit.upstream]
+zenoh = "transport/unicast/accept_pending"
+cite = ["`commons/zenoh-config/src/lib.rs` @ `/// Number of links that may stay pending during accept phase (default: 100).`", "`io/zenoh-transport/src/unicast/manager.rs` @ `self = self.accept_pending(*config.transport().unicast().accept_pending());`"]
+
+[limit.pico_preset]
+value = 1
+reason = "zenoh-pico accepts one link at a time: its accept task runs the whole handshake of the link it took before it takes the next (`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`)."
+
+[[limit]]
+id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
+kconfig = "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# dropped.
+wire = "none"
+help = '''
+The key expressions all the peers of a session may have declared to it at
+a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES. One more is
+refused and counted as one past a peer's own bound is. The cooperative
+engine keeps them in one pool its faces share, the fewer of this and as
+many as its faces could hold, so a peer that declares few leaves its share
+to the others. The default is MAX_PEER_KEYEXPR_ALIASES for each face of
+the default MAX_FACES and the dial's, so it refuses nothing a face's bound
+admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh holds the key ids each peer declared in a map of its face that grows with each declaration, and bounds the session by its heap."
+cite = ["`zenoh/src/net/routing/dispatcher/face.rs` @ `pub(crate) remote_mappings: IntHashMap<ExprId, Arc<Resource>>,`"]
+
+[limit.pico_preset]
+value = 32
+reason = "zenoh-pico takes each key id a peer declares from its heap as it comes, in a list of that peer with no count (`vendor/zenoh-pico/src/session/resource.c` @ `*resources = _z_resource_slist_push_empty(*resources);`), so it bounds them by its heap alone. The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and lets the faces of a listener of the preset hold twice that together, against ten times it reserved before; the speed image states four for its one peer."
+
+[[limit]]
+id = "SESSION_MAX_REMOTE_DECLS"
+kconfig = "WZ_LIMIT_SESSION_MAX_REMOTE_DECLS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+wire = "none"
+help = '''
+The declarations of one kind (subscribers, queryables, liveliness tokens)
+all the peers of a session may hold open to it at a time, each peer also
+held to MAX_REMOTE_DECLS. One more is refused and counted as one past a
+peer's own bound is, and the application is not told of it. The
+cooperative engine keeps them in one pool of each kind its faces share,
+the fewer of this and as many as its faces could hold. The default is
+MAX_REMOTE_DECLS for each face of the default MAX_FACES and the dial's, so
+it refuses nothing a face's bound admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: a zenoh session holds the declarations of its peers in maps that grow with each one, and bounds them by its heap."
+cite = ["`zenoh/src/api/session.rs` @ `pub(crate) remote_subscribers: HashMap<SubscriberId, KeyExpr<'static>>,`", "`zenoh/src/api/session.rs` @ `pub(crate) remote_queryables: HashMap<Id, (KeyExpr<'static>, bool)>,`"]
+
+[limit.pico_preset]
+value = 32
+reason = "zenoh-pico takes each subscriber, queryable and token its peers declare from its heap as it comes, in one list of the session with no count (`vendor/zenoh-pico/src/session/interest.c` @ `zn->_remote_declares = _z_declare_data_slist_push_empty(zn->_remote_declares);`), so it bounds them by its heap alone. The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and lets the faces of a listener of the preset hold twice that of each kind together, against ten times it reserved before; the speed image states four of each kind for its one peer."
+
+[[limit]]
+id = "SESSION_MAX_INBOUND_SUB_INTERESTS"
+kconfig = "WZ_LIMIT_SESSION_MAX_INBOUND_SUB_INTERESTS"
+kind = "bound"
+driven = "remote"
+on_heap = "advisory"
+default = 16016
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: within the limit no byte a peer sees changes; past it, what does not fit is
+# left out.
+wire = "none"
+help = '''
+The interests in this session's subscribers that all its peers may have
+it remember at a time, each peer also held to MAX_INBOUND_SUB_INTERESTS.
+Past it a peer still gets the subscribers of the moment, not the later
+ones, as past a peer's own bound. The cooperative engine keeps them in one
+pool its faces share, the fewer of this and as many as its faces could
+hold. The default is MAX_INBOUND_SUB_INTERESTS for each face of the
+default MAX_FACES and the dial's, so it refuses nothing a face's bound
+admits.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the interests of its peers a session remembers."
+
+[limit.pico_preset]
+value = 16
+reason = "zenoh-pico remembers none of the interests a peer sends: it answers the current part and keeps no future one (`vendor/zenoh-pico/src/session/interest.c` @ `// TODO: Update future masks`). The preset keeps a peer's own bound, so a client of the preset, one face, is refused nothing it was, and the faces of a listener of the preset share one face's worth, more than zenoh-pico keeps; the speed image states two for its one peer."
 
 [[limit]]
 id = "QUERIER_MAX_PENDING_QUERIES"

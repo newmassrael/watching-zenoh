@@ -6908,6 +6908,164 @@
         "D9 size: no_std 1.45x and std 2.38x with the link flags on both arms; D10: Windows TCP batched throughput 1.40x and TCP round trip 1.44x behind; D12: MCU heap 4.4-5.2x of pico's.",
         "Tests that hang under rx-lent-only with tx-lend-only (46 fail on the base too) need their own round."
       ]
+    },
+    "Round 4611": {
+      "decision_summary": "Run 45051019628 (graded f4d3943298, Round 4609) was read job by job before any fix was written. Four of its eight red jobs, C1ao, C1y, C1z and C1ba, stop on one compile error: `drive_session_dyn` and `drive_session_dyn_send` in `crates/wz-runtime-tokio/src/session_glue.rs` take `crate::session_open::InboundLink`, and `session_open` is compiled only with `transport-link-tcp` and `transport-unicast`, while `session_glue` is compiled with `transport-unicast` alone; a build of `transport-unicast` without the TCP link (the C1ao clippy leg `--no-default-features --features transport-unicast`, and the feature sets of C1y, C1z and C1ba) fails with E0433. The two functions are gated on `transport-link-tcp` now, the gate their parameter's module already has; every caller (`accept_loop`, gated on `routing-accept`, which implies `transport-link-tcp`, and `wz-capi-core`'s drive) is compiled only where the link is. C1co's Layer S cooperative leg ended `gets_between_open_sessions_are_counted_for_their_allocations` past its 60 s run bound: pinned to one core on a build host the run took 1034 s, each `z_get` 0.75 to 36 s, and a gdb stack dump showed both sessions' read tasks in `StreamDriver::service` waiting for an app link's input with the session held, the caller waiting for the session; the same cause was repaid by `932d721a6` and `c3844faff` in the integration that landed before this round (the run takes 0.80 s there with them), so this round adds nothing to it. C1cs (`capic-router-node` 672 over) was repaid by `c23fb8d7b` in that integration. The C1cc oracle-side failure and the budget margins of C1bnl shard 1/4 and C1cs are acknowledged unpaid in `docs/hosted-red-acks.md`.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: `drive_session_dyn` and `drive_session_dyn_send` are `#[cfg(feature = \"transport-link-tcp\")]`, with a doc line naming the module their link lives in.",
+        "docs/reason-review-pins.md: session-close-ingress / session_glue.rs to the new blob; the reason's two claims about that file (`check_out_of_band` at the head of every iteration, the park on `out_of_band_signalled` in both arms) re-read and hold.",
+        "docs/hosted-red-acks.md: row red-f4d3-session-open-gate for run 45051019628, each of its eight red jobs attributed."
+      ],
+      "verification_bullets": [
+        "On the tree of this round through bx: `cargo clippy -p wz-runtime-tokio --no-default-features --features transport-unicast -- -D warnings` exit 0 (the C1ao leg that failed on hosted), and `cargo clippy -p wz-runtime-tokio --features config-mutate-runtime,access-acl -- -D warnings` exit 0.",
+        "C1co attribution: on a build host, `taskset -c 0` on the cooperative Gets traffic run of `wz-capi-pico/tests/allocation_faults.rs`: 1034 s at f4d3943298, 0.80 s at 3621c9471 (the landed app-link owner wait); the tokio engine under the same pinning 0.72 s, the control.",
+        "reason_review_pin_gate.py --check OK; the pre-push hook's round-fed gates 169 of 170 on the change at f4d3943298 before the pin row moved, the one failure being that pin."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "C1bnl shard 1/4 budget margin (99 percent of 1800 s, three runs running): the nondefault test legs are dealt to shards by position in the table; deal them by measured cost, as census_shard_plan.py does for C1cn (R4576).",
+        "C1cs job margin (92 percent of 1200 s).",
+        "C1cc `the_message_size_threshold_decides_which_puts_travel_as_shared_memory_on_wz_and_libzenohc`: oracle-side, the C1cc lane session's."
+      ]
+    },
+    "Round 4612": {
+      "decision_summary": "Layer C1bnl's hosted shard 1/4 failed its budget margin on runs 45030244784, 45047838675 and 45051019628 with every leg green (1796 s of 1800 on the last). The shards took the legs whose position in the LEGS table is congruent to the shard number, and a position says nothing about cost: read from the four shard logs of run 45051019628 (each leg's cost is the time between its line and the one before it, its build included), the shards held 869, 1,647, 810 and 995 s of legs, the second with the 543 s `wz-capture` leg and the 227 s `wz-runtime-tokio` one. That is the defect Round 4576 found in the C1cn census, and the remedy is the same: the legs are dealt by measured cost, heaviest first to the least loaded shard, by `census_shard_plan.py` over a weights table of their own (`c1bnl_leg_weights.tsv`), which puts about 1,110 s of that run's legs in each shard. A leg is named by a key, not a position, so that a row inserted mid-table moves no other row's weight: its package, its filter and the CRC of its feature field (`~n` after a key a row above already took). A leg whose row changes loses its weight and is planned at the median and named in the log, as an unmeasured census member is; the weights decide balance only and never which legs run, and every shard computes the same plan from the same tree, so the plan is a partition. Each leg's line now carries its key and its own seconds, so the table can be refreshed from a run log.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: `leg_keys` and `--list-legs`; a sharded `--all-legs` takes its legs from `census_shard_plan.py` over `c1bnl_leg_weights.tsv` (`in_shard`, both the uring provisioning and the leg loop); each leg's line ends `[<key>, <N>s]`.",
+        "scripts/lib/c1bnl_leg_weights.tsv (new): 166 legs' seconds from run 45051019628; the 8 legs added since are planned at the median (15 s).",
+        "scripts/lib/census_shard_plan.py: the docstring states the C1bnl use; the selftest reads both committed tables.",
+        ".github/workflows/ci.yml: the C1bnl job's comment records the split by cost and a prediction for the next run."
+      ],
+      "verification_bullets": [
+        "`--list-legs` prints 174 distinct keys; planned over four shards they partition the table (46, 52, 54, 54 legs; 174 distinct across them), LPT loads 1,111, 1,110, 1,110 and 1,110 s.",
+        "`--all-legs` with `WZ_LEGS_SHARDS=4` and each `WZ_LEGS_SHARD`, cargo replaced by a stand-in that reports one passing test: 38, 44, 46 and 46 legs run, 174 distinct keys, no FAIL; the hook's shape (no argument) runs its 173 hook legs and defers the one lane leg as before.",
+        "census_shard_plan.py --selftest OK; shellcheck -x of the gate clean.",
+        "The pre-push hook's round-fed gates: 168 of 170 pass; the two that fail, feature_gate_diagnostic (`limits-lent-at-open`, `rx-lent-only` in no table) and silent_skip_gate (33 coop tests bailing out on silent helpers), fail the same on origin/main 66cff413d and come from Round 4610's integration, not this change."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the four C1bnl shards' times on this landing's hosted run against the prediction (each near 1,260 s with setup); refresh `c1bnl_leg_weights.tsv` from the `[<key>, <N>s]` lines if they come out unbalanced.",
+        "Round 4610's two round-fed gate failures (feature_gate_diagnostic: `limits-lent-at-open`, `rx-lent-only`; silent_skip_gate: 33 wz-capi-coop tests on silent helpers), hosted C0 reds on the next run.",
+        "C1cs job margin (92 percent of 1200 s on run 45051019628)."
+      ]
+    },
+    "Round 4613": {
+      "decision_summary": "Pay Layer C1cc's red on hosted run 45051019628 and every run since 4596: the promotion differential of zenoh_c_shm_session_keys_twice_and_diff read shm=no for both puts of 4096 bytes from the REFERENCE sender, so the case could not adjudicate wz. Cause, from the sources at the pin: upstream builds the session's provider pool (16 MiB by default) and mlocks it whole, and a hosted runner grants 8 MiB of lockable memory, so the build fails, the provider reads ERROR (not INITIALIZING), the test's wait accepted any state that was not initializing, and every message went plain. The lane now raises RLIMIT_MEMLOCK itself, as E18 does for the same reason, so its precondition holds wherever it runs; the sender ends unless its provider is READY and prints the state it saw, so a host that cannot make the pool is named instead of read as a promotion difference. The maps probe's 500 ms wait is gone: both libraries make the shared-memory subsystem before the open returns (upstream at the end of its runtime's build, wz on the opening thread), so the wait carried nothing (Round 4596's carry). Upstream 1.10.2's blocking z_obtain_shm_provider defect is recorded in docs/upstream-parity.md section 8 (Round 4596's carry). Duplicates of work other sessions landed first were dropped: the tcp gate of the dyn drive doors (Round 4611), the cost-dealt C1bnl shards (Round 4612), the cooperative app link wait and the capic-router-node budget (Round 4610), and the pico ratio rows, which the next size-gate landing re-reads.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: layer_c1cc raises RLIMIT_MEMLOCK to 64 MiB with uring_raise_memlock and prints the limit.",
+        "crates/wz-integration-tests/tests/it/files/zenoh_c_shm_session_keys_twice_and_diff.rs: the sender ends (11) unless its provider is READY; the maps probe reads at once after the open.",
+        "docs/upstream-parity.md: a section 8 row for zenoh-c 1.10.2's blocking z_obtain_shm_provider, which takes the one message the transport's lazy provider waits for."
+      ],
+      "verification_bullets": [
+        "Layer C1cc locally with WZ_C1CC_REQUIRE=1 against this machine's shared-memory-arm zenoh-c oracle: the three shared-memory tests pass (threshold, promoted messages, mode), and the lane went on to a later test, which failed (carry).",
+        "upstream_citation_anchor_gate --check and --resolve-if-pinned: OK, bare citations at budget.",
+        "bash -n scripts/run-ci.sh: OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "C1cc's next test, zenoh_c_tx_batching_twice_and_diff, fails on this machine at every commit since it was added (9258deb5e) and was never reached on hosted while the shared-memory test failed before it: with batching on, wz writes a 4,000-put burst as one put per batch (libzenohc about 105). Read in the code, not yet measured: the session does turn batching on; the writer queue's inline flush (writer_queue.rs, LONE_STAGED_MAX and INLINE_MIN_QUIET_NS) has the sending thread write its own message whenever 8 us passed since the last flush, which a debug build's put always exceeds, so no batch forms.",
+        "SwappableLink and LocalSwappableLink (wz-session-core reconnect.rs) do not forward set_idle_flush, tx_staged, try_reserve_rooms_for, link_subject and link_endpoints, so a session opened with reconnect never batches.",
+        "From Round 4609: the debug frames of FaceLoopIo::new (84,168), dial_locator_on (80,824) and the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage (151,944); whether drive_multicast_session_running joins a shared drive."
+      ]
+    },
+    "Round 4614": {
+      "decision_summary": "A TCP and a UDP link to one peer, aggregated into one session with no class declared on either end, now have a real-socket witness that they split the channels by their protocols' classes: best-effort rides UDP, reliable rides TCP, as upstream's link select does. Round 2943 made an undeclared link's class its protocol's and held it over recording drivers only; the real-socket legs were two TCP links. The question came from a published automotive middleware comparison (arXiv 2505.02734) that measured upstream's best-effort over one TCP endpoint, upstream's publisher reliability being a link-selection marker, not a retransmission. The leg runs in both link orders, each discriminating one channel, and a mutation that drops the protocol class fails each order at its own assertion. No product code changed: wz already behaves as upstream does.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/it/files/session_multilink_e2e.rs: `open_multilink_udp_link` (the datagram twin of `open_multilink_link`: the acceptor peeks the initiator's InitSyn datagram, the initiator binds and connects an ephemeral socket) and `a_tcp_and_a_udp_link_split_the_channels`, run as `..._udp_first` and `..._tcp_first`; all three gated on `transport-link-udp`.",
+        "scripts/run-ci.sh: Layer C1ba's session-extqos arm of `session_multilink_e2e` builds with `transport-link-udp` too and its count goes 9 -> 11; the lane's `ML_FEATURES` carries no UDP link, so the two cases ride that arm rather than a build of their own."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-runtime-tokio --features transport-multilink --test it session_multilink_e2e::a_tcp_and_a_udp`: 2 passed, 308 filtered out (ran=2).",
+        "The C1ba arm's own command (`--no-default-features`, `ML_FEATURES,transport-qos,session-extqos,transport-link-udp`, `session_multilink_e2e`): 11 passed; with `ML_FEATURES,transport-link-udp` alone 8 passed.",
+        "`cargo clippy -p wz-runtime-tokio --tests -- -D warnings` clean on the default build with `transport-multilink` and on the arm's `--no-default-features` build (the only warnings are the vendored `ring` crate's); rustfmt --check of the test file clean.",
+        "Each order fails by construction if the class fell back to the any tier: the udp_first order asserts the reliable Put on link 2, the tcp_first order the best-effort Put on link 2, the first live link being link 1 in both."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Interop leg not written: a stock zenoh peer dialling a wz acceptor over a tcp and a udp endpoint with `max_links` 2, with wz recording which link each frame arrived on, would hold the same split from the foreign side.",
+        "Next step of the same track: a large-message fan-in lane between two hosts (several publishers of 4 MB samples to one subscriber over 1 Gbps, which oversubscribes the link), to read the queue and drop behaviour under Block and Drop congestion control against upstream at the same configuration."
+      ]
+    },
+    "Round 4615": {
+      "decision_summary": "Split hosted Layer C1cs into two shards dealt by measured cost, so the capability cost job leaves its time alarm. The job read `elapsed 1114s of 1200s budget (92%)` at run 45051019628 with its lane at 1,013 s, and 1,084 to 1,132 s in five of the six runs before it: the eight release builds the 1200 s budget was sized for are now twenty-two size cases and two statement cases, and `timeout-minutes: 20` was under seventy seconds away. `capability_cost_gate.py --shards N --shard K` builds the cases `census_shard_plan.plan` deals to shard K over `c1cs_case_weights.tsv` (the C1cn and C1bnl planner, the same rule: the weights decide the balance, never which case is built), and each case prints its seconds so the table is refreshed from hosted logs. The weights are one `--measure` of every case on four cores with an empty artifact root (1,218 s together); the plan puts 611 and 607 s in the two shards. Prediction for the next run: each shard near 660 s with its setup, 55 percent of the budget.",
+      "changes_bullets": [
+        "scripts/lib/capability_cost_gate.py: `--shards N --shard K` selects the cases `shard_cases` plans (size and statement cases together, in the gate's order); each case prints `<id>: <N>s`; stdout is line-buffered so the hosted log stamps each case; four selftest arms hold the partition.",
+        "scripts/lib/c1cs_case_weights.tsv (new): 24 cases' seconds from one four-core cold `--measure`.",
+        "scripts/lib/census_shard_plan.py: the docstring names the C1cs use; `CASE_WEIGHTS`, read by its selftest.",
+        "scripts/run-ci.sh: `layer_c1cs_capability_cost` passes `WZ_C1CS_SHARDS`/`WZ_C1CS_SHARD` to the gate; unset, every case is built as before.",
+        ".github/workflows/ci.yml: `capability-cost` is a matrix of two shards with the env pair, and its comment records the reading and the prediction."
+      ],
+      "verification_bullets": [
+        "`capability_cost_gate.py --measure` of all 24 cases under `taskset -c 0-3`, `CARGO_BUILD_JOBS=4` and an empty artifact root: rc 0 in 1,217 s, each case's seconds printed (the table's rows).",
+        "`--measure --shards 2 --shard 0 pico-client-coop-unstable` prints shard 0's twelve cases and builds none; `--shard 1` with the same id builds that one case (31 s); the two shards' lists are disjoint and cover the 24.",
+        "`--check --shards 2`, `--shards 2 --shard 2` and `--shard x` exit 2 with the usage reason.",
+        "capability_cost_gate.py --selftest 55/55; census_shard_plan.py --selftest OK; shard_matrix_binding.py OK with `capability-cost` among its seven sharded jobs; shellcheck -x scripts/run-ci.sh clean.",
+        "The pre-push hook's round-fed gates: 168 of 170 pass; feature_gate_diagnostic and silent_skip_gate fail as on origin/main, from Round 4610's integration, which its owner is repairing."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the two C1cs shards' times on this landing's hosted run against the prediction (each near 660 s with setup); refresh `c1cs_case_weights.tsv` from the `<id>: <N>s` lines if they come out unbalanced, or hand budget back if a shard reads under 240 s.",
+        "The C1bnl four-shard prediction of Round 4612 (each near 1,260 s) is still to be read from its hosted run."
+      ]
+    },
+    "Round 4616": {
+      "decision_summary": "Pay the C1cc red Round 4613 exposed (zenoh_c_tx_batching_twice_and_diff, failing on a shared-memory-arm oracle at every commit since the test was added in 9258deb5e): with batching on, wz's C ABI wrote a 4,000-put burst one put a batch where libzenohc wrote about 105. Measured cause: the same sources built with opt-level 3 batched (22 batches), the debug build did not (4,003); the writer queue's inline flush let a sender write its own message whenever 8 us had passed since the last flush, and an unoptimised build's put always takes longer, so every put of a one-way burst was flushed and written by its own sender and the writer never coalesced. The rule a sender's own write keeps now has a second clause on a queue that knows what its link hears: past the 8 us floor, the link must have heard a frame since the last flush (a turn of a conversation, which keeps the round-trip gain the inline write was made for) or have been quiet for the batching time limit (200 us by default, the longest a batch would wait anyway). The TCP reader counts each frame it takes off the wire into a LinkHearing its outbound queue reads; the stream flush and the datagram path share one rule (Lanes::a_sender_may_write), and a queue without a count (the multicast groups) keeps the floor alone. The rule only removes inline writes the floor allowed, so no lone message that went to the writer before now writes itself.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/writer_queue.rs: LinkHearing; OutboundTx::set_hearing; Lanes::a_sender_may_write (the floor, then heard-since-flush or quiet for the batching time limit) and Lanes::mark_flushed, used by flush_inline, write_landed_datagram and note_flush; the test a_one_way_stream_slower_than_the_floor_is_left_to_the_writer.",
+        "crates/wz-runtime-tokio/src/stream_link.rs: StreamReadDriver::hearing, counting each LinkEvent::Rx.",
+        "crates/wz-runtime-tokio/src/link_pipeline.rs: wire_tcp_stream_with_lowlatency shares one LinkHearing between the reader and the queue."
+      ],
+      "verification_bullets": [
+        "The batching differential on this machine's shared-memory-arm zenoh-c oracle, wz-capi-c built as Layer C1cc builds it: zenoh_c_tx_batching_twice_and_diff passes (batching true: wz 310 batches, libzenohc 44; false: one put a batch on both), and zenoh_c_tx_batching_time_limit_twice_and_diff passes. Before the change the debug build wrote 4,003 batches and an opt-level 3 build 22.",
+        "wz-runtime-tokio: clippy -D warnings all targets default and --all-features, and --no-default-features with transport-link-tcp,transport-unicast; --lib 782 passed; --all-features --lib writer_queue 84 passed, the fence order tests among them.",
+        "reason_review_pin_gate and upstream_citation_anchor_gate --check: OK."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "SwappableLink and LocalSwappableLink do not forward set_idle_flush or tx_staged, so a session opened with reconnect never batches. Forwarding needs a decision first: a link a swap installs that refuses the hook would leave a session batching with no writer that pulls its frames. link_subject and link_endpoints return references a lock cannot lend, so they stay unforwarded by shape.",
+        "The multicast groups' datagram inline write keeps the 8 us floor alone: their queues have no LinkHearing.",
+        "From Round 4609: the debug frames of FaceLoopIo::new (84,168), dial_locator_on (80,824) and the accept_loop test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage (151,944); whether drive_multicast_session_running joins a shared drive."
+      ]
+    },
+    "Round 4617": {
+      "decision_summary": "A fan-in lane joins the host comparison: one probe on zenoh's public API (conformance/host-bench/wz_fanin.rs), built over upstream's zenoh and with the family patched in as the parity package builds upstream's examples, run by scripts/host-bench/fanin.py in rounds that alternate pairs of arms, so that several publishers of large samples converge on one subscriber, the shape of a vehicle's camera and lidar streams. A round is judged on what both arms must hold: under block every sample put arrives, and none arrives corrupt, duplicated, reordered or foreign. Its first runs found that a 4,000,000-byte sample is lost whenever either end is wz while upstream to upstream delivers all; the AP reassembly bound is 1 MiB against upstream's 1 GiB, and the refused send is reported to the caller as sent. Both are filed as debts; whether transport-fragmentation is re-graded PARTIAL, which moves the completeness ratchet up, is left to the owner.",
+      "changes_bullets": [
+        "conformance/host-bench/wz_fanin.rs (new): pub/sub probe; samples carry publisher id, sequence and wall time, the subscriber counts received, gaps, behind, corrupt and foreign per publisher and prints one JSON line.",
+        "scripts/lib/z8_upstream_suite.py: WZ_PARITY_PROGRAMS and WZ_PARITY_SOURCES; the parity examples package builds wz_fanin beside upstream's eight programs on both arms.",
+        "scripts/host-bench/fanin.py (new): rounds of pairs (subscriber arm, publishers' arm), the judgement in judge(), --selftest; a subscriber that saw nothing is a delivery reading, not a round that did not run.",
+        "scripts/pico-compare.sh: fanin mode; parity_build_rust takes the programs to build; parity_fail_log prints a failed build's first errors, which a bx run's own log otherwise does not show.",
+        "scripts/run-ci.sh: Layer C0 leg fanin.selftest; scripts/lib/script_exercise_census.py names fanin.py among the tools pico-compare.sh runs.",
+        "Store: debt-ap-reassembly-cap-one-mebibyte, debt-oversize-publish-refusal-not-reported."
+      ],
+      "verification_bullets": [
+        "pico-compare.sh fanin on pc2 (3 publishers x 4,000,000 B at 20 Hz for 10 s, block, 2 rounds of PP, WW, PW, WP): PP delivered 1200 of 1200 (one-way p50 1.7 ms, p99 6.0 ms on one clock); WW, PW and WP delivered 0 of 1200 each, every put returning Ok.",
+        "One publisher, 3 s, block: 1,024 B delivered on all four pairs; 60,000 B and 200,000 B delivered on WW; 4,000,000 B delivered 0 on WW, PW and WP.",
+        "The bound read in the tree: out/wz-runtime-tokio/reassembly_pool_ap.rs SLOT_SIZE 1048576 (32 slots), applied as the RX ceiling in wz-runtime-tokio reassembly.rs and as the TX refusal bound in session_glue.rs.",
+        "fanin.py --selftest OK; z8_upstream_suite.py --selftest OK; script_exercise_census, reason_review_pin_gate, depth_axis_census and completeness_gate OK; shellcheck of pico-compare.sh and run-ci.sh clean; the pre-push round-fed gates 168 of 170 (the two that fail, feature_gate_diagnostic and silent_skip_gate, fail the same on origin/main and are another landing's); validate-workspace orphans 30+0 and T3 warn 4, unchanged."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "Owner decision: re-grade transport-fragmentation PARTIAL (its reason says no residual matters vs upstream, which the fan-in reading refutes); that moves c.partial-atoms in deploy/completeness_ratchet.json from 2 to 3.",
+        "Repay debt-ap-reassembly-cap-one-mebibyte and debt-oversize-publish-refusal-not-reported; the reassembly dispatcher is under edit on the no-heap branches, so agree the change with that work first.",
+        "Two-host fan-in (pc2 and pc4 share a 1 Gbps segment), where three camera streams oversubscribe the link, and the lane's figures as rows of the AP superiority matrix (scripts/host-bench/ap_matrix.py)."
+      ]
     }
   },
   "inventory_entries": {
@@ -7158,6 +7316,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "The AP presets (router preset against zenohd, wz-zenoh against the upstream Rust API) are behind upstream zenoh on the D13 matrix (deploy/ap_superiority.json, first reading 2026-11-22): router fan-out to 16 subscribers 33x the cost, throughput 2-5x, multi-hop 3.9x, heap peak 3x, session open 1.5-3x; no cell WIN; RSS and latency TIE. The owner directed the AP presets to beat upstream in every aspect; each row is held by the ratchet and falls toward WIN (thread-per-core router after the one-engine migration, P7 of docs/c-abi-engine-and-memory.md)."
+    },
+    "debt-ap-reassembly-cap-one-mebibyte": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, MEASURED: the AP (tokio) host can neither send nor rejoin a message above 1 MiB, where upstream's default transport/link/rx/max_message_size is 1 GiB. The bound is the build's reassembly pool slot (out/wz-runtime-tokio/reassembly_pool_ap.rs SLOT_SIZE 1048576, 32 slots, generated from sources/network/reassembly_pool_ap.scxml): crates/wz-runtime-tokio/src/reassembly.rs reads a configured max_message_size above it as the slot (RX_MAX_MESSAGE_SIZE_CEILING), and crates/wz-runtime-tokio/src/session_glue.rs hands the same value to the send side as its refusal bound (set_max_reassembly_bytes). Measured by scripts/pico-compare.sh fanin on pc2 (one publisher at 20 Hz for 3 s, TCP loopback, congestion control block): 4,000,000-byte samples arrived 0 of 60 whenever either end was wz (wz to wz, a wz publisher to an upstream subscriber, an upstream publisher to a wz subscriber), while upstream to upstream delivered every one and wz to wz delivered every 60,000- and 200,000-byte sample. A camera or lidar frame of a vehicle is above the bound. Closes when the AP host rejoins and sends a message up to the configured max_message_size, whose default is upstream's, and the fan-in lane delivers every 4 MB sample on the WW, PW and WP pairs. The atom transport-fragmentation still reads COMPLETE with \"no residual that matters vs upstream\", which this reading refutes; re-grading it PARTIAL moves the completeness ratchet c.partial-atoms from 2 to 3 (deploy/completeness_ratchet.json), and whether a ratchet moves up for a regrade is left to the owner."
     },
     "debt-atomic-tx-multicast-group-unreserved": {
       "status": "active",
@@ -7627,6 +7790,11 @@
       "status": "deprecated",
       "source": "carry of Round 4385",
       "reason": "CLOSED (c7 integration round): the memory document counts the values door's ValuesMemory as its own member values (memory document revision 3); with fragment pieces the figure is a lower bound because the per-piece verdict B-tree is not modelled, as the document says."
+    },
+    "debt-oversize-publish-refusal-not-reported": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, MEASURED, CAUSE NOT READ: a publication the wz session refuses as larger than its reassembly bound is reported to the zenoh API caller as sent. In the fan-in lane's pair of a wz publisher and an upstream subscriber (4,000,000-byte samples, congestion control block), every one of the 60 puts returned Ok (put_errors 0) while the upstream subscriber, whose bound is 1 GiB, received none, which is what the refusal below would give and not what a sent chain would. The engine has a typed refusal for it (SendWireError::ExceedsReassemblyCap, mapped to PublishError::ExceedsCapacity in crates/wz-session-core/src/publish_options.rs and worded for the API by publish_error in crates/wz-zenoh/src/api/session.rs); where it is lost between the session's send path and Publisher::put is not read yet. Closes when such a put returns that error, with a test that holds it and the fan-in lane counting the refusals in put_errors. Measured beside debt-ap-reassembly-cap-one-mebibyte, which is what makes the refusal happen at 4 MB."
     },
     "debt-packet-edit-after-build": {
       "status": "deprecated",

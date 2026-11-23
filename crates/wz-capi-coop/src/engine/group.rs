@@ -31,6 +31,7 @@ use alloc::sync::Arc;
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
+use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkReadiness, LinkWritability};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
@@ -57,8 +58,8 @@ use wz_session_core::sample::SampleKind;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 use wz_session_mcu::group_drive::{
-    spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupLink, GroupTxPace, GroupTxStage,
-    JoinAsk, MulticastSessionSeed,
+    try_spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupLink, GroupTxPace,
+    GroupTxStage, JoinAsk, MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -318,8 +319,14 @@ impl GroupFace {
     /// Join the group `joining` names, whose tables the registry holds already, its session
     /// spawned on `local`: each event of it goes through `dispatch`, with the sink the group's
     /// replies are queued on, after the members it admits and loses are noted. The task opens the
-    /// transport as the session's link at its first step, which the caller runs.
-    pub(super) fn join<C, D>(local: &CoopLocalSet<C>, joining: GroupJoining, dispatch: D) -> Self
+    /// transport as the session's link at its first step, which the caller runs. `Err` when the
+    /// session's runtime has no cell for the task (its tables are reserved when the session
+    /// opens), the transport let go of with what the task was to be made of.
+    pub(super) fn join<C, D>(
+        local: &CoopLocalSet<C>,
+        joining: GroupJoining,
+        dispatch: D,
+    ) -> Result<Self, SpawnRefusal>
     where
         C: ClockSource + 'static,
         D: FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static,
@@ -394,8 +401,8 @@ impl GroupFace {
         };
         // Everything the group sends is pushed onto its stage, which the face and the task write
         // from: the task's pull seam yields nothing.
-        let task = spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop);
-        Self {
+        let task = try_spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop)?;
+        Ok(Self {
             id,
             join,
             task: Some(task),
@@ -422,7 +429,7 @@ impl GroupFace {
             announced: RefCell::new(Vec::new()),
             #[cfg(feature = "connectivity")]
             events,
-        }
+        })
     }
 
     /// Push `item`, a message of the session, onto the group's stage as the tokio engine's group
@@ -695,17 +702,26 @@ impl GroupFace {
         self.stop.set(true);
     }
 
-    /// The zid of each member the group holds, whatever role it announced; a group whose session
-    /// ended holds none.
-    pub(super) fn member_zids(&self) -> Vec<Vec<u8>> {
+    /// The first member at or past place `from` of the group's member table, whatever role it
+    /// announced, with its place; a group whose session ended holds none.
+    pub(super) fn member_zid_from(
+        &self,
+        from: usize,
+    ) -> Option<(usize, wz_session_core::session_zid::SessionZid)> {
         if self.has_ended() {
-            return Vec::new();
+            return None;
         }
         self.members
             .borrow()
             .iter()
-            .map(|member| member.peer.as_slice().to_vec())
-            .collect()
+            .enumerate()
+            .skip(from)
+            .find_map(|(at, member)| {
+                Some((
+                    at,
+                    wz_session_core::session_zid::SessionZid::new(member.peer.as_slice()).ok()?,
+                ))
+            })
     }
 
     /// The members the group holds, each as the transport it is reported as (`connectivity`); a

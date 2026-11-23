@@ -853,7 +853,7 @@ impl Engine {
 
     fn acquire_keyexpr(&self, keyexpr: &str) -> Option<ExprId> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr.to_owned()),
+            Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr),
             // A node declares no key expression to its peers and names none by an id on the wire,
             // but it holds the declaration, so that the key is undeclared as it was declared.
             Engine::Router(router) => router
@@ -887,7 +887,7 @@ impl Engine {
     /// (0 router, 1 peer, 2 client).
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+            Engine::Tokio(state) => state.shared.peer_identities(),
             Engine::Router(router) => router
                 .node
                 .forwarder()
@@ -1290,7 +1290,7 @@ impl Engine {
                     .as_engine()
                     .declare_write_filter(
                         wz_capi_core::faces::FilterPlane::Subscribers,
-                        key.to_owned(),
+                        key,
                         &wire,
                         ask,
                         destination != Locality::Remote,
@@ -1497,7 +1497,7 @@ impl Engine {
                         wz_capi_core::faces::FilterPlane::Queryables {
                             complete_required: false,
                         },
-                        key.to_owned(),
+                        key,
                         &wire,
                         ask,
                         destination != Locality::Remote,
@@ -1558,7 +1558,7 @@ impl Engine {
                     .as_engine()
                     .declare_matching_listener_in(
                         tokio_engine::plane_of(kind),
-                        key.to_owned(),
+                        key,
                         tokio_engine::matching_sink(callback, notifier),
                         tokio_engine::engine_locality(destination),
                     )

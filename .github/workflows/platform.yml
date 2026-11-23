@@ -1068,17 +1068,22 @@ jobs:
   # and Linux is not one of its hosts. The examples are the program set of the release package
   # (`package-windows`), so every example builds the library the package ships: the profile
   # `host-peer-ext` resolved by the pinned Kconfig interpreter, on the engine it chooses (the
-  # cooperative one, `WZ_PICO_ENGINE`), as ONE feature list (`WZ_EXAMPLE_FEATURES`), so the
-  # library is built once; the profile example's second run builds it again with the policy's build
-  # default on, last, because that build replaces the first. Both runs also open sessions
-  # from documents that name their profile, whose answers must not follow the build's default.
+  # cooperative one, `WZ_PICO_ENGINE`), in the form a release ships, without `std`
+  # (`WZ_PICO_FORM`: `os-posix` on Linux, `os-windows` on Windows, the `capi-nostd` profile;
+  # owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7), as ONE feature list
+  # (`WZ_EXAMPLE_FEATURES`), so the library is built once; the profile example's second run builds
+  # it again with the policy's build default on, last, because that build replaces the first. Both
+  # runs also open sessions from documents that name their profile, whose answers must not follow
+  # the build's default.
   #
   # Each step started as an observation, as every new program of this workflow does, and is
   # a GATE since two consecutive hosted runs read every step green on both hosts (Platform
   # runs 44891883427 and 44895098014, from the job logs). A red here now fails the run: an
   # example stopped building or stopped holding its own checks on a host it had been shown
   # to. Each step still runs after an earlier one failed (`!cancelled()`), so one red does
-  # not hide the rest.
+  # not hide the rest. Those two runs read the library with `std`; the form without it took its
+  # place on 2026-11-23, when the owner made it the form a release ships, and stays a gate, since
+  # a release whose examples do not hold their checks is not one to ship.
   capi-examples:
     name: C ABI examples (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -1094,6 +1099,7 @@ jobs:
     env:
       WZ_HOST_SELECTED: ${{ (inputs.host == '' || inputs.host == 'both' || inputs.host == matrix.host) && 'true' || 'false' }}
       WZ_PICO_ENGINE: coop
+      WZ_PICO_FORM: nostd
     steps:
       - name: Checkout (with submodules)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
@@ -1145,9 +1151,11 @@ jobs:
         shell: bash
         run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
 
-      # The profile's list without `engine-coop`, which scripts/pico-c-program.sh names itself for
-      # the cooperative engine. A profile that no longer resolves to that engine fails here, and
-      # not as an example that ran against another build.
+      # The profile's list without `engine-coop` and `std`: scripts/pico-c-program.sh names the
+      # host's layer without `std` in the place of the engine itself, and the library a release
+      # ships carries no `std` (`nostd_features` of scripts/lib/pico_windows_package.py drops it
+      # from the same list). A profile that no longer resolves to that engine fails here, and not as
+      # an example that ran against another build.
       - name: the package's feature list
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         shell: bash
@@ -1159,6 +1167,7 @@ jobs:
             *) echo "host-peer-ext does not resolve to the cooperative engine: $args" >&2; exit 1 ;;
           esac
           features="${features//,engine-coop,/,}"
+          features="${features//,std,/,}"
           features="${features#,}"
           features="${features%,}"
           echo "the package's features: $features"
@@ -1258,9 +1267,10 @@ jobs:
           WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN: "on"
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/profiles.c "example of profiles chosen at open over a build defaulting to timestamp opt-in" "$WZ_EXAMPLE_FEATURES"
 
-  # The Windows release packages of the pico C ABI library (scripts/lib/pico_windows_package.py),
-  # one per width of Windows, a row of the matrix each: x64 (`x86_64-pc-windows-msvc`) and x86
-  # (`i686-pc-windows-msvc`, a 32-bit program, which the 64-bit runner runs as Windows runs any).
+  # The Windows packages of the pico C ABI library (scripts/lib/pico_windows_package.py), one per
+  # width of Windows and form of the library, a row of the matrix each. The widths: x64
+  # (`x86_64-pc-windows-msvc`) and x86 (`i686-pc-windows-msvc`, a 32-bit program, which the 64-bit
+  # runner runs as Windows runs any).
   # Each is the DLL in a debug and a release build with its import library and symbols, zenoh-pico's
   # headers with the config.h of the DLL's build and wz_ext.h, the examples, a configuration sample,
   # the usage and release notes, the licence and the notices derived from the dependency graph, and
@@ -1276,23 +1286,25 @@ jobs:
   # target) and run, for both builds. The upload follows only a passing test, so a package this
   # job publishes is one that passed it.
   #
-  # Each width is packaged in both forms of the library, a row of the matrix each: `single`, the one
-  # DLL, and `split`, the core and the additional library built apart from the same feature list
-  # (docs/capi-pico-additional-library.md), whose programs link both import libraries. The examples
-  # and the check program are the same for both, so each form passing them is the two forms doing
-  # what one program asks of them alike.
+  # The rows `nostd` are the package a release ships (owner, 2026-11-23, docs/c-abi-engine-and-memory.md
+  # E7, and the release workflow's `windows-packages`, which runs the same action on the same rows):
+  # the DLL built without `std` (`os-windows` over the system's own calls, P4), in the one form, the
+  # examples and the check program compiled against it and run, and the sizes of the size gate's
+  # client in both forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`),
+  # which only a Windows host can read. The rows `std` are the library with the host's standard
+  # library, kept to compare and measure against, in both forms: `single`, the one DLL, and `split`,
+  # the core and the additional library built apart from the same feature list
+  # (docs/capi-pico-additional-library.md), whose programs link both import libraries; the split form
+  # has no row without `std` because its additional library has no form without it. The examples and
+  # the check program are the same for every row, so each passing them is every form doing what one
+  # program asks of it alike.
   #
-  # A GATE since two consecutive hosted runs read every row green, each with every verdict line
-  # of its test PASS (Platform runs 44891883427 and 44895098014, from the job logs). It started
-  # as an observation, as every new program of this workflow does; a red here now fails the run:
-  # a package no longer builds, or a program compiled against it no longer holds its checks.
-  #
-  # The rows `nostd` are the same package with its DLL built without `std` (`os-windows` over the
-  # system's own calls, docs/c-abi-engine-and-memory.md P4), in the one form: the same examples
-  # and check program compiled against it and run, and the sizes of the size gate's client in both
-  # forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`), which only a
-  # Windows host can read. Observed, not yet gated, as each new row starts: `continue-on-error`
-  # until two consecutive hosted runs read them green.
+  # Every row is a GATE: a red here fails the run, as a package no longer builds or a program compiled
+  # against it no longer holds its checks. The `std` rows became one when two consecutive hosted runs
+  # read every row green, each with every verdict line of its test PASS (Platform runs 44891883427 and
+  # 44895098014, from the job logs). The `nostd` rows are one because they are what a release ships:
+  # a release run fails on the same red, so the lane that reads every push holds them to the same
+  # verdict rather than observing a form the release already judges.
   #
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
@@ -1300,20 +1312,15 @@ jobs:
     name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
-    continue-on-error: ${{ matrix.stdlib == 'nostd' }}
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, x86]
         form: [single, split]
-        stdlib: [std]
-        include:
-          - arch: x64
-            form: single
-            stdlib: nostd
-          - arch: x86
-            form: single
+        stdlib: [nostd, std]
+        exclude:
+          - form: split
             stdlib: nostd
     steps:
       - name: Checkout (with submodules)
@@ -1330,6 +1337,7 @@ jobs:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
           stdlib: ${{ matrix.stdlib }}
+          measure: ${{ matrix.stdlib == 'nostd' }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
