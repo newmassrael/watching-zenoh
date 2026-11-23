@@ -744,8 +744,10 @@ registration of the program's whose key finds no room is refused as a full table
 key a peer sends that finds no room is dropped and counted with its table's refusals
 (`IdMap::count_refused`), and the arena counts it too (`KeyCounts::refused`); an interest whose
 key finds none is answered by its `Final` alone. zenoh-pico answers a remote declaration its heap
-cannot hold by dropping it. A face past those the open planned for is handed no key arena, and
-keeps none of what its peer declares.
+cannot hold by dropping it. Every face's tables are handed the session's key arena, the
+sets the open lent and a set of no rows for a face past them alike, and a side's interest rows lent
+after it keep it (`SubscriberPeer::lend_rows`): a group's face, whose peers are the members, keeps
+what they declare as a unicast face does.
 
 The limit's default holds, with a key of `MAX_KEYEXPR_BYTES` in a block of 264 bytes, every
 keyed row the build's defaults lend for one face: the record's 224, the application's 48, the

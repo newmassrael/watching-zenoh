@@ -29,7 +29,7 @@
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, LendRefused, Lent};
 use wz_session_core::driver_loop::IterationEvent;
-use wz_session_core::key_arena::KeySpace;
+use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerRows, PeerTables};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink};
@@ -258,10 +258,14 @@ pub(super) struct Registry {
     /// The limits the session's open resolved, which every face's tables are held to: a face
     /// accepted after the open takes them as the dial role's face did.
     limits: SessionLimits,
+    /// The session's key arena, which every face's tables keep the keys of what its peer declares
+    /// in: a face past the sets the open lent is handed it as a lent set's is.
+    keys: KeySpace,
     /// Every set of face tables, each where it was built and never moved from: the sets the arena
     /// lent at the open, the dial role's face's first and always held by it, then any set of no
     /// rows made for a face that came when every lent set was held, which refuses every get and
-    /// everything the peer would have it hold. The arena lends a set for each face the config
+    /// everything the peer would have it stage, and holds what the peer declares by its ids as any
+    /// set does, each key in the session's key arena. The arena lends a set for each face the config
     /// admits and a face past those is refused before it comes, so no face is expected in a set
     /// of no rows; the session's memory is the arena alone either way. A set no face holds is
     /// kept, emptied, for the next face.
@@ -345,6 +349,7 @@ impl Registry {
             sets,
             held,
             limits: *limits,
+            keys,
             #[cfg(feature = "local-queryable")]
             local,
             #[cfg(any(
@@ -500,7 +505,7 @@ impl Registry {
             .position(|(place, held)| held.at != place)
             .unwrap_or(self.held.len());
         if at == self.sets.len() {
-            push_rowless(&mut self.sets, &self.limits);
+            push_rowless(&mut self.sets, self.keys, &self.limits);
         }
         self.held.insert(at, HeldSet { at, id });
     }
@@ -890,8 +895,15 @@ impl Registry {
 }
 
 /// Write a set of no rows at the end of `sets`, in the storage the vector keeps it in, held to
-/// `limits`, and hand it back: a set is never a value of its own in this frame.
-fn push_rowless<'s>(sets: &'s mut Vec<FaceTables>, limits: &SessionLimits) -> &'s mut FaceTables {
+/// `limits`, its peer's keys kept in `keys`, the session's key arena, and hand it back: a set is
+/// never a value of its own in this frame. No set is without the key arena, whatever its rows (a
+/// lent one, or one of no rows for a face past the plan): a table of the lent policy handed none
+/// would drop every declaration of its peer.
+fn push_rowless<'s>(
+    sets: &'s mut Vec<FaceTables>,
+    keys: KeySpace,
+    limits: &SessionLimits,
+) -> &'s mut FaceTables {
     sets.reserve(1);
     let at = sets.len();
     // SAFETY: `reserve` left room for at least one set past the length, which is the first cell of
@@ -901,7 +913,9 @@ fn push_rowless<'s>(sets: &'s mut Vec<FaceTables>, limits: &SessionLimits) -> &'
         FaceTables::rowless_in(&mut sets.spare_capacity_mut()[0], limits);
         sets.set_len(at + 1);
     }
-    &mut sets[at]
+    let set = &mut sets[at];
+    set.peer.keep_keys_in(LentKeys::from(keys));
+    set
 }
 
 /// Write a set at the end of `sets` and lend it its rows there, `gets` and `peer` of them from
@@ -915,7 +929,7 @@ fn lend_set(
     peer: PeerRows,
     limits: &SessionLimits,
 ) -> Result<(), LendRefused> {
-    push_rowless(sets, limits).lend(arena, keys, gets, peer, limits)
+    push_rowless(sets, keys, limits).lend(arena, keys, gets, peer, limits)
 }
 
 #[cfg(test)]
@@ -934,6 +948,8 @@ mod tests {
         registry: Registry,
         arena: SessionArena,
         lent: usize,
+        /// The key arena the registry's tables keep their keys in, lent from `arena`.
+        keys: KeySpace,
     }
 
     /// A registry whose arena lends the tables of `faces` faces, one row of each table.
@@ -974,6 +990,7 @@ mod tests {
             registry,
             arena,
             lent: faces,
+            keys,
         }
     }
 
@@ -1024,6 +1041,90 @@ mod tests {
             face.peer.finals.has_room(),
             "taking what is owed keeps the row"
         );
+    }
+
+    /// Every face keeps the keys of what its peer declares in the session's key arena: the dial
+    /// face's set, a set the open lent that a face takes as it comes (a group's, which the session
+    /// adds as it joins the group, `join_groups`), and a set of no rows for a face past the plan.
+    /// A subscriber each face's peer declares is held and matched, its key a block of the one
+    /// arena, and nothing is refused.
+    #[test]
+    fn every_face_keeps_what_its_peer_declares_in_the_sessions_key_arena() {
+        use wz_session_core::declare_build::build_declare_subscriber;
+        use wz_session_core::key_arena::block_bytes;
+
+        let mut held = held(2);
+        held.registry.add_face(5);
+        held.registry.add_face(6);
+        assert!(
+            in_a_lent_set(&held, 5),
+            "CONTROL: the second face takes the set the open lent"
+        );
+        assert!(
+            !in_a_lent_set(&held, 6),
+            "CONTROL: the third face is past the plan"
+        );
+        let key = "demo/declared/k";
+        let block = block_bytes(key.len()).expect("a short key");
+        for (held_before, id) in [DIAL_FACE, 5, 6].into_iter().enumerate() {
+            let at = held
+                .registry
+                .held_at(id)
+                .expect("the registry holds the face");
+            let Registry { app, sets, .. } = &mut held.registry;
+            let set = &mut sets[at];
+            let declare = build_declare_subscriber(1, 0, Some(key)).expect("a declaration");
+            let peer = &mut set.peer;
+            app.remote_subscribers.dispatch_declare(
+                &mut peer.remote_subscribers,
+                &declare.body,
+                peer.subscribers.mapping_spaces(),
+            );
+            assert!(
+                peer.remote_subscribers.has_matching(key),
+                "face {id}: its peer's subscriber is held"
+            );
+            assert_eq!(peer.remote_subscribers.refusals(), 0, "face {id}");
+            assert_eq!(
+                held.keys.counts().used,
+                (held_before + 1) * block,
+                "face {id}: its key is a block of the session's key arena"
+            );
+        }
+    }
+
+    /// An interest a face's peer asks is kept with its key in the session's key arena, on the
+    /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
+    /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
+    /// after it was handed the key arena keeps it.
+    #[test]
+    fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
+        use wz_session_core::key_arena::block_bytes;
+
+        let mut held = held(2);
+        held.registry.add_face(5);
+        let block = block_bytes("demo/**".len()).expect("a short key");
+        for (held_before, id) in [DIAL_FACE, 5].into_iter().enumerate() {
+            let at = held
+                .registry
+                .held_at(id)
+                .expect("the registry holds the face");
+            let Registry { app, sets, .. } = &mut held.registry;
+            let set = &mut sets[at];
+            app.subscribers.respond_to_subscriber_interest_borrowed(
+                &mut set.peer.subscribers,
+                7,
+                Some("demo/**"),
+                false,
+                true,
+                false,
+            );
+            assert_eq!(
+                held.keys.counts().used,
+                (held_before + 1) * block,
+                "face {id}: the interest's key is a block of the session's key arena"
+            );
+        }
     }
 
     /// The dial face's peer tables are lent at the open.
