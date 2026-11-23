@@ -415,8 +415,7 @@ async fn wz_to_wz_handshakes_and_delivers_push_over(
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -577,8 +576,7 @@ async fn wz_to_wz_fragments_and_reassembles_an_oversize_put_over(
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),
@@ -1461,8 +1459,7 @@ async fn wz_acceptor_binds_a_serial_listen_string_and_delivers_a_push() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(sample.keyexpr(), KEYEXPR);
                 assert_eq!(
                     sample.payload(),

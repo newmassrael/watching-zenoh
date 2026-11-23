@@ -108,8 +108,7 @@ async fn oversize_namespaced_put_fragments_and_reassembled_path_strips() {
         let fired = fired.clone();
         let expect = payload.clone();
         observer
-            .subscribers
-            .register(KEYEXPR, move |sample| {
+            .subscribe(KEYEXPR, move |sample| {
                 assert_eq!(
                     sample.keyexpr(),
                     KEYEXPR,

@@ -6873,6 +6873,7 @@ mod reconnect_tx_tests {
         {
             let finals = finals.clone();
             observer
+                .face()
                 .liveliness_gets
                 .register_get(
                     14,
