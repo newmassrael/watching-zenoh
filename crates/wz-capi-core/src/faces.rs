@@ -158,9 +158,49 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    StatementNotHonoured, SubId, SubscriberSink, TokenId, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId,
+    StatementNotHonoured, SubId, TokenId, WireKey,
 };
+
+/// Mints one liveliness-subscriber callback per face: each face's leg keeps what it was told of
+/// itself. A port's callback ([`wz_capi_port::LivelinessSink`]) becomes one by
+/// [`face_liveliness_sink`].
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+
+/// One leg of a get, as this registry's sessions call it: dropped at the leg's end. A port's leg
+/// ([`wz_capi_port::ReplyCallback`]) becomes one by [`face_reply`].
+pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;
+
+/// The port's leg `callback` as one this registry calls; its end is the port's, as it holds it.
+pub fn face_reply(callback: wz_capi_port::ReplyCallback) -> ReplyCallback {
+    Box::new(move |reply: &dyn ReplyView| callback.call(reply))
+}
+
+/// The port's callback `sink` as a per-face factory, as [`face_sink`] makes a subscriber's.
+pub fn face_liveliness_sink(sink: wz_capi_port::LivelinessSink) -> LivelinessSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: LivelinessSample<'_>| sink.call(sample))
+    })
+}
+
+/// Mints one subscriber callback per face: what this registry keeps for one C subscription, since
+/// each face's session registers a callback of its own. A port's callback
+/// ([`wz_capi_port::SubscriberSink`]) becomes one by [`face_sink`].
+pub type SubscriberSink =
+    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// The port's callback `sink` as a per-face factory: each face's callback calls the one sink
+/// through a shared borrow, and the sink is let go of with the last of them, after its last call.
+pub fn face_sink(sink: wz_capi_port::SubscriberSink) -> SubscriberSink {
+    let sink = Arc::new(sink);
+    Arc::new(move || {
+        let sink = Arc::clone(&sink);
+        Box::new(move |sample: &dyn SampleView| sink.call(sample))
+    })
+}
 
 /// Mints one queryable callback per face.
 ///
@@ -5340,7 +5380,7 @@ impl SharedSession {
         timeout_ms: u32,
         links: LinkRestriction,
         fan: Option<&crate::cancellation::CancellableFan>,
-        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+        leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> usize {
         let opts =
             crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
@@ -7430,7 +7470,6 @@ mod matching_aggregate_tests {
 
         let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
             .expect("test host entropy");
-        let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
         let declare = |shared: &SharedSession| {
             SessionEngine::declare_subscriber_on_wire(
                 shared,
@@ -7438,7 +7477,7 @@ mod matching_aggregate_tests {
                 WireKey::literal(),
                 wz_session_core::locality::Locality::Any,
                 None,
-                sink.clone(),
+                wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {}),
             )
         };
         assert!(
@@ -7488,7 +7527,9 @@ mod matching_aggregate_tests {
                 None,
                 &mut || -> wz_capi_port::ReplyCallback {
                     minted.set(minted.get() + 1);
-                    Box::new(|_view: &dyn wz_session_core::reply_sink::ReplyView| {})
+                    wz_capi_port::ReplyCallback::shared(
+                        |_view: &dyn wz_session_core::reply_sink::ReplyView| {},
+                    )
                 },
             )
         };
@@ -10263,7 +10304,7 @@ mod face_up_order_tests {
         let asked = |links: LinkRestriction| {
             let own = Arc::new(AtomicUsize::new(0));
             let counted = own.clone();
-            let mut mint = move || -> wz_capi_port::ReplyCallback {
+            let mut mint = move || -> ReplyCallback {
                 let counted = counted.clone();
                 Box::new(move |_view: &dyn ReplyView| {
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -10319,8 +10360,7 @@ mod face_up_order_tests {
         let engine = shared.engine_ref();
 
         let asked = |links: LinkRestriction| {
-            let mut mint =
-                || -> wz_capi_port::ReplyCallback { Box::new(|_view: &dyn ReplyView| {}) };
+            let mut mint = || wz_capi_port::ReplyCallback::shared(|_view: &dyn ReplyView| {});
             SessionEngine::liveliness_get_on_link_set(
                 engine,
                 "wz/link/live",
@@ -10342,9 +10382,7 @@ mod face_up_order_tests {
             "no set: every link is asked"
         );
 
-        let sink: SubscriberSink = Arc::new(|| {
-            Box::new(|_sample: &dyn SampleView| {}) as Box<dyn FnMut(&dyn SampleView) + Send>
-        });
+        let sink = wz_capi_port::SubscriberSink::shared(|_sample: &dyn SampleView| {});
         let limited = SessionEngine::declare_subscriber_on_link_set(
             engine,
             "wz/link/sub",

@@ -762,7 +762,7 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     assert_eq!(row(&plan, "ended legs").count, legs);
     assert_eq!(
         row(&plan, "ended legs").entry_bytes,
-        core::mem::size_of::<u64>()
+        core::mem::size_of::<crate::engine::Ended>()
     );
 }
 
@@ -1235,12 +1235,7 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
     let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(preset)));
     let router = Router::start(CatchAll::None);
     let engine = super::entity_tables::open_under(&router, limits);
-    let sink = || -> LivelinessSink {
-        Arc::new(|| {
-            Box::new(|_sample: LivelinessSample<'_>| {})
-                as Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send>
-        })
-    };
+    let sink = || LivelinessSink::shared(|_sample: LivelinessSample<'_>| {});
     let declare = |key: &str| {
         engine.declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink())
     };
@@ -1288,7 +1283,7 @@ fn the_pico_presets_lane_holds_one_record() {
     };
     assert_eq!(
         lane,
-        crate::lane::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
+        crate::round::read_bytes(limits.pico_unicast_batch_bytes(), frag, key, most),
         "the preset's lane is one record's room"
     );
     let plan = ArenaPlan::of(&preset_client(), &limits).expect("the preset is under the build");

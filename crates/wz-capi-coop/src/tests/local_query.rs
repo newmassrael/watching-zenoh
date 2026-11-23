@@ -121,6 +121,74 @@ fn a_get_for_the_session_alone_is_answered_by_its_own_queryables_inside_the_call
     );
 }
 
+/// An answer of the session's own queryable is handed to the get's callback by the thread that
+/// makes it, inside its reply: the queryable reads it handed when its reply returns. A get whose
+/// consolidation keeps the latest reply of a key until its end is handed that reply at the end,
+/// from what its entry held, once, before its callback is let go.
+#[test]
+fn an_own_answer_is_handed_inside_its_reply_and_a_held_one_at_the_end() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let inside = Arc::new(Mutex::new(Vec::new()));
+    let (count, seen) = (handed.clone(), inside.clone());
+    declare(
+        &engine,
+        "demo/lq/**",
+        Locality::Any,
+        move |_, query, out| {
+            out.reply_keyed(query.keyexpr(), b"own")
+                .expect("a reply on the query's own key");
+            seen.lock().unwrap().push(count.load(Ordering::SeqCst));
+        },
+    );
+    for (mode, handed_inside) in [(ConsolidationMode::None, 1), (ConsolidationMode::Latest, 0)] {
+        handed.store(0, Ordering::SeqCst);
+        inside.lock().unwrap().clear();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let issued = engine.get_on_wire(
+            "demo/lq/a",
+            &WireKey::literal(),
+            &get_for(Locality::SessionLocal).with_consolidation(mode),
+            None,
+            &mut || {
+                let count = handed.clone();
+                let gone = Dropped(ended.clone());
+                ReplyCallback::shared(move |reply: &dyn ReplyView| {
+                    let _ = &gone;
+                    if reply.kind() == ReplyKind::Put {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            },
+        );
+        assert_eq!(issued, Ok(1), "{mode:?}");
+        assert_eq!(
+            *inside.lock().unwrap(),
+            [handed_inside],
+            "{mode:?}: what the queryable read when its reply returned"
+        );
+        assert_eq!(
+            handed.load(Ordering::SeqCst),
+            1,
+            "{mode:?}: the answer is handed once"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            1,
+            "{mode:?}: the leg's callback is let go once, inside the get"
+        );
+    }
+}
+
 /// Run `body` on a thread of its own and wait at most five seconds for what it returns: a call
 /// that waits on a lock it holds fails the test by name instead of holding the run for ever.
 fn within_five_seconds<R: Send + 'static>(
@@ -481,7 +549,7 @@ fn a_get_of_its_own_with_no_row_for_its_final_is_refused_whole() {
             None,
             &mut || {
                 counting.fetch_add(1, Ordering::SeqCst);
-                Box::new(|_view: &dyn ReplyView| {}) as ReplyCallback
+                ReplyCallback::shared(|_view: &dyn ReplyView| {})
             },
         )
     });

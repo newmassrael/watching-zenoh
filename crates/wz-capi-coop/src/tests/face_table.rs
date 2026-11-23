@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wz_capi_port::{
-    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine, WireKey,
+    FilterPlane, QueryCallback, QueryHolder, ReplyCallback, SessionDrive, SessionEngine,
+    SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::locality::Locality;
@@ -59,7 +60,7 @@ fn a_declaration_and_a_put_reach_every_face() {
             WireKey::literal(),
             Locality::Any,
             None,
-            Arc::new(|| Box::new(|_: &dyn SampleView| {})),
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
     };
     subscribe("demo/early/**").expect("a session with ids left declares");
@@ -136,13 +137,13 @@ fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
             minted.set(index + 1);
             let end = End(index, legs.clone());
             let seen = legs.clone();
-            Box::new(move |view: &dyn ReplyView| {
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
                 seen.lock()
                     .unwrap()
                     .replies
                     .push((index, view.payload().to_vec()));
-            }) as ReplyCallback
+            })
         },
     );
     assert_eq!(issued, Ok(2), "one leg for each face");

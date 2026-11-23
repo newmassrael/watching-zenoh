@@ -319,7 +319,7 @@ impl SessionEngine for SharedSession {
                 wire,
                 allowed_origin,
                 retraction,
-                sink,
+                crate::faces::face_sink(sink),
             )
         })
     }
@@ -541,7 +541,7 @@ impl SessionEngine for SharedSession {
                 keyexpr.to_owned(),
                 wire,
                 options,
-                sink,
+                crate::faces::face_liveliness_sink(sink),
             )
         })
     }
@@ -570,7 +570,7 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_on_wire(keyexpr, wire, opts.clone(), leg())
+                    .query_on_wire(keyexpr, wire, opts.clone(), crate::faces::face_reply(leg()))
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -604,7 +604,12 @@ impl SessionEngine for SharedSession {
             fan,
             |query_leg| {
                 let rid = query_leg
-                    .query_shm(keyexpr, opts.clone(), &value, leg())
+                    .query_shm(
+                        keyexpr,
+                        opts.clone(),
+                        &value,
+                        crate::faces::face_reply(leg()),
+                    )
                     .ok()
                     .map(|handle| handle.rid());
                 issued += usize::from(rid.is_some());
@@ -634,7 +639,7 @@ impl SessionEngine for SharedSession {
                 allowed_origin,
                 links,
                 retraction,
-                sink,
+                crate::faces::face_sink(sink),
             )
         })
     }
@@ -703,7 +708,7 @@ impl SessionEngine for SharedSession {
                 wire,
                 options,
                 links,
-                sink,
+                crate::faces::face_liveliness_sink(sink),
             )
         })
     }
@@ -748,7 +753,8 @@ impl SharedSession {
         if self.is_closed() {
             return Err(Refusal::Closed);
         }
-        Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, leg))
+        let mut leg = || crate::faces::face_reply(leg());
+        Ok(self.liveliness_get_on_links(keyexpr, timeout_ms, links, fan, &mut leg))
     }
 }
 

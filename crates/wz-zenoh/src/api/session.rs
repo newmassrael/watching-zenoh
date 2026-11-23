@@ -1734,7 +1734,8 @@ impl Engine {
                 tokio_engine::ask_liveliness(
                     request,
                     Box::new(move |key, _wire, timeout_ms, fan, leg| {
-                        Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, leg))
+                        let mut leg = || wz_capi_core::faces::face_reply(leg());
+                        Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, &mut leg))
                     }),
                 )
             }
@@ -1970,7 +1971,7 @@ mod tokio_engine {
     #[cfg(not(feature = "shared-memory"))]
     pub(super) use wz_capi_core::faces::no_shm_clients;
     use wz_capi_core::{
-        faces::{FanoutError, SubscriberSink, WireKey},
+        faces::{FanoutError, LivelinessSink, SubscriberSink, WireKey},
         runtime::{
             locality::Locality as EngineLocality,
             qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
@@ -1984,8 +1985,7 @@ mod tokio_engine {
     };
     use wz_capi_port::cancellation::CancellableFan;
     use wz_capi_port::{
-        HeldQuery, LivelinessSink, MatchingSink, QueryHolder, QueryableSink, ReplyCallback,
-        SessionEngine,
+        HeldQuery, MatchingSink, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::{
@@ -3285,7 +3285,7 @@ mod tokio_engine {
         // is under way and lets go of it when the router tells it the end, which is what ends the
         // query for the callback.
         let mut leg = leg_minter(callback, fan, consolidation);
-        let mut on_reply = leg();
+        let on_reply = leg();
         drop(leg);
         // A reply of an instrumented query is completed as the node hands it to the session, on
         // the thread that hands it and ahead of the consolidation: upstream's session records the
@@ -3300,7 +3300,7 @@ mod tokio_engine {
             });
         #[cfg(not(feature = "unstable"))]
         let ingress = None;
-        let on_reply = Box::new(move |view: &dyn ReplyView| on_reply(view));
+        let on_reply = Box::new(move |view: &dyn ReplyView| on_reply.call(view));
         // A value that is a buffer of shared memory goes as the buffer: its descriptor to a face
         // that negotiated shared memory, its bytes to any other, as the registry's get sends it.
         #[cfg(feature = "shared-memory")]
@@ -3538,7 +3538,7 @@ mod tokio_engine {
         });
         move || -> ReplyCallback {
             let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
+            ReplyCallback::shared(move |view: &dyn ReplyView| match reply_of(view) {
                 Ok(reply) => delivery.deliver(reply),
                 Err(error) => tracing::error!("a reply could not be delivered: {error}"),
             })
@@ -4191,12 +4191,6 @@ mod tokio_engine {
             FanoutError::HeldConduit => zerror!(
                 "the publication on {} was dropped: another sender held its conduit and the \
                  session's queue profile drops such a publication at once and reports it",
-                publication.key
-            )
-            .into(),
-            FanoutError::LocalNoRoom => zerror!(
-                "the publication on {} reached none of the session's own subscribers: one of \
-                 them, whose callback was running, had no room left to wait in",
                 publication.key
             )
             .into(),
@@ -10614,7 +10608,7 @@ mod tests {
                 &mut || {
                     let lines = Arc::clone(&lines);
                     let guard = ended.clone();
-                    Box::new(move |view: &dyn ReplyView| {
+                    wz_capi_port::ReplyCallback::shared(move |view: &dyn ReplyView| {
                         let _ = &guard;
                         lines.lock().unwrap().push(line(view));
                     })

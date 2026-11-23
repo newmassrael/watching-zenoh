@@ -131,7 +131,11 @@ and its feature is measured by a sibling program; it is never retried until it p
   pending queries and replies, interests. Routing/matching is a function over these tables. The
   callback of a local entity is stored in the entity's row (a C function pointer and context, or
   a Rust closure in a pool row); delivery calls it from the row, holding the row pinned, with no
-  intermediate lane and no copy.
+  intermediate lane and no copy. A callback is a `Fn`, called through a shared borrow: a C
+  closure's function, context and drop held as they are, a Rust closure an `Arc<dyn Fn + Send +
+  Sync>` as upstream zenoh's. So it is called with no lock held, from any thread and from inside
+  itself, as zenoh-pico calls it (a put a callback makes on its own subscriber's key reaches it
+  again at once; `wz_ext.h`, "callbacks"), and it is let go of once, after its last call.
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the
@@ -211,7 +215,7 @@ crate root, under the line that names its row here (`// Totality debt TD-NNN
 (docs/c-abi-architecture.md section 7).`). Nothing else may allow a totality lint: no allow on an
 item, no inner allow, no `cfg_attr` or `expect` form, no `clippy::restriction`. New code is total,
 so the register only shrinks: `scripts/lib/totality_debt_gate.py` refuses a row past the last id
-given (TD-206) and holds the register's lint cells (379) to its ratchet, which a paid row
+given (TD-206) and holds the register's lint cells (376) to its ratchet, which a paid row
 lowers in its own commit. For the lints a text read decides (`unwrap_used`, `expect_used` and the
 panicking macros) it also holds each row to its module's sites, both ways; indexing and arithmetic
 are held by the build's clippy alone.
@@ -385,7 +389,6 @@ orders the payment (largest first) and is not a measurement of what clippy repor
 | TD-151 | `wz-session-core` | `wire_id` | `arithmetic_side_effects` | 1 | open |
 | TD-152 | `wz-session-core` | `wire_noise` | `arithmetic_side_effects` | 1 | open |
 | TD-153 | `wz-capi-coop` | `engine` | `indexing_slicing`, `expect_used`, `arithmetic_side_effects` | 113 | in flight |
-| TD-154 | `wz-capi-coop` | `lane` | `indexing_slicing`, `arithmetic_side_effects` | 76 | open |
 | TD-155 | `wz-capi-pico` | `os` | `indexing_slicing`, `arithmetic_side_effects` | 59 | in flight |
 | TD-156 | `wz-capi-pico` | `process_pool` | `indexing_slicing`, `panic`, `arithmetic_side_effects` | 48 | in flight |
 | TD-157 | `wz-capi-pico` | `bytes` | `arithmetic_side_effects` | 20 | in flight |

@@ -1045,6 +1045,27 @@ impl<K: ObserverSinks, P: Storage> SlotObserverOf<K, P> {
         }
     }
 
+    /// [`Self::flush_liveliness_on_link_loss`] a token at a time while `room` says the next
+    /// token's `Delete` can be taken: the tokens left stay with `peers` for a later call. Whether
+    /// none is left.
+    pub fn flush_liveliness_on_link_loss_while<T: Storage>(
+        &mut self,
+        peers: &mut PeerTables<T>,
+        room: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            self.liveliness_subscribers
+                .flush_peer_tokens_on_link_loss_while(&mut peers.tokens, room)
+                .1
+        }
+        #[cfg(not(feature = "liveliness-subscriber"))]
+        {
+            let _ = (peers, room);
+            true
+        }
+    }
+
     /// The link of this session was lost: every subscriber and queryable its peer
     /// had declared is gone, and the matching watches are re-evaluated against what
     /// remains. Returns the number of declarations dropped.

@@ -1505,7 +1505,7 @@ pub(crate) fn fan_get(
         // real final, a timeout sweep, and a face death alike — whereas a counter
         // incremented on a final would never be reached by the face-death path. See
         // the module doc.
-        Box::new(move |view: &dyn ReplyView| leg.fire(view)) as ReplyCallback
+        ReplyCallback::shared(move |view: &dyn ReplyView| leg.fire(view))
     });
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so

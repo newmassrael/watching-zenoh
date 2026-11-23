@@ -555,13 +555,6 @@ fn regen_statecharts_and_pools(root: &Path) {
         codegen.emit_buffer_pool(stem, &network, &out);
     }
 
-    // The hand-off between a session and its deliveries on the cooperative engine (wz-capi-coop
-    // `lane`): the queue, and the handle it carries, which the queue names as its sibling module.
-    let coop_out = root.join("out/wz-capi-coop");
-    mkdir(&coop_out);
-    codegen.emit_codec("delivery_lane_handle", &session, &coop_out);
-    codegen.emit_queue("delivery_lane_queue", &session, &coop_out);
-
     // sce-codegen drops a `sce_sourcemap.json` side-artifact into the
     // --output-dir (overwritten per emit, emit-order-dependent, never
     // include!'d). The old build.rs left it in the ephemeral OUT_DIR
@@ -573,7 +566,6 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-runtime-coop",
         "wz-link-lwip",
         "wz-app-frame",
-        "wz-capi-coop",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }

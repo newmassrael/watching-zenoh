@@ -11,7 +11,7 @@
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-use wz_capi_port::{SessionEngine, WireKey};
+use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::face::FaceEventKind;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -24,18 +24,12 @@ fn hearing(session: &Stepped) -> Arc<Mutex<Vec<Vec<u8>>>> {
     let heard = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let into = heard.clone();
     session
-        .declare_subscriber_on_wire(
-            "demo/one/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            Arc::new(move || {
-                let into = into.clone();
-                Box::new(move |sample: &dyn SampleView| {
-                    into.lock().unwrap().push(sample.payload().to_vec());
-                })
-            }),
-        )
+        .declare_subscriber_on_wire("demo/one/**", WireKey::literal(), Locality::Any, None, {
+            let into = into.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            })
+        })
         .expect("the session declares the subscriber");
     heard
 }

@@ -13,8 +13,8 @@
 //!
 //! A type belongs here when an ABI and an engine both have to name it and nothing in it is a
 //! particular engine's. The ids an ABI's handles carry ([`SubId`], [`MatchId`], [`FilterId`],
-//! [`TokenId`]), the callback factories an ABI hands an engine ([`SubscriberSink`],
-//! [`MatchingSink`], [`LivelinessSink`]), the
+//! [`TokenId`]), the callbacks and callback factories an ABI hands an engine
+//! ([`SubscriberSink`], [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
 //! face registry, which re-exports them, so the zenoh-c ABI keeps its paths. Why an engine refused
@@ -54,7 +54,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 
@@ -114,9 +113,90 @@ pub type MatchId = u64;
 /// holds for its whole life.
 pub type FilterId = u64;
 
-/// Mints one subscriber callback per face.
-pub type SubscriberSink =
-    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+/// A subscriber's callback, as an ABI hands it to an engine. It is called through a shared borrow
+/// ([`Self::call`]), from any thread and at any depth, a call from inside itself included:
+/// zenoh-pico calls its subscriptions' callbacks with no lock of its session held, so a put a
+/// callback makes on a key its own subscription matches calls it again from inside itself
+/// (`vendor/zenoh-pico/src/session/subscription.c`, `_z_trigger_subscriptions_impl`), and
+/// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
+/// the engine is done with it, after its last call has returned: its drop is the program's.
+pub enum SubscriberSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawSampleCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedSampleFn>),
+}
+
+/// A Rust program's subscriber callback, as [`SubscriberSink::Shared`] shares it: upstream zenoh's
+/// `Callback<Sample>` shape.
+pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
+/// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
+#[derive(Clone, Copy)]
+pub struct RawSampleCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: a raw callback is made only by `SubscriberSink::raw`, whose caller promises that its
+// function may be called with its context from any thread, at once from several and from inside
+// itself, and its drop once on any thread; the shared one is `Send + Sync` itself.
+unsafe impl Send for SubscriberSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for SubscriberSink {}
+
+impl SubscriberSink {
+    /// A C program's closure: `call` with `context` for each sample, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// `call` may be called with `context` from any thread, at once from several and from inside
+    /// itself, until `drop` is called; `drop`, when given, may be called with `context` once, on
+    /// any thread, after the last call has returned.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: &dyn SampleView),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawSampleCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl Fn(&dyn SampleView) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `sample` to the callback.
+    pub fn call(&self, sample: &dyn SampleView) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+}
+
+impl Drop for SubscriberSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawSampleCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call, since a
+            // call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries: the
 /// entity id the token is declared under, of the width [`SubId`] has for the same reason.
@@ -170,10 +250,81 @@ impl Drop for Ticker {
     }
 }
 
-/// Mints one liveliness-subscriber callback per face: each token a peer declares on the key is a
-/// `Put`, each it retracts a `Delete`.
-pub type LivelinessSink =
-    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
+/// A liveliness subscriber's callback, as an ABI hands it to an engine: each token a peer declares
+/// on the key is a `Put`, each it retracts a `Delete`. Called through a shared borrow, from any
+/// thread and at any depth, and let go of once, after its last call, as [`SubscriberSink`] is.
+pub enum LivelinessSink {
+    /// A C program's closure: its function, its context and its drop, held as they are, with no
+    /// heap ([`Self::raw`]).
+    Raw(RawLivelinessCallback),
+    /// A Rust program's closure, shared ([`Self::shared`]).
+    Shared(Arc<SharedLivelinessFn>),
+}
+
+/// A Rust program's liveliness callback, as [`LivelinessSink::Shared`] shares it.
+pub type SharedLivelinessFn = dyn for<'a> Fn(LivelinessSample<'a>) + Send + Sync;
+
+/// The parts of a C program's closure an engine calls ([`LivelinessSink::Raw`]), as
+/// [`RawSampleCallback`] holds a subscriber's.
+#[derive(Clone, Copy)]
+pub struct RawLivelinessCallback {
+    call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+    context: *mut core::ffi::c_void,
+    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+}
+
+// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `LivelinessSink::raw`, whose
+// caller promises what the marker traits ask of it.
+unsafe impl Send for LivelinessSink {}
+// SAFETY: as `Send`.
+unsafe impl Sync for LivelinessSink {}
+
+impl LivelinessSink {
+    /// A C program's closure: `call` with `context` for each change, and `drop` with `context`
+    /// once, when the engine lets it go.
+    ///
+    /// # Safety
+    /// As [`SubscriberSink::raw`]'s.
+    pub unsafe fn raw(
+        call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
+        context: *mut core::ffi::c_void,
+        drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    ) -> Self {
+        Self::Raw(RawLivelinessCallback {
+            call,
+            context,
+            drop,
+        })
+    }
+
+    /// A Rust program's closure, shared.
+    pub fn shared(call: impl for<'a> Fn(LivelinessSample<'a>) + Send + Sync + 'static) -> Self {
+        Self::Shared(Arc::new(call))
+    }
+
+    /// Hand `sample` to the callback.
+    pub fn call(&self, sample: LivelinessSample<'_>) {
+        match self {
+            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
+            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            Self::Shared(call) => call(sample),
+        }
+    }
+}
+
+impl Drop for LivelinessSink {
+    fn drop(&mut self) {
+        if let Self::Raw(RawLivelinessCallback {
+            context,
+            drop: Some(drop),
+            ..
+        }) = *self
+        {
+            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call.
+            unsafe { drop(context) };
+        }
+    }
+}
 
 /// Delivers ONE aggregated matching verdict to C.
 ///
@@ -239,11 +390,6 @@ pub enum FanoutError {
     /// zenoh-pico's put fails. Nothing was sent on that face. Under zenoh's profile a congestion
     /// drop is the publish's success, and this is never answered.
     HeldConduit,
-    /// The session's own subscribers it reaches could not all be handed it: one whose callback
-    /// runs on the putting thread is handed it once that callback returns, from the session's
-    /// delivery lane, and the lane had no room for it. No subscriber of the session was handed
-    /// it; what the links were given went.
-    LocalNoRoom,
 }
 
 impl From<StatementNotHonoured> for FanoutError {

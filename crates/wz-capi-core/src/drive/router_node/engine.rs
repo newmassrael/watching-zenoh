@@ -270,9 +270,11 @@ impl SessionEngine for RouterState {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // One callback for the node's one data plane, where a registry mints one for each face.
-        let host = self
-            .forwarder
-            .host_subscriber_from(keyexpr, allowed_origin, sink());
+        let host = self.forwarder.host_subscriber_from(
+            keyexpr,
+            allowed_origin,
+            Box::new(move |sample: &dyn wz_session_core::sink::SampleView| sink.call(sample)),
+        );
         self.engine
             .subscriptions
             .lock()
@@ -483,7 +485,15 @@ impl SessionEngine for RouterState {
     ) -> Result<SubId, Refusal> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
-        let face = self.liveliness.subscribe(keyexpr, history, sink());
+        let face = self.liveliness.subscribe(
+            keyexpr,
+            history,
+            Box::new(
+                move |sample: wz_session_core::declare::liveliness_sample::LivelinessSample<'_>| {
+                    sink.call(sample)
+                },
+            ),
+        );
         self.engine
             .subscriptions
             .lock()
@@ -506,13 +516,13 @@ impl SessionEngine for RouterState {
         // One leg: the node's own face asks, and the router routes the query to the queryables of
         // every face and of the node itself. Its callback is let go when the query ends, which is
         // the leg's end.
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered(
                 keyexpr,
                 opts,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
             // The one way the node fails to ask: a query its codec cannot build.
@@ -539,14 +549,14 @@ impl SessionEngine for RouterState {
         // One leg, as `get_on_wire`'s: the node's own face asks, with the chunk as the value, and
         // the router sends its descriptor to a face that negotiated shared memory and its bytes
         // to any other (`RouterState::get_numbered_shm`).
-        let mut callback = leg();
+        let callback = leg();
         let id = self
             .get_numbered_shm(
                 keyexpr,
                 opts,
                 value,
                 None,
-                Box::new(move |view| callback(view)),
+                Box::new(move |view| callback.call(view)),
                 Box::new(|| {}),
             )
             // The node fails to ask a query its codec cannot build, or a chunk it cannot send.
@@ -580,9 +590,9 @@ impl SessionEngine for RouterState {
         let ended = Arc::clone(&callback);
         let face = Arc::clone(&self.liveliness);
         let on_key: KeyHandler = Box::new(move |key: &str| {
-            let mut held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(callback) = held.as_mut() {
-                callback(&wz_runtime_tokio::reply_sink::BorrowedReply {
+            let held = told.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(callback) = held.as_ref() {
+                callback.call(&wz_runtime_tokio::reply_sink::BorrowedReply {
                     rid: 0,
                     keyexpr: key,
                     kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,

@@ -252,8 +252,9 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// Declare a subscriber on `keyexpr`, announced as `wire`, receiving what `allowed_origin`
-    /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
-    /// beside its id, when the declaring ABI's reference library names one.
+    /// admits through the callback `sink`, which the engine lets go of once it is done with it,
+    /// after its last call has returned. `retraction` is the key its undeclaration names beside
+    /// its id, when the declaring ABI's reference library names one.
     ///
     /// Refused, with `sink` let go of, nothing declared and nothing sent, as every declaration
     /// of the port is: [`Refusal::NoEntityId`] once the session has handed out every declaration
@@ -469,7 +470,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     }
 
     /// Subscribe to the liveliness tokens the peers hold on `keyexpr`, asking for them as `wire`
-    /// names it, through callbacks `sink` mints; with `history`, the tokens already alive are
+    /// names it, through the callback `sink`; with `history`, the tokens already alive are
     /// delivered first. It is a subscriber like any other to retract
     /// ([`Self::undeclare_subscriber`]): the ids are one space. Refused as
     /// [`Self::declare_subscriber_on_wire`] is, and with [`Refusal::NotBuilt`] by an engine with
