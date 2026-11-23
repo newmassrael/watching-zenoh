@@ -529,10 +529,17 @@ fn run_router(
         local.run_until_idle();
         match inbox.try_recv() {
             Ok(Command::DeclareSubscriber(id, key)) => {
-                let _ = actions.send_declare_subscriber(id, 0, Some(key));
+                let _ = actions.send_declare_subscriber(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             Ok(Command::DeclareQueryable(id, key, complete)) => {
-                let _ = actions.send_declare_queryable(id, 0, Some(key), complete);
+                let _ = actions.send_declare_queryable(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                    complete,
+                );
             }
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
@@ -547,7 +554,10 @@ fn run_router(
                 let _ = holding
                     .borrow_mut()
                     .with_app(|app| app.local_tokens.register(u64::from(id), key));
-                let _ = actions.send_declare_token(id, 0, Some(key));
+                let _ = actions.send_declare_token(
+                    id,
+                    wz_session_core::named_key::NamedKey::literal(key).expect("a key"),
+                );
             }
             #[cfg(feature = "liveliness")]
             Ok(Command::UndeclareToken(id)) => {

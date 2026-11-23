@@ -51,12 +51,14 @@ use crate::caps;
 use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
+use crate::named_key::{NamedKey, Prefix};
 use crate::pubsub::{
     any_local_match, fire_into_memoized, scan_subscribers, MatchMemo, RowRef, SubscriberRows,
 };
 use crate::registry_error::RegisterError;
 use crate::slot_map::{Handle, Pinned, Removal, SlotMap};
 use crate::wire_id::{EntityId, ExprId, RequestId};
+use crate::wire_key::MappedId;
 
 /// The markers that keep one table's handles from being taken by another.
 pub mod kind {
@@ -1084,6 +1086,36 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 suffix,
             },
             None => literal,
+        }
+    }
+
+    /// The key `key` names as the session sends it: its whole text, named on the wire by the
+    /// declaration its row holds while that declaration stands, and whole otherwise
+    /// ([`Self::wire_of`]). `None` for an empty key, which no row keeps.
+    pub fn named<'k>(&self, key: &'k EntityKey<P::Key>) -> Option<NamedKey<'k>> {
+        let whole = text(&key.key);
+        let declared = key
+            .prefix
+            .and_then(|prefix| self.keyexprs.get(prefix))
+            .and_then(|row| Some(Prefix::of(MappedId::new(row.id)?, text(&row.key))));
+        match declared {
+            Some(prefix) => NamedKey::under(whole, prefix).or_else(|| NamedKey::literal(whole)),
+            None => NamedKey::literal(whole),
+        }
+    }
+
+    /// `text`, a key the program names by the declaration the wire calls `id` (`0` for none), as
+    /// the session sends it: named by that declaration while it stands and begins the key, and
+    /// whole otherwise. `None` for an empty text.
+    pub fn named_by<'k>(&self, text: &'k str, id: ExprId) -> Option<NamedKey<'k>> {
+        let declared = MappedId::new(id).and_then(|mapped| {
+            let handle = self.keyexpr_by_id(id)?;
+            let row = self.keyexprs.get(handle)?;
+            Some(Prefix::of(mapped, text(&row.key)))
+        });
+        match declared {
+            Some(prefix) => NamedKey::under(text, prefix).or_else(|| NamedKey::literal(text)),
+            None => NamedKey::literal(text),
         }
     }
 

@@ -100,6 +100,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::link_admission::{LinkAdmission, LinkRegistry};
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::network_message::NetworkMessage;
 #[cfg(not(feature = "shared-key-ids"))]
 use wz_session_core::policy::KeyWireForm;
@@ -1544,16 +1545,21 @@ pub(crate) struct SubscriberRow {
 }
 
 impl SubscriberRow {
-    /// Declare this subscriber, which matches `keyexpr`, over `actions`: whether the link took
-    /// it.
-    fn declare<C: ClockSource + 'static>(&self, keyexpr: &str, actions: &McuActions<C>) -> bool {
-        let wire = on_link(actions, keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_declare_subscriber(self.id, 0, Some(keyexpr))
-        } else {
-            actions.send_declare_subscriber(self.id, wire.mapping_id, wire.suffix.as_deref())
-        }
-        .is_ok()
+    /// `keyexpr`, the key this subscriber matches, as the session sends it: named by the
+    /// declaration the ABI named it by while that declaration stands in `tables`.
+    fn named<'k>(&self, keyexpr: &'k str, tables: &CoopTables) -> Option<NamedKey<'k>> {
+        tables.named_by(keyexpr, self.wire.mapping_id)
+    }
+
+    /// Declare this subscriber, on `key`, over `actions`: whether the link took it.
+    fn declare<C: ClockSource + 'static>(
+        &self,
+        key: NamedKey<'_>,
+        actions: &McuActions<C>,
+    ) -> bool {
+        actions
+            .send_declare_subscriber(self.id, key_on_link(actions, key))
+            .is_ok()
     }
 
     /// Retract this subscriber over `actions`, naming its key when its declaration asked to.
@@ -1592,6 +1598,26 @@ fn on_link<'w, C: ClockSource + 'static>(
         Some(linked) => Cow::Owned(linked),
         None => Cow::Borrowed(wire),
     }
+}
+
+/// `key` as the link of `actions` names it: the link's key-wire form decides, and the declared
+/// form keeps `key` as the session names it (`shared-key-ids`).
+#[cfg(feature = "shared-key-ids")]
+fn key_on_link<'k, C: ClockSource + 'static>(
+    actions: &McuActions<C>,
+    key: NamedKey<'k>,
+) -> NamedKey<'k> {
+    actions.named_on_link(key)
+}
+
+/// A build without the shared key ids names every key on every link as the session names it.
+#[cfg(not(feature = "shared-key-ids"))]
+#[inline(always)]
+fn key_on_link<'k, C: ClockSource + 'static>(
+    _actions: &McuActions<C>,
+    key: NamedKey<'k>,
+) -> NamedKey<'k> {
+    key
 }
 
 /// A build without the shared key ids names every key on every link as the ABI made it.
@@ -1646,20 +1672,21 @@ struct QblEntry {
 
 #[cfg(feature = "queryable")]
 impl QblEntry {
-    /// Declare this queryable over `actions`: whether the link took it.
-    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
-        let wire = on_link(actions, &self.keyexpr, &self.wire);
-        if wire.is_literal() {
-            actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
-        } else {
-            actions.send_declare_queryable(
-                self.id,
-                wire.mapping_id,
-                wire.suffix.as_deref(),
-                self.complete,
-            )
-        }
-        .is_ok()
+    /// This queryable's key as the session sends it: named by the declaration the ABI named it by
+    /// while that declaration stands in `tables`.
+    fn named(&self, tables: &CoopTables) -> Option<NamedKey<'_>> {
+        tables.named_by(&self.keyexpr, self.wire.mapping_id)
+    }
+
+    /// Declare this queryable, on `key`, over `actions`: whether the link took it.
+    fn declare<C: ClockSource + 'static>(
+        &self,
+        key: NamedKey<'_>,
+        actions: &McuActions<C>,
+    ) -> bool {
+        actions
+            .send_declare_queryable(self.id, key_on_link(actions, key), self.complete)
+            .is_ok()
     }
 
     /// Retract this queryable over `actions`, naming its key when its declaration asked to.
@@ -6154,7 +6181,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             complete,
             callback,
         };
-        core.announce(Kind::Queryable, |actions| entry.declare(actions));
+        // The key is named before the links are told, from the tables as they stand: telling a
+        // link changes none of the session's declarations.
+        let named = entry.named(&core.tables.borrow());
+        core.announce(Kind::Queryable, |actions| {
+            named.is_some_and(|key| entry.declare(key, actions))
+        });
         #[cfg(feature = "group")]
         core.announce_to_groups(GroupEntity {
             what: GroupDeclaration::Queryable {

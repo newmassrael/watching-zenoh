@@ -53,6 +53,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::session_init_params::SessionInitParams;
@@ -104,12 +105,15 @@ fn declare_admin<C: ClockSource + 'static>(
     config_key: &str,
 ) -> bool {
     // `complete: false` is upstream's `QueryableInfoType::DEFAULT`.
-    actions
-        .send_declare_queryable(ADMIN_QUERYABLE_ID, 0, Some(admin_key), false)
-        .is_ok()
-        && actions
-            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, 0, Some(config_key))
+    NamedKey::literal(admin_key).is_some_and(|key| {
+        actions
+            .send_declare_queryable(ADMIN_QUERYABLE_ID, key, false)
             .is_ok()
+    }) && NamedKey::literal(config_key).is_some_and(|key| {
+        actions
+            .send_declare_subscriber(CONFIG_SUBSCRIBER_ID, key)
+            .is_ok()
+    })
 }
 
 impl<'a, L, C, P, A> AdminNode<'a, L, C, P, A>

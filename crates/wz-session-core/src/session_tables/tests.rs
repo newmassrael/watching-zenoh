@@ -736,6 +736,45 @@ fn a_retracted_declaration_goes_whatever_holds_it() {
 }
 
 #[test]
+fn a_key_is_named_as_the_session_sends_it_by_the_declaration_that_stands() {
+    use crate::named_key::NamedKey;
+    use crate::wire_key::{KeyText, MappedId, WireKey};
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/").unwrap();
+    let id = MappedId::new(declared.id).unwrap();
+    let form = KeyForm {
+        prefix: Some(declared.handle),
+        names_key: false,
+    };
+    let token = tables.declare_token("demo/x", form).unwrap();
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    let named = tables.named(key).unwrap();
+    assert_eq!(named.text(), "demo/x");
+    assert_eq!(named.wire(), WireKey::mapped(id, KeyText::new("x")));
+    // A key the program names by a declaration's id is named by it while the key starts with
+    // the declared literal, and whole otherwise.
+    assert_eq!(
+        tables.named_by("demo/y", declared.id).unwrap().wire(),
+        WireKey::mapped(id, KeyText::new("y"))
+    );
+    assert_eq!(
+        tables.named_by("away/y", declared.id),
+        NamedKey::literal("away/y")
+    );
+    assert_eq!(tables.named_by("demo/y", 0), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("demo/y", 99), NamedKey::literal("demo/y"));
+    assert_eq!(tables.named_by("", declared.id), None);
+    // A retracted declaration names no key any more, the token's included.
+    assert_eq!(tables.retract_keyexpr(declared.handle), Some(declared.id));
+    let key = tables.tokens().get(token.handle).unwrap().key();
+    assert_eq!(tables.named(key), NamedKey::literal("demo/x"));
+    assert_eq!(
+        tables.named_by("demo/y", declared.id),
+        NamedKey::literal("demo/y")
+    );
+}
+
+#[test]
 fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
     let mut tables = Tables::new();
     assert_eq!(tables.take_entity_id(), Some(1));

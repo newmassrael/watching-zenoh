@@ -17771,7 +17771,10 @@ async fn a_declaration_made_during_the_wait_restarts_it() {
         tokio::time::sleep(interval / 2).await;
         session
             .actions()
-            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .send_declare_subscriber(
+                10,
+                wz_session_core::named_key::NamedKey::literal("home/sub").expect("a key"),
+            )
             .expect("declare subscriber");
     };
     let (stable, ()) = tokio::join!(

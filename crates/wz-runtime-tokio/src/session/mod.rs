@@ -7936,7 +7936,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // QueryableId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_queryable(id.entity_id(), mapping_id, suffix, options.complete)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_queryable(id.entity_id(), key, options.complete)
+                })
                 .map_err(map_queryable_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step, like declare_subscriber.
@@ -8442,7 +8444,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SubscriptionId (one entity id, mirroring `_z_get_entity_id`).
             let wire_id = id.as_u64();
             let declare = actions
-                .prepare_declare_subscriber(id.entity_id(), mapping_id, suffix)
+                .with_outbound_key(mapping_id, suffix, |key| {
+                    actions.prepare_declare_subscriber(id.entity_id(), key)
+                })
                 .map_err(map_subscribe_err)?;
             // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
             // step: a declaration made while a paced replay is walking the cache is replayed in its
@@ -8614,8 +8618,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place =
                 liveliness::TokenPlace::take(self, u64::from(token_id), keyexpr_string.clone())
                     .map_err(LivelinessAliasError::Refused)?;
-            let declare = actions
-                .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+            let declare = wz_session_core::named_key::NamedKey::literal(&keyexpr_string)
+                .ok_or(SendDeclareError::MissingKeyexpr)
+                .and_then(|key| actions.prepare_declare_token(token_id, key))
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.
@@ -8778,7 +8783,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let place = liveliness::TokenPlace::take(self, u64::from(token_id), resolved)
                 .map_err(LivelinessAliasError::Refused)?;
             let declare = actions
-                .prepare_declare_token(token_id, mapping_id, inline_suffix)
+                .with_outbound_key(mapping_id, inline_suffix, |key| {
+                    actions.prepare_declare_token(token_id, key)
+                })
                 .map_err(map_decl_err)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
             // and send through the seam, as one step.

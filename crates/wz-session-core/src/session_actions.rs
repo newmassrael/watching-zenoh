@@ -14713,9 +14713,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // With no allocator the declaration is written from the caller's own text
         // through the borrowed writer of `lent_control`, straight into the lent slot:
         // the owned `DeclareOwned` below is a heap object whose only job is to be
@@ -14723,7 +14723,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // does not exist in this profile.
         #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Subscriber {
                 id: u64::from(subscriber_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14739,7 +14739,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_subscriber_recorded(
                 subscriber_id,
                 keyexpr_mapping_id,
@@ -14765,8 +14765,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // seam-routed `Session::declare_subscriber`; this wrapper keeps the
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller).
-            let declare =
-                self.prepare_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_subscriber(subscriber_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_subscriber_recorded(
@@ -14811,15 +14810,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: no allocator, so the borrowed writer, with the
         // local `QueryableInfo` the owned form stamps (omitted when it is the default).
         #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Queryable {
                 id: u64::from(queryable_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14835,7 +14834,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_queryable_recorded(
                 queryable_id,
                 keyexpr_mapping_id,
@@ -14864,12 +14863,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // dispatch + reconnect-cache half (byte-stable-wire test callers +
             // any direct low-level caller). Mirror of the declare-subscriber
             // split landed in R311ou.
-            let declare = self.prepare_declare_queryable(
-                queryable_id,
-                keyexpr_mapping_id,
-                keyexpr_suffix,
-                complete,
-            )?;
+            let declare = self.prepare_declare_queryable(queryable_id, key, complete)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`), carrying `complete` so a complete queryable survives the replay,
             // and send, as one step.
@@ -14921,15 +14915,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn send_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<(), SendDeclareError> {
+        let (keyexpr_mapping_id, keyexpr_suffix) = (key.wire().id(), key.wire().suffix());
         // See `send_declare_subscriber`: with no allocator the declaration is written from the
         // caller's own text through the borrowed writer of `lent_control`, straight into the
         // lent slot, and there is no reconnect cache to copy the keyexpr into.
         #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
         {
-            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.dispatch_declare_lent(&LentDeclaration::Token {
                 id: u64::from(token_id),
                 mapping_id: keyexpr_mapping_id,
@@ -14940,7 +14934,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A lend-only session: see `send_declare_subscriber`.
         #[cfg(all(feature = "declare-token", feature = "alloc", feature = "tx-lend-only"))]
         {
-            self.check_outbound_held_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(key.text())?;
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
                 self.dispatch_declare_lent(&LentDeclaration::Token {
                     id: u64::from(token_id),
@@ -14956,8 +14950,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             not(feature = "tx-lend-only")
         ))]
         {
-            let declare =
-                self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let declare = self.prepare_declare_token(token_id, key)?;
             // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on
             // `_Z_RES_OK`) and send, as one step.
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
@@ -14988,20 +14981,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_token(
         &self,
         token_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        // R300 — same gate shape as `send_declare_subscriber`. The full path
-        // to `DeclareOwned` mirrors `dispatch_declare` — the module-level
-        // `use` is `liveliness-token`-gated but this build half is reachable
-        // under bare `declare-token` (the `send_declare_token` wrapper path).
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        // R300 — same gate shape as `send_declare_subscriber`, on the key's whole text, which
+        // the caller holds with the form that names it. The full path to `DeclareOwned` mirrors
+        // `dispatch_declare` — the module-level `use` is `liveliness-token`-gated but this
+        // build half is reachable under bare `declare-token` (the `send_declare_token` wrapper
+        // path).
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_token(
             u64::from(token_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15023,16 +15014,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_subscriber(
         &self,
         subscriber_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
         Ok(build_declare_subscriber(
             u64::from(subscriber_id),
-            keyexpr_mapping_id,
-            keyexpr_suffix,
+            key.wire().id(),
+            key.wire().suffix(),
         )?)
     }
 
@@ -15148,15 +15136,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn prepare_declare_queryable(
         &self,
         queryable_id: crate::wire_id::EntityId,
-        keyexpr_mapping_id: crate::wire_id::ExprId,
-        keyexpr_suffix: Option<&str>,
+        key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let mut declare =
-            build_declare_queryable(u64::from(queryable_id), keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(key.text())?;
+        let mut declare = build_declare_queryable(
+            u64::from(queryable_id),
+            key.wire().id(),
+            key.wire().suffix(),
+        )?;
         // Stamp the local QueryableInfo completeness (the BestMatching producer
         // input). DEFAULT / incomplete omits the ext, so a plain queryable stays
         // byte-identical to before.
@@ -15384,6 +15372,64 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             keys.space().resolve_own_mapping(mapping_id)
         })
         .or_else(|| self.shared_key_literal(mapping_id))
+    }
+
+    /// Run `f` on the key `(mapping_id, suffix)` names as this link resolves it: its whole text,
+    /// read from the declarations the link knows (its own record of them, or the dictionary of
+    /// shared key ids) and the rest after them, named on the wire by that declaration. For a caller
+    /// that holds a key as the wire names it and not its text: a session that keeps its
+    /// declarations names its keys from its own table. Refused, `f` not run, as
+    /// [`Self::reconstruct_outbound_keyexpr`] refuses: the id `0` with no text, or an id the link
+    /// does not know.
+    #[cfg(feature = "alloc")]
+    pub fn with_outbound_key<X>(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        f: impl FnOnce(crate::named_key::NamedKey<'_>) -> Result<X, SendDeclareError>,
+    ) -> Result<X, SendDeclareError> {
+        let text = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
+        let key = match crate::wire_key::MappedId::new(mapping_id) {
+            None => crate::named_key::NamedKey::literal(&text),
+            Some(id) => {
+                // The declaration's literal is the text before the suffix the caller named.
+                let declared = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::named_key::NamedKey::under(&text, crate::named_key::Prefix::of(id, declared))
+            }
+        };
+        f(key.ok_or(SendDeclareError::MissingKeyexpr)?)
+    }
+
+    /// `key` as this link names it, by the link's key-wire form (`shared-key-ids`): the declared
+    /// form keeps it as the session names it, the literal form names it whole, and the shared form
+    /// by the dictionary's id whose entry begins it and the rest after the entry.
+    #[cfg(feature = "shared-key-ids")]
+    pub fn named_on_link<'k>(
+        &self,
+        key: crate::named_key::NamedKey<'k>,
+    ) -> crate::named_key::NamedKey<'k> {
+        let text = key.text();
+        match self.key_wire_on_link(text) {
+            crate::shared_key_ids::KeyWire::Declared => key,
+            crate::shared_key_ids::KeyWire::Literal => {
+                crate::named_key::NamedKey::literal(text).unwrap_or(key)
+            }
+            crate::shared_key_ids::KeyWire::Shared { id, suffix } => {
+                let entry = text
+                    .get(..text.len().saturating_sub(suffix.map_or(0, str::len)))
+                    .unwrap_or_default();
+                crate::wire_key::MappedId::new(id)
+                    .and_then(|id| {
+                        crate::named_key::NamedKey::under(
+                            text,
+                            crate::named_key::Prefix::of(id, entry),
+                        )
+                    })
+                    .unwrap_or(key)
+            }
+        }
     }
 
     /// Read the key expressions this link's session declared from the session's own table,
@@ -15646,52 +15692,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 })
                 .ok_or(SendDeclareError::UnknownMappingId(id)),
         }
-    }
-
-    /// What [`Self::reconstruct_outbound_keyexpr`] decides for a declaration's key, with
-    /// no allocator and so no string to build: the outbound pico-safety gate (R300) on
-    /// a literal key, and the refusals for a key that names nothing. A session with no
-    /// allocator declares no keyexpr of its own (`declare-keyexpr` needs the heap), so
-    /// its table of outbound mappings is always empty and every alias is unknown, the
-    /// answer the owned form gives for an empty table.
-    #[cfg(all(
-        not(feature = "alloc"),
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_declared_keyexpr(
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        match (mapping_id, suffix) {
-            (0, None) => Err(SendDeclareError::MissingKeyexpr),
-            (0, Some(literal)) => Ok(check_outbound_keyexpr_pico_safe(literal)?),
-            (id, _) => Err(SendDeclareError::UnknownMappingId(id)),
-        }
-    }
-
-    /// The outbound pico-safety gate (R300) of a declaration a lend-only session writes from its
-    /// parts: the key the peer will read, resolved through this session's outbound mappings, as
-    /// `prepare_declare_subscriber` gates it before it builds the owned one.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "tx-lend-only",
-        any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token"
-        )
-    ))]
-    fn check_outbound_held_keyexpr(
-        &self,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&str>,
-    ) -> Result<(), SendDeclareError> {
-        let reconstructed = self.reconstruct_outbound_keyexpr(mapping_id, suffix)?;
-        Ok(check_outbound_keyexpr_pico_safe(&reconstructed)?)
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on

@@ -17,7 +17,6 @@
 //! or gone with a lost link. The deliveries hand them out with no lock held; the tokens alive when
 //! the subscriber asked for its history are handed on the declaring thread.
 
-use alloc::borrow::Cow;
 use alloc::sync::Arc;
 
 use wz_capi_port::{SubId, TokenId, WireKey};
@@ -27,6 +26,8 @@ use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::{BoxedLivelinessSampleSink, LivelinessSample};
 #[cfg(feature = "group")]
 use wz_session_core::declare_form::RetractionKey;
+use wz_session_core::named_key::NamedKey;
+#[cfg(feature = "group")]
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 use wz_session_mcu::dial::McuActions;
@@ -35,33 +36,6 @@ use super::LivelinessCallback;
 #[allow(unused_imports)]
 use crate::prelude::*;
 use crate::round::Round;
-
-/// How the link of `actions` names `keyexpr`, which the session's tables name `form` on the
-/// wire: the declaration's id and the rest of the key, or id 0 and the whole key. The link's key-
-/// wire form decides where the session shares key ids (`shared-key-ids`), and the tables' form
-/// stands otherwise.
-fn named_on_link<'a, C: ClockSource + 'static>(
-    actions: &McuActions<C>,
-    keyexpr: &'a str,
-    form: WireForm<'a>,
-) -> (ExprId, Option<Cow<'a, str>>) {
-    #[cfg(feature = "shared-key-ids")]
-    if let Some(linked) = wz_capi_port::wire_on_link(actions.key_wire_on_link(keyexpr)) {
-        if linked.is_literal() {
-            return (0, Some(Cow::Borrowed(keyexpr)));
-        }
-        return (linked.mapping_id, linked.suffix.map(Cow::Owned));
-    }
-    #[cfg(not(feature = "shared-key-ids"))]
-    let _ = actions;
-    if form.mapping == 0 {
-        return (0, Some(Cow::Borrowed(keyexpr)));
-    }
-    (
-        form.mapping,
-        (!form.suffix.is_empty()).then_some(Cow::Borrowed(form.suffix)),
-    )
-}
 
 /// The ABI's form of a key the session's tables name `form` on the wire, for a group told the
 /// entity it names.
@@ -76,18 +50,15 @@ fn wire_key_of(form: WireForm<'_>) -> WireKey {
     )
 }
 
-/// Announce the token `id` the session holds on `keyexpr` over `actions`, its key named as the
-/// session's tables name it on the wire (`form`) or as the link's key-wire form says: whether the
-/// link took it.
+/// Announce the token `id` the session holds on `key` over `actions`, its key named as the
+/// session's tables name it or as the link's key-wire form says: whether the link took it.
 pub(super) fn declare_token<C: ClockSource + 'static>(
     actions: &McuActions<C>,
     id: TokenId,
-    keyexpr: &str,
-    form: WireForm<'_>,
+    key: NamedKey<'_>,
 ) -> bool {
-    let (mapping, suffix) = named_on_link(actions, keyexpr, form);
     actions
-        .send_declare_token(id, mapping, suffix.as_deref())
+        .send_declare_token(id, super::key_on_link(actions, key))
         .is_ok()
 }
 

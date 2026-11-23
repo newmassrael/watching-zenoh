@@ -243,24 +243,32 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                         actions.send_declare_keyexpr(row.id(), row.key()).is_ok()
                     })
                 }
-                Kind::Subscriber => match self.registry.borrow().app.subscribers.row_at(left) {
-                    Some((keyexpr, row)) => row.declare(keyexpr, actions),
-                    None => true,
-                },
+                Kind::Subscriber => {
+                    let tables = self.tables.borrow();
+                    let registry = self.registry.borrow();
+                    let told = match registry.app.subscribers.row_at(left) {
+                        Some((keyexpr, row)) => row
+                            .named(keyexpr, &tables)
+                            .is_some_and(|key| row.declare(key, actions)),
+                        None => true,
+                    };
+                    told
+                }
                 Kind::Interest => self.interests[left].send(actions),
                 #[cfg(feature = "queryable")]
-                Kind::Queryable => self.queryables[left].declare(actions),
+                Kind::Queryable => {
+                    let entry = &self.queryables[left];
+                    let named = entry.named(&self.tables.borrow());
+                    named.is_some_and(|key| entry.declare(key, actions))
+                }
                 #[cfg(feature = "liveliness")]
                 Kind::Token => {
                     let tables = self.tables.borrow();
                     let row = tables.tokens().iter().nth(left);
                     let told = row.map_or(true, |(_, row)| {
-                        super::liveliness::declare_token(
-                            actions,
-                            row.id(),
-                            row.key().as_str(),
-                            tables.wire_of(row.key()),
-                        )
+                        tables.named(row.key()).is_some_and(|key| {
+                            super::liveliness::declare_token(actions, row.id(), key)
+                        })
                     });
                     told
                 }
@@ -346,17 +354,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn announce_subscriber(&mut self, index: usize) {
         let place = self.start_of(Kind::Subscriber) + index;
         let registry = &self.registry;
+        let tables = &self.tables;
         announce_on(
             &mut self.faces,
             place,
             OnRefusal::Forget,
             |actions| {
-                registry
-                    .borrow()
+                let tables = tables.borrow();
+                let registry = registry.borrow();
+                let told = registry
                     .app
                     .subscribers
                     .row_at(index)
-                    .is_some_and(|(keyexpr, row)| row.declare(keyexpr, actions))
+                    .is_some_and(|(keyexpr, row)| {
+                        row.named(keyexpr, &tables)
+                            .is_some_and(|key| row.declare(key, actions))
+                    });
+                told
             },
             |_| {},
         );
@@ -413,12 +427,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             |actions| {
                 let tables = tables.borrow();
                 let taken = tables.tokens().get(handle).is_some_and(|row| {
-                    super::liveliness::declare_token(
-                        actions,
-                        row.id(),
-                        row.key().as_str(),
-                        tables.wire_of(row.key()),
-                    )
+                    tables
+                        .named(row.key())
+                        .is_some_and(|key| super::liveliness::declare_token(actions, row.id(), key))
                 });
                 taken
             },

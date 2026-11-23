@@ -31,6 +31,7 @@ use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
+use wz_session_core::named_key::NamedKey;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::query_sink::BoxedQuerySink;
 use wz_session_core::registry_error::RegisterError;
@@ -204,10 +205,10 @@ fn declare_one<C: ClockSource + 'static>(
         return false;
     };
     match declaration {
-        Declaration::Queryable(key) => actions
-            .send_declare_queryable(id, 0, Some(key), false)
-            .is_ok(),
-        Declaration::Subscriber(key) => actions.send_declare_subscriber(id, 0, Some(key)).is_ok(),
+        Declaration::Queryable(key) => NamedKey::literal(key)
+            .is_some_and(|key| actions.send_declare_queryable(id, key, false).is_ok()),
+        Declaration::Subscriber(key) => NamedKey::literal(key)
+            .is_some_and(|key| actions.send_declare_subscriber(id, key).is_ok()),
     }
 }
 
