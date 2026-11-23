@@ -25,6 +25,18 @@ Two surfaces take bytes wz did not make.
 | `config` | the config verdict of `wz-capi-c` |
 | `sender` | the end-to-end sender of `wz-capi-c` |
 
+**The pico C ABI's own doors** (`wz_ext_*`, package `wz-fuzz-pico-ext`), in the
+build the release package makes of the library:
+
+| target | what it drives |
+|--------|----------------|
+| `pico_transport` | a session dialled over a transport the program supplies, fed through `wz_ext_transport_received` as a stream or as datagrams, after a far end the harness plays answered its handshake |
+| `pico_config` | the doors that state a config's policies, profile, zenoh document, key ids and key-wire forms, the runtime's limits document, and what an open would ask of the system |
+| `pico_e2e` | the end-to-end sender and the receiving judge, every frame the sender builds judged again by a receiver of the same profile |
+| `pico_instance_key` | the instance keyer over a schema and a description, its last values held to what was recorded or set |
+| `pico_catalog` | the message catalog reader, every entry read back and found again, and the sender, receiver and supervision rows it makes |
+| `pico_payload` | the payload schema reader and a catalog message's payload: bytes decoded, values set and read at paths, and what it encodes decoded into the same bytes |
+
 **The network ingress, the bytes a peer sends into a session.** Each target
 reads its input as the units of a link, each behind its two-byte
 little-endian length, as a stream link frames them:
@@ -63,6 +75,15 @@ per-session slot profile, the C ABI's engine), which must meet neither each
 other nor the dissector's selection, so each is a package of its own and
 `fuzz.sh build` builds each package in an invocation of its own
 (`scripts/lib/fuzz_seeds.py --packages` names the package of each target).
+
+`pico-ext` writes no feature list: its doors are fuzzed in the build of the
+release package, so `fuzz.sh build` resolves `configs/profiles/host-peer-ext.conf`
+(`fuzz_seeds.py --features-of`, through the resolver the verification lanes
+use, after provisioning the pinned Kconfig interpreter) and names the result on
+cargo's command line. Each name is a feature of the package that forwards to the
+library's feature of that name; a capability the profile comes to name that no
+row forwards is refused by name. A person running `cargo fuzz` inside
+`crates/wz-fuzz` passes the same `--features` for these targets.
 `ingress-common` is what the ingress targets share, and depends on no crate
 of the session shell for the same reason.
 
