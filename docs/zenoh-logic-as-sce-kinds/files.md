@@ -799,6 +799,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/multicast_rx.rs` | S1 | |
 | `crates/wz-session-core/src/multicast_stats.rs` | S1 | |
 | `crates/wz-session-core/src/multicast_tx.rs` | S1 | |
+| `crates/wz-session-core/src/named_key.rs` | S2 | |
 | `crates/wz-session-core/src/namespace.rs` | S2 | |
 | `crates/wz-session-core/src/network_message.rs` | S1 | |
 | `crates/wz-session-core/src/ntp64.rs` | S1 | |
