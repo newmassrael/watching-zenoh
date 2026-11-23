@@ -452,6 +452,18 @@ suites (C1co, Layer Z) unchanged.
    `wz-capi-port` `lib.rs` (`WireKey`), `engine.rs` (`&str` arguments), `wz-session-core`
    `wireexpr_resolve.rs`, `shared_key_ids.rs`. Families: the declarations, `z_put`, `z_get`.
    Tests: a key one byte past `MAX_KEYEXPR_BYTES` refused; a join that would exceed it refused.
+   Done in part: an object of the ABI keeps its key's text in the session's key arena, a block it
+   holds through the port (`HeldKey`, `SessionKeys`, `SessionEngine::key_arena` in
+   `wz-capi-port` `held_key.rs`), shared and let go of under the session's lock and read with
+   none; a key a row of the engine's record keeps already is shared with it, so a publisher's key,
+   its write filter's, its Interest's and the program's object take one block; a declared key's
+   literal and a write filter's key are no copies of their own (`KeyText` in `wz-capi-pico`
+   `keyexpr.rs`), and an Interest's row reads its form's rest of the key from its own key. A key
+   the arena has no room for answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having sent nothing, one past
+   the session's `MAX_KEYEXPR_BYTES` `Z_EINVAL`. Tests: `held_key.rs` of the port,
+   `tests/held_keys.rs` of `wz-capi-coop` (a cycle of holds and of declarations ten times past
+   the arena gives every block back), `arena_key_tests` of `keyexpr.rs`. What is left is
+   section 7's.
 8. **U7. Closures by value.** `wz-capi-port` `lib.rs` (the sink factories), `wz-capi-pico`
    `ffi.rs`, `handlers.rs`, `matching.rs`, `write_filter.rs`, `wz-session-core` `sink.rs`,
    `reply_sink.rs`, `decl_sink.rs`, `query_sink.rs`. Families: the declarations. Tests: the drop
@@ -460,7 +472,11 @@ suites (C1co, Layer Z) unchanged.
    `cancellation.rs`, `wz-capi-port` `cancellation.rs`, `query.rs`, `wz-capi-coop`
    `engine/query.rs`, `engine/get.rs`, `wz-session-core` `query.rs`, `reply.rs`,
    `owed_replies.rs`. Families: `z_get`, query answered. Tests: a get past its table refused
-   having sent nothing; a query with no held-query row answered with its Final at once.
+   having sent nothing; a query with no held-query row answered with its Final at once. Its
+   remainder done: a query is answered into a stage of the query plane, one for each held query
+   (`MAX_PENDING_FINALS`), each lent at the open with the rows and the bytes of a face's stage of
+   replies (`AnswerStages` in `engine/query.rs`, the plan's row `answer stages`); an answer that
+   finds every stage held stages no reply, is counted, and its Final is sent all the same.
 10. **U9. Handle objects and payloads from the process pools.** `wz-capi-pico` `object_slot.rs`
     (no heap fallback), `object_pool.rs` (reserved at the first call, decision Q1),
     `bytes.rs`, `string_array.rs`, `encoding.rs`, `config.rs`. Family: owned values. Tests:
@@ -499,20 +515,19 @@ U10 the ABI's own objects; U11 to U15 the rest; U16 closes the phase.
 ## 7. The heap the C ABI build still links
 
 What a cooperative C library still instantiates with the `Heap` policy, or on the heap, after the
-units on the track so far (U0, U1, U2, U4 in part, U5, U8, U9, the peer-written tables of
+units on the track so far (U0, U1, U2, U4 in part, U5, U6 in part, U8, U9, the peer-written tables of
 section 4.5 and the links' reassembly of section 4.9), read from the source and to be confirmed by the symbol diff of the library, and the
 unit that takes each away:
 
 | what | where | taken away by |
 |------|-------|---------------|
-| the reply stage a held query is answered into (`ReplyStage::held_to`, the build's profile) | `wz-capi-coop` `engine.rs`, `engine/query.rs` | U8's remainder: the held query's row of the query plane |
 | the declaration watchers inside the lent observer (`remote_subscribers`, `remote_queryables`, `liveliness`) | `wz-session-core` `slot_observer.rs` (`SlotObserverOf::lent`) | U5's remainder: their lists lent at open, at most `MAX_DECL_OBSERVERS` each |
 | the keys canonized for the ABI's own key expressions (`canonize_keyexpr`, a `Heap` string) | `wz-capi-pico` `keyexpr.rs` | U6 |
 | the held queries, get events and handed publish legs (`VecDeque`, owned keys and payloads) | `wz-capi-coop` `engine.rs`, `engine/query.rs`, `engine/get.rs` | U4's remainder |
 | the faces' list, the sample marshal's key and payload copies, the closures | `engine/registry.rs` (`Vec<FaceTables>`), `wz-capi-pico` `pubsub.rs` (`SampleMarshal`), the port's sink factories | 4.6, U9's borrowed marshal, U7 |
 | a payload's place (`box_bytes`: a `Box<ByteBuf>` for each `z_bytes_clone` and each copy, as a build with no thread-local cache keeps none) and its bytes (`Backing::Owned`, an `Arc` over a `Vec`) | `wz-capi-pico` `bytes.rs` | U9: the pools and a block pool of HELD_PAYLOAD_BYTES. `object-pool` implies `unstable-api`, whose layouts a program built without `Z_FEATURE_UNSTABLE_API` (the speed matrix's) does not compile against, so such a build needs the pools apart from their doors |
 | the place of each handle object of a build without the pools (`Slot::take`, a `Box`) | `wz-capi-pico` `object_slot.rs` | U9, as above |
-| an entity's own copies of its key: `DeclaredKeyexpr`'s literal and its `Arc<WireDeclaration>`, a write filter's `keyexpr`, the `String` each port call takes and drops, an Interest form's suffix, a subscriber's wire anchor | `wz-capi-pico` `keyexpr.rs`, `write_filter.rs`, `pubsub.rs`; `wz-capi-port` `engine.rs` | U6, and U10 for the port's arguments (`&str`) |
+| what is left of an entity's own copies of its key: a declaration's `Arc<WireDeclaration>`, which every share of the key clones, and the anchor a subscriber's wire key keeps (an `Arc` of two shares of the keys, no copies of them now); a key that opens wild, held twice (the program's object's block and the record's row's, as the object is made before the row); the `String` each port call takes and drops; a key the program builds with no session (`z_keyexpr_from_str`, `z_keyexpr_concat`, a clone of a view) | `wz-capi-pico` `keyexpr.rs`, `pubsub.rs`; `wz-capi-port` `engine.rs` | U6's remainder: the record's rows hold the declarations they name by count (the row of `MAX_DECLARED_KEYEXPRS` counts its holders already), which the publish leg handed to the next holder of a held session (`HandedLeg`) must take too though it is queued outside the session's lock, and the liveliness rows (`engine/liveliness.rs`) with them; U10 for the port's arguments (`&str`); U9 for a key of no session |
 | each callback's `Arc<Mutex<..>>` in the engine's `targets`, and the `Vec` that holds them | `wz-capi-coop` `engine.rs` | U7 |
 | a get's list of the faces it asks (`up_faces`, a `Vec` for each get) | `wz-capi-coop` `engine.rs` | U8's remainder |
 | the kernel objects of the OS layer on Zephyr: a `k_mutex` for each `wz_capi_port::os::Mutex`, a `k_condvar` for each condition variable, the read task's `k_thread` record | `deploy/zephyr-common/wz_os_zephyr.c` | U11: the session's locks and its one thread placed at open |
@@ -540,7 +555,7 @@ heap's own header of each block, not a measurement.
 
 | site | when | bytes | unit |
 |------|------|------:|------|
-| the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states | U1; the size is the image's limits |
+| the session's arena (`ArenaPlan`, reserved through `AllocatorMemory`) | open | about 190 KB at the build's defaults, the measured peak less what lies outside it (a lane of 64 KiB, 224 rows of the engine's record each with a key of 256 bytes, eight reply rows of 1 KiB, two reassembly chains of 4 KiB, a batch and two slots); about 40 KB at the pico preset (section 9.1); about 22 KB under the limits `arm_w.conf` states; the stages held queries are answered into (U8) add one stage for each of `MAX_PENDING_FINALS`, `MAX_PENDING_REPLIES` rows with their keys and payloads each, about 86 KB at the build's defaults, about 5.4 KB at the pico preset and about 200 bytes under `arm_w.conf` (estimates) | U1; the size is the image's limits |
 | the engine (`Arc::new_cyclic`) and its lane (`SharedLane`), with the lane's storage of its event slots (`DELIVERY_LANE_EVENTS`, the build's: a bookkeeping entry, its rehearsal's copy, a place in the list handed on and a record for each) and its two queues of 64 handles, and the planes beside it (`QueryPlane`, `LinkRooms`, `MatchFlips`) | open | a few KB, and about 150 a lane event slot: about 9,600 at the build's 64, about 1,200 at the 8 `arm_w.conf` states | U4 (the records), U1 |
 | the registry (`Rc<RefCell<Registry>>`) and a face's peer tables, whose rows of peer declarations and aliases are inline at the build's `MAX_REMOTE_DECLS` and `MAX_PEER_KEYEXPR_ALIASES`, each the id and the place of its key in the key arena (section 9.4) | open | about 1,500 bytes of rows at the build's defaults, about 400 under `arm_w.conf` (16 KB and 1.3 KB while each row held its key inline) | U5 |
 | a `k_mutex` for each lock of the engine and of each entity that holds one, a `k_condvar` for each condition variable | open, and each declaration | 20 to 30 each, some fifteen at open | U11 |
@@ -548,8 +563,9 @@ heap's own header of each block, not a measurement.
 | the config (`ConfigState`, a `BTreeMap<u8, String>` of the mode and the locator) | before the open, dropped by it | about 200, alive while the arena is reserved | U14 |
 | a link's setup: the entropy source's box, the link's own key space (`LinkOwnSpace`), the lane's gate (`LaneGate`), the socket's `Closer` and its readiness box (`wz-runtime-zephyr` `fd.rs`) | open, each dial | about 200 | U10, U11 |
 | the read task: a stack of `CONFIG_WZ_OS_THREAD_STACK_SIZE` from `k_thread_stack_alloc`, from the heap while the kernel keeps no pool of dynamic stacks; its `struct wz_os_thread`; `start_reader`'s flag and boxed body | `zp_start_read_task` (the mt cells) | 16,384 and about 250 | `arm_w_mt.conf` places the stack in a static pool, as zenoh-pico places its tasks' (`vendor/zenoh-pico/src/system/zephyr/system.c` @ `K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);`); the rest U11 |
-| a publisher: its handle's `Box`, its key's literal and `Arc<WireDeclaration>`, its write filter's key and the `k_mutex` of the filter's listeners; and, dropped within the call, the key handed to `acquire_keyexpr` and to `declare_write_filter` | each declaration | about 250 kept, two keys dropped | U9, U6, U10, U11 |
-| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's literal and declaration, the wire key's anchor (two more copies of the keys), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key as `String` | each declaration | about 350 kept | U7, U6, U10, U5 |
+| a publisher: its handle's `Box`, its key's `Arc<WireDeclaration>` and the `k_mutex` of its write filter's listeners (its key's literal and its filter's key are one block of the key arena, which the record's rows of the key share); and, dropped within the call, the key handed to `acquire_keyexpr` and to `declare_write_filter`, and the Interest form's rest of the key | each declaration | about 200 kept (estimate), three keys dropped | U9, U6's remainder, U10, U11 |
+| a background subscriber: the closure's `Arc<CClosure>` and its `ReleaseLatch`, its key's declaration, the wire key's anchor (an `Arc` of two shares of the keys, whose text is the key arena's), the sink factory's `Arc`, the engine's `BoxedSink`, the callback's boxes, its `Arc<Mutex<..>>` and `k_mutex` in `targets`; and, dropped within the call, the key as `String` | each declaration | about 300 kept (estimate) | U7, U6's remainder, U10, U5 |
+| a query a queryable answers: the stage its replies are staged in, one of the query plane's lent at the open (`AnswerStages`) | each query answered | none, read from the source; the open's arena holds one stage for each of `MAX_PENDING_FINALS` | done (U8) |
 | `z_bytes_clone`: the payload's place (`box_bytes`) | each put of the put cell | 24, freed by the put | U9 |
 | `z_bytes_copy_from_buf`: the place, the `Arc<Backing>` and the copied bytes | each round trip of the rtt cell | 56 and the payload, freed by the put | U9 |
 | `z_publisher_put` on a publisher declared with no options of its own beyond the congestion control: `publish_plain`, `put_plain_filtered`, `send_plain_put_qos` into a slot the arena lent | each put | none, read from the source | done (U2) |
@@ -842,7 +858,7 @@ is the next cut, not taken here.
 | the lane's event slots (8) and its two queues of 64 handles | about 1,200 and about 1,150 | none | the queues' capacity is their document's (`sources/session/delivery_lane_queue.scxml`): one of the image's event slots needs the document to take it from the limit |
 | a receive buffer and one transmit slot of the batch | 4,096 | the same, a read and a write buffer | none: this is zenoh-pico's own floor |
 | the objects of the open outside the arena: the engine and its planes, the kernel objects, the handle, the registry's face tables | about 5,100 | its session and transport structs | the registry's face tables (their rows of what the peer declares, inline at the build's capacities, about 400) lent from the arena as the other tables are (section 4.5); the kernel objects one per lock the engine keeps, not one per entity |
-| the tables lent from the arena: the record, the application's, the gets, a face's peer tables, and the key arena | about 2,900 | lists of what is declared, allocated per entity | the key held twice by a local declaration (the record's and the application's table's) shared as one block, by handing the record's `KeyRef` to the registration, about 100 here and 600 at the pico preset |
+| the tables lent from the arena: the record, the application's, the gets, a face's peer tables, and the key arena | about 2,900 | lists of what is declared, allocated per entity | the key held twice by a local declaration (the record's and the application's table's) shared as one block, by handing the record's `KeyRef` to the registration, about 100 here and 600 at the pico preset; the record's own rows and the program's objects already share one block for a key (U6) |
 | each declaration and each message | some hundreds, freed by the put | the same order | the places the owned objects of section 9 still allocate (U6, U7, U9) |
 
 What each cell is expected to peak at with the event slots `arm_w.conf` states (about 8,400 bytes
