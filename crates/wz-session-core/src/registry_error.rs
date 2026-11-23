@@ -57,6 +57,9 @@ pub enum RegisterError {
     /// Produced by the subscriber table and the queryable registry, whose
     /// ids are the declaration ids on the wire.
     IdsExhausted,
+    /// The entity the declaration is made on is not declared: a matching listener's write filter,
+    /// undeclared with its publisher or querier.
+    OwnerGone,
 }
 
 impl core::fmt::Display for RegisterError {
@@ -70,6 +73,7 @@ impl core::fmt::Display for RegisterError {
             Self::IdsExhausted => {
                 f.write_str("registry has handed out every 32-bit declaration id")
             }
+            Self::OwnerGone => f.write_str("the entity the declaration is made on is not declared"),
         }
     }
 }

@@ -258,14 +258,18 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
     let live = tables
         .declare_liveliness_subscriber("l", false, KeyForm::default(), latched(2))
         .unwrap();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "m", false)
+        .unwrap()
+        .handle;
     let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "m", false, latched(3))
+        .declare_matching_listener(filter, latched(3))
         .unwrap();
     let get = tables.begin_get(1, "g", 10, 4).unwrap();
     let calls = (
         tables.begin_queryable(qbl.handle).unwrap(),
         tables.begin_liveliness_subscriber(live.handle).unwrap(),
-        tables.begin_matching_listener(listener.handle).unwrap(),
+        tables.begin_matching_listener(listener).unwrap(),
         tables.pin_get(get.handle).unwrap(),
     );
     assert_eq!((calls.0.call, calls.1.call, calls.2.call), (1, 2, 3));
@@ -279,11 +283,10 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .unwrap()
         .row
         .is_none());
-    assert!(tables
-        .undeclare_matching_listener(listener.handle)
-        .unwrap()
-        .row
-        .is_none());
+    assert!(matches!(
+        tables.undeclare_matching_listener(listener),
+        Some(Removal::AfterCalls)
+    ));
     assert!(matches!(
         tables.end_get(get.handle),
         Some(Removal::AfterCalls)
@@ -293,7 +296,7 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
     assert!(ended::<CClosure<u32>>(calls.1));
     assert!(tables.release_liveliness_subscriber(live.handle).is_some());
     assert!(ended::<CClosure<u32>>(calls.2));
-    assert!(tables.release_matching_listener(listener.handle).is_some());
+    assert!(tables.release_matching_listener(listener).is_some());
     assert_eq!(tables.unpin_get(calls.3).unwrap().into_callback(), 4);
 }
 
@@ -426,7 +429,7 @@ fn queries_tokens_and_liveliness_reach_by_their_keys() {
 }
 
 #[test]
-fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
+fn filters_of_one_kind_and_key_share_one_interest_their_listeners_read() {
     let mut tables = Tables::new();
     let first = tables
         .declare_write_filter(Plane::Subscribers, "k", false)
@@ -436,10 +439,7 @@ fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
         .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap();
     assert_eq!(second.interest, None);
-    let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "k", false, 9)
-        .unwrap();
-    assert_eq!(listener.interest, None);
+    let listener = tables.declare_matching_listener(first.handle, 9).unwrap();
     // Another kind on the same key asks apart.
     let querier = tables
         .declare_write_filter(
@@ -454,43 +454,86 @@ fn filters_and_listeners_of_one_kind_and_key_share_one_interest() {
     assert_eq!(tables.interests().len(), 2);
     let interest = tables.write_filters().get(first.handle).unwrap().interest();
     assert_eq!(tables.interest_key(interest), Some("k"));
-    assert_eq!(tables.interests().get(interest).unwrap().holds(), 3);
-    // The Interest's Final goes with its last holder.
+    assert_eq!(tables.interests().get(interest).unwrap().holds(), 2);
     assert_eq!(
         tables
-            .undeclare_write_filter(first.handle)
+            .matching_listeners()
+            .get(listener)
+            .unwrap()
+            .interest(),
+        interest,
+        "a listener reads its filter's Interest"
+    );
+    // The Interest's Final goes with its last holder; the listener goes with its filter.
+    let mut gone = Vec::new();
+    assert_eq!(
+        tables
+            .undeclare_write_filter(first.handle, |handle, removal| gone.push((handle, removal)))
             .unwrap()
             .interest_final,
         None
     );
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].0, listener);
+    assert!(matches!(&gone[0].1, Removal::Taken(row) if *row.callback() == 9));
+    assert!(tables.matching_listeners().get(listener).is_none());
     assert_eq!(
         tables
-            .undeclare_write_filter(second.handle)
+            .undeclare_write_filter(second.handle, |_, _| unreachable!("no listener on it"))
             .unwrap()
             .interest_final,
-        None
+        Some(asked)
     );
-    let unwatched = tables.undeclare_matching_listener(listener.handle).unwrap();
-    assert_eq!(unwatched.interest_final, Some(asked));
-    assert_eq!(unwatched.row.unwrap().into_callback(), 9);
     assert_eq!(tables.interests().len(), 1);
 }
 
 #[test]
-fn a_full_listener_table_refuses_before_an_interest_is_asked() {
+fn a_listener_on_no_filter_is_refused_with_its_callback() {
+    let mut tables = Tables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let _ = tables.undeclare_write_filter(filter, |_, _| {});
+    let refused = tables.declare_matching_listener(filter, 5).unwrap_err();
+    assert_eq!(refused.why, RegisterError::OwnerGone);
+    assert_eq!(refused.callback, 5);
+}
+
+#[test]
+fn a_filter_undeclared_while_its_listener_is_called_leaves_it_to_the_last_call() {
+    let mut tables = LatchedTables::new();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let listener = tables
+        .declare_matching_listener(filter, latched(4))
+        .unwrap();
+    let call = tables.begin_matching_listener(listener).unwrap();
+    let mut gone = Vec::new();
+    let _ = tables.undeclare_write_filter(filter, |handle, removal| gone.push((handle, removal)));
+    assert!(matches!(gone.as_slice(), [(handle, Removal::AfterCalls)] if *handle == listener));
+    assert!(tables.begin_matching_listener(listener).is_none());
+    assert!(ended::<CClosure<u32>>(call));
+    assert!(tables.release_matching_listener(listener).is_some());
+}
+
+#[test]
+fn a_full_listener_table_refuses_and_hands_the_callback_back() {
     let mut tables = Tables::new();
     tables.limit_to(&TableRows {
         matching_listeners: 0,
         ..rows()
     });
-    let refused = tables
-        .declare_matching_listener(Plane::Subscribers, "k", false, 4)
-        .unwrap_err();
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", false)
+        .unwrap()
+        .handle;
+    let refused = tables.declare_matching_listener(filter, 4).unwrap_err();
     assert_eq!(refused.why, RegisterError::TableFull);
     assert_eq!(refused.callback, 4);
-    assert!(tables.interests().is_empty());
-    // No id was spent on an Interest that was never asked.
-    assert_eq!(tables.declare_token("t", KeyForm::default()).unwrap().id, 1);
+    assert_eq!(tables.interests().len(), 1, "the filter's alone");
 }
 
 #[test]
@@ -510,7 +553,7 @@ fn a_write_filter_keeps_the_peers_answer_until_their_tables_change() {
     peers.written.set(1);
     assert_eq!(tables.write_filter_open(filter, &peers), Some(true));
     assert_eq!(peers.asked.get(), 2);
-    let _ = tables.undeclare_write_filter(filter);
+    let _ = tables.undeclare_write_filter(filter, |_, _| {});
     assert_eq!(tables.write_filter_open(filter, &peers), None);
 }
 
@@ -558,10 +601,11 @@ fn only_a_complete_queryable_counts_where_completeness_is_required() {
 #[test]
 fn a_matching_listener_is_told_each_change_once() {
     let mut tables = Tables::new();
-    let listener = tables
-        .declare_matching_listener(Plane::Subscribers, "k", true, 3)
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "k", true)
         .unwrap()
         .handle;
+    let listener = tables.declare_matching_listener(filter, 3).unwrap();
     let mut cursor = 0;
     assert_eq!(tables.next_matching_change(&mut cursor, &NoPeers), None);
     let sub = subscribe(&mut tables, "k", Locality::Any, 1);

@@ -88,12 +88,15 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   entity names the key expression declaration its key starts with by the handle of that row, not
   by a copy of its id and suffix: the wire form (`SessionTables::wire_of`) is the declaration's
   id and the rest of the entity's own key. Holding the declaration is a count in its row, released
-  when the entity is undeclared; the last release retracts the declaration. A filter and a
-  listener keep no key: they read the key of the Interest they hold.
-- **Interests.** A write filter and a matching listener hold one Interest each, shared by every
-  filter and listener on the same kind and key; a new holder of an existing Interest sends
-  nothing, the last release sends its Final. The Interest table's bound is the sum of the two, so
-  a filter or a listener the table has room for always finds room for its Interest.
+  when the entity is undeclared; the last release retracts the declaration. A filter keeps no
+  key: it reads the key of the Interest it holds.
+- **Interests.** A write filter holds one Interest, shared by every filter on the same kind and
+  key; a new holder of an existing Interest sends nothing, the last release sends its Final. The
+  Interest table's bound is the filters', so a filter the table has room for always finds room
+  for its Interest.
+- **Matching listeners.** A listener is declared on a write filter (its publisher's or
+  querier's), whose row owns it: it reads the filter's kind, key and Interest, and undeclaring the
+  filter undeclares every listener on it, each by the latch rule of P11 below.
 - **Ids.** One entity id space (the wire's `EntityId`, from 1, refused once spent rather than
   wrapped); key expression ids from 1, skipping any still declared; request ids skipping any
   still pending.
@@ -126,8 +129,10 @@ fn undeclare_subscriber(&mut self, h: SubscriberHandle) -> Option<Undeclared<Sub
 // ... the same pair for queryables, tokens and liveliness subscribers.
 fn declare_write_filter(&mut self, plane: Plane, key: &str, count_local: bool)
     -> Result<Watching<kind::WriteFilter>, RegisterError>;
-fn declare_matching_listener(&mut self, plane: Plane, key: &str, count_local: bool, cb: F::Matching)
-    -> Result<Watching<kind::MatchingListener>, Refused<F::Matching>>;
+fn declare_matching_listener(&mut self, filter: WriteFilterHandle, cb: F::Matching)
+    -> Result<MatchingListenerHandle, Refused<F::Matching>>;
+fn undeclare_write_filter(&mut self, h: WriteFilterHandle,
+    each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>)) -> Option<Unwatched<WriteFilterRow>>;
 fn begin_get(&mut self, face: FaceId, key: &str, deadline: u64, cb: F::Reply)
     -> Result<GetBegun, Refused<F::Reply>>;
 

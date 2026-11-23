@@ -20,8 +20,8 @@
 //! entity that names a key expression declaration of the session's holds that declaration's row
 //! ([`KeyForm::prefix`]) instead of a copy of its id and suffix: its wire form is read off both
 //! ([`SessionTables::wire_of`]), and the declaration is retracted when its last holder goes. A
-//! write filter and a matching listener keep no key: they read the key of the Interest they hold,
-//! which every filter and listener of one kind on one key share.
+//! write filter keeps no key: it reads the key of the Interest it holds, which every filter of one
+//! kind on one key shares, and a matching listener, declared on a filter, reads its filter's.
 //!
 //! # Refusals
 //!
@@ -120,8 +120,9 @@ pub type FaceId = u64;
 /// The build's bound of the write filters: a publisher's and a querier's each.
 pub const FILTER_ROWS: usize = caps::MAX_PUBLISHERS.saturating_add(caps::MAX_QUERIERS);
 
-/// The build's bound of the Interests: one for each write filter and matching listener at most.
-pub const INTEREST_ROWS: usize = FILTER_ROWS.saturating_add(caps::MAX_MATCHING_LISTENERS);
+/// The build's bound of the Interests: one for each write filter at most, whose matching listeners
+/// read its own.
+pub const INTEREST_ROWS: usize = FILTER_ROWS;
 
 /// What a write filter or a matching listener counts: the subscribers, or the queryables, complete
 /// ones alone where the querier's target requires them.
@@ -463,8 +464,11 @@ impl WriteFilterRow {
 }
 
 /// A matching listener: told when what its publisher or querier reaches starts or stops matching.
+/// It is declared on that publisher's or querier's write filter, whose row owns it: it reads the
+/// filter's Interest, and goes with the filter ([`SessionTables::undeclare_write_filter`]).
 #[derive(Debug)]
 pub struct MatchingRow<Cb> {
+    filter: WriteFilterHandle,
     plane: Plane,
     interest: InterestHandle,
     count_local: bool,
@@ -473,6 +477,11 @@ pub struct MatchingRow<Cb> {
 }
 
 impl<Cb> MatchingRow<Cb> {
+    /// The write filter it is declared on.
+    pub fn filter(&self) -> WriteFilterHandle {
+        self.filter
+    }
+
     /// What it counts.
     pub fn plane(&self) -> Plane {
         self.plane
@@ -609,10 +618,10 @@ pub struct TableRows {
 }
 
 impl TableRows {
-    /// The Interests: one for each write filter and matching listener at most, so a filter or a
-    /// listener the tables have room for always finds room for its Interest.
+    /// The Interests: one for each write filter at most, so a filter the tables have room for
+    /// always finds room for its Interest; a matching listener reads its filter's.
     pub fn interests(&self) -> usize {
-        self.write_filters.saturating_add(self.matching_listeners)
+        self.write_filters
     }
 }
 
@@ -1352,12 +1361,28 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
     }
 
-    /// Undeclare the write filter `handle` names.
+    /// Undeclare the write filter `handle` names, and every matching listener declared on it:
+    /// `each` is handed each listener's handle and its removal, the row when no call of it runs,
+    /// else [`Removal::AfterCalls`], when the call that ends last lets it go
+    /// ([`Self::release_matching_listener`]).
     pub fn undeclare_write_filter(
         &mut self,
         handle: WriteFilterHandle,
+        mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
     ) -> Option<Unwatched<WriteFilterRow>> {
         let interest = self.write_filters.get(handle)?.interest;
+        let mut cursor = 0usize;
+        while let Some((listener, owned)) = self
+            .matching
+            .next_from(&mut cursor)
+            .map(|(listener, row)| (listener, row.filter == handle))
+        {
+            if owned {
+                if let Some(removal) = self.retire_matching_listener(listener) {
+                    each(listener, removal);
+                }
+            }
+        }
         let removal = self.write_filters.remove(handle)?;
         let interest_final = self.release_interest(interest);
         Some(Unwatched {
@@ -1366,65 +1391,57 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         })
     }
 
-    /// Declare a matching listener on `key`. It starts as not matching: the first
-    /// [`Self::next_matching_change`] tells it otherwise where it matches.
+    /// Declare a matching listener on the write filter `filter`, whose kind, key and Interest it
+    /// reads and with which it goes. It starts as not matching: the first
+    /// [`Self::next_matching_change`] tells it otherwise where it matches. Refused with
+    /// [`RegisterError::OwnerGone`] when `filter` names no filter, the callback handed back.
     pub fn declare_matching_listener(
         &mut self,
-        plane: Plane,
-        key: &str,
-        count_local: bool,
+        filter: WriteFilterHandle,
         callback: F::Matching,
-    ) -> Result<Watching<kind::MatchingListener>, Refused<F::Matching>> {
-        if self.matching.is_full() {
+    ) -> Result<MatchingListenerHandle, Refused<F::Matching>> {
+        let Some(owner) = self.write_filters.get(filter) else {
             return Err(Refused {
-                why: RegisterError::TableFull,
+                why: RegisterError::OwnerGone,
                 callback,
             });
-        }
-        let (interest, asked) = match self.hold_interest(plane.interest_kind(), key) {
-            Ok(held) => held,
-            Err(why) => return Err(Refused { why, callback }),
         };
         let row = MatchingRow {
-            plane,
-            interest,
-            count_local,
+            filter,
+            plane: owner.plane,
+            interest: owner.interest,
+            count_local: owner.count_local,
             last: false,
             callback,
         };
-        match self.matching.insert(row) {
-            Ok(handle) => Ok(Watching {
-                handle,
-                interest: asked,
-            }),
-            Err(CapacityFull(row)) => {
-                let _ = self.release_interest(interest);
-                Err(Refused {
-                    why: RegisterError::TableFull,
-                    callback: row.callback,
-                })
-            }
-        }
+        self.matching
+            .insert(row)
+            .map_err(|CapacityFull(row)| Refused {
+                why: RegisterError::TableFull,
+                callback: row.callback,
+            })
     }
 
-    /// Undeclare the matching listener `handle` names.
+    /// Undeclare the matching listener `handle` names, its filter staying: its row when no call of
+    /// it runs, else [`Removal::AfterCalls`], when the call that ends last lets it go
+    /// ([`Self::release_matching_listener`]).
     pub fn undeclare_matching_listener(
         &mut self,
         handle: MatchingListenerHandle,
-    ) -> Option<Unwatched<Matching<F>>> {
-        let (interest, idle) = self
-            .matching
-            .get(handle)
-            .map(|row| (row.interest, row.callback.retire()))?;
-        if !idle {
+    ) -> Option<Removal<Matching<F>>> {
+        self.retire_matching_listener(handle)
+    }
+
+    /// Retire the matching listener `handle` names: it leaves every lookup and no call of it
+    /// begins.
+    fn retire_matching_listener(
+        &mut self,
+        handle: MatchingListenerHandle,
+    ) -> Option<Removal<Matching<F>>> {
+        if !self.matching.get(handle)?.callback.retire() {
             let _held = self.matching.pin(handle)?;
         }
-        let removal = self.matching.remove(handle)?;
-        let interest_final = self.release_interest(interest);
-        Some(Unwatched {
-            row: removal.taken(),
-            interest_final,
-        })
+        self.matching.remove(handle)
     }
 
     /// Whether the session's own entities of `plane` that hear what the session itself sends
