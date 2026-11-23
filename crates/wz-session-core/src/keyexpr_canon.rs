@@ -1542,15 +1542,42 @@ mod tests {
         );
     }
 
-    /// A canonical form canonizes to itself, a collapsed `$*` run included.
+    /// The zenoh-c form canonizes to itself, a collapsed `$*` run included: its walk folds a
+    /// lone `$*` into the wild run, so the run it writes is already in order.
     #[test]
-    fn canonize_is_idempotent() {
-        for text in ["home/foo$*bar", "a$*$*$*b/**/*/$*$*", "**/*/a", "$*$*/x"] {
+    fn the_zenoh_c_form_is_idempotent() {
+        for text in [
+            "home/foo$*bar",
+            "a$*$*$*b/**/*/$*$*",
+            "**/*/a",
+            "$*$*/x",
+            "**/$*/temp",
+        ] {
+            let once = canonize_keyexpr_in(text, KeyexprDialect::ZenohC).unwrap();
+            let twice = canonize_keyexpr_in(once.as_str(), KeyexprDialect::ZenohC).unwrap();
+            assert_eq!(twice.as_str(), once.as_str(), "{text}");
+        }
+        assert_eq!(
+            canonize_keyexpr_in("a$*$*$*b/**/*/$*$*", KeyexprDialect::ZenohC).unwrap(),
+            "a$*b/*/*/**"
+        );
+    }
+
+    /// The pico form is not always its own canonical form, and wz writes it as pico does: a lone
+    /// `$*` ends the wild run and is written `*` after it, so a `**` that preceded it stays in
+    /// front of a `*`, which a second pass reorders. The one-pass walk and the two-pass
+    /// reference write the same first form (`the_pico_dialect_does_not_fold_a_dollar_star_into_the_run`
+    /// is the shape pico was measured on); a form with no lone `$*` after a run is idempotent.
+    #[test]
+    fn the_pico_form_after_a_lone_dollar_star_is_reordered_by_a_second_pass() {
+        let once = canonize_keyexpr("a$*$*$*b/**/*/$*$*").unwrap();
+        assert_eq!(once.as_str(), "a$*b/*/**/*");
+        assert_eq!(canonize_keyexpr(once.as_str()).unwrap(), "a$*b/*/*/**");
+        for text in ["home/foo$*bar", "**/*/a", "$*$*/x", "a/**/*/*/b"] {
             let once = canonize_keyexpr(text).unwrap();
             let twice = canonize_keyexpr(once.as_str()).unwrap();
             assert_eq!(twice.as_str(), once.as_str(), "{text}");
         }
-        assert_eq!(canonize_keyexpr("home/foo$*bar").unwrap(), "home/foo$*bar");
     }
 
     // ── R300 — check_outbound_keyexpr_pico_safe ────────────────
