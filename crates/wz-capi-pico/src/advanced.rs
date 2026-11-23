@@ -1108,8 +1108,9 @@ unsafe fn declare_subscriber_state(
 fn fire_miss(slot: &MissSlot, miss: &Miss) {
     let source = miss.source();
     let mut zid = [0u8; crate::zid::Z_ID_SIZE];
-    let n = source.zid().len().min(zid.len());
-    zid[..n].copy_from_slice(&source.zid()[..n]);
+    for (to, from) in zid.iter_mut().zip(source.zid()) {
+        *to = *from;
+    }
     let value = ze_miss_t {
         source: z_entity_global_id_t {
             zid: z_id_t { id: zid },

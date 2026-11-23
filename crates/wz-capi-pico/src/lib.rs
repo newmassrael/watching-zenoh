@@ -470,8 +470,6 @@ pub mod additional;
 #[allow(clippy::indexing_slicing)]
 pub mod admin_space;
 #[cfg(feature = "advanced")]
-// Totality debt TD-162 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub mod advanced;
 #[cfg(feature = "advanced")]
 // Totality debt TD-184 (docs/c-abi-architecture.md section 7).
