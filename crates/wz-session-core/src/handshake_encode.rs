@@ -93,6 +93,8 @@ use sce_forge_runtime::codec::Bounded;
     feature = "transport-keepalive"
 ))]
 use sce_forge_runtime::codec::BoundedIter;
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+use wz_codecs::ext_entry::ExtEntryParts;
 #[cfg(any(
     feature = "codec-init-body",
     feature = "codec-open-body",
@@ -203,8 +205,10 @@ pub fn encode_init_into(
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Result<(), CodecError> {
-    let message = init_message(params, caps, is_ack, extensions, cookie_override)?;
-    TransportInitWire::encode_source(&message, &mut TxSink::new(&mut *buf))
+    with_parts(extensions, |parts| {
+        let message = init_message(params, caps, is_ack, parts, cookie_override)?;
+        TransportInitWire::encode_source(&message, &mut TxSink::new(&mut *buf))
+    })
 }
 
 /// The bytes [`encode_init_into`] writes for the same arguments, as the message's
@@ -246,22 +250,119 @@ pub(crate) fn init_frame_len(
 }
 
 /// The extension chain of a transport message as its document is handed it: the
-/// entries a sender holds, read where they are. No entry is no chain, so the
-/// encode clears the header's Z flag; it sets each entry's own Z but the last's,
-/// whatever the held header says.
+/// entries a sender holds, read where they are, each presented as the parts the
+/// chains of every other message the session writes are presented as
+/// (`ExtEntryParts`), so one compiled extension writer serves them all. No entry
+/// is no chain, so the encode clears the header's Z flag; it sets each entry's own
+/// Z but the last's, whatever the held header says.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-struct HeldChain<'e>(Option<Bounded<&'e [ExtEntryOwned], { usize::MAX }, 1>>);
+struct HeldChain<'e>(Option<Bounded<&'e [ExtEntryParts<'e>], { usize::MAX }, 1>>);
 
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 impl<'e> HeldChain<'e> {
-    fn of(entries: &'e [ExtEntryOwned]) -> Self {
+    fn of(entries: &'e [ExtEntryParts<'e>]) -> Self {
         Self(Bounded::new(entries))
     }
 
     fn entries(
         &self,
-    ) -> Option<BoundedIter<core::slice::Iter<'e, ExtEntryOwned>, { usize::MAX }, 1>> {
+    ) -> Option<BoundedIter<core::slice::Iter<'e, ExtEntryParts<'e>>, { usize::MAX }, 1>> {
         self.0.as_ref().map(|chain| chain.iter())
+    }
+}
+
+/// The body of one held entry as the parts its writer reads, borrowed from the entry.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+#[derive(Clone, Copy)]
+enum HeldBody<'e> {
+    Unit,
+    Zint(wz_codecs::ext_zint::ExtZintParts),
+    Zbuf(wz_codecs::ext_zbuf::ExtZbufParts<'e>),
+    Unknown(wz_codecs::ext_entry::ExtEntryUnknownTag),
+}
+
+/// The body of a unit entry, and of an entry whose encoding the grammar cannot name.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+const NO_BODY: wz_codecs::ext_unit::ExtUnitParts = wz_codecs::ext_unit::ExtUnitParts {};
+
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+impl<'e> HeldBody<'e> {
+    fn of(entry: &'e ExtEntryOwned) -> Self {
+        use crate::transport_profile::ExtEntryOwnedVariant as Body;
+        match &entry.body {
+            Body::CodecZenohExtUnit(_) => Self::Unit,
+            Body::CodecZenohExtZint(z) => {
+                Self::Zint(wz_codecs::ext_zint::ExtZintParts { value: z.value })
+            }
+            Body::CodecZenohExtZbuf(z) => Self::Zbuf(wz_codecs::ext_zbuf::ExtZbufParts {
+                value: wz_codecs::ext_zbuf::ExtZbufSource::value(z),
+            }),
+            Body::Default { tag, .. } => Self::Unknown(*tag),
+        }
+    }
+
+    fn parts(&self, header: u8) -> ExtEntryParts<'_> {
+        use wz_codecs::ext_entry::ExtEntryPartsBody as Body;
+        let body = match self {
+            Self::Unit => Body::CodecZenohExtUnit(&NO_BODY),
+            Self::Zint(z) => Body::CodecZenohExtZint(z),
+            Self::Zbuf(z) => Body::CodecZenohExtZbuf(z),
+            Self::Unknown(tag) => Body::Default {
+                tag: *tag,
+                body: &NO_BODY,
+            },
+        };
+        ExtEntryParts { header, body }
+    }
+}
+
+/// How many held entries are presented as parts on the stack: as many as a chain a session
+/// stages holds, one entry per kind of extension the build stages (`ext_chain::STAGED_EXT_KINDS`
+/// counts the same kinds). A chain handed over whole that is longer is presented on the heap where
+/// there is one, and refused where there is none, which a build with no heap never hands over.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+const STACK_PARTS: usize = 3
+    + cfg!(feature = "transport-qos") as usize
+    + cfg!(feature = "transport-lowlatency") as usize
+    + cfg!(feature = "session-extcompression") as usize
+    + cfg!(feature = "session-extshm") as usize
+    + cfg!(feature = "session-extauth") as usize
+    + cfg!(feature = "transport-multilink") as usize;
+
+/// Run `write` over `entries` presented as parts ([`HeldChain`]).
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+fn with_parts<R>(
+    entries: &[ExtEntryOwned],
+    write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
+) -> Result<R, CodecError> {
+    if entries.len() <= STACK_PARTS {
+        let mut bodies = [HeldBody::Unit; STACK_PARTS];
+        for (slot, entry) in bodies.iter_mut().zip(entries) {
+            *slot = HeldBody::of(entry);
+        }
+        let mut parts = [ExtEntryParts {
+            header: 0,
+            body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtUnit(&NO_BODY),
+        }; STACK_PARTS];
+        for ((slot, body), entry) in parts.iter_mut().zip(&bodies).zip(entries) {
+            *slot = body.parts(entry.header);
+        }
+        return write(parts.get(..entries.len()).unwrap_or(&[]));
+    }
+    #[cfg(feature = "alloc")]
+    {
+        let bodies: Vec<HeldBody<'_>> = entries.iter().map(HeldBody::of).collect();
+        let parts: Vec<ExtEntryParts<'_>> = bodies
+            .iter()
+            .zip(entries)
+            .map(|(body, entry)| body.parts(entry.header))
+            .collect();
+        write(&parts)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = write;
+        Err(CodecError::CapacityExceeded)
     }
 }
 
@@ -300,7 +401,7 @@ fn init_message<'p, 'e>(
     params: &'p SessionInitParams,
     caps: InitCaps,
     is_ack: bool,
-    extensions: &'e [ExtEntryOwned],
+    extensions: &'e [ExtEntryParts<'e>],
     cookie_override: Option<&'p [u8]>,
 ) -> Result<InitMessage<'p, 'e>, CodecError> {
     // R86 — cookie carrier rules: InitSyn (is_ack=false) never
@@ -385,8 +486,10 @@ pub fn encode_open_into(
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
 ) -> Result<(), CodecError> {
-    let message = open_message(params, initial_sn, is_ack, cookie_override, extensions)?;
-    TransportOpenWire::encode_source(&message, &mut TxSink::new(&mut *buf))
+    with_parts(extensions, |parts| {
+        let message = open_message(params, initial_sn, is_ack, cookie_override, parts)?;
+        TransportOpenWire::encode_source(&message, &mut TxSink::new(&mut *buf))
+    })
 }
 
 /// What [`encode_open_into`] writes before the extension chain: the header byte,
@@ -426,6 +529,39 @@ pub(crate) fn encode_open_head_into(
     let message = open_message(params, initial_sn, is_ack, cookie_override, &[])?;
     buf.append_byte(open_head_byte(&message, has_ext))?;
     message.body.encode(&mut TxSink::new(&mut *buf))
+}
+
+/// The extension chain of a held Open written after its head
+/// (`encode_open_head_into`), each entry presented as parts ([`HeldChain`]) so the
+/// chain is written by the one extension writer every other chain is written by,
+/// with the continuation bit set on every entry but the last.
+#[cfg(any(
+    all(
+        feature = "tx-lend-only",
+        feature = "session-unicast",
+        feature = "codec-open-body",
+        any(feature = "session-unicast-open", feature = "session-unicast-accept")
+    ),
+    all(test, feature = "codec-init-body", feature = "codec-open-body")
+))]
+pub(crate) fn encode_held_chain_into(
+    buf: &mut crate::tx_buf::EncodeBuf<'_>,
+    entries: &[ExtEntryOwned],
+) -> Result<(), CodecError> {
+    with_parts(entries, |parts| {
+        let last = parts.len().wrapping_sub(1);
+        for (at, part) in parts.iter().enumerate() {
+            let mut part = *part;
+            if at == last {
+                part.header &= !crate::ext_header::EXT_FLAG_Z;
+            } else {
+                part.header |= crate::ext_header::EXT_FLAG_Z;
+            }
+            let part = &part;
+            wz_codecs::ext_entry::ExtEntryWire::encode_source(&part, &mut TxSink::new(&mut *buf))?;
+        }
+        Ok(())
+    })
 }
 
 /// The header byte of the head [`encode_open_head_into`] writes: what
@@ -528,7 +664,7 @@ fn open_message<'p, 'e>(
     initial_sn: u64,
     is_ack: bool,
     cookie_override: Option<&'p [u8]>,
-    extensions: &'e [ExtEntryOwned],
+    extensions: &'e [ExtEntryParts<'e>],
 ) -> Result<OpenMessage<'p, 'e>, CodecError> {
     // R311ku — the T flag is DERIVED, not configured: a whole-second
     // lease compacts to the seconds form, pico `_z_t_msg_make_open_syn`
@@ -945,7 +1081,7 @@ mod tests {
                     )
                     .expect("head");
                     let head = split.len();
-                    crate::ext_chain::encode_ext_chain_into(&mut split, chain).expect("chain");
+                    super::encode_held_chain_into(&mut split, chain).expect("chain");
                     assert_eq!(split, whole, "ack {is_ack}, {} ext(s)", chain.len());
                     assert_eq!(
                         whole[0] & wire_const::FLAG_T_Z != 0,

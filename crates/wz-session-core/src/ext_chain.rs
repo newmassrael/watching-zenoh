@@ -582,17 +582,10 @@ pub(crate) fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
 /// buffer that cannot hold the chain refuses with `BufferOverflow`; the bytes
 /// already written stay, so the caller rolls back with
 /// [`TxBuf::truncate`](crate::tx_buf::TxBuf::truncate) to the length it saw.
-// The Init is written whole by its document, so the chain is written here for
-// the vector form above, for the lend-only Open, which writes its chain after
-// the head where the chain is staged, and for the tests that hold that Open's
-// two halves to the whole one.
+// The Init and the Open are written by `handshake_encode` (the lend-only Open's
+// chain by `encode_held_chain_into`), so the chain is written here for the vector
+// form above and for the tests that hold the two forms to each other.
 #[cfg(any(
-    all(
-        feature = "tx-lend-only",
-        feature = "session-unicast",
-        feature = "codec-open-body",
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-    ),
     all(
         feature = "alloc",
         any(
@@ -644,7 +637,7 @@ pub(crate) fn encode_ext_chain_into(
 pub(crate) fn ext_chain_len(entries: &[ExtEntryOwned]) -> usize {
     // Counted by the writer itself, so the count and the write are one compiled encoder.
     let mut count = crate::tx_buf::CountTxBuf::new();
-    match encode_ext_chain_into(&mut count, entries) {
+    match crate::handshake_encode::encode_held_chain_into(&mut count, entries) {
         Ok(()) => crate::tx_buf::TxBuf::len(&count),
         Err(_) => 0,
     }
