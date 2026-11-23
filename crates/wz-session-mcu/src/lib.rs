@@ -136,8 +136,6 @@ pub mod slot_admin;
 pub mod slot_client;
 // The latest sample of a subscription, in storage the image declared: what a node that
 // subscribes keeps, and what a queryable that answers from it reads.
-// Totality debt TD-218 (docs/c-abi-architecture.md section 7).
-#[allow(clippy::indexing_slicing)]
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod latest;
 // The client node as a publisher: a stream of puts on a key, at the times of an arrival process, from
